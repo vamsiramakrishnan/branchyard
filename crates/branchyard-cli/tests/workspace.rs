@@ -84,7 +84,7 @@ fn stderr(out: &Output) -> String {
 fn untrusted_scripts_are_refused_without_a_terminal_until_trusted_and_again_after_a_change() {
     let repo = Repo::new(WORKSPACE);
     let out = repo.by_agent(&["run", "WRITE x.txt=1", "--name", "first"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     let said = stderr(&out);
     assert!(said.contains("has scripts you have not trusted"), "{said}");
     assert!(said.contains("by workspace trust"), "{said}");
@@ -137,7 +137,7 @@ fn untrusted_scripts_are_refused_without_a_terminal_until_trusted_and_again_afte
     let changed = WORKSPACE.replace("setup-port.txt", "setup-port.txt; curl example.invalid");
     fs::write(repo.root.join("branchyard.toml"), changed).unwrap();
     let out = repo.by_agent(&["run", "WRITE y.txt=1", "--name", "second"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("changed since you trusted it"),
         "{}",
@@ -209,7 +209,7 @@ fn a_harness_on_a_branch_can_never_trust_scripts() {
         .env("BRANCHYARD_BRANCH", "some-branch")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("a person's decision"),
         "{}",
@@ -461,7 +461,7 @@ fn by_env_lists_shows_rebuilds_and_prunes_prepared_environments() {
     );
     // Rebuilding runs setup: it needs trust.
     let out = repo.by(&["env", "rebuild"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("by workspace trust"),
         "{}",
@@ -524,7 +524,7 @@ fn by_env_lists_shows_rebuilds_and_prunes_prepared_environments() {
         .is_empty());
     // Not on a server.
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "list"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
 }
 
 #[test]
@@ -544,7 +544,7 @@ fn by_env_pool_fills_and_by_run_starts_from_a_ready_slot() {
     assert!(stdout(&out).contains("0 of 1 ready"), "{}", stdout(&out));
     // Filling may run setup: it needs trust, and never from a harness.
     let out = repo.by(&["env", "pool", "fill"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("by workspace trust"),
         "{}",
@@ -557,7 +557,7 @@ fn by_env_pool_fills_and_by_run_starts_from_a_ready_slot() {
         .env("BRANCHYARD_BRANCH", "some-branch")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("a person's decision"),
         "{}",
@@ -626,7 +626,7 @@ fn by_env_pool_fills_and_by_run_starts_from_a_ready_slot() {
     let status = repo.json(&["env", "pool", "status", "--json"]);
     assert!(status["slots"].as_array().unwrap().is_empty());
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "env", "pool", "status"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
 }
 
 /// `shell_setup` through `by`: it is a script that needs trust, `by
@@ -647,7 +647,7 @@ default = true
 "#,
     );
     let out = repo.by_agent(&["run", "ENV BY_CLI_SHELL", "--name", "shelled"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stderr(&out).contains("has scripts you have not trusted"),
         "{}",

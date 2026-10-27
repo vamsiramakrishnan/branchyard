@@ -188,7 +188,7 @@ fn a_build_without_microsandbox_names_the_command_that_adds_it() {
         "--image",
         "alpine:3.20",
     ]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     let text = stderr(&out);
     assert!(text.contains("no Microsandbox support"), "{text}");
     assert!(
@@ -363,7 +363,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
 
     // No token anywhere: the flag, the variable and the file key.
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let text = stderr(&out);
     assert!(
         text.starts_with("by: remote mode needs a token\n  next: "),
@@ -373,7 +373,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     assert!(text.contains("BRANCHYARD_TOKEN_FILE"), "{text}");
     assert!(text.contains("token_file under [remote]"), "{text}");
     let json = repo.by(&["--remote", "http://127.0.0.1:9", "ls", "--json"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(2));
     let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(envelope["error"]["kind"], "usage", "{envelope}");
     assert_eq!(
@@ -395,7 +395,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
         "app",
         "ls",
     ]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     let text = stderr(&out);
     assert!(
         text.starts_with("by: cannot reach http://127.0.0.1:9"),
@@ -415,7 +415,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     )
     .unwrap();
     let out = repo.by(&["ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(
         stderr(&out).contains("next: start a server with `by serve`"),
         "{}",

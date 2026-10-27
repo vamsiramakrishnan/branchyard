@@ -1030,7 +1030,7 @@ pub fn show(env: &crate::commands::Env, as_json: bool) -> crate::commands::Outco
     let cwd = std::env::current_dir()?;
     let vars = |name: &str| std::env::var(name).ok();
     let config = crate::defaults::config_at(&cwd, &vars)
-        .map_err(crate::commands::Failure::Message)?
+        .map_err(|why| crate::errors::config(&why))?
         .map(|c| c.usage)
         .unwrap_or_default();
     let now = now_ms();
@@ -1171,7 +1171,7 @@ pub fn guard(harnesses: &[String]) -> Result<(), crate::commands::Failure> {
     let cwd = std::env::current_dir()?;
     let vars = |name: &str| std::env::var(name).ok();
     let Some(config) = crate::defaults::config_at(&cwd, &vars)
-        .map_err(crate::commands::Failure::Message)?
+        .map_err(|why| crate::errors::config(&why))?
         .map(|c| c.usage)
     else {
         return check(
@@ -1215,10 +1215,13 @@ pub fn check(
         if let Some(why) = login.over(near, now_ms) {
             match mode {
                 UsageGuard::Refuse => {
-                    return Err(crate::commands::Failure::Message(format!(
-                        "{why}; [usage] guard = \"refuse\" stops new branches on it (by usage \
-                         shows every window)"
-                    )))
+                    return Err(crate::errors::Report::new(
+                        "quota_exceeded",
+                        format!("{why}; [usage] guard = \"refuse\" stops new branches on it"),
+                    )
+                    .next("by usage (shows every window)")
+                    .next("pick another harness with --harness ID")
+                    .into())
                 }
                 _ => warn(&format!("{why} (by usage)")),
             }

@@ -134,9 +134,11 @@ fn read(path: &Path) -> Result<Option<branchyard_setup::config::ProjectConfig>, 
     match path.is_file() {
         false => Ok(None),
         true => setup_io::read_layer(path).map(Some).map_err(|e| {
-            Failure::Message(format!(
-                "{e}\n(fix it, or check it with `by config validate`)"
-            ))
+            crate::errors::Report::new(
+                "config",
+                format!("{e}\n(fix it, or check it with `by config validate`)"),
+            )
+            .into()
         }),
     }
 }
@@ -203,13 +205,21 @@ fn resolve(root: &Path, name: &str) -> Result<Resolved, Failure> {
     let mut all = resolve_all(root)?;
     let names: Vec<String> = all.keys().cloned().collect();
     all.remove(name).ok_or_else(|| {
-        Failure::Message(match names.is_empty() {
-            true => format!(
-                "no recipe named {name}: {} has no [recipes] (docs/recipes.md)",
-                root.display()
+        match names.is_empty() {
+            true => crate::errors::Report::new(
+                "config",
+                format!(
+                    "no recipe named {name}: {} has no [recipes] (docs/recipes.md)",
+                    root.display()
+                ),
             ),
-            false => format!("no recipe named {name}; there are {}", names.join(", ")),
-        })
+            false => crate::errors::Report::usage(format!(
+                "no recipe named {name}; there are {}",
+                names.join(", ")
+            ))
+            .next("by recipe list"),
+        }
+        .into()
     })
 }
 
@@ -236,11 +246,12 @@ fn describe(r: &Resolved) -> String {
 
 fn in_harness() -> Result<(), Failure> {
     match workspace_cmd::in_harness() {
-        Some(_) => Err(Failure::Message(
+        Some(_) => Err(crate::errors::Report::new(
+            "denied",
             "a harness running on a branch cannot run or trust recipes; that is a person's \
-             decision, made outside any branch"
-                .into(),
-        )),
+             decision, made outside any branch",
+        )
+        .into()),
         None => Ok(()),
     }
 }
@@ -264,26 +275,34 @@ fn require_trust(env: &Env, r: &Resolved) -> Result<(), Failure> {
         if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
             return workspace_cmd::record_trust(&r.key(), &r.digest);
         }
-        return Err(Failure::Message(format!(
-            "not trusted; nothing ran. Change or remove [recipes.{}] in {}, or trust it with \
-             `by recipe trust {}`",
-            r.name,
-            r.file.display(),
-            r.name
-        )));
+        return Err(
+            crate::errors::Report::new("denied", "not trusted; nothing ran")
+                .next(format!("by recipe trust {}", r.name))
+                .next(format!(
+                    "change or remove [recipes.{}] in {}",
+                    r.name,
+                    r.file.display()
+                ))
+                .into(),
+        );
     }
     let why = match r.trust {
         Trust::Changed => "changed since you trusted it",
         _ => "has commands you have not trusted",
     };
-    Err(Failure::Message(format!(
-        "recipe {} in {} {why}, and there is no terminal to ask on; nothing ran. Review it with \
-         `by recipe show {}`, then run `by recipe trust {}`",
-        r.name,
-        r.file.display(),
-        r.name,
-        r.name
-    )))
+    Err(crate::errors::Report::new(
+        "denied",
+        format!(
+            "recipe {} in {} {why}, and there is no terminal to ask on; nothing ran",
+            r.name,
+            r.file.display()
+        ),
+    )
+    .next(format!(
+        "by recipe show {}, then by recipe trust {}",
+        r.name, r.name
+    ))
+    .into())
 }
 
 /// Recipe `name` of the repository here, once its commands may run: not
@@ -300,11 +319,12 @@ pub(crate) fn trusted(env: &Env, name: &str) -> Result<Recipe, Failure> {
 /// `by recipe ACTION`.
 pub fn main(env: &Env, target: &Target, action: &RecipeAction, json: bool) -> Outcome {
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by recipe runs a repository's recipe scripts on this machine; it does not take \
-             --remote"
-                .into(),
-        ));
+             --remote",
+        )
+        .next("run by recipe without --remote")
+        .into());
     }
     let root = root()?;
     match action {
@@ -513,14 +533,19 @@ pub fn provider(args: &crate::args::RecipeArgs) -> Result<branchyard::RecipeOpti
             Trust::Changed => "changed since you trusted it",
             _ => "has commands you have not trusted",
         };
-        return Err(Failure::Message(format!(
-            "recipe {} in {} {why}; nothing ran. Review it with `by recipe show {}`, then run \
-             `by recipe trust {}`",
-            r.name,
-            r.file.display(),
-            r.name,
-            r.name
-        )));
+        return Err(crate::errors::Report::new(
+            "denied",
+            format!(
+                "recipe {} in {} {why}; nothing ran",
+                r.name,
+                r.file.display()
+            ),
+        )
+        .next(format!(
+            "by recipe show {}, then by recipe trust {}",
+            r.name, r.name
+        ))
+        .into());
     }
     Ok(branchyard::RecipeOptions {
         name: r.name.clone(),

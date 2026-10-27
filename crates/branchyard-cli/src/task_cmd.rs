@@ -81,10 +81,11 @@ fn locate(key: &str) -> Result<(Yard, TaskView), Failure> {
         let view = tasks::view(&yard, key)?;
         return Ok((yard, view));
     }
-    Err(Failure::Message(format!(
-        "no task {key}: give its ID (or a prefix of at least 4 characters) or an attempt's \
-         name; `by task ls` lists them"
-    )))
+    Err(crate::errors::Report::usage(format!(
+        "no task {key}: give its ID (or a prefix of at least 4 characters) or an attempt's name"
+    ))
+    .next("by task ls (lists them)")
+    .into())
 }
 
 fn new(
@@ -97,11 +98,11 @@ fn new(
 ) -> Outcome {
     if folder.is_none() && !no_files {
         if large_threshold.is_some() {
-            return Err(Failure::Message(
-                "--large-threshold applies to a task with a repository of its own: pass \
-                 --folder PATH or --no-files"
-                    .into(),
-            ));
+            return Err(crate::errors::Report::usage(
+                "--large-threshold applies to a task with a repository of its own",
+            )
+            .next("pass --folder PATH or --no-files, or drop --large-threshold")
+            .into());
         }
         // A task in this repository is a run: its first attempt is a branch.
         return commands::run(env, &Target::Local, prompt, task, false);
@@ -336,7 +337,10 @@ fn open(key: &str, attempt: Option<&str>, editor: Option<&str>, print_only: bool
         .worktree
         .clone()
         .filter(|w| w.is_dir())
-        .ok_or_else(|| Failure::Message(format!("{} has no worktree", attempt.name)))?;
+        .ok_or_else(|| {
+            crate::errors::Report::new("state", format!("{} has no worktree", attempt.name))
+                .next(format!("by show {}", attempt.name))
+        })?;
     if print_only {
         return print(&format!("{}\n", worktree.display()));
     }
@@ -419,11 +423,12 @@ fn rm(env: &Env, key: &str, yes: bool, as_json: bool) -> Outcome {
             }
         );
         if !crate::attempts::confirm(env, &question) {
-            return Err(Failure::Message(format!(
-                "removing task {} removes its attempts; pass --yes to confirm (or run on a \
-                 terminal)",
+            return Err(crate::errors::Report::usage(format!(
+                "removing task {} removes its attempts, and nothing confirmed it",
                 view.task.id
-            )));
+            ))
+            .next("pass --yes to confirm, or run it on a terminal")
+            .into());
         }
     }
     let removed = match view.task.files {
@@ -456,11 +461,11 @@ fn remote_main(
             let view = remote.repo.task(&args.task)?;
             show(env, &view, as_json)
         }
-        _ => Err(Failure::Message(
-            "by --remote task lists and shows a server's tasks; start one with by --remote run, \
-             accept an attempt with by --remote merge, and run the other task commands on the \
-             server's host"
-                .into(),
-        )),
+        _ => Err(crate::errors::Report::usage(
+            "by --remote task lists and shows a server's tasks, and no more",
+        )
+        .next("start one with by --remote run, and accept an attempt with by --remote merge")
+        .next("run the other task commands on the server's host")
+        .into()),
     }
 }

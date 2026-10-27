@@ -145,10 +145,13 @@ pub fn main(env: &Env, target: &Target, action: &PlanAction, json: bool) -> Outc
             task,
         } => {
             let edited = match (edit, file) {
-                (_, Some(file)) => Some(
-                    std::fs::read_to_string(file)
-                        .map_err(|e| Failure::Message(format!("--file {file}: {e}")))?,
-                ),
+                (_, Some(file)) => Some(std::fs::read_to_string(file).map_err(|e| {
+                    crate::errors::Report::usage(format!(
+                        "--file {file}: {}",
+                        crate::errors::plain_io(&e)
+                    ))
+                    .next("give the file that holds the edited plan")
+                })?),
                 (true, None) => {
                     let info = plan_of(target, branch)?;
                     let proposed = info.plan.map(|p| p.markdown).unwrap_or_default();

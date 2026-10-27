@@ -25,6 +25,7 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use crate::commands::{print, Env, Failure, Outcome, Target};
+use crate::errors::Report;
 
 pub const TRIGGER_EXAMPLES: &str = "\
 Examples:
@@ -271,10 +272,11 @@ fn lifecycle_of(args: &AddArgs) -> Result<Option<Lifecycle>, Failure> {
     ];
     if args.to.is_none() {
         if let Some((flag, _)) = given.iter().find(|(_, set)| *set) {
-            return Err(Failure::Message(format!(
-                "{flag} is the lifecycle of a branch a trigger delivers to: give --to TEMPLATE \
-                 with it"
-            )));
+            return Err(crate::errors::Report::usage(format!(
+                "{flag} is the lifecycle of a branch a trigger delivers to"
+            ))
+            .next("give --to TEMPLATE with it")
+            .into());
         }
         return Ok(None);
     }
@@ -328,11 +330,21 @@ fn duration(text: &str) -> Result<Duration, String> {
 }
 
 fn read_secret(path: &Path) -> Result<String, Failure> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Failure::Message(format!("{}: {e}", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        crate::errors::Report::usage(format!(
+            "{}: {}",
+            path.display(),
+            crate::errors::plain_io(&e)
+        ))
+        .next("give the file that holds the secret")
+    })?;
     let secret = text.lines().next().unwrap_or("").trim().to_owned();
     if secret.is_empty() {
-        return Err(Failure::Message(format!("{} is empty", path.display())));
+        return Err(
+            crate::errors::Report::usage(format!("{} is empty", path.display()))
+                .next("write the secret on its first line")
+                .into(),
+        );
     }
     Ok(secret)
 }
@@ -350,17 +362,21 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
         },
         (None, None, Some(source)) => When::Event { source },
         _ => {
-            return Err(Failure::Message(
-                "give one of --cron, --every and --on".into(),
-            ))
+            return Err(
+                crate::errors::Report::usage("a trigger needs a schedule or an event")
+                    .next("give one of --cron, --every and --on")
+                    .into(),
+            )
         }
     };
     let mut conditions = Conditions::default();
     for condition in &args.conditions {
         let Some((field, value)) = condition.split_once('=') else {
-            return Err(Failure::Message(format!(
-                "--if {condition:?}: write FIELD=VALUE, such as label=agent"
-            )));
+            return Err(crate::errors::Report::usage(format!(
+                "--if {condition:?} is not FIELD=VALUE"
+            ))
+            .next("write FIELD=VALUE, such as --if label=agent")
+            .into());
         };
         let value = value.to_owned();
         match field.trim().trim_end_matches('~') {
@@ -374,10 +390,14 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
             "recipient" | "to" => conditions.recipient.push(value),
             "subject" | "subject_contains" => conditions.subject_contains.push(value),
             other => {
-                return Err(Failure::Message(format!(
-                    "--if {other}=...: use kind, repo, label, author, branch, text, or for an \
-                     email sender, recipient or subject"
-                )))
+                return Err(crate::errors::Report::usage(format!(
+                    "--if {other}=...: no such field"
+                ))
+                .next(
+                    "use kind, repo, label, author, branch, text, or for an email sender, \
+                         recipient or subject",
+                )
+                .into())
             }
         }
     }
@@ -385,7 +405,9 @@ fn spec(args: &AddArgs, repo: &str) -> Result<TriggerSpec, Failure> {
         Some(line) => Some(
             shlex::split(line)
                 .filter(|argv| !argv.is_empty())
-                .ok_or_else(|| Failure::Message(format!("--check {line:?} is not a command")))?,
+                .ok_or_else(|| {
+                    crate::errors::Report::usage(format!("--check {line:?} is not a command"))
+                })?,
         ),
         None => None,
     };
@@ -741,17 +763,21 @@ fn test_request(
     event_type: &Option<String>,
     precheck: bool,
 ) -> Result<TriggerTestRequest, Failure> {
-    let event =
-        match event {
-            Some(path) => {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| Failure::Message(format!("{}: {e}", path.display())))?;
-                Some(serde_json::from_str(&text).map_err(|e| {
-                    Failure::Message(format!("{} is not JSON: {e}", path.display()))
-                })?)
-            }
-            None => None,
-        };
+    let event = match event {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                crate::errors::Report::usage(format!(
+                    "{}: {}",
+                    path.display(),
+                    crate::errors::plain_io(&e)
+                ))
+            })?;
+            Some(serde_json::from_str(&text).map_err(|e| {
+                crate::errors::Report::usage(format!("{} is not JSON: {e}", path.display()))
+            })?)
+        }
+        None => None,
+    };
     Ok(TriggerTestRequest {
         event,
         event_type: event_type.clone(),
@@ -829,17 +855,19 @@ struct Local {
     root: PathBuf,
 }
 
+/// The trigger store or the server configuration failed under the command.
 fn failure(e: impl std::fmt::Display) -> Failure {
-    Failure::Message(e.to_string())
+    crate::errors::Report::new("state", e.to_string()).into()
 }
 
 impl Local {
     fn open() -> Result<Local, Failure> {
         let cwd = std::env::current_dir()?;
         let env = |name: &str| std::env::var(name).ok();
-        let args =
-            crate::defaults::apply_serve(&cwd, &env, Vec::new()).map_err(Failure::Message)?;
-        let config = branchyard_server::cli::resolve(&args).map_err(Failure::Message)?;
+        let args = crate::defaults::apply_serve(&cwd, &env, Vec::new())
+            .map_err(|why| crate::errors::config(&why))?;
+        let config =
+            branchyard_server::cli::resolve(&args).map_err(|why| crate::errors::config(&why))?;
         let here = crate::commands::open()?.root().to_path_buf();
         let (repo, root) = config
             .repos
@@ -851,13 +879,14 @@ impl Local {
             })
             .cloned()
             .ok_or_else(|| {
-                Failure::Message(format!(
-                    "the server configuration does not serve {}; run by trigger in a served \
-                     repository, or use --remote",
-                    here.display()
-                ))
+                crate::errors::Report::new(
+                    "config",
+                    format!("the server configuration does not serve {}", here.display()),
+                )
+                .next("run by trigger in a served repository")
+                .next("pass --remote URL")
             })?;
-        let store = triggers::store::open(&config).map_err(Failure::Message)?;
+        let store = triggers::store::open(&config).map_err(failure)?;
         Ok(Local {
             config,
             store,
@@ -881,7 +910,12 @@ impl Local {
         let found = self.store.find(None, key).map_err(failure)?;
         match found.as_slice() {
             [one] => Ok(one.clone()),
-            [] => Err(Failure::Message(format!("no trigger named {key}"))),
+            [] => Err(crate::errors::Report::new(
+                "unknown_trigger",
+                format!("no trigger named {key}"),
+            )
+            .next("by trigger list")
+            .into()),
             several => several
                 .iter()
                 .find(|t| t.id == key)
@@ -892,9 +926,9 @@ impl Local {
                 })
                 .cloned()
                 .ok_or_else(|| {
-                    Failure::Message(format!(
-                        "{key} names triggers of several tenants; give its ID"
-                    ))
+                    crate::errors::Report::usage(format!("{key} names triggers of several tenants"))
+                        .next("give its ID (by trigger list --json lists them)")
+                        .into()
                 }),
         }
     }
@@ -904,11 +938,9 @@ impl Local {
     }
 
     fn reread(&self, id: &str) -> Result<Trigger, Failure> {
-        let t = self
-            .store
-            .get(id)
-            .map_err(failure)?
-            .ok_or_else(|| Failure::Message("the trigger was removed".into()))?;
+        let t = self.store.get(id).map_err(failure)?.ok_or_else(|| {
+            crate::errors::Report::new("unknown_trigger", "the trigger was removed")
+        })?;
         Ok(self.info(&t))
     }
 
@@ -938,13 +970,13 @@ impl Local {
                     now,
                     precheck.then_some((scratch.as_path(), self.root.as_path())),
                 )
-                .map_err(Failure::Message)?;
+                .map_err(Report::usage)?;
                 show_test(&tested, json)
             }
             TriggerAction::Enable { name } => {
                 let t = self.find(name)?;
                 let next = triggers::Schedule::of(&t.spec.when)
-                    .map_err(Failure::Message)?
+                    .map_err(Report::usage)?
                     .and_then(|s| s.next_after(now, now));
                 self.store
                     .set_state(&t.id, true, None, 0, next)
@@ -973,9 +1005,9 @@ impl Local {
             TriggerAction::Secret { name, secret_file } => {
                 let t = self.find(name)?;
                 if t.spec.when.is_schedule() {
-                    return Err(Failure::Message(
-                        "a schedule takes no webhook secret".into(),
-                    ));
+                    return Err(
+                        crate::errors::Report::usage("a schedule takes no webhook secret").into(),
+                    );
                 }
                 let (secret, generated) = match secret_file {
                     Some(path) => (read_secret(path)?, None),
@@ -991,14 +1023,18 @@ impl Local {
     }
 
     fn add(&self, args: &AddArgs, json: bool, now: u64) -> Outcome {
-        let mut spec = triggers::validate(spec(args, &self.repo)?).map_err(Failure::Message)?;
+        let mut spec = triggers::validate(spec(args, &self.repo)?).map_err(Report::usage)?;
         if spec.precheck.is_some() && !self.config.triggers.allow_prechecks.allows(&self.repo) {
-            return Err(Failure::Message(format!(
-                "the server does not let {}'s triggers run prechecks: start it with \
-                 by serve --allow-trigger-prechecks, or set allow_trigger_prechecks in its \
-                 configuration",
-                self.repo
-            )));
+            return Err(crate::errors::Report::new(
+                "denied",
+                format!(
+                    "the server does not let {}'s triggers run prechecks",
+                    self.repo
+                ),
+            )
+            .next("start it with by serve --allow-trigger-prechecks")
+            .next("set allow_trigger_prechecks in its configuration")
+            .into());
         }
         let event = !spec.when.is_schedule();
         let (secret, generated) = match (spec.secret.take(), event) {
@@ -1012,7 +1048,7 @@ impl Local {
         let enabled = spec.enabled;
         let next = match enabled {
             true => triggers::Schedule::of(&spec.when)
-                .map_err(Failure::Message)?
+                .map_err(Report::usage)?
                 .and_then(|s| s.next_after(now, now)),
             false => None,
         };
@@ -1030,10 +1066,12 @@ impl Local {
             next_due_ms: next,
         };
         if !self.store.create(&t).map_err(failure)? {
-            return Err(Failure::Message(format!(
+            return Err(crate::errors::Report::usage(format!(
                 "a trigger named {} exists already",
                 t.spec.name
-            )));
+            ))
+            .next("pick another --name, or by trigger rm it first")
+            .into());
         }
         show_created(
             &TriggerCreated {
@@ -1191,9 +1229,10 @@ mod tests {
         // Without --to there is no branch for them to belong to.
         let mut alone = args.clone();
         alone.dormant_after = Some(7);
-        let Err(Failure::Message(refused)) = spec(&alone, "app") else {
+        let Err(Failure::Report(refused)) = spec(&alone, "app") else {
             panic!("a lifecycle without --to is refused");
         };
+        let refused = refused.said();
         assert!(
             refused.contains("--dormant-after") && refused.contains("--to"),
             "{refused}"

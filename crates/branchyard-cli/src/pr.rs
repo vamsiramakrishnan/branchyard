@@ -34,7 +34,12 @@ use crate::render::{Style, Tone};
 
 impl From<GhError> for Failure {
     fn from(error: GhError) -> Self {
-        Failure::Message(error.to_string())
+        let kind = match &error {
+            GhError::Missing | GhError::Unauthenticated(_) => "tool_unavailable",
+            GhError::Failed { .. } | GhError::Parse { .. } => "command_failed",
+            GhError::Io(_) => "io",
+        };
+        crate::errors::Report::new(kind, error.to_string()).into()
     }
 }
 
@@ -132,9 +137,11 @@ pub fn issue_ref(text: &str) -> Result<String, Failure> {
     let number = text.strip_prefix('#').unwrap_or(text);
     match number.parse::<u64>() {
         Ok(n) if n > 0 => Ok(n.to_string()),
-        _ => Err(Failure::Message(format!(
-            "--issue takes a GitHub issue URL, #N or N, or linear:KEY, jira:KEY,              gitlab:GROUP/PROJECT#N or a Linear, Jira or GitLab issue URL, not {text:?}"
-        ))),
+        _ => Err(crate::errors::Report::usage(format!(
+            "--issue takes a GitHub issue URL, #N or N, or linear:KEY, jira:KEY, \
+             gitlab:GROUP/PROJECT#N or a Linear, Jira or GitLab issue URL, not {text:?}"
+        ))
+        .into()),
     }
 }
 
@@ -150,9 +157,12 @@ pub fn fetch_issue(gh: &Gh, reference: &str) -> Result<Issue, Failure> {
         ],
         false,
     )?;
-    let number = value["number"]
-        .as_u64()
-        .ok_or_else(|| Failure::Message(format!("gh gave no number for issue {reference}")))?;
+    let number = value["number"].as_u64().ok_or_else(|| {
+        crate::errors::Report::new(
+            "command_failed",
+            format!("gh gave no number for issue {reference}"),
+        )
+    })?;
     Ok(Issue {
         number,
         title: text(&value["title"]),
@@ -253,7 +263,7 @@ fn fetch_tracked(
     let cwd = std::env::current_dir()?;
     let env = |name: &str| std::env::var(name).ok();
     let config = crate::defaults::config_at(&cwd, &env)
-        .map_err(Failure::Message)?
+        .map_err(|why| crate::errors::config(&why))?
         .unwrap_or_default();
     let gateway = match yard {
         Some(yard) => crate::gateway_cmd::configured(yard)?,
@@ -280,7 +290,7 @@ fn fetch_tracked(
     };
     crate::trackers::fetch(reference, &sources)
         .map(Issue::from)
-        .map_err(Failure::Message)
+        .map_err(|why| crate::errors::Report::new("command_failed", why).into())
 }
 
 /// For `run`, `fan` and `spawn` with `--issue` or `--pr`: fetch the issue
@@ -299,7 +309,7 @@ pub fn issue_task(
     let Some(given) = &task.issue else {
         return Ok((prompt.to_owned(), task.clone(), None));
     };
-    let issue = match crate::trackers::parse(given).map_err(Failure::Message)? {
+    let issue = match crate::trackers::parse(given).map_err(crate::errors::Report::usage)? {
         Some(tracked) => fetch_tracked(&tracked, yard)?,
         None => {
             let reference = issue_ref(given)?;
@@ -343,16 +353,19 @@ fn pr_task(
     yard: Option<&Yard>,
 ) -> Result<(String, TaskArgs, Option<Link>), Failure> {
     let Some(yard) = yard else {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "--pr starts from a pull request's head commit fetched into this repository; it \
-             works in local mode only, and not inside a harness"
-                .into(),
-        ));
+             works in local mode only, and not inside a harness",
+        )
+        .next("run it without --remote, in your own terminal")
+        .into());
     };
     if task.base.is_some() {
-        return Err(Failure::Message(
-            "--pr starts from the pull request's head; it takes no --base".into(),
-        ));
+        return Err(crate::errors::Report::usage(
+            "--pr starts from the pull request's head; it takes no --base",
+        )
+        .next("drop --base")
+        .into());
     }
     let gh = Gh::new(yard.root(), None);
     gh.ready()?;
@@ -368,9 +381,11 @@ fn pr_task(
     )?;
     let head = text(&value["headRefOid"]);
     if head.len() < 7 || !head.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(Failure::Message(format!(
-            "gh gave no head commit for pull request #{number}"
-        )));
+        return Err(crate::errors::Report::new(
+            "command_failed",
+            format!("gh gave no head commit for pull request #{number}"),
+        )
+        .into());
     }
     let have = |commit: &str| {
         Git::new(yard.root())
@@ -387,14 +402,18 @@ fn pr_task(
             .arg(format!("refs/pull/{number}/head"))
             .run()
             .map_err(|e| {
-                Failure::Message(format!(
-                    "could not fetch pull request #{number}'s head from origin: {e}"
-                ))
+                crate::errors::Report::new(
+                    "git",
+                    format!("could not fetch pull request #{number}'s head from origin: {e}"),
+                )
+                .next("git remote -v (origin must be the pull request's repository)")
             })?;
         if !have(&head) {
-            return Err(Failure::Message(format!(
-                "fetched pull request #{number}, but its head {head} is not here"
-            )));
+            return Err(crate::errors::Report::new(
+                "git",
+                format!("fetched pull request #{number}, but its head {head} is not here"),
+            )
+            .into());
         }
     }
     let title = text(&value["title"]);
@@ -468,7 +487,11 @@ fn free_name(yard: &Yard, name: &str) -> Result<String, Failure> {
     (2..1000)
         .map(|n| format!("{name}-{n}"))
         .find(|candidate| !exists(candidate))
-        .ok_or_else(|| Failure::Message(format!("no free branch name like {name}")))
+        .ok_or_else(|| {
+            crate::errors::Report::usage(format!("no free branch name like {name}"))
+                .next("name the branch with --name")
+                .into()
+        })
 }
 
 /// Record on `branch` what it started from.
@@ -953,14 +976,18 @@ impl From<GhError> for PublishError {
 impl From<PublishError> for Failure {
     fn from(error: PublishError) -> Self {
         match error {
-            PublishError::CheckFailed(run) => Failure::Message(format!(
-                "the check `{}` failed on {}'s candidate {}, so nothing was pushed; pass \
-                 --allow-failing-check to push anyway. Its output ended:\n{}",
-                run.argv.join(" "),
-                "the branch",
-                short(&run.commit),
-                tail_lines(&run.output_tail, 20)
-            )),
+            PublishError::CheckFailed(run) => crate::errors::Report::new(
+                "check_failed",
+                format!(
+                    "the check `{}` failed on the branch's candidate {}, so nothing was pushed",
+                    run.argv.join(" "),
+                    short(&run.commit)
+                ),
+            )
+            .line("output", tail_lines(&run.output_tail, 20))
+            .next("fix the branch (by send BRANCH \"<prompt>\"), then by pr again")
+            .next("pass --allow-failing-check to push anyway")
+            .into(),
             PublishError::Other(failure) => failure,
         }
     }
@@ -968,25 +995,33 @@ impl From<PublishError> for Failure {
 
 /// Refuse a branch that should not become a pull request yet.
 fn publishable(info: &BranchInfo, allow_not_ready: bool) -> Result<(), Failure> {
-    let refuse = |why: String| Err(Failure::Message(why));
-    match &info.status {
-        BranchStatus::Ready => Ok(()),
-        BranchStatus::Running => refuse(format!(
-            "{} is running; wait for its turn to end (by log --follow {})",
-            info.name, info.name
-        )),
-        BranchStatus::Merged { target, .. } => refuse(format!(
-            "{} was merged into {target} locally; push {target} instead",
-            info.name
-        )),
-        _ if info.candidate.is_none() => refuse(format!("{} has no candidate to push", info.name)),
-        _ if allow_not_ready => Ok(()),
-        status => refuse(format!(
-            "{} is {}, not ready; pass --allow-not-ready to push its candidate anyway",
-            info.name,
-            crate::render::status_text(status).0
-        )),
-    }
+    use crate::errors::Report;
+    let name = &info.name;
+    let refused = match &info.status {
+        BranchStatus::Ready => return Ok(()),
+        BranchStatus::Running => Report::new("running", format!("{name} is running")).next(
+            format!("by log --follow {name} (until its turn ends), then by pr {name}"),
+        ),
+        BranchStatus::Merged { target, .. } => Report::new(
+            "already_merged",
+            format!("{name} was merged into {target} locally"),
+        )
+        .next(format!("push {target} instead")),
+        _ if info.candidate.is_none() => {
+            Report::new("no_candidate", format!("{name} has no candidate to push"))
+                .next(format!("by log {name}"))
+        }
+        _ if allow_not_ready => return Ok(()),
+        status => Report::new(
+            "denied",
+            format!(
+                "{name} is {}, not ready",
+                crate::render::status_text(status).0
+            ),
+        )
+        .next("pass --allow-not-ready to push its candidate anyway"),
+    };
+    Err(refused.into())
 }
 
 /// `by pr` without `--watch`: check the candidate, push it, and open the
@@ -996,10 +1031,12 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
     let info = branch.info().clone();
     publishable(&info, args.allow_not_ready)?;
     let before = state(&info, &branch.events()?);
-    let candidate = info
-        .candidate
-        .clone()
-        .ok_or_else(|| Failure::Message(format!("{} has no candidate", info.name)))?;
+    let candidate = info.candidate.clone().ok_or_else(|| {
+        Failure::from(
+            crate::errors::Report::new("no_candidate", format!("{} has no candidate", info.name))
+                .next(format!("by log {}", info.name)),
+        )
+    })?;
     let check = match (args.no_check, &before.check) {
         (true, _) => None,
         (false, Some((_, run))) if run.commit == candidate.commit => Some(run.clone()),
@@ -1097,11 +1134,17 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
                 .map(str::trim)
                 .find(|line| line.starts_with("http"))
                 .ok_or_else(|| {
-                    Failure::Message(format!("gh pr create printed no URL: {}", out.trim()))
+                    Failure::from(crate::errors::Report::new(
+                        "command_failed",
+                        format!("gh pr create printed no URL: {}", out.trim()),
+                    ))
                 })?
                 .to_owned();
             let number = pr_number(&url).ok_or_else(|| {
-                Failure::Message(format!("cannot read a pull request number from {url}"))
+                Failure::from(crate::errors::Report::new(
+                    "command_failed",
+                    format!("cannot read a pull request number from {url}"),
+                ))
             })?;
             // The issue may live in another repository than the pull
             // request; then it is closed by its full name.
@@ -1675,9 +1718,12 @@ pub fn refresh(yard: &Yard, name: &str) -> Outcome {
     let branch = yard.branch(name)?;
     let state = state(branch.info(), &branch.events()?);
     let Some(pr) = &state.pull_request else {
-        return Err(Failure::Message(format!(
-            "{name} has no pull request to refresh; open one with by pr {name}"
-        )));
+        return Err(crate::errors::Report::new(
+            "not_found",
+            format!("{name} has no pull request to refresh"),
+        )
+        .next(format!("open one with by pr {name}"))
+        .into());
     };
     let gh = Gh::new(yard.root(), None);
     gh.ready()?;
@@ -1737,10 +1783,10 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
         }
         let branch = yard.branch(name)?;
         let state = self::state(branch.info(), &branch.events()?);
-        let pr = state
-            .pull_request
-            .clone()
-            .ok_or_else(|| Failure::Message(format!("{name} has no pull request")))?;
+        let pr = state.pull_request.clone().ok_or_else(|| {
+            crate::errors::Report::new("not_found", format!("{name} has no pull request"))
+                .next(format!("open one with by pr {name}"))
+        })?;
         let Observed {
             observation,
             feedback: observed,

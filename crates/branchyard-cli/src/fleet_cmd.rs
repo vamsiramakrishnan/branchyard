@@ -15,6 +15,7 @@ use serde_json::json;
 use crate::args::TaskArgs;
 use crate::attempts::{self, CompareArgs};
 use crate::commands::{open, print, Env, Failure, Outcome, Target};
+use crate::errors::Report;
 use crate::json;
 use crate::render::{self, Cell, Column, Style, Tone};
 
@@ -24,21 +25,25 @@ fn style(env: &Env) -> Style {
 
 /// Why routing does not run remotely.
 pub fn local_only() -> Failure {
-    Failure::Message(
+    Report::usage(
         "routing (--auto, --kind, or a [fleet] with no --harness) and judging run in local mode \
-         only for now; name a harness with --harness"
-            .into(),
+         only for now",
     )
+    .next("name a harness with --harness ID")
+    .next("run it without --remote, in the repository")
+    .into()
 }
 
 /// The fleet table a routed task uses.
 pub fn table(task: &TaskArgs) -> Result<&Fleet, Failure> {
     task.fleet.as_ref().ok_or_else(|| {
-        Failure::Message(
-            "--auto routes through a [fleet] table, and branchyard.toml has none; add \
-             [fleet.default] with candidates (see docs/fleet.md), or name a harness"
-                .into(),
+        Report::new(
+            "config",
+            "--auto routes through a [fleet] table, and branchyard.toml has none",
         )
+        .next("add [fleet.default] with candidates (docs/fleet.md)")
+        .next("name a harness with --harness ID")
+        .into()
     })
 }
 
@@ -48,14 +53,19 @@ pub fn table(task: &TaskArgs) -> Result<&Fleet, Failure> {
 /// its own.
 pub fn inventory_default(private_home: bool) -> Result<InventoryDefault, Failure> {
     let inventory = crate::harness_cmd::detected_here().map_err(|e| {
-        Failure::Message(format!(
-            "with no [fleet], --auto routes among the harnesses logged in here, and they \
-             could not be detected: {e}"
-        ))
+        Report::new(
+            "harness_unavailable",
+            format!(
+                "with no [fleet], --auto routes among the harnesses logged in here, and they \
+                 could not be detected: {e}"
+            ),
+        )
+        .next("by harnesses --refresh (detects them again)")
+        .next("name a harness with --harness ID")
     })?;
     let cwd = std::env::current_dir()?;
     let config = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
-        .map_err(Failure::Message)?;
+        .map_err(|why| crate::errors::config(&why))?;
     let preferred = config.and_then(|c| c.defaults.harness);
     let built = branchyard::inventory_default(&inventory, preferred.as_deref(), private_home);
     if built.entry.candidates.is_empty() {
@@ -64,15 +74,20 @@ pub fn inventory_default(private_home: bool) -> Result<InventoryDefault, Failure
             .iter()
             .map(|e| format!("{}: {}", e.candidate.harness, e.reason))
             .collect();
-        return Err(Failure::Message(format!(
-            "with no [fleet], --auto routes among the harnesses logged in here, and none is{}; \
-             log one in (by harnesses login ID), or add [fleet.default] with candidates (see \
-             docs/fleet.md)",
-            match why.is_empty() {
-                true => " installed".to_owned(),
-                false => format!(": {}", why.join("; ")),
-            }
-        )));
+        return Err(Report::new(
+            "harness_unavailable",
+            format!(
+                "with no [fleet], --auto routes among the harnesses logged in here, and none \
+                 is{}",
+                match why.is_empty() {
+                    true => " installed".to_owned(),
+                    false => format!(": {}", why.join("; ")),
+                }
+            ),
+        )
+        .next("log one in: by harnesses login ID")
+        .next("add [fleet.default] with candidates (docs/fleet.md)")
+        .into());
     }
     Ok(built)
 }
@@ -87,11 +102,13 @@ pub fn with_inventory_default(task: &mut TaskArgs) -> Result<(), Failure> {
         return Ok(());
     }
     if task.sandbox.is_some() || task.substrate.is_some() || task.recipe.is_some() {
-        return Err(Failure::Message(
+        return Err(Report::usage(
             "with no [fleet], --auto routes among the harnesses logged in on this machine, which \
-             says nothing of a sandbox's; add [fleet.default] with candidates (see docs/fleet.md)"
-                .into(),
-        ));
+             says nothing of a sandbox's",
+        )
+        .next("add [fleet.default] with candidates (docs/fleet.md)")
+        .next("name a harness with --harness ID")
+        .into());
     }
     let built = inventory_default(task.isolated)?;
     task.fleet = Some(built.fleet());
@@ -363,12 +380,12 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
     // The judge's branch runs as `by run` would here: the configuration's
     // defaults (isolation, provider, secrets by name) with no flags.
     let mut task = TaskArgs::default();
-    let cwd = std::env::current_dir().map_err(|e| Failure::Message(e.to_string()))?;
+    let cwd = std::env::current_dir()?;
     if let Some(config) = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
-        .map_err(Failure::Message)?
+        .map_err(|why| crate::errors::config(&why))?
     {
         crate::defaults::apply_task(&config, &mut task, crate::defaults::Scope::NewBranch)
-            .map_err(Failure::Message)?;
+            .map_err(|why| crate::errors::config(&why))?;
     }
     let options = crate::commands::Live::start(env, &task, false, None).options(&task)?;
     let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet, &options)?;
@@ -391,9 +408,15 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
         return Ok(());
     }
     let Some(pick) = judgement.pick.clone() else {
-        return Err(Failure::Message(
-            "nothing to pick: no attempt has a candidate whose check passes".into(),
-        ));
+        return Err(Report::new(
+            "no_candidate",
+            "nothing to pick: no attempt has a candidate whose check passes",
+        )
+        .next(format!(
+            "by compare {} --check (shows each check)",
+            names.join(" ")
+        ))
+        .into());
     };
     let compare = CompareArgs {
         branches: names.clone(),
@@ -518,7 +541,7 @@ pub fn advise(
         None => {
             let cwd = std::env::current_dir()?;
             let isolated = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
-                .map_err(Failure::Message)?
+                .map_err(|why| crate::errors::config(&why))?
                 .is_some_and(|c| c.defaults.isolated == Some(true));
             let built = inventory_default(isolated)?;
             (built.fleet(), built.excluded)
@@ -647,7 +670,7 @@ pub fn route(
         None => {
             let cwd = std::env::current_dir()?;
             let isolated = crate::defaults::config_at(&cwd, &|name| std::env::var(name).ok())
-                .map_err(Failure::Message)?
+                .map_err(|why| crate::errors::config(&why))?
                 .is_some_and(|c| c.defaults.isolated == Some(true));
             let built = inventory_default(isolated)?;
             (built.fleet(), built.excluded)

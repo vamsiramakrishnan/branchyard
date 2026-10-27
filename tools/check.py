@@ -158,6 +158,9 @@ STEPS = (
     Step("test_check_test_hygiene", "controls", (PY, "tests/test_check_test_hygiene.py")),
     Step("check_silent_failures", "controls", (PY, "tools/check_silent_failures.py")),
     Step("test_check_silent_failures", "controls", (PY, "tests/test_check_silent_failures.py")),
+    # The CLI's failures are Reports with a kind and an exit status; the bare messages left only fall.
+    Step("check_failure_messages", "fast", (PY, "tools/check_failure_messages.py")),
+    Step("test_check_failure_messages", "fast", (PY, "tests/test_check_failure_messages.py")),
     # The lint table's exceptions only fall, and every crate inherits the table.
     Step("check_lint_ratchet", "controls", (PY, "tools/check_lint_ratchet.py")),
     Step("test_check_lint_ratchet", "controls", (PY, "tests/test_check_lint_ratchet.py")),

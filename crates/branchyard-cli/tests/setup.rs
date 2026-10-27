@@ -687,7 +687,7 @@ fn the_configuration_supplies_defaults_under_flags_and_variables() {
     )
     .unwrap();
     let out = repo.by(&["ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(
         text(&out).contains("branchyard.toml: line 3"),
         "{}",
@@ -1047,7 +1047,7 @@ fn project_setup_and_up_refuse_outside_a_repository() {
         &["init", "project", "--json", "--next"][..],
     ] {
         let out = at(args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", text(&out));
+        assert_eq!(out.status.code(), Some(3), "{args:?}: {}", text(&out));
         assert!(text(&out).contains(&wanted), "{args:?}: {}", text(&out));
     }
     assert!(!plain.join("branchyard.toml").exists());
@@ -1060,7 +1060,7 @@ fn project_setup_and_up_refuse_outside_a_repository() {
     assert!(listing.status.success(), "{}", text(&listing));
 
     let up = at(&["up", "--plan"]);
-    assert_eq!(up.status.code(), Some(1));
+    assert_eq!(up.status.code(), Some(3));
     assert!(text(&up).contains(&wanted), "{}", text(&up));
     assert!(
         !text(&up).contains("is not inside a git work tree"),

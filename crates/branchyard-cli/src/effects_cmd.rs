@@ -99,7 +99,13 @@ pub fn approvals(target: &Target, action: Option<&ApprovalsAction>, json: bool) 
                 .into_iter()
                 .find(|a| a.branch == branch)
                 .map(|a| a.id)
-                .ok_or_else(|| Failure::Message(format!("no approval waits on {branch}")))?;
+                .ok_or_else(|| {
+                    crate::errors::Report::new(
+                        "not_found",
+                        format!("no approval waits on {branch}"),
+                    )
+                    .next("by approvals (lists what waits)")
+                })?;
             Some(&found)
         }
     };
@@ -338,11 +344,12 @@ fn outcomes_text(outcomes: &[UndoOutcome]) -> String {
 /// staged calls), `all` adds the compensable ones, `none`, or ids.
 fn choose(env: &Env, plan: &UndoPlan) -> Result<Vec<String>, Failure> {
     if !(env.stdin_tty && env.stderr_tty) {
-        return Err(Failure::Message(
-            "by undo asks which upstream effects to undo; pass --yes for every reversible one, \
-             or --only ID... (or run on a terminal)"
-                .into(),
-        ));
+        return Err(crate::errors::Report::usage(
+            "by undo asks which upstream effects to undo, and there is no terminal to ask on",
+        )
+        .next("pass --yes for every reversible one")
+        .next("pass --only ID... for some of them")
+        .into());
     }
     eprint!("Undo which upstream effects? [all reversible] (all, none, or ids) ");
     branchyard_support::best_effort("flush the prompt", io::stderr().flush());

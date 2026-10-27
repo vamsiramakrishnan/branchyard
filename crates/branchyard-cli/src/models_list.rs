@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use crate::args::ModelsAction;
 use crate::commands::{print, Env, Failure, Outcome, Target};
+use crate::errors::Report;
 use crate::render::{self, Cell, Column, Style, Tone};
 use crate::{live_catalog, models_cmd, setup_io};
 
@@ -53,9 +54,11 @@ fn focus(id: &str) -> Result<Focus, Failure> {
         .iter()
         .find(|h| h.id == id)
         .ok_or_else(|| {
-            Failure::Message(format!(
-                "no harness {id:?} in the catalog; `by harnesses --all` lists them"
-            ))
+            Report::new(
+                "unknown_harness",
+                format!("no harness {id:?} in the catalog"),
+            )
+            .next("by harnesses --all (lists them)")
         })?;
     Ok(Focus {
         entry,
@@ -76,18 +79,21 @@ pub fn main(env: &Env, target: &Target, action: &ModelsAction, as_json: bool) ->
         anthropic_url,
     } = action;
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(Report::usage(
             "by models list asks the providers with the keys of this machine; a server's keys \
-             are in its own environment (docs/model-gateway.md)"
-                .into(),
-        ));
+             are in its own environment (docs/model-gateway.md)",
+        )
+        .next("run by models list without --remote")
+        .into());
     }
     if models_cmd::inside_branch() {
-        return Err(Failure::Message(
+        return Err(Report::new(
+            "denied",
             "by models list uses the keys in your environment; inside a branch the environment \
-             holds the turn's token, which is not a provider's to see. Run it outside the harness"
-                .into(),
-        ));
+             holds the turn's token, which is not a provider's to see",
+        )
+        .next("run by models list in your own terminal, outside the harness")
+        .into());
     }
     let cwd = std::env::current_dir()?;
     let root = setup_io::project_root(&cwd);

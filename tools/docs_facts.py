@@ -4,7 +4,8 @@
 Counts, lists and matrices that the code already knows (how many files are
 vendored, how many derivatives follow how many vendored sources, which crates
 exist, how many tests there are, which environment prefixes the runtime
-strips, which routes the server registers) are computed
+strips, which routes the server registers, which exit status `by` ends with
+for each error kind) are computed
 here from the source of truth and written in two places:
 
 - docs/facts.json, the full set, committed so a change shows in review;
@@ -133,6 +134,47 @@ def http_facts():
     return {"route_count": len(routes), "routes": sorted(routes)}
 
 
+def rust_string(literal):
+    """The text of a Rust string literal's body: a `\\` line continuation
+    skips the newline and the next line's indentation, `\\"` is a quote."""
+    text = re.sub(r"\\\n\s*", "", literal)
+    return text.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def exit_facts():
+    """`by`'s exit statuses, what each means and the error kinds that end with it, from the CLI's own
+    table (crates/branchyard-cli/src/errors.rs: `Exit`, `EXITS`, `KINDS`)."""
+    text = (ROOT / "crates/branchyard-cli/src/errors.rs").read_text()
+    enum = re.search(r"pub enum Exit \{(.*?)\n\}", text, re.S)
+    meanings = re.search(r"const EXITS: \[\(Exit, &str\); \d+\] = \[(.*?)\n\];", text, re.S)
+    kinds = re.search(r"const KINDS: &\[\(&str, Exit\)\] = &\[(.*?)\n\];", text, re.S)
+    if not (enum and meanings and kinds):
+        raise SystemExit("docs_facts: Exit, EXITS or KINDS not found in crates/branchyard-cli/src/errors.rs")
+    codes = {name: int(code) for name, code in re.findall(r"^\s*(\w+) = (\d+),", enum.group(1), re.M)}
+    said = {
+        name: rust_string(body)
+        for name, body in re.findall(r'\(\s*Exit::(\w+),\s*"((?:[^"\\]|\\.)*)"', meanings.group(1), re.S)
+    }
+    by_exit = {name: [] for name in codes}
+    for kind, name in re.findall(r'\("([a-z_]+)", Exit::(\w+)\)', kinds.group(1)):
+        by_exit[name].append(kind)
+    if set(said) != set(codes):
+        raise SystemExit("docs_facts: EXITS does not describe every Exit in crates/branchyard-cli/src/errors.rs")
+    return [
+        {"code": codes[name], "name": name, "meaning": said[name], "kinds": sorted(by_exit[name])}
+        for name in sorted(codes, key=codes.get)
+    ]
+
+
+def exit_table(exits):
+    """docs/cli.md's exit-status table."""
+    rows = ["| Status | Meaning | `--json` kinds |", "|---|---|---|"]
+    for exit in exits:
+        kinds = ", ".join(f"`{kind}`" for kind in exit["kinds"]) or "—"
+        rows.append(f"| {exit['code']} | {exit['meaning']} | {kinds} |")
+    return "\n\n" + "\n".join(rows) + "\n\n"
+
+
 def runtime_facts():
     text = (ROOT / "crates/branchyard-runtime/src/lib.rs").read_text()
     match = re.search(r"const DEFAULT_STRIP: \[&str; \d+\] = \[(.*?)\];", text, re.S)
@@ -205,6 +247,7 @@ def compute():
         "http": http_facts(),
         "runtime": runtime_facts(),
         "profiles": profile_facts(),
+        "cli": {"exit_codes": exit_facts()},
     }
 
 
@@ -269,6 +312,7 @@ def regions(facts):
         "runtime.strip_prefixes": join_and([f"`{p}*`" for p in facts["runtime"]["strip_prefixes"]]),
         "profiles.summary": profile_summary(facts["profiles"]),
         "profiles.table": profile_table(facts["profiles"]),
+        "cli.exit_codes": exit_table(facts["cli"]["exit_codes"]),
     }
 
 

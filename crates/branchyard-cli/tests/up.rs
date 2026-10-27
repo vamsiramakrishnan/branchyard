@@ -313,7 +313,7 @@ fn without_a_terminal_an_unset_policy_leaves_the_install_to_the_person() {
     // A repository's file cannot allow installs either: the loader refuses it.
     w.project_file("[defaults]\nharness = \"codex\"\n[harnesses]\ninstall = \"auto\"\n");
     let out = w.by(&["up", "--json"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     // With `--json` the refusal is the error envelope on stdout.
     let error: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
@@ -387,14 +387,14 @@ fn up_refuses_inside_a_harness_and_with_a_remote() {
     let w = World::new();
     w.fake_codex("0.150.0");
     let out = w.by_env(&["up"], &[("BRANCHYARD_BRANCH", "agent/x")]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         text(&out.stderr).contains("cannot bring the repository up"),
         "{}",
         text(&out.stderr)
     );
     let out = w.by(&["up", "--remote", "http://127.0.0.1:9"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(
         text(&out.stderr).contains("--remote"),
         "{}",

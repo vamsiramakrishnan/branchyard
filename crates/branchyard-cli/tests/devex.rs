@@ -268,7 +268,7 @@ fn usage_reads_both_logins_and_the_guard_warns_or_refuses() {
     )
     .unwrap();
     let refused = run("refused");
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         stderr(&refused).contains("guard = \"refuse\""),
         "{}",
@@ -818,7 +818,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
 
     // Kill: refused without a terminal or --yes, then every listener stops.
     let out = repo.by(&["workspace", "kill", "srv"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("pass --yes"), "{}", stderr(&out));
     let killed = repo.json(&["workspace", "kill", "srv", "--yes", "--json"]);
     assert_eq!(killed["stopped"].as_array().unwrap().len(), 3);
@@ -1122,7 +1122,7 @@ fn detach_refuses_to_ask() {
     let out = repo.by(&["run", "go", "--detach", "--ask"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let out = repo.by(&["run", "go", "--detach"]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(
         stderr(&out).contains("a detached turn has none"),
         "{}",

@@ -316,7 +316,11 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
         }
     };
     let Some(plan) = response.plan else {
-        return Err(Failure::Message("the setup finished without a plan".into()));
+        return Err(crate::errors::Report::new(
+            "invalid_plan",
+            "the setup finished without a plan",
+        )
+        .into());
     };
     cliclack::note("Review", review_text(&plan, true)).map_err(Failure::Io)?;
     if !plan.valid {
@@ -371,7 +375,7 @@ pub fn run(topic: Option<Topic>, defaults: bool) -> Outcome {
             cliclack::outro_cancel(problems.join("\n")).map_err(Failure::Io)?;
             Err(Failure::Reported)
         }
-        Err(Refusal::Io(message)) => Err(Failure::Message(message)),
+        Err(Refusal::Io(message)) => Err(crate::errors::Report::new("io", message).into()),
     }
 }
 

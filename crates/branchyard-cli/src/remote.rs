@@ -27,6 +27,7 @@ use branchyard_client::{new_key, Client, Repo};
 use crate::args::{Globals, Permissions, RigArgs, SpawnArgs, TaskArgs};
 use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome, Prompt};
 use crate::console::Console;
+use crate::errors::Report;
 use crate::render::{self, Renderer};
 use crate::rig::{Fallback, RigPlan};
 
@@ -39,19 +40,15 @@ pub struct Remote {
 }
 
 /// What a remote command with no token says, in the error style: the three
-/// places one can be given, and where `by serve` writes one. Printed here
-/// (as JSON when `--json` is on the line), since the command has not been
-/// dispatched yet.
+/// places one can be given, and where `by serve` writes one.
 fn needs_token() -> Failure {
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let report = crate::errors::Report::new("usage", "remote mode needs a token")
+    Report::usage("remote mode needs a token")
         .next("pass --token-file FILE, or set BRANCHYARD_TOKEN_FILE")
         .next(
             "set token_file under [remote] in branchyard.toml (`by serve` writes one at \
              .branchyard/server/token on the server's host)",
-        );
-    crate::errors::print(&report, crate::errors::wants_json(&argv));
-    Failure::Reported
+        )
+        .into()
 }
 
 /// What to do when a server does not answer; `by doctor`'s `server.reachable`
@@ -67,16 +64,20 @@ impl Remote {
         let url = globals
             .remote
             .as_deref()
-            .ok_or_else(|| Failure::Message("no server URL".into()))?;
+            .ok_or_else(|| Report::usage("no server URL").next("pass --remote URL"))?;
         // `ssh://`: a server this starts on the host, reached through a
         // forwarded Unix socket, with the token it fetched (docs/remote-ssh.md).
         let tunnel = match crate::ssh_remote::is_ssh(url) {
             true => {
                 if globals.token_file.is_some() || globals.ca_file.is_some() {
-                    return Err(Failure::Message(
-                        "an ssh:// remote fetches its own token and needs no CA; drop                          --token-file and --ca-file (or BRANCHYARD_TOKEN_FILE and                          BRANCHYARD_CA_FILE)"
-                            .into(),
-                    ));
+                    return Err(Report::usage(
+                        "an ssh:// remote fetches its own token and needs no CA file",
+                    )
+                    .next(
+                        "drop --token-file and --ca-file (or unset BRANCHYARD_TOKEN_FILE and \
+                         BRANCHYARD_CA_FILE)",
+                    )
+                    .into());
                 }
                 Some(crate::ssh_remote::connect(url)?)
             }
@@ -98,14 +99,23 @@ impl Remote {
                 let repos = client.repos()?;
                 match repos.as_slice() {
                     [only] => only.name.clone(),
-                    [] => return Err(Failure::Message("the server serves no repositories".into())),
+                    [] => {
+                        return Err(Report::new(
+                            "config",
+                            format!("the server at {url} serves no repositories"),
+                        )
+                        .next("start it with one: by serve --repo NAME=PATH (on its host)")
+                        .into())
+                    }
                     several => {
                         let names: Vec<&str> = several.iter().map(|r| r.name.as_str()).collect();
-                        return Err(Failure::Message(format!(
-                            "the server serves {}; pass --repo NAME, set BRANCHYARD_REPO, or set \
-                             repo under [remote] in branchyard.toml",
+                        return Err(Report::usage(format!(
+                            "the server serves {}: name one",
                             names.join(", ")
-                        )));
+                        ))
+                        .next(format!("pass --repo {}, or set BRANCHYARD_REPO", names[0]))
+                        .next("set repo under [remote] in branchyard.toml")
+                        .into());
                     }
                 }
             }
@@ -139,21 +149,24 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// absolute here, since a relative path would name a file on this machine.
 fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
     if let Some(recipe) = &task.recipe {
-        return Err(Failure::Message(format!(
+        return Err(Report::usage(format!(
             "--provider recipe:{} runs on the machine that has the repository: a server does not \
-             run environment recipes (docs/recipes.md). Run it without --remote",
+             run environment recipes (docs/recipes.md)",
             recipe.name
-        )));
+        ))
+        .next("run it without --remote, in the repository")
+        .into());
     }
     let mut provider = commands::provider(task)?;
     if let (Some(Provider::Substrate(options)), Some(args)) = (&mut provider, &task.substrate) {
         options.key = args.key.clone().into();
         if !options.key.is_absolute() {
-            return Err(Failure::Message(format!(
-                "--substrate-key names a file on the server in remote mode; give its absolute \
-                 path there, not {}",
+            return Err(Report::usage(format!(
+                "--substrate-key names a file on the server in remote mode, not {}",
                 args.key
-            )));
+            ))
+            .next("give the key's absolute path on the server: --substrate-key /PATH")
+            .into());
         }
     }
     Ok(provider)
@@ -164,11 +177,11 @@ fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
 fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Failure> {
     match task.permissions {
         Permissions::Yes => Ok((PolicySpec::allow_all(), None)),
-        Permissions::Ask => Err(Failure::Message(
-            "--ask is not available in remote mode, where the harness runs on the server; \
-             pass --yes, or leave requests denied"
-                .into(),
-        )),
+        Permissions::Ask => Err(Report::usage(
+            "--ask is not available in remote mode, where the harness runs on the server",
+        )
+        .next("pass --yes, or --permissions read-only|edit-worktree, or leave requests denied")
+        .into()),
         Permissions::Preset(preset) => Ok((PolicySpec::preset(preset), None)),
         Permissions::Unset => Ok((PolicySpec::default(), Some(REMOTE_DENY_NOTICE))),
     }
@@ -222,32 +235,28 @@ fn failed(error: ErrorBody) -> Failure {
 }
 
 /// The engine error a server error stands for, for `--json` output: its
-/// kind is the one a local `by` reports.
+/// kind is the one a local `by` reports ([`crate::errors::local_kind`]).
 pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
     match error {
         branchyard_client::Error::Api { error, .. } => {
-            let kind = match error.code.as_str() {
-                "git_error" => "git".to_owned(),
-                "harness_error" => "harness".to_owned(),
-                "io_error" => "io".to_owned(),
-                "state_error" => "state".to_owned(),
-                "remote_error" => error
-                    .detail
-                    .as_ref()
-                    .and_then(|d| d["kind"].as_str())
-                    .unwrap_or("remote")
-                    .to_owned(),
-                code => code.to_owned(),
-            };
+            let kind = crate::errors::local_kind(&error.code, error.detail.as_ref());
             // A failed check's siblings or the branches on whose own work
-            // it failed, and every check of the integration, as a local
-            // `by` reports them.
+            // it failed, every check of the integration, why a harness
+            // cannot start and which profile routes no approvals, as a
+            // local `by` reports them.
             let detail = error.detail.as_ref().and_then(|d| {
                 let mut local = d
                     .get("shared")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                for key in ["checks", "own_work"] {
+                for key in [
+                    "checks",
+                    "own_work",
+                    "harness",
+                    "cause",
+                    "unsupported",
+                    "profile",
+                ] {
                     if let Some(value) = d.get(key) {
                         local[key] = value.clone();
                     }
@@ -282,6 +291,11 @@ impl From<Failure> for branchyard::Error {
             Failure::Sdk(error) => error,
             Failure::Remote(error) => sdk_error(error),
             Failure::Message(message) => branchyard::Error::Usage(message),
+            Failure::Report(report) => branchyard::Error::Remote {
+                kind: report.kind.clone(),
+                message: report.said(),
+                detail: report.detail.map(Box::new),
+            },
             other => branchyard::Error::Remote {
                 kind: "io".into(),
                 message: other.to_string(),
@@ -524,10 +538,15 @@ fn follow_prefixed(
             }
         }
         let Ok(heard) = rx.recv() else {
-            return Err(Failure::Message(format!(
-                "lost track of operation {}",
+            return Err(Report::new(
+                "remote_protocol",
+                format!("lost track of operation {} on the server", op.id),
+            )
+            .next(format!(
+                "by ls (the server goes on with operation {})",
                 op.id
-            )));
+            ))
+            .into());
         };
         match heard {
             Heard::Entry(item) if streaming => match *item {
@@ -589,11 +608,13 @@ fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioning>, Failur
         .flat_map(|s| &s.secrets)
         .find(|s| s.from.is_some())
     {
-        return Err(Failure::Message(format!(
+        return Err(Report::usage(format!(
             "--secret {name}=...: with --remote, secrets come from the server, whose operator \
-             decides where each is read; pass --secret {name}",
+             decides where each is read",
             name = secret.name
-        )));
+        ))
+        .next(format!("pass --secret {name}", name = secret.name))
+        .into());
     }
     Ok(spec)
 }
@@ -625,7 +646,7 @@ fn first_branch(result: OperationResult) -> Result<BranchInfo, Failure> {
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))
+        .ok_or_else(|| missing("branch"))
 }
 
 /// `by run`'s task request, with the notice and provider it announces.
@@ -748,7 +769,7 @@ fn finish_result(env: &Env, remote: &Remote, result: OperationResult) -> Outcome
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))?;
+        .ok_or_else(|| missing("branch"))?;
     let style = render::Style { color: env.color };
     let check = inspect(remote, &info.name).ok().and_then(|i| i.check);
     print(&format!(
@@ -953,9 +974,7 @@ fn map_finish(
     let console = live_console(env, true, json);
     let done = follow_prefixed(remote, op, &console, Some(&format!("{name}-")));
     console.finish();
-    let report = result(done?)?
-        .map
-        .ok_or_else(|| Failure::Message("the server returned no map".into()))?;
+    let report = result(done?)?.map.ok_or_else(|| missing("map"))?;
     let out = args.out.as_ref().map(std::path::PathBuf::from);
     if let Some(out) = &out {
         crate::map_cmd::write_atomic(out, &crate::map_cmd::results_text(out, &report))?;
@@ -1056,7 +1075,7 @@ pub fn send_json(
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))?;
+        .ok_or_else(|| missing("branch"))?;
     Ok(Sent {
         name: info.name,
         status: info.status,
@@ -1341,16 +1360,12 @@ pub fn merge(
     };
     let op = match remote.repo.merge(branch, &request, &new_key()) {
         Err(error) if error.code() == Some("detached_head") => {
-            return Err(Failure::Message(
-                "HEAD is detached; pass --into <branch>".into(),
-            ))
+            return Err(commands::detached_head().into())
         }
         other => other?,
     };
     let done = remote.client.wait(&op.id)?;
-    result(done)?
-        .merged
-        .ok_or_else(|| Failure::Message("the server returned no merge".into()))
+    result(done)?.merged.ok_or_else(|| missing("merge"))
 }
 
 /// `by rig run` on the server: the lowered plan as one task request, with
@@ -1429,7 +1444,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         Err(error) => return rig_failed(true, error),
     };
     let Some(info) = result.branches.first() else {
-        return Err(Failure::Message("the server returned no branch".into()));
+        return Err(missing("branch"));
     };
     // Read again, as local mode does: the root gained its children.
     let root = remote.repo.branch(&info.name)?;
@@ -1437,13 +1452,15 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
 }
 
 fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
-    if json {
-        let value =
-            serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
-        print(&crate::json::text(&value))?;
-        return Err(Failure::Reported);
-    }
-    Err(Failure::Sdk(error))
+    commands::fail(json, &error)
+}
+
+/// A server's answer without what it must hold: this `by` and the server
+/// do not speak the same API.
+fn missing(what: &str) -> Failure {
+    Report::new("remote_protocol", format!("the server returned no {what}"))
+        .next("compare by --version here with the server's; they should match")
+        .into()
 }
 
 #[cfg(test)]

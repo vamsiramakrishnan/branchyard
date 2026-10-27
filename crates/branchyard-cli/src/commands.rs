@@ -20,6 +20,7 @@ use crate::args::{
     self, shell_quote, ArtifactArgs, GraphArgs, Permissions, ScratchArgs, SpawnArgs, TaskArgs,
 };
 use crate::console::{self, Choice, Console};
+use crate::errors::Report;
 use crate::json;
 use crate::remote::{self, Remote};
 use crate::render::{self, Renderer, Style, Tone};
@@ -72,16 +73,26 @@ impl Env {
     }
 }
 
+/// How a command failed. `crate::errors::finish` prints it, once, and
+/// exits with the status of its kind (docs/cli.md, "Exit status").
 #[derive(Debug)]
 pub enum Failure {
     Sdk(branchyard::Error),
     Remote(branchyard_client::Error),
     Io(io::Error),
+    /// What failed, its kind and the command to run next
+    /// (`Report::new(kind, what).next(..).into()`): the one shape a new
+    /// failure takes.
+    Report(Box<Report>),
+    /// A bare message, reported with the kind `unclassified` (exit 1).
+    /// The old shape: tools/failure_message_ratchet.json counts what is
+    /// left, and a new failure is a [`Failure::Report`].
     Message(String),
-    /// Already explained on stdout, such as a branch that failed; exit 1.
+    /// Already explained, such as a branch that failed; exit 1, or the
+    /// status of the report `crate::errors::print` printed.
     Reported,
     /// A step only the person can do remains, such as a login that needs a
-    /// terminal; exit 2. The text says what to run (empty when stdout
+    /// terminal; exit 3. The text says what to run (empty when stdout
     /// already did).
     Manual(String),
 }
@@ -96,6 +107,7 @@ impl fmt::Display for Failure {
             }
             Failure::Remote(error) => write!(f, "{error}"),
             Failure::Io(error) => write!(f, "{error}"),
+            Failure::Report(report) => f.write_str(&report.said()),
             Failure::Message(message) => f.write_str(message),
             Failure::Reported => Ok(()),
             Failure::Manual(message) => f.write_str(message),
@@ -126,7 +138,11 @@ pub type Outcome = Result<(), Failure>;
 /// An argument clap requires for the action it is parsed under. A missing
 /// one is reported, never a panic.
 fn given<T>(value: Option<T>, name: &str) -> Result<T, Failure> {
-    value.ok_or_else(|| Failure::Message(format!("missing the {name} argument")))
+    value.ok_or_else(|| {
+        Report::usage(format!("missing the {name} argument"))
+            .next("see by help <command> for its arguments")
+            .into()
+    })
 }
 
 pub fn print(text: &str) -> Outcome {
@@ -301,14 +317,18 @@ impl Live {
 
     pub(crate) fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
         if !task.require_labels.is_empty() {
-            return Err(Failure::Message(
-                "--require-label chooses among a server's workers: use it with --remote".into(),
-            ));
+            return Err(Report::usage(
+                "--require-label chooses among a server's workers, and this command runs here",
+            )
+            .next("add --remote URL, or drop --require-label")
+            .into());
         }
         if task.priority.is_some() {
-            return Err(Failure::Message(
-                "--priority orders a server's queue: use it with --remote".into(),
-            ));
+            return Err(Report::usage(
+                "--priority orders a server's queue, and this command runs here",
+            )
+            .next("add --remote URL, or drop --priority")
+            .into());
         }
         let console = self.console.clone();
         let exe = std::env::current_exe().ok();
@@ -573,19 +593,23 @@ pub fn fan(
 ) -> Outcome {
     let routed = crate::fleet_cmd::is_routed(task);
     if harnesses.is_some() && task.auto {
-        return Err(Failure::Message(
-            "--auto routes through the [fleet] table; it takes no --harness".into(),
-        ));
+        return Err(Report::usage(
+            "--auto routes through the [fleet] table; it takes no --harness",
+        )
+        .next("drop --harness, or drop --auto")
+        .into());
     }
     let harnesses = match (harnesses, routed) {
         (Some(harnesses), _) => harnesses,
         (None, true) => &[],
         (None, false) => {
-            return Err(Failure::Message(
-                "fan needs --harness ID,ID,... or a [fleet] table to route by (--auto); see \
-                 docs/fleet.md"
-                    .into(),
-            ))
+            return Err(Report::usage(
+                "fan needs the harnesses to run: --harness ID,ID,... or a [fleet] table to \
+                 route by (--auto)",
+            )
+            .next("by fan \"<prompt>\" --harness ID,ID (by harnesses lists them)")
+            .next("add a [fleet] table (docs/fleet.md) and pass --auto")
+            .into())
         }
     };
     if let Target::Remote(remote) = target {
@@ -907,18 +931,17 @@ pub fn steer(
         Err(error) => return fail(json, &error),
     };
     match &steer.state {
-        branchyard::SteerState::Refused { reason } if json => {
-            let value = serde_json::json!({"error": {
-                "kind": "steer_refused",
-                "message": format!("{branch}'s turn did not take the input: {reason}"),
-                "steer": steer,
-            }});
-            print(&format!("{}\n", to_json(&value)))?;
-            Err(Failure::Reported)
-        }
         branchyard::SteerState::Refused { reason } => {
-            eprintln!("by: {branch}'s turn did not take the input: {reason}");
-            Err(Failure::Reported)
+            let report = Report::new(
+                "steer_refused",
+                format!("{branch}'s turn did not take the input: {reason}"),
+            )
+            .field("steer", serde_json::to_value(&steer).unwrap_or_default())
+            .next(format!(
+                "by send {} \"<prompt>\" once the turn ends (starts a new turn)",
+                shell_quote(branch)
+            ));
+            emit_report(json, report)
         }
         _ if json => print(&format!("{}\n", to_json(&steer))),
         // The state first, in the words the delegate skill and the JSON
@@ -1364,7 +1387,10 @@ fn page(text: &str) -> Outcome {
         .ok()
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| "less".into());
-    let argv = args::split_words(&pager).map_err(|e| Failure::Message(format!("PAGER: {e}")))?;
+    let argv = args::split_words(&pager).map_err(|e| {
+        Report::new("config", format!("PAGER is not a command line: {e}"))
+            .next("fix PAGER, or unset it to use less")
+    })?;
     let Some((program, rest)) = argv.split_first() else {
         return print(text);
     };
@@ -1495,9 +1521,7 @@ pub fn merge_quietly(target: &Target, branch: &str, into: Option<&str>) -> Outco
     let yard = open()?;
     let target = match into {
         Some(target) => target.to_owned(),
-        None => yard
-            .current_branch()?
-            .ok_or_else(|| Failure::Message("HEAD is detached; pass --into <branch>".into()))?,
+        None => yard.current_branch()?.ok_or_else(detached_head)?,
     };
     yard.merge(branch, &target)?;
     Ok(())
@@ -1523,7 +1547,7 @@ pub fn merge_as(
             match remote::merge(remote, branch, into) {
                 Ok(merged) => (merged, check),
                 Err(Failure::Remote(error)) => {
-                    return emit_report(json, &crate::errors::remote(&error, Some(branch)))
+                    return emit_report(json, crate::errors::remote(&error, Some(branch)))
                 }
                 Err(other) => return Err(other),
             }
@@ -1532,9 +1556,7 @@ pub fn merge_as(
             let yard = open()?;
             let into = match into {
                 Some(target) => target.to_owned(),
-                None => yard.current_branch()?.ok_or_else(|| {
-                    Failure::Message("HEAD is detached; pass --into <branch>".into())
-                })?,
+                None => yard.current_branch()?.ok_or_else(detached_head)?,
             };
             let check = check_of(&yard, branch);
             match yard.merge(branch, &into) {
@@ -1625,9 +1647,14 @@ fn remove_branch(target: &Target, branch: &str, keep_credentials: bool) -> Resul
         }
         // The server decides what stays on its disk.
         Target::Remote(_) if keep_credentials => {
-            return Err(Failure::Message(
-                "--keep-credentials is for a local yard; a server always removes them".into(),
+            return Err(Report::usage(
+                "--keep-credentials is for a local yard; a server always removes them",
+            )
+            .next(format!(
+                "by rm {} (without --keep-credentials)",
+                shell_quote(branch)
             ))
+            .into())
         }
         Target::Remote(remote) => remote.repo.remove(branch)?,
     }
@@ -1636,7 +1663,8 @@ fn remove_branch(target: &Target, branch: &str, keep_credentials: bool) -> Resul
 
 /// Serve a branch's delegation tools on stdio; see `branchyard-mcp`.
 pub fn mcp(root: &str, branch: &str) -> Outcome {
-    branchyard_mcp::serve_branch(root.into(), branch).map_err(|e| Failure::Message(e.to_string()))
+    branchyard_mcp::serve_branch(root.into(), branch)
+        .map_err(|e| Report::new("io", format!("by mcp for {branch}: {e}")).into())
 }
 
 /// `by mcp --list-tools`: the tools `by mcp` serves, with their input
@@ -1674,26 +1702,21 @@ pub(crate) fn to_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).expect("results serialize")
 }
 
-/// Report `error` (see [`crate::errors`]): `{"error": {"kind", "message",
-/// "next", "detail"}}` on stdout with `--json`, else the text on stderr;
-/// exit 1 either way.
+/// Fail with `error`'s report (see [`crate::errors`]): `{"error": {"kind",
+/// "message", "next", "detail", "exit"}}` on stdout with `json`, else the
+/// text on stderr, and the exit status of its kind.
 pub(crate) fn fail(json: bool, error: &branchyard::Error) -> Outcome {
     fail_in(json, error, None)
 }
 
 /// [`fail`] for a command that acts on `branch`, whose hints may name it.
 pub(crate) fn fail_in(json: bool, error: &branchyard::Error, branch: Option<&str>) -> Outcome {
-    emit_report(json, &crate::errors::sdk(error, branch))
+    emit_report(json, crate::errors::sdk(error, branch))
 }
 
-/// Print a failure's report as [`fail`] does.
-pub(crate) fn emit_report(json: bool, report: &crate::errors::Report) -> Outcome {
-    if json {
-        print(&format!("{}\n", to_json(&report.json())))?;
-        return Err(Failure::Reported);
-    }
-    eprint!("{}", report.text());
-    Err(Failure::Reported)
+/// Fail with `report`, as JSON with `json` or as text, as [`fail`] does.
+pub(crate) fn emit_report(json: bool, report: Report) -> Outcome {
+    Err(report.with_json(json).into())
 }
 
 /// Print a result as JSON or as text.
@@ -1730,18 +1753,32 @@ pub fn read_prompt_file(path: &str) -> Result<String, Failure> {
     let text = match path {
         "-" => {
             let mut text = String::new();
-            io::Read::read_to_string(&mut io::stdin(), &mut text)
-                .map_err(|e| Failure::Message(format!("--prompt-file -: {e}")))?;
+            io::Read::read_to_string(&mut io::stdin(), &mut text).map_err(|e| {
+                Report::new(
+                    "io",
+                    format!(
+                        "--prompt-file -: could not read standard input: {}",
+                        crate::errors::plain_io(&e)
+                    ),
+                )
+            })?;
             text
         }
-        path => std::fs::read_to_string(path)
-            .map_err(|e| Failure::Message(format!("--prompt-file {path}: {e}")))?,
+        path => std::fs::read_to_string(path).map_err(|e| {
+            Report::usage(format!(
+                "--prompt-file {path}: {}",
+                crate::errors::plain_io(&e)
+            ))
+            .next("give a file that holds the prompt, or - to read it from standard input")
+        })?,
     };
     let text = text.trim_end_matches(['\n', '\r']).to_owned();
     match text.trim().is_empty() {
-        true => Err(Failure::Message(format!(
-            "--prompt-file {path} holds no prompt"
-        ))),
+        true => Err(
+            Report::usage(format!("--prompt-file {path} holds no prompt"))
+                .next("write the prompt into the file, or pass it as an argument")
+                .into(),
+        ),
         false => Ok(text),
     }
 }
@@ -3200,8 +3237,13 @@ fn absolute(path: &str) -> std::path::PathBuf {
 pub(crate) fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioning>, Failure> {
     let mut spec = task.provision.clone();
     if let Some(path) = &task.instructions {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Failure::Message(format!("--instructions {path}: {e}")))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            Report::usage(format!(
+                "--instructions {path}: {}",
+                crate::errors::plain_io(&e)
+            ))
+            .next("give a file that holds the instructions")
+        })?;
         spec.get_or_insert_with(Default::default).instructions = Some(text);
     }
     Ok(spec)
@@ -3383,20 +3425,19 @@ pub fn print_rig_run(rig: &str, root: &BranchInfo, descendants: &[BranchInfo]) -
 /// `--json`, `{"error": {"kind": "invalid_rig", "message", "field", "line",
 /// "column"}}`.
 fn rig_refused(args: &args::RigArgs, error: &rig::RigError) -> Outcome {
-    let message = format!("{}: {error}", args.file);
-    if args.json {
-        let value = serde_json::json!({"error": {
-            "kind": "invalid_rig",
-            "message": message,
-            "field": error.field,
-            "line": error.line,
-            "column": error.column,
-        }});
-        print(&json::text(&value))?;
-        return Err(Failure::Reported);
-    }
-    eprintln!("by: {message}");
-    Err(Failure::Reported)
+    let report = Report::new("invalid_rig", format!("{}: {error}", args.file))
+        .field("field", serde_json::json!(error.field))
+        .field("line", serde_json::json!(error.line))
+        .field("column", serde_json::json!(error.column));
+    emit_report(args.json, report)
+}
+
+/// `by merge` without `--into` on a detached HEAD: there is no branch to
+/// merge into.
+pub(crate) fn detached_head() -> Report {
+    Report::usage("HEAD is detached, so there is no branch to merge into")
+        .next("pass --into <branch>")
+        .next("git switch <branch>, then merge again")
 }
 
 #[cfg(test)]

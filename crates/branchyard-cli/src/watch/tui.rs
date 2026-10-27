@@ -2001,7 +2001,10 @@ fn open_editor(
         Err(error) => {
             branchyard_support::best_effort(
                 "report a failed command to the dashboard",
-                done.send(finished(Err(crate::commands::Failure::Message(error)), &[])),
+                done.send(finished(
+                    Err(crate::errors::Report::new("config", error).into()),
+                    &[],
+                )),
             );
             return Ok(());
         }

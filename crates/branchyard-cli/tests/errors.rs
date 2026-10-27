@@ -74,7 +74,7 @@ fn outside_a_repository_the_message_names_the_directory_and_the_way_out() {
     let repo = Repo::new();
     let here = fs::canonicalize(&repo.dir).unwrap();
     let out = repo.outside(&["ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert_eq!(
         stderr(&out),
         format!(
@@ -86,9 +86,10 @@ fn outside_a_repository_the_message_names_the_directory_and_the_way_out() {
     assert_eq!(stdout(&out), "");
 
     let json = repo.outside(&["ls", "--json"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(3));
     let error = envelope(&json);
     assert_eq!(error["kind"], "not_a_repository");
+    assert_eq!(error["exit"], 3);
     assert_eq!(
         error["message"],
         format!("{} is not inside a git repository", here.display())
@@ -107,7 +108,7 @@ fn an_unknown_branch_gets_a_did_you_mean_and_by_ls() {
     repo.branch("hello", &[]);
 
     let typo = repo.by(&["show", "brokn"]);
-    assert_eq!(typo.status.code(), Some(1));
+    assert_eq!(typo.status.code(), Some(2));
     assert_eq!(
         stderr(&typo),
         "by: no branch named brokn; did you mean broken?\n  next: by ls\n"
@@ -119,9 +120,10 @@ fn an_unknown_branch_gets_a_did_you_mean_and_by_ls() {
     );
 
     let json = repo.by(&["show", "brokn", "--json"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(2));
     let error = envelope(&json);
     assert_eq!(error["kind"], "unknown_branch");
+    assert_eq!(error["exit"], 2);
     assert_eq!(
         error["message"],
         "no branch named brokn; did you mean broken?"
@@ -157,8 +159,10 @@ fn a_running_branch_says_to_wait_for_it_or_cancel_it() {
         stderr(&refused)
     );
     let json = repo.by_agent(&["send", "stuck", "WHOAMI", "--json"]);
+    assert_eq!(json.status.code(), Some(1));
     let error = envelope(&json);
     assert_eq!(error["kind"], "running");
+    assert_eq!(error["exit"], 1);
     assert_eq!(error["message"], "stuck is still running its turn");
     assert_eq!(error["next"].as_array().unwrap().len(), 2);
 
@@ -186,6 +190,7 @@ fn a_failed_check_names_the_check_the_exit_the_output_and_what_to_run() {
     assert_eq!(json.status.code(), Some(1));
     let error = envelope(&json);
     assert_eq!(error["kind"], "check_failed");
+    assert_eq!(error["exit"], 1);
     assert!(
         error["message"]
             .as_str()
@@ -290,7 +295,7 @@ fn a_missing_harness_says_how_to_install_or_pick_one() {
             .unwrap()
     };
     let out = run(&[]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(
         stderr(&out).ends_with(
             "by: gemini-cli is not installed: gemini was not found on PATH\n  next: by harnesses \
@@ -300,6 +305,7 @@ fn a_missing_harness_says_how_to_install_or_pick_one() {
         stderr(&out)
     );
     let json = run(&["--json"]);
+    assert_eq!(json.status.code(), Some(3));
     let error = envelope(&json);
     assert_eq!(error["kind"], "harness_unavailable");
     assert_eq!(
@@ -307,13 +313,19 @@ fn a_missing_harness_says_how_to_install_or_pick_one() {
         "gemini-cli is not installed: gemini was not found on PATH"
     );
     assert_eq!(error["next"][0], "by harnesses install gemini-cli");
+    // Why, as data: the hint above is read from it, not from the text.
+    assert_eq!(
+        error["detail"],
+        serde_json::json!({"harness": "gemini-cli", "cause": "not_on_path"})
+    );
+    assert_eq!(error["exit"], 3);
 }
 
 #[test]
 fn a_missing_argument_is_a_usage_sentence_not_a_denial() {
     let repo = Repo::new();
     let inspect = repo.by(&["inspect"]);
-    assert_eq!(inspect.status.code(), Some(1));
+    assert_eq!(inspect.status.code(), Some(2));
     assert_eq!(
         stderr(&inspect),
         "by: inspect needs a branch outside a harness: `by inspect <branch>` (`by ls` lists \
@@ -334,6 +346,7 @@ fn a_missing_argument_is_a_usage_sentence_not_a_denial() {
     assert!(!stderr(&inspect).contains("denied"));
     let json = repo.by(&["inspect", "--json"]);
     assert_eq!(envelope(&json)["kind"], "usage");
+    assert_eq!(json.status.code(), Some(2));
 }
 
 #[test]
@@ -361,7 +374,7 @@ fn a_config_value_of_the_wrong_type_is_a_sentence() {
     )
     .unwrap();
     let out = repo.by(&["ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     let text = stderr(&out);
     assert!(
         text.contains("line 2: defaults.budget_usd needs a number, not \"five\""),
@@ -374,9 +387,10 @@ fn a_config_value_of_the_wrong_type_is_a_sentence() {
     );
 
     let json = repo.by(&["ls", "--json"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(3));
     let error = envelope(&json);
     assert_eq!(error["kind"], "config");
+    assert_eq!(error["exit"], 3);
     assert!(
         error["message"]
             .as_str()
@@ -393,6 +407,7 @@ fn a_refused_command_line_is_json_too_with_exit_2() {
     assert_eq!(out.status.code(), Some(2));
     let error = envelope(&out);
     assert_eq!(error["kind"], "usage");
+    assert_eq!(error["exit"], 2);
     assert!(
         error["message"].as_str().unwrap().contains("--bogus"),
         "{error}"
@@ -419,9 +434,10 @@ fn a_server_that_does_not_answer_is_remote_unreachable() {
         "ls",
         "--json",
     ]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
     let error = envelope(&out);
     assert_eq!(error["kind"], "remote_unreachable");
+    assert_eq!(error["exit"], 3);
     assert!(
         error["message"]
             .as_str()
@@ -462,7 +478,7 @@ fn every_branch_command_reports_an_unknown_branch_as_json() {
     assert_eq!(envelope(&out)["kind"], "usage");
     // A task is not a branch: its refusal is a sentence about the argument.
     let task = repo.by(&["task", "show", missing, "--json"]);
-    assert_eq!(task.status.code(), Some(1), "{}", stderr(&task));
+    assert_eq!(task.status.code(), Some(2), "{}", stderr(&task));
     let error = envelope(&task);
     assert_eq!(error["kind"], "usage");
     assert!(
@@ -474,10 +490,11 @@ fn every_branch_command_reports_an_unknown_branch_as_json() {
     );
     for line in lines {
         let out = repo.by(line);
-        assert_eq!(out.status.code(), Some(1), "{line:?}: {}", stderr(&out));
+        assert_eq!(out.status.code(), Some(2), "{line:?}: {}", stderr(&out));
         let error = envelope(&out);
         let kind = error["kind"].as_str().unwrap_or_default();
         assert_eq!(kind, "unknown_branch", "{line:?}: {error}");
+        assert_eq!(error["exit"], 2, "{line:?}: {error}");
         assert_eq!(stderr(&out), "", "{line:?}");
     }
 }
@@ -614,7 +631,7 @@ fn a_profile_that_cannot_route_approvals_says_how_to_allow_it() {
             .unwrap()
     };
     let out = run(&[]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     let text = stderr(&out);
     assert!(
         text.contains(
@@ -628,4 +645,194 @@ fn a_profile_that_cannot_route_approvals_says_how_to_allow_it() {
     let json = envelope(&run(&["--json"]));
     assert_eq!(json["kind"], "unsupported", "{json}");
     assert_eq!(json["next"].as_array().map(Vec::len), Some(2), "{json}");
+    // Refused by policy: exit 4, and the profile as data.
+    assert_eq!(json["exit"], 4, "{json}");
+    assert_eq!(
+        json["detail"],
+        serde_json::json!({"unsupported": "unrouted_approvals", "profile": "pi-rpc"})
+    );
+}
+
+/// Every failure exits with the status of its kind, and with `--json` the
+/// envelope's `exit` says which: 1 the operation failed, 2 the command
+/// line, 3 something around the command, 4 refused (docs/cli.md, "Exit
+/// status").
+#[test]
+fn each_kind_exits_with_its_status_and_the_envelope_says_which() {
+    let repo = Repo::new();
+    repo.branch("broken", &["--check", "false"]);
+    repo.branch("plain", &[]);
+    let token = repo.dir.join("token");
+    fs::write(&token, "secret\n").unwrap();
+    let token = token.display().to_string();
+    let socket = format!("unix:{}", repo.dir.join("nobody.sock").display());
+    let remote = ["--remote", &socket, "--token-file", &token];
+    let cases: Vec<(Vec<&str>, &str, i32)> = vec![
+        (vec!["merge", "broken", "--json"], "check_failed", 1),
+        (vec!["show", "nope", "--json"], "unknown_branch", 2),
+        (vec!["run", "--json", "--bogus"], "usage", 2),
+        (vec!["--repo", "app", "ls", "--json"], "usage", 2),
+        (
+            [&remote[..], &["ls", "--json"]].concat(),
+            "remote_unreachable",
+            3,
+        ),
+        (
+            vec!["spawn", "x", "--parent", "plain", "--json"],
+            "denied",
+            4,
+        ),
+    ];
+    for (line, kind, code) in &cases {
+        let out = repo.by(line);
+        assert_eq!(out.status.code(), Some(*code), "{line:?}: {}", stderr(&out));
+        let error = envelope(&out);
+        assert_eq!(error["kind"], *kind, "{line:?}: {error}");
+        assert_eq!(error["exit"], *code, "{line:?}: {error}");
+    }
+    let outside = repo.outside(&["ls", "--json"]);
+    assert_eq!(outside.status.code(), Some(3));
+    assert_eq!(envelope(&outside)["exit"], 3);
+}
+
+/// The failures given a kind and a next command in place of a bare
+/// sentence: what each says, as text and as JSON, and its status.
+#[test]
+fn reports_say_what_failed_and_the_command_to_run() {
+    let repo = Repo::new();
+    // Remote options without a server: the command line, 2.
+    let out = repo.by(&["--repo", "app", "ls"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "by: --token-file and --repo apply to remote mode; pass --remote URL too\n  next: add \
+         --remote URL (or set BRANCHYARD_REMOTE), or drop --token-file and --repo\n"
+    );
+
+    // A prompt file that is not there: the operating system's words, not
+    // its error number.
+    let missing = repo.dir.join("no-such-prompt.txt").display().to_string();
+    let out = repo.by(&["send", "any", "--prompt-file", &missing]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "by: --prompt-file {missing}: no such file or directory\n  next: give a file that \
+             holds the prompt, or - to read it from standard input\n"
+        )
+    );
+    let empty = repo.dir.join("empty.txt");
+    fs::write(&empty, "\n\n").unwrap();
+    let out = repo.by(&[
+        "send",
+        "any",
+        "--prompt-file",
+        empty.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = envelope(&out);
+    assert_eq!(error["kind"], "usage");
+    assert_eq!(
+        error["message"],
+        format!("--prompt-file {} holds no prompt", empty.display())
+    );
+    assert_eq!(
+        error["next"],
+        serde_json::json!(["write the prompt into the file, or pass it as an argument"])
+    );
+
+    // A merge from a detached HEAD has no branch to merge into.
+    repo.branch("one", &[]);
+    repo.git(&["checkout", "-q", "--detach"]);
+    let out = repo.by(&["merge", "one"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "by: HEAD is detached, so there is no branch to merge into\n  next: pass --into \
+         <branch>, or git switch <branch>, then merge again\n"
+    );
+    let error = envelope(&repo.by(&["merge", "one", "--json"]));
+    assert_eq!(error["kind"], "usage");
+    assert_eq!(error["next"].as_array().map(Vec::len), Some(2), "{error}");
+    repo.git(&["checkout", "-q", "main"]);
+
+    // A server's queue is not here.
+    let out = repo.by_agent(&["run", "x", "--priority", "5"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).ends_with(
+            "by: --priority orders a server's queue, and this command runs here\n  next: add \
+             --remote URL, or drop --priority\n"
+        ),
+        "{}",
+        stderr(&out)
+    );
+
+    // `by remote ssh` without a remote, or with one that is not ssh://.
+    let out = repo.by(&["remote", "ssh", "status"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "by: by remote ssh needs the remote it manages\n  next: by remote ssh status \
+         ssh://host/path, or pass --remote ssh://host/path\n"
+    );
+    let out = repo.by(&["remote", "ssh", "status", "https://h.test", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    let error = envelope(&out);
+    assert_eq!(
+        error["message"],
+        "https://h.test is not an ssh:// remote; by remote ssh manages those only"
+    );
+    assert_eq!(error["exit"], 2);
+
+    // A harness the catalog does not know.
+    let out = repo.by(&["models", "list", "--harness", "nope", "--json"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let error = envelope(&out);
+    assert_eq!(error["kind"], "unknown_harness");
+    assert_eq!(error["next"][0], "by harnesses --all (lists them)");
+}
+
+/// `by init`'s refusals keep the setup protocol's envelope (with its
+/// `paths`), and gain the exit status of their kind; a usage error no
+/// longer ends the process from inside the command.
+#[test]
+fn init_refusals_are_reports_with_their_status() {
+    let repo = Repo::new();
+    // The project topic outside a repository: around the command, 3.
+    let out = repo.outside(&["init", "project", "--json", "--next"]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let error = envelope(&out);
+    assert_eq!(error["kind"], "not_a_repository");
+    assert_eq!(error["exit"], 3);
+
+    // A plugin install that names no harness: the command line, 2.
+    let out = repo.by(&["init", "plugin", "--apply", "--json"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let error = envelope(&out);
+    assert_eq!(error["kind"], "usage");
+    assert_eq!(
+        error["message"],
+        "name harness IDs or --all-detected; `by init plugin` lists them"
+    );
+    assert_eq!(error["exit"], 2);
+    let out = repo.by(&["init", "plugin", "--apply"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        stderr(&out),
+        "by: name harness IDs or --all-detected; `by init plugin` lists them\n"
+    );
+
+    // No terminal: the protocol's commands, 2.
+    let out = repo.by(&["init"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).starts_with(
+            "by: by init asks questions on a terminal, and none is attached.\nHarnesses and \
+             scripts use the JSON protocol instead:\n"
+        ),
+        "{}",
+        stderr(&out)
+    );
 }

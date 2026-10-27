@@ -20,6 +20,7 @@ A counted file records what is still wrong. A count may fall and may not rise, a
 - `tools/missing_docs_ratchet.json`: undocumented public items. `python3 tools/check_missing_docs.py --write` lowers it.
 - `tools/test_hygiene_ratchet.json`: fixed waits, hand-made temp directories, hand-made servers. `python3 tools/check_test_hygiene.py --lower`.
 - `tools/wire_ratchet.json` and `tools/handrolled_banlist.toml`: hand-written HTTP and codecs. Migrate a site; lower its count.
+- `tools/failure_message_ratchet.json`: CLI failures still built as a bare `Failure::Message`; a new one is a `Report` with a kind and a `next:` (`crates/branchyard-cli/src/errors.rs`). `python3 tools/check_failure_messages.py --update`.
 - `tools/coverage_floor.json` only goes up: `python3 tools/check_coverage.py lcov.info --unit unit.lcov --update`.
 
 ## Facts in docs come from code

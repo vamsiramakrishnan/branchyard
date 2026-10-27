@@ -107,23 +107,31 @@ impl Machine for Here {
 
 pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: bool) -> Outcome {
     if globals.remote.is_some() {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by up brings up the repository on this machine; it takes no --remote (a server \
-             brings up its own: docs/server.md)"
-                .into(),
-        ));
+             brings up its own: docs/server.md)",
+        )
+        .next("run by up without --remote (unset BRANCHYARD_REMOTE)")
+        .into());
     }
     if let Some(branch) = workspace_cmd::in_harness() {
-        return Err(Failure::Message(format!(
-            "a harness running on a branch ({branch}) cannot bring the repository up; that is \
-             a person's command, run outside any branch"
-        )));
+        return Err(crate::errors::Report::new(
+            "denied",
+            format!(
+                "a harness running on a branch ({branch}) cannot bring the repository up; that \
+                 is a person's command"
+            ),
+        )
+        .next("run by up in your own terminal, outside any branch")
+        .into());
     }
     let yard = commands::open().map_err(|failure| match failure {
         // The fix, and where: not "`.` is not inside a git work tree".
-        Failure::Sdk(branchyard::Error::NotARepository(_)) => Failure::Message(
+        Failure::Sdk(branchyard::Error::NotARepository(_)) => crate::errors::Report::new(
+            "not_a_repository",
             crate::init::not_a_repository(&std::env::current_dir().unwrap_or_default()),
-        ),
+        )
+        .into(),
         other => other,
     })?;
     let config = yard.configured().unwrap_or_default();

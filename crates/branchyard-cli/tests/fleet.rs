@@ -296,7 +296,7 @@ fn routing_is_refused_with_reasons() {
     // fan with neither --harness nor a [fleet].
     let out = repo.by(&["fan", "x", "--yes"]);
     assert!(
-        stderr(&out).contains("fan needs --harness"),
+        stderr(&out).contains("fan needs the harnesses to run"),
         "{}",
         stderr(&out)
     );
