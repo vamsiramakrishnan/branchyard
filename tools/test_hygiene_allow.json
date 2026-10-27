@@ -22,11 +22,6 @@
       "reason": "A quiet period in which nothing may happen: three of the replicator's one-second intervals pass with the task fenced, and nothing reaches the remote. Against the replicator's clock."
     },
     {
-      "file": "crates/branchyard-server/tests/triggers.rs",
-      "why": "the other server would have fired too, if it was going to",
-      "reason": "A quiet period in which nothing may happen: of two servers sharing one store, only one fires a schedule, so the other's runs stay at one. Against the dispatchers' own interval."
-    },
-    {
       "file": "crates/branchyard-workspace/tests/workspace.rs",
       "why": "to just after a second begins",
       "reason": "The test is about files and an index that share one second of timestamp granularity (racy git), so the clock must cross into the next second. Time itself is the input."

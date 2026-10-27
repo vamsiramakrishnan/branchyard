@@ -454,8 +454,11 @@ fn pruning_keeps_the_newest_of_each_recipe() {
             .name(format!("b{n}"))
             .run()
             .unwrap();
-        // Distinct build times.
-        wait::settle("distinct build times", Duration::from_millis(5));
+        // Distinct build times: the next build begins in a later millisecond.
+        let built = f.yard.environments().iter().map(|e| e.built_ms).max();
+        wait::until("the clock to pass the last build's millisecond", || {
+            Some(branchyard_support::time::now_ms()) > built
+        });
     }
     assert_eq!(f.yard.environments().len(), 3);
     let newest = f.yard.environments()[0].key.clone();

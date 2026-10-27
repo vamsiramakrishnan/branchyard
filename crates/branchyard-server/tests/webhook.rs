@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use branchyard_client::api::{MergeRequest, OperationState};
+use branchyard_client::new_key;
 use branchyard_server::config::WebhookConfig;
 use branchyard_testkit::{wait, MockHttp, Response};
-use common::{run, task, Fixture, Server};
+use common::{await_operation, run, task, Fixture, Server};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
@@ -153,24 +155,33 @@ fn an_event_filter_narrows_what_is_delivered() {
     let f = Fixture::new();
     let receiver = Receiver::start();
     let mut config = f.config();
-    // `merge` never fires for this run, so nothing but its permission
-    // request or stall would ever arrive; a plain successful run has
-    // neither, so nothing should ever be delivered.
+    // Only `merge`: the entries of the run (its prompt, statuses and turn)
+    // are left out, and its merge, after them in the feed, is delivered.
+    // A webhook delivers in feed order, so once the merge has arrived, every
+    // entry before it was looked at, and none of them was sent.
     config.webhooks = vec![webhook(&receiver.url(), SECRET, &["merge"])];
     let server = Server::start(config);
     let client = server.client();
     let op = run(&client, &task("WRITE a.txt=1", "one"));
-    assert_eq!(op.state, branchyard_client::api::OperationState::Succeeded);
-
-    // Give a filtered-out delivery a moment it could have arrived in.
-    wait::settle(
-        "a filtered-out delivery would have arrived by now",
-        Duration::from_millis(300),
+    assert_eq!(op.state, OperationState::Succeeded);
+    let merge = client
+        .repo("app")
+        .merge("one", &MergeRequest::default(), &new_key())
+        .unwrap();
+    assert_eq!(
+        await_operation(&client, &merge.id).state,
+        OperationState::Succeeded
     );
-    assert!(
-        receiver.deliveries().is_empty(),
-        "{:?}",
-        receiver.deliveries()
+    let deliveries = wait::until("the merge to be delivered", || {
+        let deliveries = receiver.deliveries();
+        (!deliveries.is_empty()).then_some(deliveries)
+    });
+    assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+    let kinds = deliveries[0].json()["kinds"].clone();
+    assert_eq!(
+        kinds,
+        serde_json::json!(["status", "merge"]),
+        "{deliveries:?}"
     );
     server.stop();
 }

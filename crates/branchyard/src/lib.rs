@@ -185,6 +185,7 @@ pub use branchyard_config as config;
 /// builds one that does.
 pub use branchyard_microsandbox::{ENABLED as MICROSANDBOX_BUILT, REBUILD as MICROSANDBOX_REBUILD};
 pub use git::current_branch;
+pub use git::hold_writes as hold_git_writes;
 pub use lock::DirLock;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 

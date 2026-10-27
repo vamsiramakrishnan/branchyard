@@ -24,12 +24,15 @@ use branchyard_client::triggers::{
     TriggerRun, TriggerSpec, TriggerTestRequest, When,
 };
 use branchyard_client::Client;
+use branchyard_server::config::MetricsConfig;
 use branchyard_server::config::WorkspaceScripts;
+use branchyard_server::triggers::engine::DEFER_MS;
 use branchyard_server::triggers::events::sign;
+use branchyard_server::triggers::precheck::Worktree;
 use branchyard_server::triggers::Clock;
 use branchyard_server::Config;
 use branchyard_testkit::wait;
-use common::{await_operation, post, raw, run, task, Fixture, Server};
+use common::{await_operation, get, post, raw, run, task, Fixture, Server};
 
 /// 2026-09-21T14:13:20Z.
 const T0: u64 = 1_790_000_000_000;
@@ -38,7 +41,32 @@ fn with_clock(config: &mut Config) -> Arc<AtomicU64> {
     let time = Arc::new(AtomicU64::new(T0));
     config.triggers.clock = Clock::manual(time.clone());
     config.triggers.tick = Duration::from_millis(50);
+    // `/metrics`, for the dispatcher's count of its looks ([`two_more_looks`]).
+    config.metrics = Some(MetricsConfig {
+        listen: None,
+        token_sha256: None,
+    });
     time
+}
+
+/// How many times `server`'s trigger dispatcher has finished a look for
+/// schedules due and runs waiting (`branchyard_trigger_looks_total`).
+fn looks(server: &Server) -> f64 {
+    let (status, _, text) = raw(server.addr, &get("/metrics", Some(common::TOKEN)));
+    assert_eq!(status, 200, "{text}");
+    text.lines()
+        .find_map(|line| line.strip_prefix("branchyard_trigger_looks_total "))
+        .map_or(0.0, |value| value.trim().parse().unwrap())
+}
+
+/// Wait until `server`'s dispatcher has finished two more looks than it had
+/// when this was called: the second began after the first ended, so after
+/// everything the test did before the call, and whatever it claimed is in
+/// the store. The event a quiet period ("it would have fired by now") stood
+/// for; no duration is guessed.
+fn two_more_looks(server: &Server, what: &str) {
+    let before = looks(server);
+    wait::until_value(what, || looks(server), |now| *now >= before + 2.0);
 }
 
 fn spec(name: &str, when: When, prompt: &str) -> TriggerSpec {
@@ -66,19 +94,37 @@ fn event(source: EventSource) -> When {
     When::Event { source }
 }
 
-/// The trigger's runs once `done` holds for them.
+/// The trigger's runs once `done` holds for them. A wait that times out
+/// shows each run's state and reason: a run that ended some other way (a
+/// failed run, a skip for another reason) is the answer, not a slow machine.
 fn runs_when(
     client: &Client,
     trigger: &str,
     what: &str,
     done: impl Fn(&[TriggerRun]) -> bool,
 ) -> Vec<TriggerRun> {
-    let mut runs = Vec::new();
     wait::until(what, || {
-        runs = client.trigger_runs(trigger, 50).unwrap();
-        done(&runs)
-    });
-    runs
+        let runs = client.trigger_runs(trigger, 50).unwrap();
+        match done(&runs) {
+            true => Ok(runs),
+            false => Err(states(&runs)),
+        }
+    })
+}
+
+/// `state (reason)` of each run, newest first.
+fn states(runs: &[TriggerRun]) -> String {
+    let each: Vec<String> = runs
+        .iter()
+        .map(|r| {
+            format!(
+                "{} ({})",
+                r.state.as_str(),
+                r.reason.as_deref().unwrap_or("")
+            )
+        })
+        .collect();
+    format!("[{}]", each.join(", "))
 }
 
 /// A webhook delivery to `id`, with `headers` (one per line, CRLF-ended).
@@ -140,10 +186,7 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     assert_eq!(trigger.next_due_ms, Some(T0 + 3_600_000));
     assert_eq!(trigger.webhook_url, None);
     // Nothing before its time, however often the dispatcher looks.
-    wait::settle(
-        "the dispatcher looks often and still finds nothing due",
-        Duration::from_millis(300),
-    );
+    two_more_looks(&server, "the dispatcher to look, and find nothing due");
     assert!(client.trigger_runs("nightly", 10).unwrap().is_empty());
 
     clock.store(T0 + 3_600_000 + 5_000, Ordering::SeqCst);
@@ -162,8 +205,8 @@ fn a_schedule_fires_once_when_the_clock_reaches_it_and_its_outcome_is_recorded()
     assert!(runs[0].outcome.as_ref().unwrap().ok, "{:?}", runs[0]);
     let shown = client.trigger("nightly").unwrap();
     assert_eq!(shown.next_due_ms, Some(T0 + 7_200_000));
-    // Still once, after more ticks at the same time.
-    wait::settle("more ticks at the same time", Duration::from_millis(300));
+    // Still once, after more looks at the same time.
+    two_more_looks(&server, "more looks at the same time");
     assert_eq!(client.trigger_runs("nightly", 10).unwrap().len(), 1);
     let prompt = client.repo("app").branch("nightly-20260921-1513").unwrap();
     assert_eq!(prompt.name, "nightly-20260921-1513");
@@ -362,6 +405,21 @@ fn lifecycle_events(events: &[branchyard::RecordedEvent]) -> Vec<(LifecycleState
         .collect()
 }
 
+/// The last few events of a log, each as its time and the start of its
+/// activity, for a failure to show.
+fn tail(events: &[branchyard::RecordedEvent]) -> String {
+    let each: Vec<String> = events
+        .iter()
+        .rev()
+        .take(6)
+        .map(|e| {
+            let what = format!("{:?}", e.activity);
+            format!("{} {}", e.at_ms, what.chars().take(80).collect::<String>())
+        })
+        .collect();
+    each.join(" | ")
+}
+
 /// What the harness answered in the branch's last turn.
 fn last_reply(events: &[branchyard::RecordedEvent]) -> String {
     let start = events
@@ -436,8 +494,15 @@ fn a_branch_that_lives_on_rests_goes_dormant_is_reincarnated_and_is_deleted_by_i
         assert_eq!(status, 202, "{ack}");
         let key = format!("event:m-{said}");
         let runs = runs_when(&client, "chat", "the message's run to fire", |runs| {
-            runs.iter()
-                .any(|r| r.key == key && r.state == RunState::Fired)
+            let run = runs.iter().find(|r| r.key == key);
+            // A send that found the branch still held by the step before it
+            // (parking it) waits to be tried again a little later by the
+            // dispatcher's clock, which here moves only when the test moves
+            // it: let that time pass.
+            if run.is_some_and(|r| r.state == RunState::Pending && r.reason.is_some()) {
+                clock.fetch_add(DEFER_MS + 1, Ordering::SeqCst);
+            }
+            run.is_some_and(|r| r.state == RunState::Fired)
         });
         let run = runs.iter().find(|r| r.key == key).unwrap();
         let op = await_operation(&client, run.operation.as_ref().unwrap());
@@ -449,12 +514,19 @@ fn a_branch_that_lives_on_rests_goes_dormant_is_reincarnated_and_is_deleted_by_i
     };
     let rested = |state: LifecycleState, count: usize| {
         wait::until(&format!("{count} {state} event(s)"), || {
-            let (_, events) = turn_end();
+            let (end, events) = turn_end();
             let found = lifecycle_events(&events)
                 .iter()
                 .filter(|(s, _)| *s == state)
                 .count();
-            (found >= count).then_some(events)
+            match found >= count {
+                true => Ok(events),
+                false => Err(format!(
+                    "the clock {} ms past the turn's end {end}; the log ends {}",
+                    clock.load(Ordering::SeqCst) as i128 - end as i128,
+                    tail(&events)
+                )),
+            }
         })
     };
 
@@ -960,6 +1032,44 @@ fn prechecks_run_in_a_fresh_worktree_and_skip_with_their_reason() {
     assert_eq!(client.trigger("gated-off").unwrap().consecutive_failures, 0);
 }
 
+/// A precheck's worktree is made and removed only between the engine's own
+/// git writes in this process, never beside one. Two `git worktree add` of
+/// a repository at once fail at random, one reading the other's
+/// half-written `.git/worktrees/<id>/` (`fatal: failed to read
+/// .../commondir`): two prechecks firing together (the test above) failed a
+/// run that was to be skipped, and its wait gave up after 60 seconds.
+#[test]
+fn a_precheck_worktree_waits_for_the_engines_git_writes() {
+    let f = Fixture::new();
+    let path = f.dir.join("prechecks").join("one");
+    // Not while held: nothing appears in this quiet window, however long.
+    let not_while_held =
+        |done: &dyn Fn() -> bool| wait::try_until_for(Duration::from_millis(300), done).is_err();
+    let held = branchyard::hold_git_writes();
+    let tree = std::thread::scope(|s| {
+        let adding = s.spawn(|| Worktree::add(&f.root, &path, None));
+        assert!(
+            not_while_held(&|| path.exists()),
+            "made beside a held write"
+        );
+        drop(held);
+        adding.join().unwrap().unwrap()
+    });
+    assert!(tree.path.join("a.txt").is_file());
+    let held = branchyard::hold_git_writes();
+    std::thread::scope(|s| {
+        s.spawn(move || drop(tree));
+        assert!(
+            not_while_held(&|| !path.exists()),
+            "removed beside a held write"
+        );
+        drop(held);
+    });
+    assert!(!path.exists());
+    let listed = common::git(&f.root, &["worktree", "list"]);
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+}
+
 #[test]
 fn slack_tests_and_tenants() {
     let f = Fixture::new();
@@ -1093,16 +1203,21 @@ fn a_run_recorded_before_a_restart_fires_after_it() {
     let body = r#"{"id":"r-1"}"#;
     let headers = generic_headers(created.secret.as_ref().unwrap(), body);
     assert_eq!(deliver(&server, &created.trigger.id, &headers, body).0, 202);
-    wait::settle(
-        "a delivery that must stay pending would have moved by now",
-        Duration::from_millis(200),
-    );
     assert_eq!(
-        client.trigger_runs("later", 10).unwrap()[0].state,
-        RunState::Pending
+        looks(&server),
+        0.0,
+        "a server that does not dispatch never looks"
     );
     drop(client);
     server.stop();
+    // Stopped, the first server has done all it ever will, and the run it
+    // recorded is still pending.
+    let store = branchyard_server::triggers::store::open(&config).unwrap();
+    assert_eq!(
+        states(&store.runs(&created.trigger.id, 10).unwrap()),
+        "[pending ()]"
+    );
+    drop(store);
 
     config.triggers.dispatch = true;
     let server = Server::start(config);
@@ -1546,10 +1661,9 @@ mod postgres {
         let runs = runs_when(&client, "both", "the scheduled run to fire", |runs| {
             runs.iter().any(|r| r.state == RunState::Fired)
         });
-        wait::settle(
-            "the other server would have fired too, if it was going to",
-            Duration::from_millis(500),
-        );
+        // The other server looked at the same time after the run was
+        // claimed, and claimed nothing.
+        two_more_looks(&b, "the other server to look at the same time");
         let runs_b = b.client().trigger_runs("both", 10).unwrap();
         assert_eq!(runs_b.len(), 1, "{runs_b:?}");
         assert_eq!(

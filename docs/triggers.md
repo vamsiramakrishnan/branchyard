@@ -146,7 +146,7 @@ A run that creates the branch, or sends to it, is `fired` with its operation as 
 
 ### Lifecycle
 
-`"deliver": {"branch": "assistant", "lifecycle": {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30}}` (`--to assistant --idle-after 30m --dormant-after 7d --delete-after 30d`) says what happens to the branch while no run reaches it, the way a Coder workspace has autostop, dormancy and auto-delete. Without a `lifecycle` the branch lives until someone removes it. Each threshold is optional, and all three count from **the end of the branch's last turn**, in absolute time. The server's dispatcher looks at the branches of triggers that have a lifecycle every 30 seconds.
+`"deliver": {"branch": "assistant", "lifecycle": {"idle_minutes": 30, "dormant_days": 7, "delete_days": 30}}` (`--to assistant --idle-after 30m --dormant-after 7d --delete-after 30d`) says what happens to the branch while no run reaches it, the way a Coder workspace has autostop, dormancy and auto-delete. Without a `lifecycle` the branch lives until someone removes it. Each threshold is optional, and all three count from **the end of the branch's last turn**, in absolute time. The server's dispatcher looks at the branches of triggers that have a lifecycle every 30 seconds, one look at a time: a tick that finds the last look still parking a branch skips, rather than finding that branch held and waiting another 30 seconds to take its next step.
 
 | Threshold | Flag | When | What the server does | What you see |
 |---|---|---|---|---|
@@ -171,6 +171,7 @@ A run that creates the branch, or sends to it, is `fired` with its operation as 
 - The timeout is 1 to 600 seconds (default 60). On a timeout the command's whole process group gets SIGTERM, then SIGKILL two seconds later.
 - The last 4,000 characters of standard output and error are recorded with the run, with whether they were cut.
 - The command runs as the server's user with its environment, plus `BRANCHYARD_TRIGGER` (the trigger's name), `BRANCHYARD_TRIGGER_RUN` (the run's key) and, for an event, `BRANCHYARD_TRIGGER_EVENT`: a file holding the normalized event as JSON.
+- Prechecks of one repository run at once, but their worktrees are made and removed one at a time, between the git writes of the server's own branches: two `git worktree add` of a repository at once fail at random (`fatal: failed to read .git/worktrees/<id>/commondir`), which failed runs that were to fire or be skipped.
 
 **Trust.** A precheck is a command the server runs, so, like a repository's [`[workspace]` scripts](workspace.md#trust), it runs only where the server's operator allows it: `allow_trigger_prechecks` (`true`, or a list of served repositories) in the configuration, or `--allow-trigger-prechecks` on `by serve`. A trigger with a precheck is refused when created on a server that does not allow it (`403 precheck_not_allowed`; locally, `by trigger add` says so), and a run whose server stopped allowing it fails rather than skipping the check. `by trigger test --precheck` runs it at your terminal, as your own decision.
 
@@ -345,7 +346,7 @@ curl -sS https://by.example.com/v1/triggers/trg_…/fire \
 | `public_url` | `--public-url URL` | The base of every event trigger's webhook URL. Default `http(s)://<listen>` |
 | `allow_trigger_prechecks` | `--allow-trigger-prechecks` (every repository) | `true`, or served repositories whose triggers may run prechecks. Off by default |
 
-Both are in [`schema/server.config.json`](../schema/server.config.json). Every server and `by worker` runs a trigger dispatcher for the repositories it serves; it looks every second, and at once when a webhook records a run.
+Both are in [`schema/server.config.json`](../schema/server.config.json). Every server and `by worker` runs a trigger dispatcher for the repositories it serves; it looks every second, and at once when a webhook records a run. `/metrics` counts its looks (`branchyard_trigger_looks_total`, [observability](observability.md)): a count that stops rising on a server that dispatches means its dispatcher has stopped.
 
 ## Security
 

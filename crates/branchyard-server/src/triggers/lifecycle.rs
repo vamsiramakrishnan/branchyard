@@ -14,7 +14,7 @@
 //! A run that continues the branch ends its rest.
 
 use std::io;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use branchyard_client::triggers::{Lifecycle, RunState, TriggerRun};
 
@@ -284,20 +284,27 @@ impl Engine {
     /// served here, if [`EVERY_MS`] has passed since the last look.
     /// Returns what was done, as `(trigger, branch, action)`.
     pub fn rest(&self) -> io::Result<Vec<(String, String, Action)>> {
+        // One look at a time per engine; a tick that finds one running skips,
+        // leaving the pace unspent. The dispatcher starts a look every tick
+        // without waiting for the last: one that overlapped another (the
+        // clock past the pace while the first still parked a branch) found
+        // that branch held, decided the next step, could not take it, and
+        // spent the pace, so the step waited a whole pace for nothing.
+        if self
+            .resting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(Vec::new());
+        }
+        let _looking = Looking(&self.resting);
         let now = self.clock.now();
         let last = self.rested_at.load(Ordering::SeqCst);
         // A clock set back is no reason to wait for it to catch up.
         if last != 0 && now >= last && now - last < EVERY_MS {
             return Ok(Vec::new());
         }
-        // One look at a time per engine; a loser skips this tick.
-        if self
-            .rested_at
-            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Ok(Vec::new());
-        }
+        self.rested_at.store(now, Ordering::SeqCst);
         let repos = self.sink.repos();
         let mut done = Vec::new();
         for trigger in self.store.list(None)? {
@@ -310,6 +317,15 @@ impl Engine {
             }
         }
         Ok(done)
+    }
+}
+
+/// Clears [`Engine::resting`] when a look ends, however it ends.
+struct Looking<'a>(&'a AtomicBool);
+
+impl Drop for Looking<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
