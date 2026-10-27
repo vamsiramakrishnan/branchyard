@@ -19,7 +19,7 @@ cargo install --locked --path crates/branchyard-cli
 by --version
 ```
 
-`by --version` prints `by 0.0.1`. If the shell cannot find `by`, add `~/.cargo/bin` to your `PATH`.
+`by --version` prints `by 0.1.0-rc.1`. If the shell cannot find `by`, add `~/.cargo/bin` to your `PATH`.
 
 ## 2. See what you have
 

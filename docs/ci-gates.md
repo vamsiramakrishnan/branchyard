@@ -12,7 +12,7 @@ A change gets one run. `check.yml` runs on a push to `main` and on a pull reques
 | 1. Gates | `check.yml`, the other jobs | every change, in parallel with lane 0 | `controls` was 28 to 30 minutes without a cache | The cargo gates below: tests, Clippy, the schemas, PostgreSQL, features, docs, dependencies, coverage |
 | 2. Nightly | `nightly.yml` | 03:23 UTC and on request | an hour or more | What a push does not need: the ignored tests a stock runner can run, and the timing-sensitive suites under load |
 | Live | `qualify.yml` | Mondays and on request | | Real harnesses with real credentials ([qualification](qualification/README.md)) |
-| Release | `release.yml` | a `v*` tag | | Prebuilt binaries ([distribution](distribution.md)) |
+| Release | `release.yml` | a `v*` tag (drafts a release); a pull request that changes the release files, and on request (dry runs) | | Prebuilt binaries, the Python wheel and the plugin archives ([distribution](distribution.md#prebuilt-binaries)) |
 
 Lane 0 and lane 1 start together; nothing waits for the fast lane, so a red `fast` says what is wrong within minutes while the long jobs carry on. The Python gates run once, in `fast`: `controls` no longer repeats them, and there is no separate `python` job.
 

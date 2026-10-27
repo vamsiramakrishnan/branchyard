@@ -12,7 +12,7 @@ cargo install --locked --path crates/branchyard-cli    # installs `by` into ~/.c
 by --version
 ```
 
-`rust-toolchain.toml` pins Rust 1.94.0. Prebuilt binaries, `install.sh` and a Homebrew formula are [written but not published](#prebuilt-binaries).
+`rust-toolchain.toml` pins Rust 1.94.0. Prebuilt binaries, `install.sh`, the Python SDK's wheel and a Homebrew formula are [prepared for the first release and not published](#prebuilt-binaries); [First release](#first-release) is how a person with push rights makes it.
 
 ## Install into a harness
 
@@ -113,7 +113,7 @@ Produces four ZIP archives in `dist/`, each named `branchyard-<kind>-<version>.z
 | `branchyard-setup-skill-<version>.zip` | The standalone setup skill alone, `plugins/branchyard/skills/setup/` |
 | `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside, and `pyproject.toml`, so `pip install ./branchyard-sdk` installs both from the extracted archive ([SDKs](sdk.md#install)) |
 
-Building refuses to proceed if either plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version`, does not match the workspace's own `Cargo.toml` version, or if `.claude-plugin/marketplace.json` does not list the plugin once, at `./plugins/branchyard`, at that version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
+Building refuses to proceed if a plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version` (in PEP 440's spelling), does not match the workspace's own `Cargo.toml` version, or any other field [`tools/release_version.py`](#the-version) checks disagrees, or if `.claude-plugin/marketplace.json` does not list the plugin once, at `./plugins/branchyard`, at that version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
 
 **Reproducible.** Every archive is deterministic: inputs are read in sorted path order, every entry gets a fixed timestamp (`1980-01-01T00:00:00`, ZIP's minimum) and mode (`0644`), and compression is deflate at a fixed level. Two builds from the same source tree are byte-for-byte identical; `tests/test_distribution.py` checks this, along with every manifest entry's digest.
 
@@ -121,7 +121,7 @@ Building refuses to proceed if either plugin manifest's `name` or `version`, or 
 
 - Runs the shipped `install_skill.py` from the extracted plugin, checking the preview/apply/no-op/refuse/`--force` behavior above and that the installed skill's bytes match the canonical source.
 - Imports the extracted SDK module and calls it against a stub `by`, checking it runs standalone (no `sys.path` trick back into the checkout) and its bytes match the canonical source.
-- Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools is not installed.
+- Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools 77 or later (the first to read an SPDX `license`) is not installed; the release workflow builds the sdist and the wheel on every run.
 - Compares the plugin archive's bundled skills against the standalone skill archives: each holds the same canonical bytes, `plugins/branchyard/skills/<name>/` inside one and the top level of the other; and checks the plugin ships its three commands and `hooks/hooks.json`.
 - Checks the marketplace lists the plugin directory, every command has a `description`, the manifest names no hooks file, and each hook runs `by hook` only when `by` is installed (run with an empty `PATH`, it prints nothing and exits 0).
 - Installs the setup skill with `--skill setup`.
@@ -134,9 +134,9 @@ python3 tests/test_distribution.py
 
 ## Prebuilt binaries
 
-> **Not published yet.** No GitHub release or tag exists, so there is nothing to download: `install.sh` has no release to fetch, and no tap carries the Homebrew formula. The workflow, script and formula below are written and tested against fixtures (see [Verified here](#verified-here)); the workflow has never run. The version in the examples, 0.1.0, is a placeholder: the workspace is 0.0.1. [Build from source](#install-by) until the first release.
+> **Not published yet.** No tag or GitHub release exists, so there is nothing to download: [build from source](#install-by) until the first one. The workflow has never run on GitHub; the parts this machine can run, ran ([Verified here](#verified-here)). Its first full run is the dry run in [First release](#first-release).
 
-`.github/workflows/release.yml` runs only when a `v*` tag is pushed. It builds `by` and `branchyard-server` (with the `postgres` feature, as the container image does) for four targets, packs each with `LICENSE`, `THIRD_PARTY.md`, `README.md` and the Orca and emdash license texts their ported code requires, and attaches them to a **draft** release for a person to publish:
+`.github/workflows/release.yml` builds `by` and `branchyard-server` (with the `postgres` feature, as the container image does) for four targets, and packs each with `LICENSE`, `THIRD_PARTY.md`, `README.md` and the Orca and emdash license texts their ported code requires, as `branchyard-VERSION-TARGET.tar.gz` holding one directory of that name:
 
 | Target | Runner | Linking |
 |---|---|---|
@@ -145,25 +145,90 @@ python3 tests/test_distribution.py
 | `aarch64-apple-darwin` | `macos-14` | system libraries only |
 | `x86_64-apple-darwin` | `macos-14`, cross-compiled | system libraries only |
 
-**Why musl works with this dependency set.** The default and `postgres` builds link no OpenSSL and no aws-lc: TLS is rustls on `ring` everywhere (the server's `reqwest` is built `rustls-no-provider`), and PostgreSQL is `postgres` without TLS. Their C code is `ring`'s, SQLite (`rusqlite`'s `bundled` feature) and BLAKE3's, which musl-gcc compiles; `protoc-bin-vendored` runs on the build host only. aws-lc appears only with the `microsandbox` feature (its SDK pulls `aws-lc-rs`), which needs `libcap-ng` and KVM anyway and is not in the release. Each Linux build is checked with `file … | grep 'statically linked'`.
+Beside the four archives a release carries the Python SDK's wheel and sdist (`python -m build`: `branchyard-0.1.0rc1-py3-none-any.whl` for `0.1.0-rc.1`), the plugin, skill and SDK archives of [Archives](#archives), `install.sh`, the [Homebrew formula](#homebrew) filled in for it, and `SHA256SUMS` over every one of them.
 
-Each archive gets a `.sha256`, the release a `SHA256SUMS` of all four, and both are covered by [build provenance attestations](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`actions/attest-build-provenance`, pinned by commit like every action). Check one with `gh attestation verify branchyard-0.1.0-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard`. The same workflow builds the [image with harnesses](deploy.md#image-with-harnesses).
+**When it runs, and what it may change.**
+
+| Trigger | What the run does |
+|---|---|
+| a `v*` tag pushed | every job below, then attests every file and **drafts** a GitHub release for a person to publish: a pre-release when the version is `-alpha.N`, `-beta.N` or `-rc.N`, so publishing it does not make it the latest release |
+| Run workflow (Actions, Release) on a branch | a dry run: the same builds, packaging and installs, kept as the run's artifacts; nothing is attested, no release is drafted, no image is pushed. On a `v*` tag with `draft` ticked it is the tag push again (to draft once more after deleting a draft) |
+| a pull request that changes `release.yml`, `install.sh`, `packaging/`, `sdk/python/pyproject.toml`, `tools/package.py`, `tools/release_version.py` or `tools/homebrew_formula.py` | a dry run, without the image |
+
+The jobs, in order:
+
+| Job | What it does |
+|---|---|
+| `version` | Reads the version every file is named for from `Cargo.toml`, after [`tools/release_version.py`](#the-version) checks that every version field agrees and, on a tag, that the tag is `v` and that version; decides whether the run drafts |
+| `build` (one per target) | Installs the pinned toolchain with the target, runs `cargo build --release --locked --offline --target …`, checks that a Linux binary is static (`file` says `static-pie linked`: Rust links musl executables static-pie) and that `by --version` prints `by VERSION`, packs the archive and its `.sha256`, then installs it with `install.sh` from a directory and runs the installed `by --version` and `by` outside a repository (the x86_64 macOS binary only where the Apple silicon runner can execute it) |
+| `python` | Runs `tools/package.py` and `python -m build sdk/python`, installs the wheel into a fresh venv and imports both modules, checking the installed version |
+| `assemble` | Gathers every file into one directory, checks each archive against its `.sha256`, writes `SHA256SUMS`, fills the Homebrew formula from it, runs `install.sh` against the directory as a person would, and uploads the lot as the run's `release` artifact; the release notes ([`packaging/release-notes.md.in`](../packaging/release-notes.md.in), filled in) and `SHA256SUMS` are the job's summary |
+| `draft` | Only when the run drafts: attests `SHA256SUMS` and runs `gh release create TAG --draft --verify-tag` with the notes and every file. The only job with `contents: write` |
+| `image` | The [image with harnesses](deploy.md#image-with-harnesses): built and smoke-tested (its `by --version` must be the release's) except on a pull request, whose paths leave `deploy/` out; pushed to GHCR only when the run drafts and the repository variable `PUBLISH_IMAGES` is `true` |
+
+**Why musl works with this dependency set.** The default and `postgres` builds link no OpenSSL and no aws-lc: TLS is rustls on `ring` everywhere (the server's `reqwest` is built `rustls-no-provider`), and PostgreSQL is `postgres` without TLS. Their C code is `ring`'s, SQLite (`rusqlite`'s `bundled` feature) and BLAKE3's, which musl-gcc compiles; `protoc-bin-vendored` runs on the build host only. aws-lc appears only with the `microsandbox` feature (its SDK pulls `aws-lc-rs`), which needs `libcap-ng` and KVM anyway and is not in the release.
+
+The archives, the wheel, the sdist and the zips each get a [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`actions/attest-build-provenance`, pinned by commit like every action) in the job that built them, and so does `SHA256SUMS`, which also lists `install.sh` and `branchyard.rb`. Check one with `gh attestation verify branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard`.
+
+### The version
+
+One version names everything: `[workspace.package] version` in `Cargo.toml`. Every other file that carries Branchyard's own version must carry the same one: the crates' path dependencies on one another and their `Cargo.lock` entries, each host's plugin manifest, both marketplaces, the Herdr plugin, and `sdk/python/pyproject.toml`, which spells it the PEP 440 way (`0.1.0-rc.1` is `0.1.0rc1`).
+
+```sh
+python3 tools/release_version.py                     # checks every field and prints 0.1.0-rc.1
+python3 tools/release_version.py --tag v0.1.0-rc.1   # and that the tag names it, as the workflow does first
+python3 tools/release_version.py --pep440            # 0.1.0rc1
+python3 tools/release_version.py --set 0.1.0         # rewrites every field, Cargo.lock included
+```
+
+A release version is `X.Y.Z`, or `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`: the forms Cargo and Python can both say. A field that disagrees is named, with the command that fixes it. `tools/package.py` refuses to build archives while one disagrees, and `tests/test_distribution.py` runs the check on every `tools/check.py`, so a bump is one command and one commit.
 
 ### `install.sh`
 
 ```sh
-curl -fsSLO https://github.com/vamsiramakrishnan/branchyard/releases/download/v0.1.0/install.sh
-less install.sh                                  # read it
-sh install.sh --version 0.1.0                    # ~/.local/bin/by and branchyard-server
-sh install.sh --version 0.1.0 --prefix /opt/branchyard
+curl -fsSLO https://github.com/vamsiramakrishnan/branchyard/releases/download/v0.1.0-rc.1/install.sh
+less install.sh                                       # read it
+sh install.sh --version 0.1.0-rc.1                    # ~/.local/bin/by and branchyard-server
+sh install.sh --version 0.1.0-rc.1 --prefix /opt/branchyard
+BRANCHYARD_INSTALL_BASE=./downloaded sh install.sh --version 0.1.0-rc.1   # from files you already have
 ```
 
-POSIX `sh`. It picks the archive for this machine (`--target` overrides), downloads it and `SHA256SUMS` over `https` only (curl or wget; `file://` and a plain directory work too), compares the archive's SHA-256 with the listed one and installs nothing on a mismatch, then copies the binaries with mode 0755 (through a temporary name and a rename) and the license files into `PREFIX/share/branchyard`. It never calls `sudo` and is not meant to be piped into a shell: for a prefix you cannot write, run the file you read with the privileges that can.
+POSIX `sh`. It picks the archive for this machine (`--target` overrides), fetches it and `SHA256SUMS` over `https` only (curl or wget) or from a local directory or `file://` URL (`--base-url`, or `BRANCHYARD_INSTALL_BASE`: how the workflow installs what it just built, and how a draft's files are checked before publishing), compares the archive's SHA-256 with the listed one and installs nothing on a mismatch, then copies the binaries with mode 0755 (through a temporary name and a rename) and the license files into `PREFIX/share/branchyard`. When `PREFIX/bin` is not on `PATH` it prints the `export PATH=…` line to add; when another `by` comes first on `PATH` (a `cargo install` in `~/.cargo/bin`, say) it names it. It never calls `sudo` and is not meant to be piped into a shell: for a prefix you cannot write, run the file you read with the privileges that can.
 
 ### Homebrew
 
-`packaging/homebrew/branchyard.rb.in` is a formula template for a tap of your own; `python3 tools/homebrew_formula.py --version 0.1.0 --sums SHA256SUMS > branchyard.rb` fills its URLs and checksums from a release's `SHA256SUMS` (and fails if one is missing). The formula installs both binaries, shell completions (`by completions`) and the man page (`by man`). Nothing publishes it.
+`packaging/homebrew/branchyard.rb.in` is a formula template for a tap of your own; `python3 tools/homebrew_formula.py --version 0.1.0-rc.1 --sums SHA256SUMS > branchyard.rb` fills its URLs and checksums from a release's `SHA256SUMS` (and fails if one is missing), and the release workflow attaches the filled `branchyard.rb`. The formula installs both binaries, shell completions (`by completions`) and the man page (`by man`); its test runs `by --version`, and `by recipe list` in a new repository. Nothing publishes it to a tap.
 
-### Verified here
+## First release
 
-On 1 October 2026, on x86_64 Linux: `cargo build --release -p branchyard-cli --locked --offline` built `by` for this host (glibc, not musl) in 5 minutes 40 seconds: 45,930,280 bytes, 36,830,896 stripped (the workflow strips), and `by --version` printed `by 0.0.1`; the same archive layout installed with `install.sh` from a `file://` directory ran. A musl build (`--target x86_64-unknown-linux-musl --features postgres`, the target added with rustup) compiled every Rust crate and `ring`, then failed only to link SQLite's C, which, with no musl C compiler here (`CC=gcc`, glibc headers), referenced glibc's `__memcpy_chk` and `stat64`: the reason the workflow installs `musl-tools` and sets `CC_<target>=musl-gcc`; `tests/test_distribution.py` runs `install.sh` against a `file://` release directory in a temporary prefix (installed, modes 0755, licenses copied, a reinstall replacing, a tampered `SHA256SUMS` installing nothing, plain `http` refused, `--dry-run`), checks `sh -n`, fills the Homebrew template, and checks the workflow's trigger (only a `v*` tag push), its commit-pinned actions, targets, checksums and attestations, parsing it as YAML where PyYAML is installed. **Not verified:** `/plugin marketplace add` and `/plugin install` against a live Claude Code (no Claude Code here; the marketplace and hooks files follow its documented shapes and are checked as JSON), the workflow itself (it never ran), a complete musl build (no musl-gcc here) and macOS builds (no macOS), the attestations, and the formula under `brew`.
+The first tag is `v0.1.0-rc.1`: a release candidate, so its draft is a pre-release and the repository has no "latest" release until a plain `X.Y.Z` is published. The workspace already carries the version (`python3 tools/release_version.py` prints `0.1.0-rc.1`). Nothing below has run; the person with push rights to `vamsiramakrishnan/branchyard` runs it.
+
+1. **Rehearse on `main`.** Once the change that set the version is merged: Actions, Release, Run workflow, branch `main`, `draft` unticked (or `gh workflow run release.yml --ref main`, then `gh run watch`). Every job but `draft` runs. When it is green, download the `release` artifact (`gh run download RUN_ID --name release`) and read the file list and `release-notes.md`; the `assemble` job's summary shows the notes and `SHA256SUMS`. Fix what is red before tagging.
+
+2. **Tag the merged commit and push the tag.**
+
+   ```sh
+   git switch main && git pull --ff-only
+   python3 tools/release_version.py --tag v0.1.0-rc.1    # prints 0.1.0-rc.1, or names what disagrees
+   git tag -a v0.1.0-rc.1 -m "Branchyard 0.1.0-rc.1" && git push origin v0.1.0-rc.1
+   ```
+
+   The push starts Release on the tag. When every job passes, Releases shows a draft `v0.1.0-rc.1` marked pre-release; only people with write access see it, and nothing is public.
+
+3. **Check the draft.** A draft's files cannot be fetched from the public `releases/download/` URL until it is published, so take them with `gh`:
+
+   ```sh
+   gh release download v0.1.0-rc.1 --repo vamsiramakrishnan/branchyard --dir rc1
+   (cd rc1 && sha256sum -c SHA256SUMS)                  # shasum -a 256 -c SHA256SUMS on macOS
+   BRANCHYARD_INSTALL_BASE=rc1 sh rc1/install.sh --version 0.1.0-rc.1 --prefix "$PWD/rc1-prefix"
+   rc1-prefix/bin/by --version                           # by 0.1.0-rc.1
+   gh attestation verify rc1/branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard
+   ```
+
+4. **Publish.** Open the draft (Releases, the `v0.1.0-rc.1` draft, the pencil icon), read the notes, leave "Set as a pre-release" ticked and click **Publish release**. From then on the `install.sh` lines in the notes work for anyone. To withdraw it instead, delete the draft and the tag (`git push origin :refs/tags/v0.1.0-rc.1`, then `git tag -d v0.1.0-rc.1`), fix, and tag again.
+
+5. **After publishing**, in one change: say on this page, in the README and in [getting started](getting-started.md) that a release exists, and set the next version (`python3 tools/release_version.py --set 0.1.0-rc.2`, or `0.1.0`), so builds from `main` no longer claim to be the published one.
+
+## Verified here
+
+**27 October 2026, on this x86_64 Linux machine; no model, nothing pushed or published.** `python3 tools/release_version.py --set 0.1.0-rc.1` rewrote 18 files (23 `Cargo.lock` entries) and `cargo metadata --locked --offline` accepted the lock. With musl-tools 1.2.4 from apt and the musl target added by the workflow's own `rustup toolchain install 1.94.0 --profile minimal --target x86_64-unknown-linux-musl`, the workflow's build command (`cargo build --release --locked --offline --target x86_64-unknown-linux-musl -p branchyard-cli -p branchyard-server --features "$FEATURES"`, `CC_x86_64_unknown_linux_musl=musl-gcc`, symbols stripped) compiled 335 crates in 6 minutes 22 seconds on four shared cores, SQLite's C included this time: `by` is 60,224,000 bytes and `branchyard-server` 40,688,768, and `file` 5.45 calls both `ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, … stripped` (`ldd`: statically linked). The workflow's first version grepped that line for `statically linked` and would have failed every Linux build; it now accepts `static-pie linked`. `by --version` printed `by 0.1.0-rc.1`. Then the workflow's own step scripts, cut from `release.yml` and run with bash, ran on those binaries: Check the binaries; Package (`branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz`, 39,469,762 bytes, one directory holding `by`, `branchyard-server`, `LICENSE`, `THIRD_PARTY.md`, `README.md` and `licenses/`); Install the archive with `install.sh` (`installed by 0.1.0-rc.1 into …/runner/by/bin (sha256 2501d275…)`, the `export PATH=…` advice, and the status card outside a repository, `Branchyard: …/runner is not inside a git repository.`); the python job's Build with `build` 1.2.2.post1 (`branchyard-0.1.0rc1.tar.gz`, `branchyard-0.1.0rc1-py3-none-any.whl` and the four archives) and its install of the wheel into a fresh venv, which imported both modules and printed `0.1.0rc1`; and the assemble job's checksums, formula, install and notes steps, with stand-ins for the three archives this machine cannot build: 12 files in `SHA256SUMS`, every one `OK` under `sha256sum -c`. The installed `by` in a new repository printed `No recipes: add [recipes.NAME] to …` for `by recipe list`, which the formula's test had matched as lower-case `no recipes` (it now ignores case), and `by man` titled its page `by 0.1.0-rc.1`. Building the SDK warned that a `project.license` table is deprecated and stops building after 18 February 2027; it is now the SPDX `license = "Apache-2.0"`, with `setuptools>=77`. `tests/test_distribution.py` (48 tests) runs the version check, `install.sh` from `BRANCHYARD_INSTALL_BASE` and its `PATH` advice, the workflow's triggers and what a dry run may not do, and the same step scripts against stand-in binaries. The aarch64 and macOS matrix lines were checked by reading: the musl and `file` steps are conditioned on `musl`, the rustup step installs rustup where an image lacks it, `shasum` and BSD `sed` are what macOS has, and the x86_64 macOS binary is run only where the Apple silicon runner can execute it. On 1 October 2026 a glibc build for this host was 45.9 MB, 36.8 MB stripped. **Not done:** the workflow on GitHub (no push from here; its first run is the rehearsal in [First release](#first-release)), the aarch64 Linux and macOS builds, the attestations and `gh attestation verify`, a draft and its publishing, `docker build` of the image (no daemon), the formula under `brew`, and `/plugin marketplace add` against a live Claude Code.

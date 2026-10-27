@@ -2,9 +2,9 @@
 # Install a released `by` and `branchyard-server` for this machine, after
 # checking the archive's SHA-256 against the release's SHA256SUMS.
 #
-#   sh install.sh --version 0.1.0                  # into ~/.local/bin
-#   sh install.sh --version 0.1.0 --prefix /opt/by
-#   sh install.sh --version 0.1.0 --base-url file:///path/to/release-dir
+#   sh install.sh --version 0.1.0-rc.1                  # into ~/.local/bin
+#   sh install.sh --version 0.1.0-rc.1 --prefix /opt/by
+#   sh install.sh --version 0.1.0-rc.1 --base-url ./downloaded-release
 #
 # Download it, read it, then run it as the user who will own the files; it
 # never calls sudo. For a prefix you cannot write, run it with the
@@ -15,7 +15,7 @@ set -eu
 repo="vamsiramakrishnan/branchyard"
 version="${BRANCHYARD_VERSION:-}"
 prefix="${BRANCHYARD_PREFIX:-${HOME:-}/.local}"
-base_url=""
+base_url="${BRANCHYARD_INSTALL_BASE:-}"
 target=""
 dry_run=0
 
@@ -30,8 +30,9 @@ usage() {
 Options:
   --version V     the release to install (or BRANCHYARD_VERSION); required
   --prefix DIR    install into DIR/bin (default: ~/.local)
-  --base-url URL  where the release's files are (default: its GitHub release);
-                  https://, file:// or a directory
+  --base-url URL  where the release's files are (or BRANCHYARD_INSTALL_BASE;
+                  default: its GitHub release): https://, file:// or a
+                  directory, such as a draft's files from gh release download
   --target T      the archive's target triple (default: this machine's)
   --dry-run       say what would be installed, change nothing
 EOF
@@ -123,6 +124,8 @@ tar -xzf "$work/$archive" -C "$work"
 mkdir -p "$prefix/bin" "$prefix/share/branchyard" 2>/dev/null \
     || die "cannot create $prefix/bin; choose a --prefix you own"
 [ -w "$prefix/bin" ] || die "$prefix/bin is not writable; choose a --prefix you own"
+# An absolute path without a trailing slash, as PATH would name it.
+prefix=$(CDPATH='' cd -- "$prefix" && pwd) || die "cannot enter $prefix"
 for bin in by branchyard-server; do
     if [ -f "$work/$name/$bin" ]; then
         cp "$work/$name/$bin" "$prefix/bin/$bin.new"
@@ -137,6 +140,12 @@ fi
 
 printf 'installed %s into %s/bin (sha256 %s)\n' "$("$prefix/bin/by" --version 2>/dev/null || echo by)" "$prefix" "$actual"
 case ":${PATH:-}:" in
-    *":$prefix/bin:"*) ;;
-    *) printf 'add %s/bin to your PATH\n' "$prefix" ;;
+    *":$prefix/bin:"*)
+        found=$(command -v by 2>/dev/null || true)
+        if [ -n "$found" ] && [ "$found" != "$prefix/bin/by" ]; then
+            printf 'note: %s comes first on your PATH; remove it or put %s/bin before it\n' "$found" "$prefix"
+        fi ;;
+    *)
+        printf '%s/bin is not on your PATH; add it (in ~/.profile, ~/.bashrc or ~/.zshrc):\n' "$prefix"
+        printf '  export PATH="%s/bin:%s"\n' "$prefix" "\$PATH" ;;
 esac
