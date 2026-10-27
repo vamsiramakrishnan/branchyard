@@ -1,6 +1,6 @@
 # Status
 
-Written 25 October 2026. This is the one page that says what is built, what has run and what has not. Other pages link here instead of restating it. The harness tables below are generated (`python3 tools/docs_facts.py --write`); the rest is written by hand and dated, so a line older than the code it describes is a bug to fix here.
+Written 27 October 2026. This is the one page that says what is built, what has run and what has not. Other pages link here instead of restating it. The harness tables below are generated (`python3 tools/docs_facts.py --write`); the rest is written by hand and dated, so a line older than the code it describes is a bug to fix here.
 
 ## The words
 
@@ -37,7 +37,7 @@ See [modes](modes.md) for how to choose between these.
 | Sync and task repositories | built; hermetic | 3 October 2026: directory and git backends, in-process stand-ins for S3, Cloud Storage and Azure | [sync](sync.md), [task repositories](task-repos.md) |
 | Hooks and status lines | built for every harness with an install manifest | 24 and 25 October 2026: see the table below; on 25 October the reworded lines were repeated by real models in ten harnesses ([harness hooks](harness-hooks.md)) | [harness hooks](harness-hooks.md) |
 | SDKs | Python `branchyard.py` and `branchyard_client.py`, Rust `branchyard` and `branchyard-client`: built; hermetic. TypeScript client: not built | 24 October 2026: one script run both inside and outside a harness turn. 25 October 2026: the two Python examples ran as written against Gemini CLI. Installed from a checkout or the SDK archive; the Rust crates are not published | [SDKs](sdk.md) |
-| Distribution | `cargo install` from a clone works. Prebuilt binaries, `install.sh` and a Homebrew formula: written; the release workflow has never run | No GitHub release or tag exists | [distribution](distribution.md) |
+| Distribution | `cargo install` from a clone works. Prebuilt binaries for four targets, the Python SDK's wheel and sdist, the plugin archives, `install.sh` and a Homebrew formula: built by the release workflow, which a pull request or Run workflow rehearses as a dry run. The workspace is `0.1.0-rc.1`, the first tag's version | 27 October 2026, on this machine with no model: the x86_64 musl release build (`static-pie linked`, `by 0.1.0-rc.1`), then the workflow's own step scripts packing it, installing it with `install.sh`, building and importing the wheel, and assembling `SHA256SUMS` and the formula. Not done: the workflow on GitHub, the aarch64 and macOS builds, attestations; no tag or release exists | [distribution](distribution.md#verified-here) |
 
 ## Harness drivers
 

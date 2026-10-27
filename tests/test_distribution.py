@@ -4,10 +4,12 @@ run with the shipped launcher / imported as the shipped module. See
 `docs/distribution.md`.
 """
 
+import importlib.metadata
 import importlib.util
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -25,6 +27,8 @@ spec = importlib.util.spec_from_file_location("package", ROOT / "tools/package.p
 assert spec is not None and spec.loader is not None
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
+# tools/release_version.py, as tools/package.py loaded it.
+release_version = package.release_version
 
 
 class ArchiveTests(unittest.TestCase):
@@ -158,8 +162,11 @@ class SdkProjectTests(unittest.TestCase):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
         project = self.project["project"]
         self.assertEqual(project["name"], "branchyard")
-        self.assertEqual(project["version"], workspace["version"])
-        self.assertEqual(project["license"], {"text": workspace["license"]})
+        # The workspace version, as Python spells it (0.1.0-rc.1 is 0.1.0rc1).
+        self.assertEqual(project["version"], release_version.pep440(workspace["version"]))
+        # An SPDX expression: setuptools 77 reads it, and deprecates the table form.
+        self.assertEqual(project["license"], workspace["license"])
+        self.assertEqual(self.project["build-system"]["requires"], ["setuptools>=77"])
         self.assertEqual(project["dependencies"], [])
         # ruff.toml holds the modules to 3.9's syntax; the floor says the same.
         self.assertEqual(project["requires-python"], ">=3.9")
@@ -188,6 +195,9 @@ class SdkProjectTests(unittest.TestCase):
     def test_setuptools_builds_it_from_the_extracted_archive(self):
         if importlib.util.find_spec("setuptools") is None:
             self.skipTest("setuptools is not installed; pip install ./sdk/python needs it, or network to fetch it")
+        installed = importlib.metadata.version("setuptools")
+        if int(installed.split(".")[0]) < 77:
+            self.skipTest(f"setuptools {installed} cannot read an SPDX license; pip fetches 77 or later to build it")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             *_archives, sdk = package.build(root / "dist")
@@ -429,27 +439,257 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "demo True")
 
 
+WORKFLOW = ROOT / ".github/workflows/release.yml"
+# The condition every step or job that attests, drafts or pushes runs under.
+DRAFTS = "needs.version.outputs.draft == 'true'"
+
+
+def workflow_jobs(text):
+    """{job id: its lines} for the jobs of a workflow, in file order: the keys indented two
+    spaces under `jobs:`."""
+    jobs: dict = {}
+    current = None
+    for line in text.split("\njobs:\n", 1)[1].splitlines():
+        match = re.match(r"^  ([A-Za-z0-9_-]+):$", line)
+        if match:
+            current = match.group(1)
+            jobs[current] = []
+        elif current:
+            jobs[current].append(line)
+    return {name: "\n".join(lines) for name, lines in jobs.items()}
+
+
+def step_script(job, name):
+    """The `run: |` block of the step named `name` in a job's text, as the shell gets it."""
+    lines = job.splitlines()
+    start = lines.index(f"      - name: {name}")
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("      - "):
+            break
+        if lines[index] == "        run: |":
+            block = []
+            for line in lines[index + 1 :]:
+                if line.strip() and not line.startswith(" " * 10):
+                    break
+                block.append(line[10:])
+            return "\n".join(block).strip("\n") + "\n"
+    raise AssertionError(f"no `run: |` in step {name!r}")
+
+
+def run_step(script, cwd, env):
+    """A step's script as a runner runs a `run:` without `shell:` (bash -e)."""
+    return subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
+
+
+def fake_by(version):
+    """A stand-in `by`: `--version` and the bare status card, as the release's installs run them."""
+    return (
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        f'  --version) echo "by {version}" ;;\n'
+        '  "") echo "Branchyard: $PWD is not inside a git repository." ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n"
+    )
+
+
+def host_target():
+    """install.sh's choice of archive for this machine, or None where it has none."""
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(os.uname().machine)
+    system = {"Linux": "unknown-linux-musl", "Darwin": "apple-darwin"}.get(os.uname().sysname)
+    return f"{arch}-{system}" if arch and system else None
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    """`tools/release_version.py`: one version, everywhere it is written."""
+
+    def run_tool(self, *args, root=ROOT):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools/release_version.py"), "--root", str(root), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_every_field_carries_the_workspace_version(self):
+        version = release_version.workspace_version()
+        self.assertEqual(release_version.disagreements(), [])
+        fields = release_version.fields()
+        # Every kind of field is read: crate path dependencies, Cargo.lock, each manifest, the SDK.
+        files = {relative for relative, _field, _value in fields}
+        for needed in ["Cargo.lock", "crates/branchyard-cli/Cargo.toml", "sdk/python/pyproject.toml"]:
+            self.assertIn(needed, files)
+        self.assertLessEqual(set(release_version.JSON_FIELDS) | set(release_version.TOML_FIELDS), files)
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["members"]
+        locked = [field for relative, field, _value in fields if relative == "Cargo.lock"]
+        self.assertEqual(len(locked), len(workspace))
+        out = self.run_tool()
+        self.assertEqual((out.returncode, out.stdout), (0, version + "\n"), out.stderr)
+        out = self.run_tool("--pep440")
+        self.assertEqual(out.stdout, release_version.pep440(version) + "\n")
+
+    def test_python_spells_a_pre_release_the_pep_440_way(self):
+        for version, python in [
+            ("0.1.0", "0.1.0"),
+            ("0.1.0-rc.1", "0.1.0rc1"),
+            ("1.2.3-alpha.4", "1.2.3a4"),
+            ("10.0.0-beta.12", "10.0.0b12"),
+        ]:
+            self.assertEqual(release_version.pep440(version), python)
+        for unusable in ["0.1", "v0.1.0", "0.1.0-rc1", "0.1.0-dev.1", "0.1.0+build.5", "0.1.0-rc.1.2"]:
+            with self.assertRaises(ValueError, msg=unusable):
+                release_version.pep440(unusable)
+
+    def test_a_tag_must_be_v_and_the_workspace_version(self):
+        version = release_version.workspace_version()
+        self.assertEqual(self.run_tool("--tag", f"v{version}").stdout, version + "\n")
+        for wrong in [version, "v9.9.9", f"v{version}.1", f"release-{version}"]:
+            out = self.run_tool("--tag", wrong)
+            self.assertEqual(out.returncode, 1, wrong)
+            self.assertIn("does not name the workspace version", out.stderr)
+            self.assertEqual(out.stdout, "")
+
+    def copy_tree(self, destination):
+        """The files the tool reads or writes, copied out of the checkout."""
+        names = {"Cargo.toml", "Cargo.lock", *release_version.JSON_FIELDS, *release_version.TOML_FIELDS}
+        names |= {path.relative_to(ROOT).as_posix() for path in release_version.members().values()}
+        for name in names:
+            (destination / name).parent.mkdir(parents=True, exist_ok=True)
+            (destination / name).write_bytes((ROOT / name).read_bytes())
+        return names
+
+    def test_set_rewrites_every_field_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = self.copy_tree(root)
+            old = release_version.workspace_version(root)
+            out = self.run_tool("--set", "v2.0.0-beta.3", root=root)
+            self.assertEqual((out.returncode, out.stdout), (0, "2.0.0-beta.3\n"), out.stderr)
+            self.assertEqual(release_version.disagreements(root), [])
+            self.assertEqual(release_version.workspace_version(root), "2.0.0-beta.3")
+            self.assertIn('version = "2.0.0b3"', (root / "sdk/python/pyproject.toml").read_text())
+            # Only version lines changed; every other byte of every file is as it was.
+            for name in sorted(names):
+                before = (ROOT / name).read_text().splitlines()
+                after = (root / name).read_text().splitlines()
+                self.assertEqual(len(before), len(after), name)
+                for was, now in zip(before, after, strict=True):
+                    if was != now:
+                        self.assertIn("version", was, name)
+                        self.assertEqual(
+                            now, was.replace(old, "2.0.0-beta.3").replace(release_version.pep440(old), "2.0.0b3")
+                        )
+            # The registry crates in Cargo.lock keep their versions.
+            lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
+            registry = [p for p in lock if "source" in p]
+            self.assertTrue(registry)
+            original = {(p["name"], p["version"]) for p in tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]}
+            self.assertLessEqual({(p["name"], p["version"]) for p in registry}, original)
+            # A field left behind is named, with the command that fixes it.
+            herdr = root / "plugins/herdr/herdr-plugin.toml"
+            herdr.write_text(herdr.read_text().replace('version = "2.0.0-beta.3"', 'version = "1.0.0"'))
+            out = self.run_tool(root=root)
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("plugins/herdr/herdr-plugin.toml version is '1.0.0', not '2.0.0-beta.3'", out.stderr)
+            self.assertIn("next: python3 tools/release_version.py --set 2.0.0-beta.3", out.stderr)
+            # A version neither Cargo nor Python can say is refused before anything is written.
+            out = self.run_tool("--set", "2.0", root=root)
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("is not a release version", out.stderr)
+            self.assertEqual(release_version.workspace_version(root), "2.0.0-beta.3")
+
+    def test_the_docs_name_the_workspace_version(self):
+        version = release_version.workspace_version()
+        python = release_version.pep440(version)
+        patterns = [
+            (r"\bv(\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?)\b", version),  # a tag, or its download URL
+            (r"--version (\d+\.\d+\.\d+\S*)", version),  # install.sh and the formula
+            (r"\bby (\d+\.\d+\.\d+[A-Za-z0-9.+-]*)", version),  # what by --version prints
+            (r"branchyard-(?:[a-z-]+-)?(\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?)(?:-|\.zip)", version),  # archives
+            (r"branchyard-(\d+\.\d+\.\d+(?:[a-z]+\d+)?)(?:-py3|\.tar\.gz)", python),  # the wheel and sdist
+        ]
+        for page in ["README.md", "docs/distribution.md", "docs/getting-started.md", "docs/upgrade.md", "docs/sdk.md"]:
+            text = (ROOT / page).read_text()
+            for pattern, wanted in patterns:
+                for found in re.findall(pattern, text):
+                    self.assertEqual(found, wanted, f"{page} names {found} ({pattern})")
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
-    """`.github/workflows/release.yml`: prebuilt binaries, checksums and
-    provenance, only for a v* tag. Never run here; checked as text (and as
-    YAML when PyYAML is installed)."""
+    """`.github/workflows/release.yml`, read: when it runs and what a dry run may not do. Parsed
+    as YAML too where PyYAML is installed."""
 
     def setUp(self):
-        self.text = (ROOT / ".github/workflows/release.yml").read_text()
-
-    def test_it_runs_only_for_a_v_tag_push(self):
-        head = self.text.split("\npermissions:", 1)[0]
-        self.assertTrue(head.endswith("\non:\n  push:\n    tags: ['v*']"), head)
-        for trigger in ("pull_request", "workflow_dispatch", "schedule", "branches"):
-            self.assertNotIn(trigger, head)
+        self.text = WORKFLOW.read_text()
+        self.jobs = workflow_jobs(self.text)
         try:
             import yaml
         except ImportError:
-            return
-        parsed = yaml.safe_load(self.text)
-        # PyYAML reads the key `on` as True.
-        self.assertEqual(parsed[True], {"push": {"tags": ["v*"]}})
-        self.assertEqual(set(parsed["jobs"]), {"build", "release", "image"})
+            self.parsed = None
+        else:
+            self.parsed = yaml.safe_load(self.text)
+
+    def triggers(self):
+        head = self.text.split("\npermissions:", 1)[0]
+        return head[head.index("\non:\n") + 1 :]
+
+    def test_a_tag_drafts_and_a_pull_request_or_run_workflow_rehearses(self):
+        on = self.triggers()
+        self.assertIn("  push:\n    tags: ['v*']\n", on)
+        self.assertIn("  pull_request:\n    paths:\n", on)
+        self.assertIn("  workflow_dispatch:\n    inputs:\n      draft:\n", on)
+        for absent in ("schedule", "branches"):
+            self.assertNotIn(absent, on)
+        paths = re.findall(r"^      - (\S+)$", on, re.M)
+        for needed in [".github/workflows/release.yml", "install.sh", "packaging/**", "sdk/python/pyproject.toml"]:
+            self.assertIn(needed, paths)
+        for path in paths:
+            self.assertTrue(list(ROOT.glob(path.replace("/**", ""))), f"{path} names nothing")
+        # Every script of the repository the workflow runs is a path that starts a rehearsal.
+        for script in set(re.findall(r"\btools/[\w-]+\.py", self.text)):
+            self.assertIn(script, paths)
+        if self.parsed is not None:
+            on = self.parsed[True]  # PyYAML reads the key `on` as True.
+            self.assertEqual(on["push"], {"tags": ["v*"]})
+            self.assertEqual(on["pull_request"], {"paths": paths})
+            self.assertEqual(
+                on["workflow_dispatch"]["inputs"]["draft"],
+                {
+                    "description": on["workflow_dispatch"]["inputs"]["draft"]["description"],
+                    "type": "boolean",
+                    "default": False,
+                },
+            )
+            self.assertEqual(list(self.parsed["jobs"]), list(self.jobs))
+
+    def test_jobs_run_in_order_and_only_draft_writes(self):
+        self.assertEqual(list(self.jobs), ["version", "build", "python", "assemble", "draft", "image"])
+        self.assertIn("    needs: [version, build, python]\n", self.jobs["assemble"])
+        self.assertIn("    needs: [version, assemble]\n", self.jobs["draft"])
+        self.assertIn(f"    if: {DRAFTS}\n", self.jobs["draft"])
+        self.assertIn("    if: github.event_name != 'pull_request'\n", self.jobs["image"])
+        for name, job in self.jobs.items():
+            self.assertEqual("contents: write" in job, name == "draft", name)
+            self.assertEqual("packages: write" in job, name == "image", name)
+            self.assertEqual("gh release create" in job, name == "draft", name)
+            self.assertEqual("docker push" in job, name == "image", name)
+        if self.parsed is not None:
+            jobs = self.parsed["jobs"]
+            self.assertEqual(jobs["draft"]["if"], DRAFTS)
+            self.assertEqual(jobs["draft"]["permissions"]["contents"], "write")
+            self.assertEqual(self.parsed["permissions"], {"contents": "read"})
+            for name in ("version", "build", "python", "assemble"):
+                self.assertNotIn("if", jobs[name], f"a dry run runs {name}")
+
+    def test_a_dry_run_attests_drafts_and_pushes_nothing(self):
+        for name, job in self.jobs.items():
+            steps = job.split("\n      - ")
+            for step in steps:
+                if "actions/attest-build-provenance@" in step and name != "draft":
+                    self.assertIn(f"if: {DRAFTS}", step, name)
+                if "docker push" in step:
+                    self.assertIn(f"if: vars.PUBLISH_IMAGES == 'true' && {DRAFTS}", step)
+        self.assertEqual(self.text.count("actions/attest-build-provenance@"), 3)
+        self.assertIn("--draft --verify-tag $prerelease", self.jobs["draft"])
 
     def test_every_action_is_pinned_to_a_commit(self):
         uses = re.findall(r"uses:\s*(\S+)", self.text)
@@ -457,7 +697,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for use in uses:
             self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
 
-    def test_it_builds_four_targets_with_checksums_and_attestations(self):
+    def test_it_builds_four_targets_and_checks_them(self):
         for target in (
             "x86_64-unknown-linux-musl",
             "aarch64-unknown-linux-musl",
@@ -465,16 +705,225 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "x86_64-apple-darwin",
         ):
             self.assertIn(f"target: {target}", self.text)
+        # The archives the Homebrew formula (and so the assemble job) needs are the ones built.
+        self.assertEqual(sorted(re.findall(r"target: (\S+)", self.text)), sorted(_homebrew().TARGETS))
         self.assertIn("-p branchyard-cli -p branchyard-server", self.text)
-        self.assertIn("statically linked", self.text)
-        self.assertIn("shasum -a 256", self.text)
-        self.assertIn("SHA256SUMS", self.text)
-        self.assertEqual(self.text.count("actions/attest-build-provenance@"), 2)
-        self.assertIn("id-token: write", self.text)
-        self.assertIn("attestations: write", self.text)
-        self.assertIn("--draft --verify-tag", self.text)
-        self.assertIn("docker build -f deploy/Dockerfile.harnesses", self.text)
-        self.assertIn("if: vars.PUBLISH_IMAGES == 'true'", self.text)
+        self.assertIn("rust-toolchain.toml", self.jobs["build"])
+        self.assertIn("python3 -m build --outdir dist sdk/python", self.jobs["python"])
+        self.assertIn("if-no-files-found: error", self.jobs["build"])
+        self.assertIn("docker build -f deploy/Dockerfile.harnesses", self.jobs["image"])
+
+    def test_a_static_binary_passes_whichever_way_file_says_it(self):
+        check = step_script(self.jobs["build"], "Check the binaries")
+        (pattern,) = re.findall(r"grep -Eq '([^']+)'", check)
+        # file 5.45 (Ubuntu 24.04) on Rust's musl executables, which are static-pie, and on a
+        # classic static one; never a dynamic one.
+        self.assertRegex("ELF 64-bit LSB pie executable, x86-64, static-pie linked, stripped", pattern)
+        self.assertRegex("ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped", pattern)
+        self.assertNotRegex("ELF 64-bit LSB pie executable, dynamically linked, interpreter /lib64", pattern)
+
+    def test_the_scripts_are_what_yaml_reads(self):
+        if self.parsed is None:
+            self.skipTest("PyYAML is not installed")
+        for job_name, job in self.parsed["jobs"].items():
+            for step in job["steps"]:
+                if "name" in step and "run" in step and "\n" in step["run"]:
+                    self.assertEqual(step_script(self.jobs[job_name], step["name"]), step["run"], step["name"])
+
+
+def _homebrew():
+    spec = importlib.util.spec_from_file_location("homebrew_formula", ROOT / "tools/homebrew_formula.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class WorkflowStepTests(unittest.TestCase):
+    """The workflow's own step scripts, run here with bash against stand-in binaries: the
+    version decision, packing and installing one archive, and assembling a release."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = workflow_jobs(WORKFLOW.read_text())
+        self.version = release_version.workspace_version()
+        self.python = release_version.pep440(self.version)
+        self.env = {
+            "PATH": os.pathsep.join([str(Path(sys.executable).parent), os.environ["PATH"]]),
+            "HOME": str(self.root / "home"),
+            "RUNNER_TEMP": str(self.root / "runner"),
+            "VERSION": self.version,
+            "PYTHON_VERSION": self.python,
+            "GITHUB_OUTPUT": str(self.root / "output"),
+            "GITHUB_STEP_SUMMARY": str(self.root / "summary.md"),
+        }
+        (self.root / "runner").mkdir()
+
+    def decide(self, event, ref_type, ref_name, draft_input=""):
+        (self.root / "output").write_text("")
+        env = dict(
+            self.env,
+            GITHUB_EVENT_NAME=event,
+            GITHUB_REF_TYPE=ref_type,
+            GITHUB_REF_NAME=ref_name,
+            DRAFT_INPUT=draft_input,
+        )
+        out = run_step(step_script(self.jobs["version"], "Read and check the version"), ROOT, env)
+        values = dict(line.split("=", 1) for line in (self.root / "output").read_text().splitlines())
+        return out, values
+
+    def test_only_a_tag_drafts(self):
+        tag = f"v{self.version}"
+        for event, ref_type, ref_name, draft_input, drafts in [
+            ("push", "tag", tag, "", "true"),
+            ("workflow_dispatch", "tag", tag, "true", "true"),
+            ("workflow_dispatch", "tag", tag, "false", "false"),
+            ("workflow_dispatch", "branch", "main", "true", "false"),
+            ("pull_request", "branch", "27/merge", "", "false"),
+        ]:
+            out, values = self.decide(event, ref_type, ref_name, draft_input)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(values, {"version": self.version, "python": self.python, "draft": drafts}, event)
+        out, values = self.decide("push", "tag", "v9.9.9")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("does not name the workspace version", out.stderr)
+        self.assertEqual(values, {})
+
+    def stage_build(self, target, by_version):
+        """A checkout with a built `by` and `branchyard-server` for `target` (stand-ins)."""
+        for name in [
+            "LICENSE",
+            "THIRD_PARTY.md",
+            "README.md",
+            "install.sh",
+            "vendor/orca/LICENSE",
+            "vendor/emdash/LICENSE.md",
+        ]:
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_bytes((ROOT / name).read_bytes())
+        release = self.root / "target" / target / "release"
+        release.mkdir(parents=True, exist_ok=True)
+        for binary, text in (("by", fake_by(by_version)), ("branchyard-server", "#!/bin/sh\nexit 0\n")):
+            (release / binary).write_text(text)
+            (release / binary).chmod(0o755)
+
+    def test_package_then_install_the_archive(self):
+        if shutil.which("shasum") is None:
+            self.skipTest("no shasum (the Package step's checksum tool)")
+        target = "x86_64-unknown-linux-musl"
+        self.stage_build(target, self.version)
+        env = dict(self.env, TARGET=target)
+        out = run_step(step_script(self.jobs["build"], "Package"), self.root, env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        name = f"branchyard-{self.version}-{target}"
+        archive = self.root / "dist" / f"{name}.tar.gz"
+        with tarfile.open(archive) as tar:
+            members = {m.name: m for m in tar.getmembers() if m.isfile()}
+        self.assertEqual(
+            set(members),
+            {
+                f"{name}/{f}"
+                for f in [
+                    "by",
+                    "branchyard-server",
+                    "LICENSE",
+                    "THIRD_PARTY.md",
+                    "README.md",
+                    "licenses/orca-LICENSE",
+                    "licenses/emdash-LICENSE.md",
+                ]
+            },
+        )
+        self.assertEqual(stat.S_IMODE(members[f"{name}/by"].mode), 0o755)
+        import hashlib
+
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.assertEqual((self.root / "dist" / f"{name}.tar.gz.sha256").read_text(), f"{digest}  {name}.tar.gz\n")
+
+        out = run_step(step_script(self.jobs["build"], "Install the archive with install.sh"), self.root, env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"installed by {self.version} into {self.root}/runner/by/bin", out.stdout)
+        self.assertIn("is not inside a git repository", out.stdout)
+
+        # A binary that names another version fails the install check.
+        shutil.rmtree(self.root / "dist")
+        shutil.rmtree(self.root / "runner" / "by")
+        self.stage_build(target, "9.9.9")
+        self.assertEqual(run_step(step_script(self.jobs["build"], "Package"), self.root, env).returncode, 0)
+        out = run_step(step_script(self.jobs["build"], "Install the archive with install.sh"), self.root, env)
+        self.assertNotEqual(out.returncode, 0)
+
+    def stage_assemble(self):
+        """What the assemble job has once the artifacts are downloaded: every archive with its
+        .sha256, the Python files, and the checkout's install.sh, tools and packaging."""
+        import hashlib
+
+        dist = self.root / "dist"
+        dist.mkdir()
+        for target in _homebrew().TARGETS:
+            name = f"branchyard-{self.version}-{target}"
+            stage = self.root / "stage" / name
+            stage.mkdir(parents=True)
+            (stage / "by").write_text(fake_by(self.version))
+            (stage / "by").chmod(0o755)
+            archive = dist / f"{name}.tar.gz"
+            subprocess.run(["tar", "-C", str(stage.parent), "-czf", str(archive), name], check=True)
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            (dist / f"{name}.tar.gz.sha256").write_text(f"{digest}  {archive.name}\n")
+        python_files = [p.name for p in package.build(self.root / "zips")]
+        python_files += [f"branchyard-{self.python}-py3-none-any.whl", f"branchyard-{self.python}.tar.gz"]
+        for name in python_files:
+            (dist / name).write_bytes(name.encode())
+        (self.root / "install.sh").write_bytes((ROOT / "install.sh").read_bytes())
+        for linked in ("tools", "packaging"):
+            (self.root / linked).symlink_to(ROOT / linked)
+        return python_files
+
+    def test_assemble_writes_sums_and_formula_installs_and_names_only_real_files(self):
+        if shutil.which("sha256sum") is None or host_target() not in _homebrew().TARGETS:
+            self.skipTest("needs sha256sum and a machine install.sh has an archive for (the job runs on Linux)")
+        python_files = self.stage_assemble()
+        job = self.jobs["assemble"]
+        for step in ("Write SHA256SUMS and the Homebrew formula", "Install from the directory, as a person would"):
+            out = run_step(step_script(job, step), self.root, self.env)
+            self.assertEqual(out.returncode, 0, f"{step}: {out.stderr}")
+        dist = self.root / "dist"
+        archives = [f"branchyard-{self.version}-{t}.tar.gz" for t in _homebrew().TARGETS]
+        files = sorted([*archives, *python_files, "install.sh", "branchyard.rb"])
+        self.assertEqual(sorted(p.name for p in dist.iterdir()), sorted([*files, "SHA256SUMS"]))
+        sums = (dist / "SHA256SUMS").read_text().splitlines()
+        self.assertEqual([line.split("  ", 1)[1] for line in sums], files)
+        formula = (dist / "branchyard.rb").read_text()
+        self.assertNotRegex(formula, r"@[A-Z0-9_]+@")
+        self.assertIn(f'version "{self.version}"', formula)
+
+        out = run_step(step_script(job, "Write the release notes"), self.root, self.env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        notes = (self.root / "release-notes.md").read_text()
+        self.assertNotRegex(notes, r"@[A-Z_]+@")
+        named = set(re.findall(r"branchyard[\w.+-]*\.(?:zip|whl|tar\.gz|rb)\b", notes)) | set(
+            re.findall(r"\b(?:install\.sh|SHA256SUMS)\b", notes)
+        )
+        self.assertTrue(named)
+        self.assertLessEqual(named, {*files, "SHA256SUMS"}, "the notes name a file the release lacks")
+        summary = (self.root / "summary.md").read_text()
+        self.assertIn(notes, summary)
+        self.assertIn((dist / "SHA256SUMS").read_text(), summary)
+
+    def test_an_archive_that_changed_after_its_build_stops_the_release(self):
+        if shutil.which("sha256sum") is None:
+            self.skipTest("needs sha256sum (the job runs on Linux)")
+        self.stage_assemble()
+        archive = self.root / "dist" / f"branchyard-{self.version}-x86_64-unknown-linux-musl.tar.gz"
+        archive.write_bytes(archive.read_bytes() + b"\0")
+        out = run_step(
+            step_script(self.jobs["assemble"], "Write SHA256SUMS and the Homebrew formula"), self.root, self.env
+        )
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("FAILED", out.stdout + out.stderr)
+        self.assertFalse((self.root / "dist" / "SHA256SUMS").exists())
 
 
 def _fake_release(directory, version, target, by_text="#!/bin/sh\necho 'by 9.9.9'\n"):
@@ -509,12 +958,13 @@ class InstallScriptTests(unittest.TestCase):
         self.release = _fake_release(self.root, "1.2.3", self.target)
         self.prefix = self.root / "prefix"
 
-    def run_install(self, *args):
+    def run_install(self, *args, cwd=None, **env):
         return subprocess.run(
             ["sh", str(ROOT / "install.sh"), "--target", self.target, *args],
             capture_output=True,
             text=True,
-            env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+            cwd=cwd,
+            env={"PATH": os.environ["PATH"], "HOME": str(self.root), **env},
         )
 
     def test_it_is_posix_sh(self):
@@ -523,6 +973,9 @@ class InstallScriptTests(unittest.TestCase):
         self.assertTrue(text.startswith("#!/bin/sh\n"))
         self.assertNotIn("sudo ", text.replace("never calls sudo", ""))
         self.assertNotIn("[[", text)
+        if shutil.which("shellcheck"):
+            out = subprocess.run(["shellcheck", "-s", "sh", str(ROOT / "install.sh")], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stdout)
 
     def test_installs_after_verifying_the_checksum(self):
         out = self.run_install(
@@ -562,6 +1015,62 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn("would install branchyard-1.2.3-x86_64-unknown-linux-musl.tar.gz", out.stdout)
 
+    def test_installs_from_the_base_in_branchyard_install_base(self):
+        # How the release workflow installs what it just built, and how a draft is checked.
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), BRANCHYARD_INSTALL_BASE=str(self.release)
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue((self.prefix / "bin" / "by").is_file())
+        out = self.run_install("--version", "1.2.3", "--dry-run", BRANCHYARD_INSTALL_BASE=str(self.release))
+        self.assertIn(f"from {self.release} into", out.stdout)
+        # --base-url wins over the variable.
+        out = self.run_install(
+            "--version",
+            "1.2.3",
+            "--prefix",
+            str(self.prefix),
+            "--base-url",
+            str(self.release),
+            BRANCHYARD_INSTALL_BASE=f"{self.root}/nowhere",
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), BRANCHYARD_INSTALL_BASE="http://x.invalid"
+        )
+        self.assertIn("refusing plain http", out.stderr)
+
+    def test_says_how_to_put_the_prefix_on_path(self):
+        # A relative prefix with a trailing slash is advised as the absolute directory PATH needs.
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", "prefix/", "--base-url", str(self.release), cwd=self.root
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(f"installed by 9.9.9 into {self.prefix}/bin", out.stdout)
+        self.assertIn(f"{self.prefix}/bin is not on your PATH", out.stdout)
+        self.assertIn(f'  export PATH="{self.prefix}/bin:$PATH"\n', out.stdout)
+
+    def test_names_a_by_that_comes_first_on_path(self):
+        earlier = self.root / "cargo-bin"
+        earlier.mkdir()
+        (earlier / "by").write_text("#!/bin/sh\necho 'by 0.0.1'\n")
+        (earlier / "by").chmod(0o755)
+        path = os.pathsep.join([str(earlier), str(self.prefix / "bin"), os.environ["PATH"]])
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", str(self.release), PATH=path
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(
+            f"note: {earlier}/by comes first on your PATH; remove it or put {self.prefix}/bin before it", out.stdout
+        )
+        self.assertNotIn("export PATH", out.stdout)
+        # First on PATH: nothing to say.
+        path = os.pathsep.join([str(self.prefix / "bin"), str(earlier), os.environ["PATH"]])
+        out = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", str(self.release), PATH=path
+        )
+        self.assertEqual(out.stdout.splitlines()[1:], [])
+
 
 class HomebrewFormulaTests(unittest.TestCase):
     def setUp(self):
@@ -578,6 +1087,15 @@ class HomebrewFormulaTests(unittest.TestCase):
         self.assertIn('sha256 "' + "0" * 64 + '"', formula)
         with self.assertRaisesRegex(ValueError, "lists no"):
             self.module.render("1.2.3", sums.splitlines()[0])
+
+    def test_the_formula_test_matches_what_by_prints(self):
+        template = self.module.TEMPLATE.read_text()
+        # `by recipe list` in a new repository says "No recipes: add [recipes.NAME] ..." (27
+        # October 2026); the source spells it lower case, so the formula matches either.
+        (pattern,) = re.findall(r'assert_match\(/([^/]+)/i, shell_output\("#\{bin\}/by recipe list"\)\)', template)
+        source = (ROOT / "crates/branchyard-cli/src/recipe_cmd.rs").read_text()
+        self.assertIn(f'"{pattern}: add [recipes.NAME]', source)
+        self.assertIn('assert_match version.to_s, shell_output("#{bin}/by --version")', template)
 
 
 class HarnessImageTests(unittest.TestCase):

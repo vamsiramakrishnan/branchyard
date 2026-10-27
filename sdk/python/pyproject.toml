@@ -1,21 +1,23 @@
 # The Python SDK as an installable distribution: `pip install ./sdk/python`,
 # or the same from the extracted `branchyard-sdk-<version>.zip`. Two
 # top-level modules, standard library only. The version is the workspace's
-# (`Cargo.toml`); `tools/package.py` refuses to build when they differ.
-# Not published to PyPI yet: install from a checkout or the release archive.
-# See README.md here and docs/sdk.md#install.
+# (`Cargo.toml`) in PEP 440's spelling; tools/release_version.py checks it.
+# Not published to PyPI yet: install from a checkout or the release's wheel.
+# The license is an SPDX expression, which setuptools reads from 77 on (the
+# table form it replaces stops building in 2027). See README.md here and
+# docs/sdk.md#install.
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "branchyard"
-version = "0.0.1"
+version = "0.1.0rc1"
 description = "Branchyard from Python: branchyard inside a harness (by --json), branchyard_client over by serve's HTTP API"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 keywords = ["branchyard", "coding agents", "git", "harness", "sdk"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",

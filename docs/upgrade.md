@@ -19,7 +19,7 @@ cargo install --locked --force --path crates/branchyard-cli    # add --features 
 by --version
 ```
 
-`--force` makes cargo replace the installed `by` even though the version number is the same. Until the first release, `by --version` reads `by 0.0.1` for every build, so `git log -1` in the clone says which revision you last built. When releases exist, you will re-run `install.sh` for the version you want ([distribution](distribution.md)).
+`--force` makes cargo replace the installed `by` even though the version number is the same. Between releases, `by --version` reads the same version for every build from a clone (`by 0.1.0-rc.1` now, the version the first release is prepared for), so `git log -1` in the clone says which revision you last built. When releases exist, you will re-run `install.sh` for the version you want ([distribution](distribution.md#installsh)).
 
 ## The store
 

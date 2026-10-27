@@ -1,0 +1,37 @@
+Branchyard @VERSION@: the `by` CLI and `branchyard-server` prebuilt for Linux (x86_64 and aarch64, static) and macOS (Apple silicon and Intel), with the Python SDK and the harness plugin.
+
+## Install
+
+```sh
+curl -fsSLO https://github.com/vamsiramakrishnan/branchyard/releases/download/v@VERSION@/install.sh
+less install.sh                      # read it
+sh install.sh --version @VERSION@    # ~/.local/bin/by and branchyard-server
+by --version                         # by @VERSION@
+```
+
+`install.sh` picks the archive for this machine, checks it against `SHA256SUMS`, installs nothing on a mismatch and never calls `sudo`; `--prefix DIR` installs into `DIR/bin`. By hand: download `branchyard-@VERSION@-<target>.tar.gz` and `SHA256SUMS`, run `sha256sum -c --ignore-missing SHA256SUMS` (`shasum -a 256 -c --ignore-missing SHA256SUMS` on macOS), unpack, and put `by` on your `PATH`.
+
+## Check where a file came from
+
+```sh
+gh attestation verify branchyard-@VERSION@-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard
+```
+
+## Python SDK
+
+```sh
+pip install branchyard-@PYTHON_VERSION@-py3-none-any.whl
+```
+
+Standard library only, Python 3.9 or later: `branchyard` wraps `by --json` inside a harness, `branchyard_client` speaks to `by serve`.
+
+## Also attached
+
+| File | What it is |
+|---|---|
+| `branchyard-plugin-@VERSION@.zip` | The harness plugin: both skills, the slash commands, the hooks and every host's manifest |
+| `branchyard-skill-@VERSION@.zip`, `branchyard-setup-skill-@VERSION@.zip` | The delegate and setup skills alone |
+| `branchyard-sdk-@VERSION@.zip`, `branchyard-@PYTHON_VERSION@.tar.gz` | The Python SDK's source |
+| `branchyard.rb` | A Homebrew formula for a tap of your own |
+
+See [docs/distribution.md](https://github.com/vamsiramakrishnan/branchyard/blob/v@VERSION@/docs/distribution.md).
