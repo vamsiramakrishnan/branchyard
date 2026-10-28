@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "Serves Branchyard repositories over an authenticated HTTP JSON and SSE API"
 
@@ -68,3 +69,9 @@ branchyard-testkit = { path = "../branchyard-testkit" }
 blake3 = { workspace = true }
 branchyard-sync = { path = "../branchyard-sync", features = ["testing"] }
 tempfile = { workspace = true }
+
+# Binary distribution is independent of crates.io publication.
+[package.metadata.dist]
+dist = true
+include = ["../../LICENSE", "../../THIRD_PARTY.md", "../../packaging/licenses"]
+features = ["postgres"]

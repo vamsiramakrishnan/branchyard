@@ -45,6 +45,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::builder::styling::Style;
@@ -2927,6 +2928,15 @@ impl Flags for InitFlags {
 /// `by setup`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetupFlags {
+    /// Guide repository selection, compute setup and readiness checks
+    #[arg(long)]
+    pub guided: bool,
+    /// Bring configured prerequisites up and include their readiness in the result
+    #[arg(long)]
+    pub up: bool,
+    /// Set up this repository instead of the current directory
+    #[arg(long, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
     /// Take every default and ask nothing (the only way to write without a terminal)
     #[arg(long)]
     pub yes: bool,
@@ -7842,6 +7852,9 @@ mod tests {
             ["claude-code", "codex"]
         );
         assert!(setup("setup --no-hooks").no_hooks);
+        let guided = setup("setup --guided --up --directory /example/project");
+        assert!(guided.guided && guided.up);
+        assert_eq!(guided.directory, Some(PathBuf::from("/example/project")));
         // Naming harnesses and installing none contradict.
         let error = parse_str("setup --harness codex --no-hooks").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{error}");
@@ -7870,6 +7883,9 @@ mod tests {
             "--harness <ID>",
             "--no-hooks",
             "--no-config",
+            "--guided",
+            "--up",
+            "--directory <PATH>",
         ] {
             assert!(help.contains(word), "{word} missing from:\n{help}");
         }

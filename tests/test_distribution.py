@@ -8,6 +8,8 @@ import importlib.util
 import json
 import os
 import re
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -430,76 +432,120 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    """`.github/workflows/release.yml`: prebuilt binaries, checksums and
-    provenance, only for a v* tag. Never run here; checked as text (and as
-    YAML when PyYAML is installed)."""
+    """Dist owns packaging; the generated workflow gates publication on native smoke."""
 
     def setUp(self):
         self.text = (ROOT / ".github/workflows/release.yml").read_text()
+        self.config = tomllib.loads((ROOT / "dist-workspace.toml").read_text())
 
-    def test_it_runs_only_for_a_v_tag_push(self):
-        head = self.text.split("\npermissions:", 1)[0]
-        self.assertTrue(head.endswith("\non:\n  push:\n    tags: ['v*']"), head)
-        for trigger in ("pull_request", "workflow_dispatch", "schedule", "branches"):
-            self.assertNotIn(trigger, head)
-        try:
-            import yaml
-        except ImportError:
-            return
-        parsed = yaml.safe_load(self.text)
-        # PyYAML reads the key `on` as True.
-        self.assertEqual(parsed[True], {"push": {"tags": ["v*"]}})
-        self.assertEqual(set(parsed["jobs"]), {"build", "release", "image"})
+    def test_releases_are_tagged_and_smoke_tests_gate_publication(self):
+        self.assertIn("  push:\n    tags:", self.text)
+        self.assertNotIn("  pull_request:", self.text)
+        host = self.text.split("\n  host:\n", 1)[1].split("\n  custom-release-smoke:\n", 1)[0]
+        self.assertIn("      - custom-release-smoke", host)
+        self.assertIn("needs.custom-release-smoke.result == 'success'", host)
+        self.assertIn("uses: ./.github/workflows/release-smoke.yml", self.text)
+        self.assertIn("uses: ./.github/workflows/agy-image.yml", self.text)
 
-    def test_every_action_is_pinned_to_a_commit(self):
-        uses = re.findall(r"uses:\s*(\S+)", self.text)
-        self.assertTrue(uses)
-        for use in uses:
-            self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+    def test_actions_are_pinned_and_generated_configuration_is_reproducible(self):
+        for path in ["release.yml", "release-smoke.yml", "release-extras.yml"]:
+            text = (ROOT / ".github/workflows" / path).read_text()
+            for use in re.findall(r"uses:\s*(\S+)", text):
+                if not use.startswith("./"):
+                    self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
+        spec = importlib.util.spec_from_file_location("release_workflow", ROOT / "tools/release_workflow.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.require_smoke(self.text), self.text)
+        checked = subprocess.run(
+            [sys.executable, str(ROOT / "tools/release_workflow.py"), "--check"], capture_output=True, text=True
+        )
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        unguarded = self.text.replace(" && needs.custom-release-smoke.result == 'success'", "")
+        self.assertEqual(module.require_smoke(unguarded), self.text)
+        with self.assertRaises(ValueError):
+            module.require_smoke("no generated host job")
 
-    def test_it_builds_four_targets_with_checksums_and_attestations(self):
-        for target in (
-            "x86_64-unknown-linux-musl",
-            "aarch64-unknown-linux-musl",
-            "aarch64-apple-darwin",
-            "x86_64-apple-darwin",
-        ):
-            self.assertIn(f"target: {target}", self.text)
-        self.assertIn("-p branchyard-cli -p branchyard-server", self.text)
-        self.assertIn("statically linked", self.text)
-        self.assertIn("shasum -a 256", self.text)
-        self.assertIn("SHA256SUMS", self.text)
-        self.assertEqual(self.text.count("actions/attest-build-provenance@"), 2)
-        self.assertIn("id-token: write", self.text)
-        self.assertIn("attestations: write", self.text)
-        self.assertIn("--draft --verify-tag", self.text)
-        self.assertIn("docker build -f deploy/Dockerfile.harnesses", self.text)
-        self.assertIn("if: vars.PUBLISH_IMAGES == 'true'", self.text)
+    def test_portable_and_native_artifacts_have_dist_owned_targets_and_resources(self):
+        self.assertEqual(self.config["dist"]["cargo-dist-version"], "0.33.1")
+        self.assertEqual(
+            set(self.config["dist"]["targets"]),
+            {
+                "x86_64-unknown-linux-musl",
+                "aarch64-unknown-linux-musl",
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+            },
+        )
+        runtime = tomllib.loads((ROOT / "packaging/runtime/dist.toml").read_text())
+        self.assertEqual(set(runtime["package"]["binaries"]), {"by", "branchyard-server", "branchyard-bridge"})
+        self.assertEqual(
+            runtime["package"]["version"],
+            tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"],
+        )
+        self.assertEqual(set(runtime["dist"]["targets"]), {"x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"})
+        for source, packaged in [
+            ("vendor/orca/LICENSE", "orca-LICENSE"),
+            ("vendor/emdash/LICENSE.md", "emdash-LICENSE.md"),
+        ]:
+            self.assertEqual((ROOT / source).read_bytes(), (ROOT / "packaging/licenses" / packaged).read_bytes())
+        cli = tomllib.loads((ROOT / "crates/branchyard-cli/Cargo.toml").read_text())["package"]["metadata"]["dist"]
+        for name in [
+            "cloud_setup.py",
+            "compute_gce.py",
+            "substrate_gke.py",
+            "Dockerfile.substrate",
+            "substrate-entrypoint.sh",
+        ]:
+            self.assertTrue(any(path.endswith("/" + name) for path in cli["include"]), name)
 
 
 def _fake_release(directory, version, target, by_text="#!/bin/sh\necho 'by 9.9.9'\n"):
-    name = f"branchyard-{version}-{target}"
-    stage = directory / "stage" / name
-    (stage / "licenses").mkdir(parents=True)
-    for binary, text in (("by", by_text), ("branchyard-server", "#!/bin/sh\nexit 0\n")):
-        (stage / binary).write_text(text)
-        (stage / binary).chmod(0o755)
-    for extra in ("LICENSE", "THIRD_PARTY.md", "README.md"):
-        (stage / extra).write_text(extra)
-    (stage / "licenses" / "orca-LICENSE").write_text("MIT")
-    release = directory / "release"
-    release.mkdir(exist_ok=True)
-    archive = release / f"{name}.tar.gz"
-    subprocess.run(["tar", "-C", str(stage.parent), "-czf", str(archive), name], check=True)
+    """Create dist-shaped archives and checksum-checking generated installer fixtures."""
     import hashlib
 
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release / "SHA256SUMS").write_text(f"{digest}  {archive.name}\n")
+    release = directory / "release"
+    release.mkdir(exist_ok=True)
+    packages = {
+        "branchyard-cli": {"by": by_text},
+        "branchyard-server": {"branchyard-server": "#!/bin/sh\nexit 0\n"},
+        "branchyard-bridge": {"branchyard-bridge": "#!/bin/sh\nexit 0\n"},
+        "branchyard-runtime": {
+            "by": by_text,
+            "branchyard-server": "#!/bin/sh\nexit 0\n",
+            "branchyard-bridge": "#!/bin/sh\nexit 0\n",
+        },
+    }
+    for package_name, binaries in packages.items():
+        name = f"{package_name}-{target}"
+        stage = directory / "stage" / name
+        stage.mkdir(parents=True, exist_ok=True)
+        for binary, text in binaries.items():
+            (stage / binary).write_text(text)
+            (stage / binary).chmod(0o755)
+        archive = release / f"{name}.tar.gz"
+        subprocess.run(["tar", "-C", str(stage.parent), "-czf", str(archive), name], check=True)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        installer = release / f"{package_name}-installer.sh"
+        installer.write_text(
+            "#!/bin/sh\nset -eu\n"
+            f'APP_VERSION="{version}"\n'
+            "work=$(mktemp -d)\ntrap 'rm -rf \"$work\"' EXIT\n"
+            'case "$INSTALLER_DOWNLOAD_URL" in\n'
+            f'file://*) cp "${{INSTALLER_DOWNLOAD_URL#file://}}/{archive.name}" "$work/archive" ;;\n'
+            f'*) curl -fsSL "$INSTALLER_DOWNLOAD_URL/{archive.name}" -o "$work/archive" ;;\n'
+            "esac\n"
+            "actual=$(sha256sum \"$work/archive\" | awk '{print $1}')\n"
+            f'[ "$actual" = "{digest}" ] || {{ echo "checksum mismatch" >&2; exit 1; }}\n'
+            'tar -xzf "$work/archive" -C "$work"\n'
+            'mkdir -p "$CARGO_DIST_FORCE_INSTALL_DIR"\n'
+            + "".join(f'cp "$work/{name}/{binary}" "$CARGO_DIST_FORCE_INSTALL_DIR/{binary}"\n' for binary in binaries)
+        )
     return release
 
 
 class InstallScriptTests(unittest.TestCase):
-    """`install.sh` against a local file:// "release", in a temporary prefix."""
+    """The bootstrap delegates to dist installers, including mirrors and terminal handoff."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -507,60 +553,179 @@ class InstallScriptTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.target = "x86_64-unknown-linux-musl"
         self.release = _fake_release(self.root, "1.2.3", self.target)
-        self.prefix = self.root / "prefix"
+        self.prefix = self.root / "prefix with spaces"
 
     def run_install(self, *args):
         return subprocess.run(
-            ["sh", str(ROOT / "install.sh"), "--target", self.target, *args],
+            ["sh", str(ROOT / "install.sh"), *args],
             capture_output=True,
             text=True,
             env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+            timeout=30,
         )
 
     def test_it_is_posix_sh(self):
         self.assertEqual(subprocess.run(["sh", "-n", str(ROOT / "install.sh")]).returncode, 0)
-        text = (ROOT / "install.sh").read_text()
-        self.assertTrue(text.startswith("#!/bin/sh\n"))
-        self.assertNotIn("sudo ", text.replace("never calls sudo", ""))
-        self.assertNotIn("[[", text)
+        self.assertNotIn("sudo ", (ROOT / "install.sh").read_text())
+        self.assertNotIn("[[", (ROOT / "install.sh").read_text())
 
-    def test_installs_after_verifying_the_checksum(self):
-        out = self.run_install(
-            "--version", "v1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.release}"
+    def test_installs_three_binaries_and_reinstall_replaces(self):
+        args = ["--version", "v1.2.3", "--prefix", str(self.prefix), "--base-url", self.release.as_uri(), "--no-setup"]
+        out = self.run_install(*args)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("Installed by 9.9.9", out.stdout)
+        for binary in ("by", "branchyard-server", "branchyard-bridge"):
+            self.assertEqual(stat.S_IMODE((self.prefix / "bin" / binary).stat().st_mode), 0o755)
+        self.assertEqual(self.run_install(*args).returncode, 0)
+        relative = os.path.relpath(self.release, ROOT)
+        mirrored = self.run_install(
+            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", relative, "--no-setup"
         )
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("installed by 9.9.9 into", out.stdout)
-        for binary in ("by", "branchyard-server"):
-            path = self.prefix / "bin" / binary
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
-        self.assertTrue((self.prefix / "share/branchyard/licenses/orca-LICENSE").is_file())
-        # A plain directory works too, and installing again replaces.
-        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", str(self.release))
-        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(mirrored.returncode, 0, mirrored.stderr)
 
     def test_a_tampered_archive_installs_nothing(self):
-        sums = self.release / "SHA256SUMS"
-        sums.write_text("0" * 64 + sums.read_text()[64:])
-        out = self.run_install(
-            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.release}"
-        )
+        archive = self.release / f"branchyard-cli-{self.target}.tar.gz"
+        with archive.open("ab") as stream:
+            stream.write(b"tampered")
+        out = self.run_install("--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", self.release.as_uri())
         self.assertNotEqual(out.returncode, 0)
         self.assertIn("checksum mismatch", out.stderr)
-        self.assertFalse((self.prefix / "bin" / "by").exists())
+        self.assertFalse((self.prefix / "bin/by").exists())
 
-    def test_it_refuses_what_it_cannot_do_safely(self):
-        out = self.run_install("--prefix", str(self.prefix))
-        self.assertIn("--version", out.stderr)
-        out = self.run_install("--version", "1.2.3", "--base-url", "http://example.invalid/r")
-        self.assertIn("refusing plain http", out.stderr)
-        out = self.run_install(
-            "--version", "1.2.3", "--prefix", str(self.prefix), "--base-url", f"file://{self.root}/nowhere"
-        )
+    def test_an_installed_binary_that_cannot_start_is_reported(self):
+        _fake_release(self.root, "1.2.3", self.target, "#!/bin/sh\nexit 13\n")
+        out = self.run_install("--prefix", str(self.prefix), "--base-url", self.release.as_uri(), "--no-setup")
         self.assertNotEqual(out.returncode, 0)
+        self.assertIn("installed by could not execute", out.stderr)
+
+    def test_latest_uses_installer_version_and_pins_remaining_downloads(self):
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        curl = fake_bin / "curl"
+        curl.write_text(
+            "#!/bin/sh\nset -eu\nurl=\nout=\n"
+            'while [ "$#" -gt 0 ]; do\n'
+            'case "$1" in -o) out=$2; shift 2 ;; https://*) url=$1; shift ;; *) shift ;; esac\ndone\n'
+            'printf "%s\\n" "$url" >> "$HOME/downloads"\n'
+            f'cp "{self.release}/' + '${url##*/}" "$out"\n'
+        )
+        curl.chmod(0o755)
+        out = subprocess.run(
+            ["sh", str(ROOT / "install.sh"), "--prefix", str(self.prefix), "--no-setup"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "HOME": str(self.root)},
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        downloads = (self.root / "downloads").read_text().splitlines()
+        self.assertIn("/releases/latest/download/branchyard-cli-installer.sh", downloads[0])
+        self.assertTrue(all("/download/v1.2.3/" in url for url in downloads[1:]), downloads)
+        self.assertNotIn("different release", out.stderr)
+
+    def test_explicit_headless_setup_and_runtime_flavor(self):
+        by = (
+            '#!/bin/sh\nif [ "$1" = --version ]; then echo "by 9.9.9"; '
+            'else printf "%s\\n" "$*" > "$HOME/setup-arguments"; fi\n'
+        )
+        _fake_release(self.root, "1.2.3", self.target, by)
+        out = self.run_install(
+            "--prefix", str(self.prefix), "--base-url", str(self.release), "--setup", "--yes", "--runtime"
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual((self.root / "setup-arguments").read_text().strip(), "setup --yes --up")
+
+    def test_setup_failure_is_returned_and_no_terminal_has_a_remedy(self):
+        by = '#!/bin/sh\nif [ "$1" = --version ]; then echo "by 9.9.9"; else exit 17; fi\n'
+        _fake_release(self.root, "1.2.3", self.target, by)
+        out = self.run_install("--prefix", str(self.prefix), "--base-url", self.release.as_uri(), "--setup", "--yes")
+        self.assertEqual(out.returncode, 17)
+        out = self.run_install("--prefix", str(self.prefix), "--base-url", self.release.as_uri(), "--setup")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("guided setup needs a terminal", out.stderr)
+        self.assertIn("installed successfully", out.stderr)
+
+    @unittest.skipUnless(
+        sys.platform.startswith("linux") and shutil.which("script"),
+        "util-linux script provides the controlling terminal",
+    )
+    def test_piped_installer_hands_setup_a_real_terminal(self):
+        by = (
+            '#!/bin/sh\nif [ "$1" = --version ]; then echo "by 9.9.9"; exit 0; fi\n'
+            '[ -t 0 ] || exit 41\nprintf "Continue? "\n'
+            'IFS= read -r answer\n[ "$answer" = ready ] || exit 42\n'
+            'printf "%s\\n" "$*" > "$HOME/setup-arguments"\n'
+        )
+        _fake_release(self.root, "1.2.3", self.target, by)
+        command = (
+            shlex.join(["cat", str(ROOT / "install.sh")])
+            + " | "
+            + shlex.join(
+                [
+                    "sh",
+                    "-s",
+                    "--",
+                    "--setup",
+                    "--prefix",
+                    str(self.prefix),
+                    "--base-url",
+                    self.release.as_uri(),
+                ]
+            )
+        )
+        result = subprocess.run(
+            ["script", "-qec", command, "/dev/null"],
+            input="ready\n",
+            capture_output=True,
+            text=True,
+            env={"PATH": os.environ["PATH"], "HOME": str(self.root)},
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Continue?", result.stdout)
+        self.assertEqual((self.root / "setup-arguments").read_text().strip(), "setup --guided")
+
+    def test_it_refuses_invalid_sources_versions_and_dry_run_writes_nothing(self):
+        for args, message in [
+            (["--base-url", "http://example.invalid/r"], "refusing plain http"),
+            (["--version", "bad/version"], "version must"),
+            (["--prefix", "relative"], "absolute path"),
+            (["--base-url", self.release.as_uri(), "--version", "2.0.0"], "requested 2.0.0"),
+        ]:
+            self.assertIn(message, self.run_install(*args).stderr)
+        out = self.run_install("--dry-run", "--prefix", str(self.prefix))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("latest/download", out.stdout)
         self.assertFalse(self.prefix.exists())
         out = self.run_install("--version", "1.2.3", "--dry-run")
-        self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("would install branchyard-1.2.3-x86_64-unknown-linux-musl.tar.gz", out.stdout)
+        self.assertIn("/download/v1.2.3", out.stdout)
+
+
+class ReleaseAssetTests(unittest.TestCase):
+    def test_assets_use_actual_archive_hashes_and_keep_the_bootstrap(self):
+        import hashlib
+
+        spec = importlib.util.spec_from_file_location("release_assets", ROOT / "tools/release_assets.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for target in [
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "aarch64-unknown-linux-musl",
+                "x86_64-unknown-linux-musl",
+            ]:
+                release = _fake_release(root, "0.0.1", target)
+            bootstrap, sums, formula = module.build_assets(release, root / "output")
+            self.assertEqual(bootstrap.read_bytes(), (ROOT / "install.sh").read_bytes())
+            self.assertIn(hashlib.sha256(bootstrap.read_bytes()).hexdigest() + "  install.sh", sums.read_text())
+            self.assertIn("resource binary", formula.read_text())
+        for tool in ["release_assets.py", "release_smoke.py"]:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / tool), "--help"], capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class HomebrewFormulaTests(unittest.TestCase):
@@ -570,12 +735,16 @@ class HomebrewFormulaTests(unittest.TestCase):
         spec.loader.exec_module(self.module)
 
     def test_the_template_fills_from_sha256sums(self):
-        sums = "".join(f"{str(i) * 64}  branchyard-1.2.3-{t}.tar.gz\n" for i, t in enumerate(self.module.TARGETS))
+        sums = "".join(
+            f"{str(i) * 64}  {package}-{target}.tar.gz\n"
+            for i, target in enumerate(self.module.TARGETS)
+            for package in self.module.PACKAGES
+        )
         formula = self.module.render("1.2.3", sums)
         self.assertNotRegex(formula, r"@[A-Z0-9_]+@")
         self.assertIn('version "1.2.3"', formula)
         self.assertIn("releases/download/v1.2.3", formula)
-        self.assertIn('sha256 "' + "0" * 64 + '"', formula)
+        self.assertIn('"branchyard-cli" => "' + "0" * 64 + '"', formula)
         with self.assertRaisesRegex(ValueError, "lists no"):
             self.module.render("1.2.3", sums.splitlines()[0])
 

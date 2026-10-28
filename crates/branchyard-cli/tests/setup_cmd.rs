@@ -746,3 +746,168 @@ egress = { mode = "deny" }
         config
     );
 }
+
+#[test]
+fn guided_setup_requires_terminal_or_explicit_defaults_before_writing() {
+    let s = Setup::new();
+    let before = s.snapshot();
+    let result = s.by(&["setup", "--guided", "--json"]);
+    assert_eq!(result.status.code(), Some(1), "{}", text(&result));
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert!(report["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("needs a terminal"));
+    assert_eq!(s.snapshot(), before);
+}
+
+#[test]
+fn setup_directory_and_up_have_one_json_result_and_a_ready_exit() {
+    let mut s = Setup::new();
+    s.repo.set_env("ANTHROPIC_API_KEY", "setup-test-only-key");
+    let out = s.by(&[
+        "setup",
+        "--yes",
+        "--up",
+        "--no-hooks",
+        "--json",
+        "--directory",
+        s.repo.root.to_str().unwrap(),
+    ]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(report["ready"], true, "{report}");
+    assert_eq!(report["readiness"]["ready"], true);
+    assert!(report["readiness"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["name"] == "store"));
+    let again = s.by(&["setup", "--yes", "--up", "--no-hooks", "--json"]);
+    assert!(again.status.success(), "{}", text(&again));
+    let again: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(again["written"], serde_json::json!([]));
+    assert_eq!(again["ready"], true);
+}
+
+#[test]
+fn setup_up_reports_missing_credentials_in_one_json_result_and_exits_nonzero() {
+    let s = Setup::new();
+    let out = s.by(&["setup", "--yes", "--up", "--no-hooks", "--json"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ready"], false, "{report}");
+    assert_eq!(report["readiness"]["ready"], false);
+    assert!(report["readiness"]["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|step| step["name"] == "login.claude-code" && step["state"] == "needs_person"));
+    assert!(s.repo.root.join("branchyard.toml").exists());
+}
+
+#[test]
+fn guided_setup_initializes_an_explicit_project_and_prefers_agy() {
+    let s = Setup::new();
+    let agy = s.repo.dir.join("fakebin/agy");
+    fs::write(&agy, "#!/bin/sh\necho 'agy 1.4.8'\n").unwrap();
+    fs::set_permissions(&agy, fs::Permissions::from_mode(0o755)).unwrap();
+    let destination = s.repo.dir.join("new-project");
+    let out = s.by(&[
+        "setup",
+        "--guided",
+        "--yes",
+        "--no-hooks",
+        "--json",
+        "--directory",
+        destination.to_str().unwrap(),
+    ]);
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(destination.join(".git").exists(), "{}", text(&out));
+    let config = fs::read_to_string(destination.join("branchyard.toml")).unwrap();
+    assert!(config.contains("harness = \"antigravity\""), "{config}");
+    assert_eq!(
+        report["ready"], false,
+        "credentials were not configured: {report}"
+    );
+    assert!(!s.repo.root.join("branchyard.toml").exists());
+}
+
+#[test]
+fn guided_dry_run_never_initializes_an_unselected_directory() {
+    let s = Setup::new();
+    let before = s.snapshot();
+    let out = s.by(&["setup", "--guided", "--dry-run", "--json", "--no-hooks"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["dry_run"], true);
+    assert!(report.get("readiness").is_none());
+    assert_eq!(s.snapshot(), before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cancelling_guided_compute_selection_writes_no_configuration() {
+    let s = Setup::new();
+    let driver = r#"
+import os, pty, select, signal, sys, time
+pid, master = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], 'setup', '--guided', '--no-hooks'])
+output = bytearray()
+end = time.monotonic() + 30
+cancelled = False
+try:
+    while time.monotonic() < end:
+        ready, _, _ = select.select([master], [], [], max(0, end - time.monotonic()))
+        if not ready:
+            raise RuntimeError('guided prompt timed out')
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output.extend(chunk)
+        if not cancelled and b'Where should agent tasks run?' in output:
+            os.write(master, b'\x03')
+            cancelled = True
+    else:
+        raise RuntimeError('guided cancellation timed out')
+finally:
+    os.close(master)
+    if not cancelled:
+        os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+sys.stdout.buffer.write(output)
+assert cancelled, 'compute prompt not reached'
+"#;
+    let out = s
+        .repo
+        .command("python3")
+        .args(["-c", driver, env!("CARGO_BIN_EXE_by")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(stdout(&out).contains("Where should agent tasks run?"));
+    assert!(!s.repo.root.join("branchyard.toml").exists());
+}
+
+#[test]
+fn existing_remote_setup_does_not_require_workstation_logins() {
+    let s = Setup::new();
+    let config =
+        "[defaults]\nharness = \"antigravity\"\n[remote]\nurl = \"ssh://worker/project\"\n";
+    fs::write(s.repo.root.join("branchyard.toml"), config).unwrap();
+    let report = s.json(&["setup", "--yes", "--json", "--no-hooks"]);
+    assert_eq!(report["next"], "by setup --up");
+    assert!(!report["todo"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "login" || item["kind"] == "install"));
+    assert_eq!(
+        fs::read_to_string(s.repo.root.join("branchyard.toml")).unwrap(),
+        config
+    );
+}

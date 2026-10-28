@@ -238,6 +238,7 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
         ];
         if (facts.platform.kvm && facts.build.microsandbox)
             || d.provider == Some(ProviderKind::Microsandbox)
+            || text(answers, "remote").as_deref() == Some("server")
         {
             providers.push(Choice::new(
                 "microsandbox",
@@ -453,39 +454,46 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             ),
         ])
         .rule(Rule::Url {
-            schemes: vec!["http".into(), "https".into()],
+            schemes: vec!["http".into(), "https".into(), "ssh".into()],
         })
         .when(Condition::equals("remote", "server")),
     );
-    qs.push(
-        Question::new(
-            "remote.token_file",
-            Kind::Path,
-            "Token file",
-            "Which file holds your bearer token?",
-            "--token-file: the token stays in that file; only its path is stored.",
-        )
-        .default(
+    let ssh_remote = text(answers, "remote.url").is_some_and(|url| url.starts_with("ssh://"));
+    let mut token_question = Question::new(
+        "remote.token_file",
+        Kind::Path,
+        "Token file",
+        "Which file holds your bearer token?",
+        "--token-file: the token stays in that file; only its path is stored.",
+    )
+    .default(if ssh_remote {
+        Value::Null
+    } else {
+        Value::from(
             current
                 .remote
                 .token_file
                 .clone()
                 .unwrap_or_else(|| ".branchyard/server/token".into()),
         )
-        .choices(vec![
-            Choice::new(
-                ".branchyard/server/token",
-                "by serve's token",
-                "what by serve creates by default",
-            ),
-            Choice::new(
-                ".branchyard/tokens/admin.token",
-                "by init server's",
-                "the admin token by init server writes",
-            ),
-        ])
-        .when(Condition::equals("remote", "server")),
-    );
+    })
+    .choices(vec![
+        Choice::new(
+            ".branchyard/server/token",
+            "by serve's token",
+            "what by serve creates by default",
+        ),
+        Choice::new(
+            ".branchyard/tokens/admin.token",
+            "by init server's",
+            "the admin token by init server writes",
+        ),
+    ])
+    .when(Condition::equals("remote", "server"));
+    if ssh_remote {
+        token_question = token_question.optional();
+    }
+    qs.push(token_question);
     qs.push(
         Question::new(
             "remote.ca_file",
@@ -1393,6 +1401,24 @@ mod tests {
     use crate::interview::resolve;
     use crate::probe::FakeProbe;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn remote_microsandbox_does_not_require_a_local_kvm_build() {
+        let mut facts = Facts::gather(&FakeProbe::typical());
+        facts.platform.kvm = false;
+        facts.build.microsandbox = false;
+        let answers = BTreeMap::from([
+            ("remote".into(), json!("server")),
+            ("remote.url".into(), json!("ssh://worker/project")),
+            ("provider".into(), json!("microsandbox")),
+            ("microsandbox.image".into(), json!("example.invalid/agy:1")),
+        ]);
+        let state = resolve(&|answers| questions(&facts, answers), &answers, true);
+        assert!(state.done(), "{state:?}");
+        assert_eq!(state.answers["provider"], "microsandbox");
+        assert_eq!(state.answers["remote"], "server");
+        assert!(state.answers["remote.token_file"].is_null());
+    }
 
     #[test]
     fn substrate_interview_saves_paths_and_requires_private_home_secrets() {

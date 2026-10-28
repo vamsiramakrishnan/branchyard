@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "The by command: delegate coding work to agent harnesses on git branches"
 
@@ -82,3 +83,9 @@ branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 tempfile = { workspace = true }
+
+# Binary distribution is independent of crates.io publication.
+[package.metadata.dist]
+dist = true
+include = ["../../LICENSE", "../../THIRD_PARTY.md", "../../packaging/licenses", "../../tools/cloud_setup.py", "../../tools/compute_gce.py", "../../tools/substrate_gke.py", "../../deploy/Dockerfile.substrate", "../../deploy/substrate-entrypoint.sh"]
+features = ["postgres"]

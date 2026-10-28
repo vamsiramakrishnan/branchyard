@@ -138,6 +138,9 @@ STEPS = (
     ),
     Step("test_install_ci_tool", "fast", (PY, "tests/test_install_ci_tool.py")),
     Step("test_substrate_gke", "fast", (PY, "tests/test_substrate_gke.py")),
+    Step("test_compute_gce", "fast", (PY, "tests/test_compute_gce.py")),
+    Step("test_cloud_setup", "fast", (PY, "tests/test_cloud_setup.py")),
+    Step("test_fetch_agy", "fast", (PY, "tests/test_fetch_agy.py")),
     Step("test_substrate_image", "fast", (PY, "tests/test_substrate_image.py")),
     Step("test_check_coverage", "fast", (PY, "tests/test_check_coverage.py")),
     # The controls job's Python gates, in its order.

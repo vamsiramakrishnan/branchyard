@@ -1,0 +1,12 @@
+[package]
+name = "branchyard-runtime"
+version = "0.0.1"
+repository = "https://github.com/vamsiramakrishnan/branchyard"
+license = "Apache-2.0"
+description = "Linux Branchyard runtime with Microsandbox support"
+binaries = ["by", "branchyard-server", "branchyard-bridge"]
+build-command = ["sh", "../../tools/release_runtime.sh"]
+
+[dist]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+include = ["../../LICENSE", "../../THIRD_PARTY.md", "../licenses"]

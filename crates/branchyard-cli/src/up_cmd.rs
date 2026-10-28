@@ -123,6 +123,13 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
              a person's command, run outside any branch"
         )));
     }
+    let plan = run(env, plan_only, yes, as_json)?;
+    report(env, &plan, as_json)
+}
+
+/// Compute and optionally apply readiness without writing its final report.
+/// Setup embeds this result in its own single structured response.
+pub(crate) fn run(env: &Env, plan_only: bool, yes: bool, as_json: bool) -> Result<Plan, Failure> {
     let yard = commands::open().map_err(|failure| match failure {
         // The fix, and where: not "`.` is not inside a git work tree".
         Failure::Sdk(branchyard::Error::NotARepository(_)) => Failure::Message(
@@ -149,7 +156,7 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
     }
     let mut plan = planned?;
     if plan_only {
-        return report(env, &plan, as_json);
+        return Ok(plan);
     }
     // On a terminal, each install the policy leaves to you is asked about.
     if interactive && !yes {
@@ -192,8 +199,7 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
             Err(_) => progress.error("Setup stopped; run by doctor, then rerun by up"),
         }
     }
-    let applied = result?;
-    report(env, &applied, as_json)
+    result.map_err(Failure::from)
 }
 
 /// Print the plan; exit 0 only when every step is ready.
@@ -219,7 +225,7 @@ fn tone(state: State) -> Tone {
 
 /// A table of the steps, what to do about each that is not ready, and a
 /// summary line.
-fn text(plan: &Plan, style: Style) -> String {
+pub(crate) fn text(plan: &Plan, style: Style) -> String {
     let columns = [
         Column {
             header: "STATE",

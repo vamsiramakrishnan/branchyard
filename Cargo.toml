@@ -30,6 +30,7 @@ resolver = "2"
 version = "0.0.1"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/vamsiramakrishnan/branchyard"
 publish = false
 rust-version = "1.94"
 
@@ -88,3 +89,9 @@ too_many_arguments = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# Optimized portable release artifacts built by dist.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = "symbols"

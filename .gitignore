@@ -27,3 +27,5 @@ __pycache__/
 # What `pip install ./sdk/python` leaves in the source tree
 sdk/python/build/
 sdk/python/*.egg-info/
+# Verified release image input downloaded by tools/fetch_agy.py.
+/agy

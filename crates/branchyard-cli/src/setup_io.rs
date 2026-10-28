@@ -73,7 +73,7 @@ pub(crate) fn which(program: &str) -> Option<PathBuf> {
 
 /// The first line a command prints, or `None` if it fails or takes longer
 /// than `timeout`. Its input is closed; nothing else is passed.
-fn first_line(
+pub(crate) fn first_line(
     program: &Path,
     args: &[&str],
     cwd: Option<&Path>,

@@ -1,0 +1,6 @@
+.git
+target
+dist
+.branchyard
+**/__pycache__
+**/*.pyc

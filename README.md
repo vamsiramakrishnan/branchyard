@@ -4,19 +4,17 @@
 
 `by` starts a task on a new git branch, in a worktree of its own, with the coding harness you choose: Claude Code, Codex, Gemini CLI and others. The harness works there while you do something else. You read the diff, and `by merge` runs your check on the exact merge before it moves your branch. A harness can delegate to child branches, several harnesses can attempt the same task, and a branch outlives the terminal that started it. The same engine is a Rust and Python SDK ([SDKs](docs/sdk.md)), and `by serve` offers it over HTTP.
 
-> **Status: early development.** Built and tested against fakes: the local engine, `by`, the server and the harness drivers (some also qualified against the real harness). Built but unqualified: the sandbox providers. Not built: the execution-node service. What has run, with dates: [docs/status.md](docs/status.md).
+> **Status: early development.** Tests include hermetic fixtures and dated live runtime and harness qualification. Read [the remote validation record](docs/remote-validation-2026-10-28.md) for the tested environments and remaining limits, and [status](docs/status.md) for the wider project.
 
 ## Install
 
-Build from source. It is the only path until the first release: there are no GitHub releases or tags yet.
+Install the released binaries and enter the guided setup:
 
 ```sh
-git clone https://github.com/vamsiramakrishnan/branchyard && cd branchyard
-cargo install --locked --path crates/branchyard-cli    # installs `by` into ~/.cargo/bin
-by --version
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --setup
 ```
 
-You need git and Rust 1.94.0, the version `rust-toolchain.toml` pins; with rustup, `rustup toolchain install` in the clone fetches it. Prebuilt binaries and `install.sh` will come with the first release ([distribution](docs/distribution.md)).
+The installer downloads verified prebuilt binaries and starts the guided setup. No Rust toolchain or source checkout is needed. Use `--no-setup` for binaries alone and `--version VERSION` to pin a release. Linux hosts that need local Microsandbox support use `--runtime`; [distribution](docs/distribution.md) describes the native prerequisites and source-build alternative.
 
 ## Start here
 
