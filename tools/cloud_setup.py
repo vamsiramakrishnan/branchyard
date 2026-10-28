@@ -526,6 +526,8 @@ def validate(args: argparse.Namespace) -> None:
                     "repo",
                     "version",
                     "forward_secret",
+                    "tunnel_through_iap",
+                    "internal_ip",
                 )
             )
         ):
@@ -569,6 +571,10 @@ def validate(args: argparse.Namespace) -> None:
         raise gke.SetupError("by executable must name one installed program")
     if args.forward_secret and args.kind != "gce":
         raise gke.SetupError("secret forwarding is available only for the selected GCE worker")
+    if args.tunnel_through_iap and args.kind != "gce":
+        raise gke.SetupError("IAP SSH transport is available only for a GCE worker")
+    if args.internal_ip and args.kind != "gce":
+        raise gke.SetupError("private SSH transport is available only for a GCE worker")
     if args.forward_secret and args.forward_secret not in {"GEMINI_API_KEY", "GOOGLE_API_KEY"}:
         raise gke.SetupError("forward-secret must name GEMINI_API_KEY or GOOGLE_API_KEY, never its value")
 
@@ -662,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
     for field in ("kind", "project", "zone", "name", "service-account", "runtime", "repo", "version"):
         parser.add_argument(f"--{field}")
     parser.add_argument("--forward-secret")
+    parser.add_argument("--tunnel-through-iap", action="store_true")
+    parser.add_argument("--internal-ip", action="store_true")
     parser.add_argument("--by", default=os.environ.get("BRANCHYARD_SETUP_BY", "by"))
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)
@@ -692,6 +700,26 @@ def main(argv: list[str] | None = None) -> int:
                         "state": str(state),
                         "billing": "resources remain billable until deleted",
                         "forward_secret": args.forward_secret,
+                        "ssh_transport": "iap"
+                        if args.tunnel_through_iap
+                        else "private"
+                        if args.internal_ip
+                        else "direct"
+                        if args.kind == "gce"
+                        else None,
+                        "external_ip": not args.internal_ip if args.kind == "gce" else None,
+                        "private_route_required": args.kind == "gce"
+                        and args.internal_ip
+                        and not args.tunnel_through_iap,
+                        "outbound_access_required": args.kind == "gce" and args.internal_ip,
+                        "iap_live_qualification": "not_qualified" if args.tunnel_through_iap else None,
+                        "iap_firewall": {
+                            "source_range": "35.235.240.0/20",
+                            "allow": "tcp:22",
+                            "target": "only this deployment's dedicated VM tag",
+                        }
+                        if args.tunnel_through_iap
+                        else None,
                         "model": "not called",
                     },
                     indent=2,
@@ -733,6 +761,10 @@ def main(argv: list[str] | None = None) -> int:
                 command_args.extend(["--service-account", args.service_account])
             if args.forward_secret:
                 command_args.extend(["--forward-secret", args.forward_secret])
+            if args.tunnel_through_iap:
+                command_args.append("--tunnel-through-iap")
+            if args.internal_ip:
+                command_args.append("--internal-ip")
             deployment = json.loads(command(command_args, timeout=1800))
             if not isinstance(deployment, dict) or not isinstance(deployment.get("remote"), str):
                 raise gke.SetupError("GCE helper returned no native SSH deployment URL")

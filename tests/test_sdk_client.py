@@ -1779,9 +1779,16 @@ class LocalMode(ServerCase):
                 message = raised.exception.message
                 self.assertIn("could not run by", message)
                 self.assertIn("`by` is not on PATH (or set BRANCHYARD_BY)", message)
-                self.assertIn("to fix: install it with `cargo install --locked --path crates/branchyard-cli`", message)
-                self.assertIn("no release is published yet", message)
-                self.assertTrue(message.endswith("(no release is published yet)"), message)
+                self.assertIn("to fix: install released binaries with `curl -fsSL", message)
+                self.assertIn(
+                    "https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh "
+                    "| sh -s -- --no-setup`",
+                    message,
+                )
+                self.assertIn(
+                    "or build from a checkout with `cargo install --locked --path crates/branchyard-cli`", message
+                )
+                self.assertNotIn("no release is published yet", message)
         # A path that does not exist is not a `by` that is missing from PATH.
         with self.assertRaises(bc.LocalError) as raised:
             bc.Local(str(self.root), by=str(self.root / "no-such-by")).doctor()

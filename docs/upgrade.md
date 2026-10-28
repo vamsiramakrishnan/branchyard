@@ -6,11 +6,20 @@ What to do when a newer Branchyard arrives, and the one step you cannot take bac
 
 1. Let running branches finish or stop them (`by ls`, `by cancel NAME`). A turn belongs to the engine process that started it; stopping first leaves none to be recovered.
 2. Back up the store if you might return to the older `by`. It is one SQLite file in WAL mode, `.branchyard/state.db`. With no `by` command running, copy it with any `-wal` and `-shm` files beside it, or use `sqlite3 .branchyard/state.db ".backup state.db.bak"`. The work itself is in git (the `by/NAME` branches and the `refs/branchyard/` checkpoints), so a clone or a git backup of the repository covers that. The user-level files are in `~/.config/branchyard/` (your `config.toml`, workspace trust records, the harness inventory).
-3. Note how you built `by`. A rebuild without the same `--features` (`postgres`, `microsandbox`) drops them.
+3. Keep the same installation mode. Add `--runtime` again if you used the runtime installer. For a source build, keep the same `--features` (`postgres`, `microsandbox`).
 
 ## The binary
 
-No release is published yet, so upgrading is rebuilding from source:
+Update the released binaries while retaining project configuration:
+
+```sh
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --no-setup
+by --version
+```
+
+Add `--version X.Y.Z` to pin a release and `--runtime` to retain Microsandbox build support. See [distribution](distribution.md#install-by) for supported platforms and runtime prerequisites.
+
+For a source installation, rebuild from your checkout:
 
 ```sh
 cd branchyard
@@ -19,7 +28,7 @@ cargo install --locked --force --path crates/branchyard-cli    # add --features 
 by --version
 ```
 
-`--force` replaces a source installation even when its version number is unchanged. For a binary installation, rerun the single-command installer with `--no-setup` to update the binaries and retain project configuration. Add `--version X.Y.Z` to pin a release and `--runtime` to retain Microsandbox build support. See [distribution](distribution.md#install-by) for the installer and platform requirements.
+`--force` replaces a source installation even when its version number is unchanged.
 
 Between source releases, `by --version` keeps the workspace version, so `git log -1` in the clone identifies the exact source revision.
 

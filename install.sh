@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install Branchyard's verified prebuilt binaries and start guided setup.
 #   curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --setup
-#   sh install.sh --version 0.1.0 --prefix "$HOME/.local" --no-setup
+#   sh install.sh --version 0.1.1 --prefix "$HOME/.local" --no-setup
 set -eu
 
 repo=vamsiramakrishnan/branchyard

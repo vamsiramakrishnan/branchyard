@@ -1082,6 +1082,175 @@ assert cancelled, 'compute prompt not reached'
 }
 
 #[test]
+fn compute_gce_plans_offline_without_writing_cloud_or_ssh_state() {
+    let s = Setup::new();
+    fs::write(
+        s.repo.root.join("branchyard.toml"),
+        "[remote]\nurl = \"ssh://saved-worker/project\"\n",
+    )
+    .unwrap();
+    let before = s.snapshot();
+    let args = [
+        "compute",
+        "gce",
+        "--project",
+        "test-project",
+        "--zone",
+        "us-central1-a",
+        "--name",
+        "test-worker",
+        "--directory",
+        ".",
+        "--internal-ip",
+        "--forward-secret",
+        "GEMINI_API_KEY",
+    ];
+    for iap in [false, true] {
+        let extra: &[&str] = if iap { &["--tunnel-through-iap"] } else { &[] };
+        let out = s.by(&[&args[..], extra].concat());
+        assert!(out.status.success(), "{}", text(&out));
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["mode"], "plan");
+        assert_eq!(value["target"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(value["target"]["internal_ip"], true);
+        assert_eq!(value["target"]["tunnel_through_iap"], iap);
+        assert_eq!(value["target"]["forward_secret"], "GEMINI_API_KEY");
+        assert_eq!(value["iap_firewall"].is_object(), iap);
+        assert_eq!(s.snapshot(), before);
+    }
+}
+
+#[test]
+fn compute_gce_refuses_harness_and_remote_context_before_provisioning() {
+    let mut s = Setup::new();
+    let args = [
+        "compute",
+        "gce",
+        "--project",
+        "test-project",
+        "--zone",
+        "us-central1-a",
+        "--name",
+        "test-worker",
+        "--apply",
+    ];
+    let before = s.snapshot();
+    let out = s.by(&[&["--remote", "https://example.invalid"][..], &args[..]].concat());
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("takes no --remote"), "{}", text(&out));
+    s.repo.set_env("BRANCHYARD_BRANCH", "team-lead");
+    let out = s.by(&args);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    assert!(
+        text(&out).contains("cannot provision cloud resources"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.snapshot(), before);
+}
+
+#[test]
+fn compute_gce_explains_an_old_python_before_running_the_helper() {
+    let s = Setup::new();
+    let python = s.repo.dir.join("fakebin/python3");
+    fs::write(&python, "#!/bin/sh\nprintf 'old\\n'\n").unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+    let before = s.snapshot();
+    let out = s.by(&[
+        "compute",
+        "gce",
+        "--project",
+        "test-project",
+        "--zone",
+        "us-central1-a",
+        "--name",
+        "test-worker",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    assert!(
+        text(&out).contains("Python 3.10 or newer"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("install Python 3.10+ as python3"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(s.snapshot(), before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn guided_gce_reviews_the_iap_firewall_before_any_cloud_change() {
+    let s = Setup::new();
+    let driver = r#"
+import os, pty, select, signal, sys, time
+pid, master = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[1], [sys.argv[1], 'setup', '--guided', '--no-hooks'])
+steps = [
+    (b'Where should agent tasks run?', b'\x1b[B\x1b[B\x1b[B\x1b[B\r'),
+    (b'Google Cloud project', b'test-project\r'),
+    (b'Zone', b'\r'),
+    (b'Dedicated deployment name', b'\r'),
+    (b'Worker service account email', b'\r'),
+    (b'Worker execution', b'\r'),
+    (b'SSH connection to the worker', b'\x1b[B\x1b[B\r'),
+    (b'Create or resume these billable cloud resources?', b'\x03'),
+]
+output = bytearray()
+pending = bytearray()
+end = time.monotonic() + 30
+index = 0
+closed = False
+try:
+    while time.monotonic() < end:
+        ready, _, _ = select.select([master], [], [], max(0, end - time.monotonic()))
+        if not ready:
+            raise RuntimeError('guided GCE prompt timed out')
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            closed = True
+            break
+        if not chunk:
+            closed = True
+            break
+        output.extend(chunk)
+        pending.extend(chunk)
+        if index < len(steps) and steps[index][0] in pending:
+            os.write(master, steps[index][1])
+            index += 1
+            pending.clear()
+    else:
+        raise RuntimeError('guided GCE cancellation timed out')
+finally:
+    os.close(master)
+    if not closed:
+        os.kill(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+sys.stdout.buffer.write(output)
+assert index == len(steps), ('cloud resource review not reached', index)
+assert b'Google Cloud IAP' in output
+assert b'not live qualified' in output
+assert b'35.235.240.0/20' in output
+assert b'tcp:22' in output
+assert b'"ssh_transport": "iap"' in output
+"#;
+    let out = s
+        .repo
+        .command("python3")
+        .args(["-c", driver, env!("CARGO_BIN_EXE_by")])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!s.repo.root.join("branchyard.toml").exists());
+    assert!(!s.file(".ssh").exists());
+    assert!(!s.file(".local/state/branchyard/cloud").exists());
+}
+
+#[test]
 fn existing_remote_setup_does_not_require_workstation_logins() {
     let s = Setup::new();
     let config =

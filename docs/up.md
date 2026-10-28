@@ -31,6 +31,13 @@ or `GOOGLE_API_KEY`; `AGY_TOKEN` and a host login do not satisfy this check.
 Credential presence means a source is available, not that a model accepted it.
 Template inspection proves neither bridge execution nor model connectivity.
 
+For a new GCE worker, [`by setup --guided`](setup.md) reviews the VM and SSH
+transport before provisioning. `by compute gce --tunnel-through-iap` offers an
+offline JSON plan and explicit `--apply` for operators who supply the cloud
+settings themselves. IAP uses a dedicated TCP 22 firewall rule, shown in the
+plan. `by up` checks a saved connection; it does not create cloud VMs or change
+their firewall rules. See [GCE worker setup](compute-gce.md) for access and cleanup.
+
 For Microsandbox, `up` and `doctor` distinguish build support from host readiness.
 On Linux they check read/write access to `/dev/kvm`, with separate remedies for a
 missing device and a login missing the `kvm` group. This does not start or qualify

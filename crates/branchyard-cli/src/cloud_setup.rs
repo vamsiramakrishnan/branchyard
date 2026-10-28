@@ -7,8 +7,163 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::commands::{Env, Failure};
+use crate::args::Globals;
+use crate::commands::{self, Env, Failure, Outcome};
 use crate::errors::Report;
+
+/// Review or provision a dedicated cloud worker from the operator's machine.
+#[derive(Clone, Debug, PartialEq, clap::Subcommand)]
+pub enum Action {
+    /// Prepare a dedicated GCE worker for native SSH; prints an offline JSON plan by default
+    #[command(
+        after_help = "Examples:\n  by compute gce --project my-project --zone us-central1-a --name by-worker --directory . --tunnel-through-iap\n  # Review the JSON plan, then repeat with --apply.\n\nIAP opens TCP 22 only from 35.235.240.0/20 to this deployment's VM tag.\nIt requires your Google Cloud IAP tunnel permission. Add --internal-ip to omit\nthe VM's external address; package downloads then require existing outbound access.\nCalls no model. Resources remain billable until you delete them. See docs/compute-gce.md."
+    )]
+    Gce(Gce),
+}
+
+/// Settings forwarded to the release's packaged GCE provisioning helper.
+#[derive(Clone, Debug, PartialEq, clap::Args)]
+pub struct Gce {
+    /// Google Cloud project with billing and the Compute Engine API enabled
+    #[arg(long)]
+    project: String,
+    /// Zone for the dedicated worker, such as us-central1-a
+    #[arg(long)]
+    zone: String,
+    /// Dedicated VM name; reuse the same options to resume, never adopts a foreign VM
+    #[arg(long)]
+    name: String,
+    /// Copy this repository's clean committed HEAD; omitted creates an empty repository
+    #[arg(long, value_name = "PATH")]
+    directory: Option<PathBuf>,
+    /// Branchyard release to install; defaults to this CLI's version
+    #[arg(long, default_value = env!("CARGO_PKG_VERSION"))]
+    version: String,
+    /// Published worker image pinned by release tag or @sha256 digest; defaults to --version
+    #[arg(long, value_name = "PIN")]
+    image: Option<String>,
+    /// Worker execution: local processes or Microsandbox KVM guests
+    #[arg(long, value_parser = ["local", "microsandbox"], default_value = "local")]
+    backend: String,
+    /// VM machine type; Microsandbox needs n2-standard or c3-standard
+    #[arg(long, default_value = "n2-standard-4")]
+    machine_type: String,
+    /// Existing service account in this project; omitted attaches no account
+    #[arg(long, value_name = "EMAIL")]
+    service_account: Option<String>,
+    /// Existing VPC network; creates no network or NAT
+    #[arg(long, default_value = "default")]
+    network: String,
+    /// Existing subnet for the VM
+    #[arg(long, default_value = "default")]
+    subnet: String,
+    /// Balanced persistent disk size in GB
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(30..))]
+    disk_size: u32,
+    /// Omit the external IP; needs an existing private route or --tunnel-through-iap, plus outbound access
+    #[arg(long)]
+    internal_ip: bool,
+    /// SSH through Google Cloud IAP; allow TCP 22 from 35.235.240.0/20 only to this VM's dedicated tag
+    #[arg(long)]
+    tunnel_through_iap: bool,
+    /// Read this environment variable into the worker's private keystore over SSH stdin; never pass a key value
+    #[arg(long, value_name = "ENV_NAME", value_parser = ["GEMINI_API_KEY", "GOOGLE_API_KEY"])]
+    forward_secret: Option<String>,
+    /// Private deployment records; default is ~/.local/state/branchyard/compute-gce/PROJECT/ZONE/NAME
+    #[arg(long, value_name = "PATH")]
+    state_dir: Option<PathBuf>,
+    /// Create or resume the reviewed billable VM, firewall when using IAP, and owned SSH configuration
+    #[arg(long)]
+    apply: bool,
+}
+
+fn gce_command(args: &Gce) -> Command {
+    let mut command = Command::new("python3");
+    command
+        .args(["-c", include_str!("../../../tools/compute_gce.py")])
+        .args([
+            "--project",
+            &args.project,
+            "--zone",
+            &args.zone,
+            "--name",
+            &args.name,
+        ])
+        .args(["--version", &args.version, "--backend", &args.backend])
+        .args([
+            "--machine-type",
+            &args.machine_type,
+            "--network",
+            &args.network,
+            "--subnet",
+            &args.subnet,
+        ])
+        .arg("--disk-size")
+        .arg(args.disk_size.to_string())
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit());
+    for (flag, value) in [
+        ("--image", args.image.as_deref()),
+        ("--service-account", args.service_account.as_deref()),
+        ("--forward-secret", args.forward_secret.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.args([flag, value]);
+        }
+    }
+    for (flag, value) in [
+        ("--repo", args.directory.as_deref()),
+        ("--state-dir", args.state_dir.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.arg(flag).arg(value);
+        }
+    }
+    for (flag, selected) in [
+        ("--internal-ip", args.internal_ip),
+        ("--tunnel-through-iap", args.tunnel_through_iap),
+        ("--apply", args.apply),
+    ] {
+        if selected {
+            command.arg(flag);
+        }
+    }
+    command
+}
+
+/// Run the packaged cloud helper locally, outside a harness session.
+pub(crate) fn compute(globals: &Globals, action: &Action) -> Outcome {
+    if globals.remote.is_some() {
+        return Err(
+            Report::usage("by compute provisions from this machine; it takes no --remote")
+                .next("run by compute without --remote, and unset BRANCHYARD_REMOTE")
+                .into(),
+        );
+    }
+    if let Some(branch) = crate::workspace_cmd::in_harness() {
+        return Err(Report::new(
+            "denied",
+            format!("a harness running on branch {branch} cannot provision cloud resources"),
+        )
+        .next("run by compute in your own terminal, outside any branch")
+        .into());
+    }
+    let Action::Gce(args) = action;
+    python_ready()?;
+    let output = gce_command(args).output().map_err(|_| {
+        Report::new(
+            "tool_unavailable",
+            "could not start the packaged GCE helper",
+        )
+        .next("install Python 3.10+ as python3, then rerun the same by compute gce command")
+    })?;
+    if !output.status.success() {
+        return Err(Report::new("command_failed", "GCE setup stopped; no model was called")
+            .next("follow the reported remedy, inspect the private deployment state, and rerun the same command")
+            .into());
+    }
+    commands::print(&String::from_utf8_lossy(&output.stdout))
+}
 
 /// Cloud destination offered by the setup interview.
 #[derive(Clone, Copy)]
@@ -31,8 +186,7 @@ fn input(label: &str, initial: &str) -> Result<String, Failure> {
         .map_err(crate::wizard::cancelled)
 }
 
-/// Export this release's exact helpers into an atomic, versioned cache.
-fn resources() -> Result<PathBuf, Failure> {
+fn python_ready() -> Result<(), Failure> {
     let version = crate::setup_io::first_line(
         Path::new("python3"),
         &[
@@ -45,10 +199,16 @@ fn resources() -> Result<PathBuf, Failure> {
     if version.as_deref() != Some("ok") {
         return Err(
             Report::new("tool_unavailable", "cloud setup needs Python 3.10 or newer")
-                .next("install Python 3.10+ as python3, then rerun by setup --guided")
+                .next("install Python 3.10+ as python3, then rerun the same command")
                 .into(),
         );
     }
+    Ok(())
+}
+
+/// Export this release's exact helpers into an atomic, versioned cache.
+fn resources() -> Result<PathBuf, Failure> {
+    python_ready()?;
     let cache = dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .ok_or_else(|| {
@@ -287,6 +447,28 @@ pub(crate) fn guided(
             .interact()
             .map_err(crate::wizard::cancelled)?,
     };
+    let transport = match kind {
+        CloudKind::Gce => cliclack::select("SSH connection to the worker")
+            .initial_value("direct")
+            .item(
+                "direct",
+                "External IP",
+                "Requires your existing direct SSH ingress rule",
+            )
+            .item(
+                "private",
+                "Private IP",
+                "Requires your private VPC route and outbound package access",
+            )
+            .item(
+                "iap",
+                "Google Cloud IAP",
+                "Requires IAP IAM and permitted TCP 22 ingress; not live qualified",
+            )
+            .interact()
+            .map_err(crate::wizard::cancelled)?,
+        CloudKind::Gke => "direct",
+    };
     let cache = resources()?;
     let mut command = Command::new("python3");
     command
@@ -314,6 +496,11 @@ pub(crate) fn guided(
         .arg(std::env::current_exe()?)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit());
+    if transport == "iap" {
+        command.arg("--tunnel-through-iap");
+    } else if transport == "private" {
+        command.arg("--internal-ip");
+    }
     if matches!(kind, CloudKind::Gce) {
         if let Some(name) = ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
             .into_iter()
@@ -380,6 +567,58 @@ pub(crate) fn guided(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gce_arguments_keep_private_network_and_iap_independent() {
+        let parsed = crate::args::parse_from([
+            "by",
+            "compute",
+            "gce",
+            "--project",
+            "test-project",
+            "--zone",
+            "us-central1-a",
+            "--name",
+            "test-worker",
+            "--directory",
+            "/source with spaces",
+            "--state-dir",
+            "/private state",
+            "--internal-ip",
+            "--tunnel-through-iap",
+            "--forward-secret",
+            "GOOGLE_API_KEY",
+            "--apply",
+        ])
+        .unwrap();
+        let args = parsed
+            .command
+            .and_then(|command| match command {
+                crate::args::Command::Compute {
+                    action: Action::Gce(args),
+                } => Some(args),
+                _ => None,
+            })
+            .unwrap();
+        let command = gce_command(&args);
+        let argv = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(argv[0], "-c");
+        assert_eq!(argv[1], include_str!("../../../tools/compute_gce.py"));
+        for (flag, value) in [
+            ("--repo", "/source with spaces"),
+            ("--state-dir", "/private state"),
+            ("--forward-secret", "GOOGLE_API_KEY"),
+            ("--version", env!("CARGO_PKG_VERSION")),
+        ] {
+            assert!(argv.windows(2).any(|pair| pair == [flag, value]), "{flag}");
+        }
+        for flag in ["--internal-ip", "--tunnel-through-iap", "--apply"] {
+            assert!(argv.iter().any(|arg| arg == flag), "{flag}");
+        }
+    }
 
     #[test]
     fn unattended_cloud_setup_never_creates_resources() {

@@ -55,6 +55,7 @@ pub fn apply(
             | Command::Config { .. }
             | Command::Doctor { .. }
             | Command::Up { .. }
+            | Command::Compute { .. }
             | Command::Mcp { .. }
             | Command::Completions { .. }
             | Command::Man { .. }
