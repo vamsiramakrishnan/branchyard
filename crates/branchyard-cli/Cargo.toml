@@ -51,9 +51,9 @@ url = { workspace = true }
 hex = { workspace = true }
 # `by init`'s interactive wizard, and the setup engine it drives.
 cliclack = "0.5.6"
-branchyard-setup = { version = "0.1.0-rc.1", path = "../branchyard-setup" }
+branchyard-setup = { version = "0.1.0", path = "../branchyard-setup" }
 dirs = { workspace = true }
-branchyard-harness = { version = "0.1.0-rc.1", path = "../branchyard-harness" }
+branchyard-harness = { version = "0.1.0", path = "../branchyard-harness" }
 # `by harnesses --all` and `by connectors catalog`: the generated catalogs.
 branchyard-controls = { path = "../branchyard-controls" }
 schemars = { workspace = true, optional = true }

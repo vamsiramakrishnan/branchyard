@@ -523,9 +523,13 @@ class ReleaseVersionTests(unittest.TestCase):
                 for was, now in zip(before, after, strict=True):
                     if was != now:
                         self.assertTrue(old in was or release_version.pep440(old) in was, name)
-                        self.assertEqual(
-                            now, was.replace(old, "2.0.0-beta.3").replace(release_version.pep440(old), "2.0.0b3")
+                        python_version = release_version.TOML_FIELDS.get(name, (None, False))[1]
+                        expected = (
+                            was.replace(release_version.pep440(old), "2.0.0b3")
+                            if python_version
+                            else was.replace(old, "2.0.0-beta.3")
                         )
+                        self.assertEqual(now, expected)
             # The registry crates in Cargo.lock keep their versions.
             lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
             registry = [p for p in lock if "source" in p]

@@ -11,8 +11,8 @@ description = "Branchyard's configuration file, branchyard.toml: its types, stri
 workspace = true
 
 [dependencies]
-branchyard-harness = { version = "0.1.0-rc.1", path = "../branchyard-harness" }
-branchyard-provision = { version = "0.1.0-rc.1", path = "../branchyard-provision" }
+branchyard-harness = { version = "0.1.0", path = "../branchyard-harness" }
+branchyard-provision = { version = "0.1.0", path = "../branchyard-provision" }
 dirs = { workspace = true }
 glob = { workspace = true }
 hex = { workspace = true }

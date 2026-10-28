@@ -1,6 +1,6 @@
 [package]
 name = "branchyard-runtime"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 repository = "https://github.com/vamsiramakrishnan/branchyard"
 license = "Apache-2.0"
 description = "Linux Branchyard runtime with Microsandbox support"
