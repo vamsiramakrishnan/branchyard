@@ -116,19 +116,28 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
     let descendants = descendants?.unwrap_or_default();
     // Read again: the root's record gained its children during its turn.
     let root = branch.yard().branch(&branch.info().name)?;
-    print_rig_run(&plan.rig, root.info(), &descendants)
+    let view = ResultView::local(root.yard(), root.info())?;
+    print_rig_run(&plan.rig, root.info(), &descendants, view.as_ref())
 }
 
 /// `by rig run --json`'s result: the root and every branch below it, the
 /// same from a server.
-pub fn print_rig_run(rig: &str, root: &BranchInfo, descendants: &[BranchInfo]) -> Outcome {
+pub(crate) fn print_rig_run(
+    rig: &str,
+    root: &BranchInfo,
+    descendants: &[BranchInfo],
+    view: Option<&ResultView>,
+) -> Outcome {
     let value = serde_json::json!({
         "rig": rig,
-        "root": json::branch(root),
+        "root": view.map_or_else(|| json::branch(root), |view| view.json(root)),
         "descendants": descendants.iter().map(json::branch).collect::<Vec<_>>(),
     });
     print(&json::text(&value))?;
-    branch_outcome(root)
+    match view {
+        Some(view) => view.outcome(root),
+        None => branch_outcome(root),
+    }
 }
 
 /// A spec `by rig` cannot honor: the field, its line and why; with

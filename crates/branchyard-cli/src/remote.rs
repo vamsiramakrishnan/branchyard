@@ -807,21 +807,35 @@ pub fn fan_with_result(
 
 fn admit_result(task: &TaskArgs) -> Result<TaskArgs, Failure> {
     let contract = commands::result_for_task(task)?;
-    if contract
-        .as_ref()
-        .is_some_and(|contract| contract.is_deliverable())
-        && task.check.is_some()
-    {
-        return Err(Report::new("unsupported", "remote deliverable checks cannot be verified by this client")
-            .next("run the coordinator on the server host, or use a remote compute provider from a local coordinator")
-            .into());
-    }
+    admit_result_checks(contract.as_ref(), task.check.is_some())?;
     let mut task = task.clone();
     if let Some(contract) = contract {
         task.result_schema = Some(contract.schema.to_string());
         task.result_schema_file = None;
     }
     Ok(task)
+}
+
+fn admit_result_checks(contract: Option<&branchyard::ResultContract>, has_check: bool) -> Outcome {
+    if contract.is_some_and(|contract| contract.is_deliverable()) && has_check {
+        return Err(Report::new("unsupported", "remote deliverable checks cannot be verified by this client")
+            .next("run the coordinator on the server host, or use a remote compute provider from a local coordinator")
+            .into());
+    }
+    Ok(())
+}
+
+fn result_next(remote: &Remote, branch: &str) -> String {
+    let globals = remote
+        .args
+        .iter()
+        .map(|word| crate::args::shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "by {globals} inspect {} --json",
+        crate::args::shell_quote(branch)
+    )
 }
 
 fn finish_results(
@@ -872,16 +886,7 @@ fn finish_results(
         }
         for (info, view) in infos.iter().zip(&views) {
             if let Some(view) = view {
-                let globals = remote
-                    .args
-                    .iter()
-                    .map(|word| crate::args::shell_quote(word))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let next = format!(
-                    "by {globals} inspect {} --json",
-                    crate::args::shell_quote(&info.name)
-                );
+                let next = result_next(remote, &info.name);
                 print(&view.text(Some(&next)))?;
             }
         }
@@ -1647,6 +1652,7 @@ pub fn merge(
 /// delegates.
 pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigArgs) -> Outcome {
     let root = &plan.root;
+    admit_result_checks(root.result.as_ref(), root.check.is_some())?;
     let (mode, notice) = match root.policy.default {
         Fallback::Allow => (PolicyMode::Allow, None),
         Fallback::Deny => (PolicyMode::Deny, Some(REMOTE_DENY_NOTICE)),
@@ -1711,10 +1717,10 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         Err(error) => return Err(error.into()),
     };
     announce(remote, notice, None, false);
-    if !args.json {
+    if !args.json && root.result.is_none() {
         return finish_one(env, remote, &op, true);
     }
-    let result = match follow_result(env, remote, &op) {
+    let mut result = match follow_result(env, remote, &op) {
         Ok(result) => result,
         Err(error) => return rig_failed(true, error),
     };
@@ -1723,7 +1729,33 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
     };
     // Read again, as local mode does: the root gained its children.
     let root = remote.repo.branch(&info.name)?;
-    commands::print_rig_run(&plan.rig, &root, &result.descendants)
+    let view = if plan.root.result.is_some() {
+        let mut attempts =
+            crate::attempts::remote_attempts_for_infos(&remote.repo, std::slice::from_ref(&root))?;
+        let attempt = attempts
+            .pop()
+            .ok_or_else(|| missing("rig root assessment"))?;
+        commands::ResultView::from_attempt(&root, attempt)
+    } else {
+        None
+    };
+    if args.json {
+        return commands::print_rig_run(&plan.rig, &root, &result.descendants, view.as_ref());
+    }
+    if let Some(info) = result.branches.first_mut() {
+        *info = root.clone();
+    }
+    match finish_result(env, remote, result) {
+        Ok(()) | Err(Failure::Reported) => {}
+        Err(error) => return Err(error),
+    }
+    match view {
+        Some(view) => {
+            print(&view.text(Some(&result_next(remote, &root.name))))?;
+            view.outcome(&root)
+        }
+        None => branch_outcome(&root),
+    }
 }
 
 fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {

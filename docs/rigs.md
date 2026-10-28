@@ -172,7 +172,21 @@ A branch in a rig spawns only by seat, and only the seats its own seat delegates
 
 ## Output
 
-`by rig check --json` prints the plan: `{rig, description, root: {seat, name, harness, profile, budget, policy, check, isolated, provision, delegation}, seats, unapproved_tools, skipped_files}`. `by rig run --json` prints `{rig, root: BranchInfo, descendants: [BranchInfo]}` once every seat it spawned has finished, the same locally and from a server; a refused spec prints `{"error": {"kind": "invalid_rig", "message", "field", "line", "column"}}` and exits 1.
+`by rig check --json` prints the compiled plan and its seat constraints.
+`by rig run --json` prints one rig report after its spawned seats finish, with
+root and descendant branch information. A refused spec returns a structured
+`invalid_rig` error with its field location and exits 1.
+
+A required root result contract has the same acceptance rules with and without
+`--json`. Missing or invalid current-turn output fails completion, and a
+deliverable's declared check must pass. JSON keeps the existing rig report and
+adds result assessment under `root`; incomplete required output exits 1 after
+that single report. It does not start another native turn to repair the output.
+
+Remote rig results use the same required-output assessment. A remote deliverable
+with a declared check is refused before execution because the client cannot
+verify that check. Use a local coordinator with a remote compute provider when
+that workflow needs checks.
 
 ## What is refused, and why
 

@@ -90,6 +90,26 @@ impl Fixture {
         args.extend(extra);
         self.run_at(directory, &args)
     }
+
+    fn rig_spec(&self, name: &str, purpose: &str, failing_check: bool) -> String {
+        let path = self.repo.dir.join(format!("{name}.toml"));
+        let check = if failing_check {
+            "check = [\"sh\", \"-c\", \"exit 1\"]"
+        } else {
+            ""
+        };
+        fs::write(&path, format!(r#"
+version = 1
+name = "{name}"
+root = "lead"
+[seats.lead]
+harness = "gemini-cli"
+policy = {{ default = "deny" }}
+result = {{ purpose = "{purpose}", required = true, schema = {{ type = "object", required = ["answer"], properties = {{ answer = {{ type = "string", minLength = 1 }} }}, additionalProperties = false }} }}
+{check}
+"#)).unwrap();
+        path.display().to_string()
+    }
 }
 
 const SCHEMA: &str = r#"{"type":"object","required":["answer"],"properties":{"answer":{"type":"string","minLength":1}},"additionalProperties":false}"#;
@@ -159,6 +179,90 @@ fn invalid_required_outputs_and_failed_declared_checks_exit_one_with_one_report(
     assert_eq!(result["result_complete"], false);
     assert!(result["candidate"].is_null());
     assert_eq!(result["turns"], 1);
+}
+
+#[test]
+fn rig_json_enforces_required_results_without_changing_its_shape_or_native_turns() {
+    let f = Fixture::new();
+    for purpose in ["report", "deliverable"] {
+        let spec = f.rig_spec(&format!("rig-{purpose}"), purpose, false);
+        for (label, answer, expected) in [
+            ("valid", r#"{"answer":"finding"}"#, 0),
+            ("missing", "no structured result", 1),
+            ("invalid", r#"{"answer":42}"#, 1),
+        ] {
+            let prompt = f.reply(&format!("{purpose}-{label}"), answer);
+            let name = format!("{purpose}-{label}");
+            let output = f.run(&[
+                "rig",
+                "run",
+                &spec,
+                &prompt,
+                "--name",
+                &name,
+                "--command",
+                &f.agent,
+                "--json",
+            ]);
+            assert_eq!(output.status.code(), Some(expected), "{}", shown(&output));
+            let value = parsed(&output);
+            assert_eq!(value["rig"], format!("rig-{purpose}"));
+            assert_eq!(value["descendants"], json!([]));
+            assert!(value.get("error").is_none());
+            let root = &value["root"];
+            assert_eq!(root["status"]["state"], "no_changes");
+            assert_eq!(root["turns"], 1);
+            assert_eq!(root["children"], json!([]));
+            assert!(root["candidate"].is_null());
+            assert_eq!(root["result_complete"], expected == 0);
+            if expected == 0 {
+                assert_eq!(root["result"], json!({"answer":"finding"}));
+                assert!(root["result_event"].as_u64().is_some());
+                assert!(root["result_error"].is_null());
+            } else {
+                assert!(root["result"].is_null());
+                assert!(root["result_event"].is_null());
+                assert!(root["result_error"].is_string());
+            }
+        }
+    }
+}
+
+#[test]
+fn rig_declared_checks_gate_deliverables_in_both_output_formats() {
+    let f = Fixture::new();
+    let spec = f.rig_spec("checked-rig", "deliverable", true);
+    let prompt = f.reply("checked-rig", r#"{"answer":"valid structure"}"#);
+    for json in [true, false] {
+        let name = if json { "checked-json" } else { "checked-text" };
+        let mut args = vec![
+            "rig",
+            "run",
+            &spec,
+            &prompt,
+            "--name",
+            name,
+            "--command",
+            &f.agent,
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = f.run(&args);
+        assert_eq!(output.status.code(), Some(1), "{}", shown(&output));
+        if json {
+            let value = parsed(&output);
+            assert_eq!(value["rig"], "checked-rig");
+            assert_eq!(value["descendants"], json!([]));
+            assert_eq!(value["root"]["result"], json!({"answer":"valid structure"}));
+            assert_eq!(value["root"]["result_check"]["state"], "failed");
+            assert_eq!(value["root"]["result_complete"], false);
+            assert_eq!(value["root"]["turns"], 1);
+            assert!(value.get("error").is_none());
+        } else {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("configured check failed"));
+        }
+    }
 }
 
 #[test]

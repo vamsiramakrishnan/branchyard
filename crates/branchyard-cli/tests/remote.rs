@@ -1593,6 +1593,165 @@ instances = 2
 policy = { deny = ["Edit"] }
 "#;
 
+fn result_rig(dir: &Path, purpose: &str, checked: bool) -> String {
+    let path = dir.join(format!("{purpose}-{checked}.toml"));
+    let check = if checked {
+        "check = [\"sh\", \"-c\", \"exit 1\"]\n"
+    } else {
+        ""
+    };
+    let result = format!(
+        r#"result = {{ purpose = "{purpose}", required = true, schema = {{ type = "object", required = ["answer"], properties = {{ answer = {{ type = "string" }} }}, additionalProperties = false }} }}
+{check}"#
+    );
+    fs::write(
+        &path,
+        TEAM.replace("[seats.lead]\n", &format!("[seats.lead]\n{result}")),
+    )
+    .unwrap();
+    path.display().to_string()
+}
+
+#[test]
+fn rig_results_enforce_the_same_contract_in_remote_text_and_json() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &repo)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let agent = fake_agent!().display().to_string();
+    for as_json in [true, false] {
+        for purpose in ["report", "deliverable"] {
+            let spec = result_rig(&dir.0, purpose, false);
+            for (label, answer, expected) in [
+                ("valid", r#"{"answer":"finding"}"#, 0),
+                ("missing", "no structured result", 1),
+                ("invalid", r#"{"answer":42}"#, 1),
+            ] {
+                let name = format!("{purpose}-{label}-{as_json}");
+                let answer_file = dir.0.join(format!("{name}.json"));
+                fs::write(&answer_file, answer).unwrap();
+                let prompt = format!("Research\nREPLY_FILE {}", answer_file.display());
+                let mut args = vec![
+                    "rig",
+                    "run",
+                    &spec,
+                    &prompt,
+                    "--name",
+                    &name,
+                    "--command",
+                    &agent,
+                ];
+                if as_json {
+                    args.push("--json");
+                }
+                let output = server.by(&dir.0, &args);
+                assert_eq!(
+                    output.status.code(),
+                    Some(expected),
+                    "{}\n{}",
+                    text(&output.stdout),
+                    text(&output.stderr)
+                );
+                if as_json {
+                    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+                    assert_eq!(value["rig"], "team");
+                    assert_eq!(value["descendants"], serde_json::json!([]));
+                    assert!(value.get("error").is_none());
+                    assert_eq!(value["root"]["status"]["state"], "no_changes");
+                    assert_eq!(value["root"]["turns"], 1);
+                    assert_eq!(value["root"]["children"], serde_json::json!([]));
+                    assert_eq!(value["root"]["result_complete"], expected == 0);
+                    if expected == 0 {
+                        assert_eq!(
+                            value["root"]["result"],
+                            serde_json::json!({"answer":"finding"})
+                        );
+                        assert!(value["root"]["result_event"].as_u64().is_some());
+                    } else {
+                        assert!(value["root"]["result"].is_null());
+                        assert!(value["root"]["result_error"].is_string());
+                    }
+                } else {
+                    let output = text(&output.stdout);
+                    assert!(
+                        output.contains(&format!(
+                            "result {name}: {}",
+                            if expected == 0 {
+                                "complete"
+                            } else {
+                                "incomplete"
+                            }
+                        )),
+                        "{output}"
+                    );
+                    if expected != 0 {
+                        assert!(
+                            output.contains(&format!("--remote {}", server.url)),
+                            "{output}"
+                        );
+                        assert!(!output.contains("next: by compare"), "{output}");
+                    }
+                }
+            }
+        }
+    }
+    let branches = branchyard::Yard::open(&repo).unwrap().branches().unwrap();
+    assert_eq!(branches.len(), 12);
+    assert!(branches
+        .iter()
+        .all(|branch| branch.turns == 1 && branch.children.is_empty()));
+}
+
+#[test]
+fn rig_remote_deliverable_checks_are_refused_before_any_submission() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let server = Served::start(
+        &dir.0,
+        &[("app", &repo)],
+        &["--allow-client-commands", "--allow-delegation"],
+    );
+    let spec = result_rig(&dir.0, "deliverable", true);
+    let agent = fake_agent!().display().to_string();
+    for as_json in [true, false] {
+        let mut args = vec![
+            "rig",
+            "run",
+            &spec,
+            "WRITE forbidden.txt=never",
+            "--command",
+            &agent,
+        ];
+        if as_json {
+            args.push("--json");
+        }
+        let output = server.by(&dir.0, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "{}\n{}",
+            text(&output.stdout),
+            text(&output.stderr)
+        );
+        if as_json {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["error"]["kind"], "unsupported");
+        }
+    }
+    let token = fs::read_to_string(&server.token_file).unwrap();
+    let client = branchyard_client::Client::new(&server.url, token.trim()).unwrap();
+    assert!(client.repo("app").operations(None).unwrap().is_empty());
+    assert!(branchyard::Yard::open(&repo)
+        .unwrap()
+        .branches()
+        .unwrap()
+        .is_empty());
+    assert!(!repo.join("forbidden.txt").exists());
+}
+
 #[test]
 fn rig_runs_print_what_local_ones_do() {
     let dir = Dir::new();
