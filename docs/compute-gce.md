@@ -212,3 +212,12 @@ inspected while implementing the bootstrap. See the
 [dated live validation record](remote-validation-2026-10-28.md) for
 real-environment evidence. Not done: these hermetic checks do not qualify a live
 GCE bootstrap, model authentication or a complete Microsandbox lifecycle.
+
+
+Public 0.1.1 follow-up, 28 October 2026: live provisioning through the published
+standalone `by compute gce --apply` also passed from a non-Git directory, using
+its embedded helper. A fresh private worker passed binary/version, native
+configuration, KVM, authenticated remote connection and real MicroVM execution
+checks. See the [public verification record](remote-validation-2026-10-28.md#public-011-verification-28-october-2026).
+Not done: model execution, the MicroVM hard memory ceiling, and IAP under this
+managed network policy.
