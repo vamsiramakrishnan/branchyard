@@ -24,6 +24,8 @@ members = [
     "crates/branchyard-wire",
     "crates/branchyard-workspace",
 ]
+# A [patch.crates-io] crate, not a member (see the patch at the end).
+exclude = ["patches/zstd-0.13"]
 resolver = "2"
 
 [workspace.package]
@@ -89,3 +91,9 @@ too_many_arguments = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# Microsandbox's msb_krun_vmm asks for zstd 0.13, whose zstd-safe 7 has
+# RustSec advisories and no fixed 0.13 release; this zstd 0.13 re-exports
+# zstd 0.14 on the fixed zstd-safe 8.2. See patches/zstd-0.13/src/lib.rs.
+[patch.crates-io]
+zstd = { path = "patches/zstd-0.13" }

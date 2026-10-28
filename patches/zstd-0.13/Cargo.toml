@@ -1,0 +1,35 @@
+# zstd 0.13 for Microsandbox's msb_krun_vmm, re-exporting zstd 0.14: the
+# workspace's [patch.crates-io] puts it in place of crates.io's zstd 0.13.3.
+# Why, and when to remove it: src/lib.rs. Not a workspace member.
+[package]
+name = "zstd"
+version = "0.13.3"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "zstd 0.13's API, from zstd 0.14 (Branchyard's patch for msb_krun_vmm)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+upstream = { package = "zstd", version = "0.14.3", default-features = false }
+
+# zstd 0.13.3's features, each turning on zstd 0.14's of the same name, so a
+# crate that asks zstd 0.13 for one still gets it.
+[features]
+default = ["legacy", "arrays", "zdict_builder"]
+arrays = ["upstream/arrays"]
+bindgen = ["upstream/bindgen"]
+debug = ["upstream/debug"]
+doc-cfg = ["upstream/doc-cfg"]
+experimental = ["upstream/experimental"]
+fat-lto = ["upstream/fat-lto"]
+legacy = ["upstream/legacy"]
+no_asm = ["upstream/no_asm"]
+pkg-config = ["upstream/pkg-config"]
+thin = ["upstream/thin"]
+thin-lto = ["upstream/thin-lto"]
+wasm = ["upstream/wasm"]
+zdict_builder = ["upstream/zdict_builder"]
+zstdmt = ["upstream/zstdmt"]

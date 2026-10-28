@@ -161,6 +161,7 @@ STEPS = (
     ),
     Step("test_install_ci_tool", "fast", (PY, "tests/test_install_ci_tool.py")),
     Step("test_check_coverage", "fast", (PY, "tests/test_check_coverage.py")),
+    Step("test_supply_chain", "fast", (PY, "tests/test_supply_chain.py")),
     # The controls job's Python gates, in its order.
     Step("verify_vendor", "controls", (PY, "tools/verify_vendor.py")),
     Step("test_verify_vendor", "controls", (PY, "tests/test_verify_vendor.py")),
