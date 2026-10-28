@@ -162,6 +162,11 @@ fn run_takes_every_task_option() {
             goal_rounds: None,
             goal_judge: None,
             goal_judge_command: None,
+            result_schema: None,
+            result_schema_file: None,
+            result_required: false,
+            result_deliverable: false,
+            no_files: false,
             no_preflight: false,
         }
     );
@@ -2496,4 +2501,17 @@ fn the_reference_lists_every_visible_command_once() {
     for (exit, _) in crate::errors::EXITS {
         assert_eq!(text.matches(&format!("\n| {} | ", exit.code())).count(), 1);
     }
+}
+
+#[test]
+fn no_files_is_a_fan_option_without_duplicating_task_new_or_run_flags() {
+    assert!(task("fan research --harness gemini-cli --no-files").no_files);
+    assert!(!task("fan research --harness gemini-cli").no_files);
+    assert_eq!(kind("run research --no-files"), ErrorKind::UnknownArgument);
+    assert!(parse_str("task new research --no-files").is_ok());
+    assert!(
+        err("fan research --harness gemini-cli --no-files --base main")
+            .contains("cannot be used with")
+    );
+    assert!(help("fan").contains("--no-files"));
 }

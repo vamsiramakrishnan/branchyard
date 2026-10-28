@@ -955,6 +955,8 @@ fn a_seats_grant_is_narrowed_to_its_parents_too() {
         escalates_to: Vec::new(),
         instances: 2,
         bindings: Vec::new(),
+        owns: Vec::new(),
+        result: None,
     };
     let seats = Seats {
         rig: "team".into(),

@@ -1,0 +1,30 @@
+#:schema ../../schema/rig.json
+# by rig check examples/rigs/cooperative-code.toml
+# by rig run examples/rigs/cooperative-code.toml "Implement the agreed Rust feature" --allow-unapproved-tools
+version = 1
+name = "cooperative-code"
+root = "lead"
+description = "Native AGY workers own their plans; the lead coordinates code and tests"
+
+[startup]
+files = ["guidance/cooperative-team.md", "guidance/cooperative-code.md"]
+
+[seats.lead]
+harness = "antigravity"
+description = "Agree on interfaces, assign source and test ownership, and integrate checked candidates"
+budget = { max_usd = 6, max_turns = 12 }
+check = ["cargo", "test"]
+delegates_to = ["implementer", "tester"]
+policy = { default = "allow", delegation_commands = true }
+
+[seats.implementer]
+harness = "antigravity"
+description = "Implement the agreed interface in src; organize your own native plan and subagents"
+budget = { max_usd = 2, max_turns = 6 }
+owns = ["src"]
+
+[seats.tester]
+harness = "antigravity"
+description = "Test the agreed behavior in tests; organize your own native plan and subagents"
+budget = { max_usd = 2, max_turns = 6 }
+owns = ["tests"]

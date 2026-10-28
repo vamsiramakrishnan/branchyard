@@ -3,6 +3,28 @@
 
 use super::*;
 
+/// `by handoff`: relay a settled result without starting a recipient turn.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct HandoffArgs {
+    /// The settled branch whose current result to relay
+    pub source: String,
+    /// The branch that receives the frozen result in its next turn
+    #[arg(long, value_name = "BRANCH", value_parser = non_blank)]
+    pub to: String,
+    /// An immutable artifact to share with the recipient; repeatable
+    #[arg(long = "artifact", value_name = "ID", value_parser = non_blank)]
+    pub artifacts: Vec<String>,
+    /// Context for the recipient, beside the result and its provenance
+    #[arg(long, value_name = "TEXT", default_value = "")]
+    pub note: String,
+    /// Refuse if this JSON source version (incarnation, turn, result_event) is stale
+    #[arg(long, value_name = "JSON", value_parser = non_blank)]
+    pub expected_version: Option<String>,
+    /// Print the durable message and frozen handoff as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// `by approvals`.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct ApprovalsArgs {
@@ -411,6 +433,8 @@ pub struct SpawnArgs {
     pub result_schema_file: Option<String>,
     /// `--result-required`: the child must report a result.
     pub result_required: bool,
+    /// Accept a current structured answer as the deliverable without a Git change.
+    pub result_deliverable: bool,
     /// `--owns`, repeatable: the paths the child owns. Empty: none of its
     /// own, bounded only by the scope its parent works under.
     pub owns: Vec<String>,

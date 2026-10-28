@@ -449,15 +449,66 @@ fn gather(target: &Target, args: &CompareArgs) -> Result<Vec<Attempt>, Failure> 
 /// Attempts on a server, from its records, events and diffs (no checks
 /// run there); `by watch`'s `c` uses it too.
 pub fn remote_attempts(repo: &Repo, names: &[String]) -> Result<Vec<Attempt>, Failure> {
+    let infos = names
+        .iter()
+        .map(|name| repo.branch(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    remote_attempts_for_infos(repo, &infos)
+}
+
+/// Read remote output against the same branch snapshots the caller renders.
+/// A concurrently changed contracted branch remains incomplete.
+pub(crate) fn remote_attempts_for_infos(
+    repo: &Repo,
+    infos: &[BranchInfo],
+) -> Result<Vec<Attempt>, Failure> {
     let mut attempts = Vec::new();
-    for name in names {
-        let info = repo.branch(name)?;
+    for info in infos {
+        let name = &info.name;
         let events = repo.events(name, 0)?.events;
-        let files = branchyard::diff_files(&repo.diff(name)?);
-        attempts.push(branchyard::compare_attempt(&info, &events, files));
+        let files = match &info.candidate {
+            Some(_) => branchyard::diff_files(&repo.diff(name)?),
+            None => Vec::new(),
+        };
+        let inspection = repo.inspect(name)?;
+        attempts.push(remote_result_attempt(info, &events, files, inspection));
     }
     branchyard::mark_unique(&mut attempts);
     Ok(attempts)
+}
+
+/// Assess the log only when its accepted result agrees with the later inspection.
+fn remote_result_attempt(
+    info: &BranchInfo,
+    events: &[branchyard::RecordedEvent],
+    files: Vec<String>,
+    inspection: branchyard::Inspection,
+) -> Attempt {
+    let changed = info.turns != inspection.turns
+        || info.status != inspection.status
+        || info.candidate != inspection.candidate;
+    let mut attempt = branchyard::compare_attempt(info, events, files)
+        .with_result(inspection.result_contract, events);
+    if attempt.result_contract.is_some()
+        && (changed
+            || attempt
+                .result
+                .as_ref()
+                .is_some_and(|result| Some(result) != inspection.result.as_ref()))
+    {
+        attempt.result = None;
+        attempt.result_event = None;
+        attempt.result_error = Some(
+            "branch changed while its structured result was inspected; inspect it again".into(),
+        );
+    }
+    if attempt.is_deliverable() {
+        attempt.check = match inspection.check {
+            Some(_) => branchyard::AttemptCheck::NotRun,
+            None => branchyard::AttemptCheck::None,
+        };
+    }
+    attempt
 }
 
 pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
@@ -473,6 +524,9 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
             .into());
     }
     if let Some(pick) = &args.pick {
+        if let Some(attempt) = attempts.iter().find(|attempt| &attempt.branch == pick) {
+            check_git_pick(attempt)?;
+        }
         if !attempts.iter().any(|a| &a.branch == pick) {
             let names: Vec<&str> = attempts.iter().map(|a| a.branch.as_str()).collect();
             return Err(crate::errors::Report::usage(format!(
@@ -505,6 +559,19 @@ pub fn compare(env: &Env, target: &Target, args: &CompareArgs) -> Outcome {
             "picked": pick,
             "removed": removed,
         })));
+    }
+    Ok(())
+}
+
+/// Keep result selection separate from a Git merge and loser removal.
+pub(crate) fn check_git_pick(attempt: &Attempt) -> Result<(), Failure> {
+    if attempt.is_deliverable() {
+        return Err(crate::errors::Report::new(
+            "unsupported",
+            "a structured deliverable is selected as a result; --pick merges Git changes",
+        )
+        .next(format!("by inspect {} --json", attempt.branch))
+        .into());
     }
     Ok(())
 }
@@ -684,7 +751,147 @@ mod tests {
             deletions: 2,
             files: unique.iter().map(|s| s.to_string()).collect(),
             unique_files: unique.iter().map(|s| s.to_string()).collect(),
+            result_contract: None,
+            result: None,
+            result_event: None,
+            result_error: None,
         }
+    }
+
+    fn remote_snapshot() -> (BranchInfo, Vec<RecordedEvent>, branchyard::Inspection) {
+        let info = BranchInfo {
+            name: "answer".into(),
+            git_branch: "by/answer".into(),
+            worktree: "/repo/answer".into(),
+            prompt: "Research the answer".into(),
+            harness: "fake".into(),
+            profile: "fake".into(),
+            session: None,
+            parent: None,
+            children: Vec::new(),
+            depth: 0,
+            base: "base".into(),
+            candidate: None,
+            status: BranchStatus::NoChanges,
+            turns: 1,
+            cost_usd: None,
+            created_at: 1,
+            stalled: false,
+            superseded_by: None,
+            model: None,
+            provider: "local".into(),
+            isolated: false,
+            guard: None,
+        };
+        let events = vec![
+            RecordedEvent {
+                at_ms: 1,
+                activity: Activity::Prompt("research".into()),
+            },
+            RecordedEvent {
+                at_ms: 2,
+                activity: Activity::Result {
+                    value: json!({"answer":"one"}),
+                },
+            },
+        ];
+        let mut inspection: branchyard::Inspection = serde_json::from_value(json!({
+            "name":"answer", "status":{"state":"no_changes"}, "harness":"fake",
+            "profile":"fake", "parent":null, "children":[], "depth":0, "turns":1,
+            "candidate":null, "cost_usd":null, "subtree_cost_usd":0.0,
+            "max_usd":null, "remaining_usd":null, "envelope":null, "last_message":"",
+        }))
+        .unwrap();
+        inspection.result_contract = Some(branchyard::ResultContract::deliverable(
+            json!({"type":"object", "required":["answer"], "properties":{"answer":{"type":"string"}}}),
+        ).unwrap());
+        inspection.result = Some(json!({"answer":"one"}));
+        (info, events, inspection)
+    }
+
+    #[test]
+    fn remote_result_snapshots_accept_agreeing_current_turn_evidence() {
+        let (info, events, inspection) = remote_snapshot();
+        let attempt = remote_result_attempt(&info, &events, Vec::new(), inspection);
+        assert_eq!(attempt.result, Some(json!({"answer":"one"})));
+        assert_eq!(attempt.result_event, Some(2));
+        assert!(attempt.result_error.is_none());
+        let view = commands::ResultView::from_attempt(&info, attempt.clone()).unwrap();
+        assert!(view.complete());
+        assert!(view.outcome(&info).is_ok());
+        let mut newer = info;
+        newer.turns += 1;
+        let view = commands::ResultView::from_attempt(&newer, attempt).unwrap();
+        assert!(!view.complete());
+        assert!(view.outcome(&newer).is_err());
+        let value = view.json(&newer);
+        assert!(value["result"].is_null());
+        assert!(value["result_event"].is_null());
+    }
+
+    #[test]
+    fn remote_result_snapshots_clear_evidence_when_the_later_read_changed() {
+        let (info, events, original) = remote_snapshot();
+        let mut later_turn = original.clone();
+        later_turn.turns += 1;
+        let mut running = original.clone();
+        running.status = BranchStatus::Running;
+        let mut candidate = original.clone();
+        candidate.candidate = Some(branchyard::CandidateInfo {
+            commit: "new".into(),
+            files_changed: 1,
+            insertions: 1,
+            deletions: 0,
+        });
+        let mut revised = original.clone();
+        revised.result = Some(json!({"answer":"revised after the log read"}));
+        let mut missing = original;
+        missing.result = None;
+        for inspection in [later_turn, running, candidate, revised, missing] {
+            let attempt = remote_result_attempt(&info, &events, Vec::new(), inspection);
+            assert!(attempt.result.is_none());
+            assert!(attempt.result_event.is_none());
+            assert!(attempt.result_error.as_deref().unwrap().contains("changed"));
+            let view = commands::ResultView::from_attempt(&info, attempt).unwrap();
+            assert!(!view.complete());
+            assert!(view.outcome(&info).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_result_snapshots_preserve_json_null_and_legacy_report_semantics() {
+        let (mut info, mut events, mut inspection) = remote_snapshot();
+        inspection.result_contract =
+            Some(branchyard::ResultContract::deliverable(json!({"type":"null"})).unwrap());
+        inspection.result = Some(serde_json::Value::Null);
+        events[1].activity = Activity::Result {
+            value: serde_json::Value::Null,
+        };
+        let accepted = remote_result_attempt(&info, &events, Vec::new(), inspection.clone());
+        assert_eq!(accepted.result, Some(serde_json::Value::Null));
+        assert_eq!(accepted.result_event, Some(2));
+        assert!(accepted.result_error.is_none());
+
+        inspection.result_contract =
+            Some(branchyard::ResultContract::new(json!({"type":"null"}), true).unwrap());
+        info.turns = 2;
+        inspection.turns = 2;
+        events.push(RecordedEvent {
+            at_ms: 3,
+            activity: Activity::Prompt("revise".into()),
+        });
+        // Inspection deliberately retains a Report's legacy latest answer;
+        // a log with no result in this turn must not revive it.
+        let report = remote_result_attempt(&info, &events, Vec::new(), inspection.clone());
+        assert!(report.result.is_none());
+        assert!(report.result_event.is_none());
+        assert!(!report.result_error.as_deref().unwrap().contains("changed"));
+
+        inspection.result_contract = None;
+        inspection.status = BranchStatus::Running;
+        let legacy = remote_result_attempt(&info, &events, Vec::new(), inspection);
+        assert!(legacy.result_contract.is_none());
+        assert!(legacy.result_error.is_none());
     }
 
     #[test]

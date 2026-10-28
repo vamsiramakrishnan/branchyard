@@ -448,6 +448,8 @@ mod tests {
             in_reply_to: None,
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         })
     }
 
@@ -580,6 +582,8 @@ mod tests {
                 in_reply_to: None,
                 at_ms: 0,
                 delivered: false,
+                handoff: None,
+                next_turn: false,
             })
         };
         let mut t = Tracker::default();

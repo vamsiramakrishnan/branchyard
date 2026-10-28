@@ -350,7 +350,12 @@ pub(crate) fn begin_new(
 ) -> Result<(), Error> {
     // Written before the turn runs, so an engine that stops in it leaves
     // them for the turn that continues it.
-    if crate::delegation::remember_limits(record, &options.budget) {
+    let mut changed = crate::delegation::remember_limits(record, &options.budget);
+    if let Some(contract) = &options.result {
+        record.result_contract = Some(contract.clone());
+        changed = true;
+    }
+    if changed {
         yard.store().write_fenced(record, lease.fence())?;
     }
     if options.plan {
@@ -366,12 +371,18 @@ pub(crate) fn begin_new(
 pub(crate) fn first_prompt(prompt: &str, options: &TaskOptions) -> String {
     match options.plan {
         true => crate::plan::planning_prompt(prompt),
-        false => prompt.to_owned(),
+        false => crate::contract::prompt(prompt, options.result.as_ref()),
     }
 }
 
 /// Refuse a plan or goal that cannot work, before anything is created.
 fn check_plan_and_goal(profile: &'static Profile, options: &TaskOptions) -> Result<(), Error> {
+    if let Some(contract) = &options.result {
+        contract.check()?;
+        if contract.is_deliverable() && options.goal.is_some() {
+            return Err(Error::Unsupported("a result deliverable cannot use an automatic goal loop; inspect its result and request revisions explicitly".into()));
+        }
+    }
     if options.plan {
         crate::plan::check_profile(profile)?;
     }
@@ -1670,7 +1681,18 @@ pub(crate) fn reincarnate_with(
         },
     )
     .inspect_err(|_| store.release(&reserved))?;
-    let (record, lease) = record;
+    let (mut record, lease) = record;
+    record.result_contract = options.result.clone().or(parent.result_contract.clone());
+    if let Some(contract) = &record.result_contract {
+        if let Err(error) = contract
+            .check()
+            .and_then(|()| store.write_fenced(&record, lease.fence()))
+        {
+            abandon(lease, record, &error);
+            return Err(error);
+        }
+    }
+    let brief = crate::contract::prompt(&brief, record.result_contract.as_ref());
     let new_name = record.info.name.clone();
     for activity in how.events {
         let event = crate::RecordedEvent {

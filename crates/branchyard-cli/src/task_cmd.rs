@@ -275,6 +275,15 @@ pub fn details(view: &TaskView, style: render::Style) -> String {
         }
         out.push_str(&line);
         out.push('\n');
+        if let Some(result) = &attempt.result {
+            out.push_str(&format!(
+                "      result: {}\n",
+                branchyard::contract::one_line(result, 1000)
+            ));
+        }
+        if let Some(error) = &attempt.result_error {
+            out.push_str(&format!("      result incomplete: {error}\n"));
+        }
         if !attempt.conversation.is_empty() {
             out.push_str(&format!(
                 "      conversation: {}\n",

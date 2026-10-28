@@ -86,7 +86,7 @@ inspect, check, the artifact and scratch tools, and ask, report, escalate, repor
 refuse it. inspect with no branch shows your remaining budget, and in a rig your seat and the seats you \
 may spawn. You can also message: ask your parent a question (optionally waiting for its \
 answer), report to it (with a result, a JSON value, when your parent gave you a result_contract in inspect: it is checked against the contract's schema, and it is what your parent reads back), escalate to it or, if your rig seat allows, further up; answer a \
-descendant's message; state your own status in a line with report_status (working, idle, blocked, complete or failure; blocked and failure also reach your parent's inbox), which is a claim shown beside the status Branchyard derives, not a message; and read your own inbox. To read a child's answer as JSON, give spawn a result contract ({schema, required}): the child reports a result matching it, and you read it as the result of inspect or of each settled child in wait. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it. Substrate setup is an operator action outside a harness: \
+descendant's message; state your own status in a line with report_status (working, idle, blocked, complete or failure; blocked and failure also reach your parent's inbox), which is a claim shown beside the status Branchyard derives, not a message; and read your own inbox. To read a child's answer as JSON, give spawn a result contract ({schema, required}): the child reports a result matching it, and you read it as the result of inspect or of each settled child in wait. Each harness keeps its native planning, subagents and internal task graph; Branchyard depth limits count Branchyard branches only. For native final JSON without requiring the reporting tool, use a result contract with purpose: deliverable and required: true; a valid current-turn answer can complete without a Git diff. A rig seat can fix owned paths and a result contract: children may narrow ownership and may not replace the contract. Use handoff to freeze a settled descendant result and selected artifact IDs for another descendant; it waits for that recipient's next turn without steering or starting one. An external lead can use operator CLI/SDK calls without adopting or replacing its native session. A child spawned with plan: true writes a plan read-only and escalates it to you: approve_plan runs it (as proposed or edited), reject_plan ends it or, with replan, has it plan again. When a descendant's tool or connector call needs approval, the ask is escalated to you: answer_approval allows or denies it. Substrate setup is an operator action outside a harness: \
 by substrate setup prepares the saved template; by substrate check --smoke verifies bridge execution \
 and cleanup without a model. by up and by doctor report the saved connection and remote credential readiness. \
 An operator can run by setup --guided to select a repository and compute backend. \
@@ -249,10 +249,11 @@ pub fn tools() -> Vec<Tool> {
         },
         "result": {
             "type": "object",
-            "description": "The shape of the answer the child must give: it reports a JSON result with report, checked against this schema (a mismatch is refused, naming the path and the rule), and you read it as inspect's or wait's result. The child sees the contract in its own inspect as result_contract",
+            "description": "The answer schema, visible to the child as result_contract. Report is the default: the child uses report. Deliverable requires a current-turn result, accepts native final JSON after successful completion, and can complete without Git changes. Inspect and wait expose the accepted result.",
             "properties": {
                 "schema": {"type": "object", "description": "A JSON Schema using only type (object, array, string, number, integer, boolean, null, or a list), properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf, and annotations such as title and description; any other keyword, such as $ref, allOf or format, is refused"},
                 "required": {"type": "boolean", "description": "true: a report without a result is refused, and you get a warning in your log when the child ends its turn without one. Default false"},
+                "purpose": {"type": "string", "enum": ["report", "deliverable"], "description": "report keeps metadata reporting; deliverable requires required=true and accepts a native final JSON answer without a Git change"},
             },
             "required": ["schema"],
             "additionalProperties": false,
@@ -587,6 +588,31 @@ pub fn tools() -> Vec<Tool> {
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"],
                 "additionalProperties": false,
+            })),
+        ),
+        Tool::new(
+            "handoff",
+            "Relay a settled descendant's current result and selected artifacts to another descendant. The frozen handoff waits for the recipient's next turn; it never steers or starts one.",
+            schema(json!({
+                "type": "object",
+                "properties": {
+                    "from": branch_property("The settled producer, under your authority"),
+                    "to": branch_property("The recipient, under your authority"),
+                    "artifacts": {"type": "array", "items": {"type": "string"}, "description": "Only these immutable artifact IDs are shared"},
+                    "note": {"type": "string", "description": "Context for the recipient"},
+                    "expected": {
+                        "type": "object",
+                        "properties": {
+                            "incarnation": {"type": "integer"},
+                            "turn": {"type": "integer", "minimum": 0},
+                            "result_event": {"type": "integer", "minimum": 0}
+                        },
+                        "required": ["incarnation", "turn", "result_event"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
             })),
         ),
         Tool::new(

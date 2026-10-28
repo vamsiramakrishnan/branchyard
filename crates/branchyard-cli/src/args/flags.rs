@@ -855,6 +855,55 @@ pub struct Detached {
     pub json: bool,
 }
 
+/// Structured results shared by root tasks and delegated children.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct ResultFlags {
+    /// JSON Schema for the structured result
+    /// using only type, properties, required, additionalProperties, items, enum, const, minimum,
+    /// maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems,
+    /// maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description;
+    /// anything else is refused. Read accepted results with inspect, wait or compare
+    #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_schema_file", help_heading = "Result")]
+    result_schema: Option<String>,
+    /// Read the result schema from this file, or - for standard input
+    #[arg(long, value_name = "PATH", value_parser = non_blank, help_heading = "Result")]
+    result_schema_file: Option<String>,
+    /// Require a structured result matching the schema
+    #[arg(long, help_heading = "Result")]
+    result_required: bool,
+    /// Accept the native final JSON answer as the deliverable; no Git change is needed
+    #[arg(long, help_heading = "Result")]
+    result_deliverable: bool,
+}
+
+impl ResultFlags {
+    fn validate(&self) -> Result<(), String> {
+        if (self.result_required || self.result_deliverable)
+            && self.result_schema.is_none()
+            && self.result_schema_file.is_none()
+        {
+            let flag = if self.result_deliverable {
+                "--result-deliverable"
+            } else {
+                "--result-required"
+            };
+            return Err(format!(
+                "{flag} needs the schema it applies to: --result-schema or --result-schema-file"
+            ));
+        }
+        Ok(())
+    }
+
+    fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
+        self.validate()?;
+        task.result_schema = self.result_schema;
+        task.result_schema_file = self.result_schema_file;
+        task.result_required = self.result_required;
+        task.result_deliverable = self.result_deliverable;
+        Ok(())
+    }
+}
+
 /// `by run`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct RunFlags {
@@ -900,6 +949,8 @@ pub struct RunFlags {
     provision: Provision,
     #[command(flatten)]
     plan_goal: PlanGoal,
+    #[command(flatten)]
+    result: ResultFlags,
 }
 
 impl Flags for RunFlags {
@@ -927,6 +978,7 @@ impl Flags for RunFlags {
         self.delegation.apply(&mut task);
         self.provision.apply(&mut task)?;
         self.plan_goal.apply(&mut task);
+        self.result.apply(&mut task)?;
         Ok(task)
     }
 }
@@ -993,6 +1045,9 @@ pub(crate) fn task_kind(text: &str) -> Result<branchyard::TaskKind, String> {
 /// command itself.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct FanFlags {
+    /// Run in a private task without project files, even outside a Git repository
+    #[arg(long, conflicts_with_all = ["base", "pr"])]
+    no_files: bool,
     /// Branch name prefix (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
@@ -1022,12 +1077,15 @@ pub struct FanFlags {
     provision: Provision,
     #[command(flatten)]
     plan_goal: PlanGoal,
+    #[command(flatten)]
+    result: ResultFlags,
 }
 
 impl Flags for FanFlags {
     type Output = TaskArgs;
     fn check(self) -> Result<TaskArgs, String> {
-        RunFlags {
+        let no_files = self.no_files;
+        let mut task = RunFlags {
             harness: None,
             route: self.route,
             issue: self.issue,
@@ -1041,9 +1099,12 @@ impl Flags for FanFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: self.plan_goal,
+            result: self.result,
             deny: Vec::new(),
         }
-        .check()
+        .check()?;
+        task.no_files = no_files;
+        Ok(task)
     }
 }
 
@@ -1309,6 +1370,7 @@ impl Flags for MapFlags {
             delegation: Delegation::default(),
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            result: ResultFlags::default(),
             deny: Vec::new(),
         }
         .check()
@@ -1399,6 +1461,7 @@ impl Flags for ForkFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            result: ResultFlags::default(),
             deny: Vec::new(),
         }
         .check()
@@ -1443,6 +1506,7 @@ impl Flags for ReincarnateFlags {
             delegation: self.delegation,
             provision: self.provision,
             plan_goal: PlanGoal::default(),
+            result: ResultFlags::default(),
             deny: Vec::new(),
         }
         .check()
@@ -1531,20 +1595,8 @@ pub struct SpawnGraph {
     /// by `by log`, and counted by `by fleet stats` beside how the child turned out
     #[arg(long, value_name = "TEXT", value_parser = non_blank)]
     why: Option<String>,
-    /// The shape of the answer the child must report with `by report --result`, as a JSON Schema
-    /// using only type, properties, required, additionalProperties, items, enum, const, minimum,
-    /// maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems,
-    /// maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description;
-    /// anything else is refused. You read the result in `by inspect` and `by wait`
-    #[arg(long, value_name = "JSON", value_parser = non_blank, conflicts_with = "result_schema_file")]
-    result_schema: Option<String>,
-    /// Read the result schema from this file instead, `-` for standard input
-    #[arg(long, value_name = "PATH", value_parser = non_blank)]
-    result_schema_file: Option<String>,
-    /// The child must report a result: its `by report` without --result is refused, and its
-    /// ending a turn without one is noted in your log
-    #[arg(long)]
-    result_required: bool,
+    #[command(flatten)]
+    result: ResultFlags,
     /// A path the child owns: a file, a directory (and everything below it) or a glob such as
     /// tests/parser_*.rs, relative to the repository. Its changes anywhere else are refused when
     /// it is integrated, and it is told them every turn. Repeatable, or comma-separated
@@ -1574,16 +1626,7 @@ pub struct SpawnGraph {
 impl Flags for SpawnFlags {
     type Output = SpawnArgs;
     fn check(self) -> Result<SpawnArgs, String> {
-        if self.graph.result_required
-            && self.graph.result_schema.is_none()
-            && self.graph.result_schema_file.is_none()
-        {
-            return Err(
-                "--result-required needs the schema it applies to: --result-schema or \
-                 --result-schema-file"
-                    .into(),
-            );
-        }
+        self.graph.result.validate()?;
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
@@ -1614,9 +1657,10 @@ impl Flags for SpawnFlags {
             plan: self.graph.plan,
             why: self.graph.why,
             model: self.model,
-            result_schema: self.graph.result_schema,
-            result_schema_file: self.graph.result_schema_file,
-            result_required: self.graph.result_required,
+            result_schema: self.graph.result.result_schema,
+            result_schema_file: self.graph.result.result_schema_file,
+            result_required: self.graph.result.result_required,
+            result_deliverable: self.graph.result.result_deliverable,
             owns: self
                 .graph
                 .owns

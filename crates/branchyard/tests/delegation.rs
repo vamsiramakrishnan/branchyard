@@ -903,6 +903,8 @@ fn seat(below: &[&str]) -> Seat {
         escalates_to: Vec::new(),
         instances: 1,
         bindings: Vec::new(),
+        owns: Vec::new(),
+        result: None,
     }
 }
 
@@ -941,6 +943,64 @@ fn by_seat(seat: &str, prompt: &str) -> Spawn {
         seat: Some(seat.into()),
         ..Spawn::new(prompt)
     }
+}
+
+#[test]
+fn a_seats_scope_and_result_are_inherited_and_cannot_be_replaced() {
+    let f = Fixture::new();
+    let mut seats = team();
+    let contract =
+        branchyard::ResultContract::deliverable(serde_json::json!({"type": "object"})).unwrap();
+    let worker = seats.table.get_mut("worker").unwrap();
+    worker.owns = vec!["src".into()];
+    worker.result = Some(contract.clone());
+    let options = TaskOptions {
+        seats: Some(seats.clone()),
+        ..delegating(&f, seats.envelope())
+    };
+    let root = f
+        .yard
+        .task("coordinate")
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    let lead = root.delegate(options).unwrap();
+    denied(
+        lead.spawn(Spawn {
+            owns: vec!["docs".into()],
+            ..by_seat("worker", "outside")
+        }),
+        "owned paths",
+    );
+    denied(
+        lead.spawn(Spawn {
+            result: Some(
+                branchyard::ResultContract::new(serde_json::json!({"type": "string"}), true)
+                    .unwrap(),
+            ),
+            ..by_seat("worker", "wrong schema")
+        }),
+        "result contract",
+    );
+    denied(
+        lead.spawn(Spawn {
+            land: true,
+            ..by_seat("worker", "cannot auto-land knowledge output")
+        }),
+        "automatic code landing",
+    );
+    assert!(lead.children().unwrap().descendants.is_empty());
+    let child = lead
+        .spawn(Spawn {
+            owns: vec!["src/parser".into()],
+            ..by_seat("worker", "report findings")
+        })
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let inspection = lead.inspect(&child.name).unwrap();
+    assert_eq!(inspection.owns, ["src/parser"]);
+    assert_eq!(inspection.result_contract, Some(contract));
 }
 
 #[test]

@@ -800,6 +800,22 @@ pub const OPERATIONS: &[Operation] = &[
         &[Param::all("<NAME>", "name", "name"), ACTING_BRANCH, JSON],
     ),
     op(
+        "handoff",
+        &["handoff"],
+        "handoff",
+        "handoff",
+        "handoff",
+        Capability::Delegate,
+        &[
+            Param::all("<SOURCE>", "from", "source"),
+            Param::all("--to", "to", "to"),
+            Param::all("--artifact", "artifacts", "artifacts"),
+            Param::all("--note", "note", "note"),
+            Param::all("--expected-version", "expected", "expected"),
+            JSON,
+        ],
+    ),
+    op(
         "ask",
         &["ask"],
         "ask",

@@ -522,6 +522,7 @@ fn the_deterministic_judge_ranks_checks_then_size_and_records_scores() {
         .judge(
             &names,
             &JudgeOptions {
+                require_judge: false,
                 run_checks: true,
                 record: true,
                 ..JudgeOptions::default()
@@ -576,6 +577,7 @@ fn a_judge_harness_answers_a_verdict_on_a_read_only_scratch_branch() {
         .judge(
             &names,
             &JudgeOptions {
+                require_judge: false,
                 run_checks: true,
                 judge: Some(judge.clone()),
                 rubric: spec.rubric.clone(),
@@ -622,6 +624,7 @@ fn a_judge_harness_answers_a_verdict_on_a_read_only_scratch_branch() {
         .judge(
             &names,
             &JudgeOptions {
+                require_judge: false,
                 run_checks: true,
                 judge: Some(judge),
                 rubric: spec.rubric.clone(),
@@ -659,6 +662,7 @@ fn a_judge_is_pluggable() {
         .judge(
             &names,
             &JudgeOptions {
+                require_judge: false,
                 judge: Some(Arc::new(Canned(
                     r#"{"ranking": ["big", "small"], "scores": {"big": 80, "small": 70},
                         "reasons": {"big": "b", "small": "s"}}"#,

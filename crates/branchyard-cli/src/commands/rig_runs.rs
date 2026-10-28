@@ -85,6 +85,7 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
             },
             policy,
             check: root.check.clone(),
+            result: root.result.clone(),
             isolated: root.isolated,
             delegation: root.delegation.clone(),
             provision: Some(root.provision.clone()),

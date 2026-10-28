@@ -814,6 +814,28 @@ pub(crate) fn observe(
     let Some(mut outcome) = BranchOutcome::of(&record.info.status) else {
         return Ok(None);
     };
+    if record
+        .result_contract
+        .as_ref()
+        .is_some_and(crate::ResultContract::is_deliverable)
+        && matches!(
+            record.info.status,
+            BranchStatus::Ready | BranchStatus::NoChanges
+        )
+    {
+        outcome = match crate::contract::current(&events) {
+            Some(value)
+                if crate::contract::accept(
+                    record.result_contract.as_ref(),
+                    Some(value.clone()),
+                )
+                .is_ok() =>
+            {
+                BranchOutcome::Ready
+            }
+            _ => BranchOutcome::Failed,
+        };
+    }
     let id = outcome_id(name, record.created_ms);
     let previous = store.outcomes().outcome(&id)?;
     let route = recorded_route(&events);

@@ -2408,6 +2408,8 @@ mod tests {
                 in_reply_to: None,
                 at_ms: 0,
                 delivered,
+                handoff: None,
+                next_turn: false,
             })
         };
         let usage = |cumulative, input, output| {

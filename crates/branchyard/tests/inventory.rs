@@ -26,6 +26,7 @@ use common::{fake_agent, Fixture};
 struct Machine {
     _dir: tempfile::TempDir,
     bin: PathBuf,
+    tools: PathBuf,
     home: PathBuf,
     log: PathBuf,
 }
@@ -36,11 +37,14 @@ impl Machine {
         let base = fs::canonicalize(dir.path()).unwrap();
         let (bin, home) = (base.join("bin"), base.join("home"));
         fs::create_dir_all(&bin).unwrap();
+        let tools = base.join("tools");
+        branchyard_testkit::system_tools(&tools).unwrap();
         fs::create_dir_all(home.join(".local/bin")).unwrap();
         Machine {
             log: base.join("calls.log"),
             _dir: dir,
             bin,
+            tools,
             home,
         }
     }
@@ -74,9 +78,10 @@ impl Machine {
             .env(
                 "PATH",
                 format!(
-                    "{}:{}:/usr/bin:/bin",
+                    "{}:{}:{}",
                     self.bin.display(),
-                    self.home.join(".local/bin").display()
+                    self.home.join(".local/bin").display(),
+                    self.tools.display()
                 ),
             )
             .env("HOME", &self.home);
@@ -647,6 +652,32 @@ fn the_router_excludes_what_the_machine_cannot_run_with_the_reason() {
 
 #[test]
 fn a_gate_installs_on_demand_under_auto_and_records_it() {
+    let m = Machine::new();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command.env_clear();
+    branchyard_testkit::hermetic(&mut command);
+    let output = command
+        .args([
+            "gate_install_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("PATH", &m.tools)
+        .env("HOME", &m.home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "the parent test supplies a private process PATH and HOME"]
+fn gate_install_child() {
     let m = Machine::new();
     let found = m.detect(
         &DetectOptions {

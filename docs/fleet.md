@@ -157,22 +157,38 @@ A candidate's successes are the sum of its credits and its failures the sum of o
 
 ```text
 by judge <fan-name | branch...> [--harness ID [--command CMD] | --deterministic] [--rubric TEXT]
-         [--pick [--into TARGET] [--discard-others] [--yes]] [--json]
+         [--require-judge] [--pick [--into TARGET] [--discard-others] [--yes]] [--json]
 by fan "..." --auto --judge
 Yard::judge(branches, &JudgeOptions { run_checks, judge, rubric, record })
 ```
 
-One argument naming a `by fan` is that fan's branches; otherwise the branches named. For each attempt:
+One argument naming a `by fan` is that fan's branches; otherwise the branches named.
+A required current-turn `deliverable` contract also makes valid structured
+output eligible without a Git change. Compare and judge carry its result,
+result contract, result event, and any validation error. Ordinary report
+metadata leaves unchanged code ineligible. Result-only output is returned to
+the caller; Git-only `--pick` and `--into` refuse it. A schema checks structure,
+not truth. Review the evidence in the native lead or use an appropriate judge.
+See [cooperative teams](cooperative-teams.md) for AGY-only recipes.
 
-1. **Its check runs on its exact candidate**, in a private worktree, as `by compare --check` does (the same code, with the merge's 30-minute timeout).
-2. **A deterministic score**, 0 to 100, from what `by compare` gathers: the check (passed 60; none or not run 40), the diff's size in lines (up to 20, smaller better), cost (up to 10, cheaper better; 5 when unknown) and time (up to 10, faster better; 5 when unknown), each relative to the other eligible attempts. An attempt that cannot be picked scores 0: no candidate, a last turn that did not end `ready`, or a check that failed, timed out or could not run.
+`by fan --no-files` can start a private task outside a repository with result
+schema flags and an initial `--judge`. `by task show ID --json` reads its
+per-attempt structured results. Later `by judge` or `by compare` needs a yard
+context. `by task open ID --attempt NAME --print` gives a private worktree path. Running compare, judge, or handoff from that
+directory resolves its owning private yard after validating its task metadata
+and Git identity. No-files mode does not add remote routing or remote judging.
+
+For each attempt:
+
+1. **Its configured check runs on its exact candidate**, or its exact base for a result-only deliverable, in a private worktree, as `by compare --check` does (the same code, with the merge's 30-minute timeout).
+2. **A deterministic score**, 0 to 100, from what `by compare` gathers: the check (passed 60; none or not run 40), the diff's size in lines (up to 20, smaller better), cost (up to 10, cheaper better; 5 when unknown) and time (up to 10, faster better; 5 when unknown), each relative to the other eligible attempts. An ineligible attempt scores 0: no candidate or valid explicit deliverable, an unsuccessful last turn, invalid or missing current-turn deliverable output, or a check that failed, timed out or could not run. A valid result-only deliverable is scored from structural completion, cost, and time; it has no meaningful diff-size evidence.
 3. **Optionally a judge harness**: `--harness ID`, else the `judge` of the `[fleet]` entry for the attempts' kind (from the first attempt's `routed` event, or the classifier), unless `--deterministic`. It runs on a **scratch branch** from `HEAD`, with every tool request denied, and is removed afterwards along with its worktree; it is never recorded as an outcome. Its prompt has the task, a default rubric (does the task and breaks nothing, a passing check counts; changes only what is needed; clear; small) plus the entry's or `--rubric`'s, and each attempt's status, check, diff stats, turns, cost, time and diff (the first 16,000 characters). It must answer **one JSON object and nothing else** (one fenced block is allowed):
 
    ```json
    {"ranking": ["best", "next"], "scores": {"best": 90, "next": 40}, "reasons": {"best": "…", "next": "…"}}
    ```
 
-   Parsed strictly (`branchyard::parse_verdict`): exactly these three keys; the ranking names every attempt once; scores and reasons have every attempt as keys; scores are 0 to 100. Anything else, or a judge branch that fails, **falls back** to the deterministic score, and the output says why.
+   Parsed strictly (`branchyard::parse_verdict`): exactly these three keys; the ranking names every attempt once; scores and reasons have every attempt as keys; scores are 0 to 100. Without `--require-judge`, an invalid verdict or a failed optional judge falls back to deterministic scoring, and the output says why. With `--require-judge`, an unavailable, failed, or invalid model judge leaves no pick. `--deterministic` cannot satisfy that requirement. An AGY-only inventory excludes AGY as a default model judge because it cannot route per-tool approvals. A worker's `--allow-unapproved-tools` is not inherited as a judge bypass. Use deterministic scoring or review in the native lead unless you explicitly configure a suitable read-only judge.
 
 The ranking is the judge's when its verdict was used, else by deterministic score (ties: fewer turns, then name). The **proposed pick** is the best-ranked attempt that can be picked: a judge ranking a failed check first does not get it picked, and its reason says so. `by judge` prints a table (rank, branch, harness, score, check, status, +/-, cost, time, why), who judged, and the pick; `--json` prints the `Judgement`. Each attempt gets a `judged` event (score, rank, picked, by whom, reason, check), and its outcome row its score (and `judged_best` for the pick).
 

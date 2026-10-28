@@ -1150,6 +1150,8 @@ fn a_delegated_child_stays_on_the_gateway_within_its_parents_models() {
         escalates_to: Vec::new(),
         instances: 2,
         bindings: Vec::new(),
+        owns: Vec::new(),
+        result: None,
     };
     let seats = Seats {
         rig: "team".into(),

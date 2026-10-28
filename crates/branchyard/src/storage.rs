@@ -345,7 +345,7 @@ pub(crate) struct Grants<'a> {
 }
 
 impl Grants<'_> {
-    fn of_artifact<'a>(row: &'a ArtifactRow, shares: &'a [Share]) -> Grants<'a> {
+    pub(crate) fn of_artifact<'a>(row: &'a ArtifactRow, shares: &'a [Share]) -> Grants<'a> {
         Grants {
             owner: row.publisher_incarnation,
             ancestry: &row.ancestry_incarnations,
@@ -559,7 +559,11 @@ pub(crate) fn list(yard: &Yard, reader: &str) -> Result<Vec<ArtifactRef>, Error>
 }
 
 /// The artifact `id` if `reader` may read it.
-fn readable_artifact(store: &Store, reader: &str, id: &str) -> Result<ArtifactRow, Error> {
+pub(crate) fn readable_artifact(
+    store: &Store,
+    reader: &str,
+    id: &str,
+) -> Result<ArtifactRow, Error> {
     store.read(reader)?;
     let lineage = Lineage::load(store)?;
     let me = lineage.id(reader)?;

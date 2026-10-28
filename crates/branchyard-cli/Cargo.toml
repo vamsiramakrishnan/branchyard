@@ -23,7 +23,7 @@ microsandbox = ["branchyard/microsandbox"]
 postgres = ["branchyard-server/postgres"]
 # Derive schemars::JsonSchema on the rig spec's types and check that
 # schema/rig.json is what they generate; see docs/rigs.md.
-schema = ["dep:schemars"]
+schema = ["dep:schemars", "branchyard/schema"]
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }

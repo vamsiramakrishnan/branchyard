@@ -322,6 +322,17 @@
           ],
           "description": "A goal a judge verifies, like `by run --goal`."
         },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+        },
         "deny": {
           "type": "array",
           "items": {
@@ -1472,6 +1483,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -1556,6 +1585,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -1878,6 +1944,17 @@
                 }
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
             },
             "deny": {
               "type": "array",
@@ -3027,6 +3104,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -3111,6 +3206,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -3448,6 +3580,36 @@
                 "null"
               ]
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The declared structured output, when this attempt has one."
+            },
+            "result": {
+              "description": "A schema-valid result from the current turn, never an earlier answer."
+            },
+            "result_event": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Sequence of the result in the complete event log, numbered from 1."
+            },
+            "result_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a required structured answer is missing or invalid."
+            },
             "worktree": {
               "type": [
                 "string",
@@ -3663,6 +3825,43 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         }
       }
     },
@@ -3833,6 +4032,36 @@
                 "null"
               ]
             },
+            "result_contract": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The declared structured output, when this attempt has one."
+            },
+            "result": {
+              "description": "A schema-valid result from the current turn, never an earlier answer."
+            },
+            "result_event": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Sequence of the result in the complete event log, numbered from 1."
+            },
+            "result_error": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Why a required structured answer is missing or invalid."
+            },
             "worktree": {
               "type": [
                 "string",
@@ -4048,6 +4277,43 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         }
       }
     },
@@ -11772,6 +12038,29 @@
                 "error"
               ],
               "description": "The judge was asked, and its answer was not used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The judge that was required."
+                },
+                "error": {
+                  "type": "string",
+                  "description": "Why its verdict could not be used."
+                },
+                "by": {
+                  "type": "string",
+                  "const": "required_failed"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "A required judge failed or returned an invalid verdict; no pick is accepted."
             }
           ],
           "description": "Who decided a judgement."
@@ -15589,12 +15878,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "ReviewSpec": {
           "type": "object",
@@ -16037,12 +16345,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "ReviewSpec": {
           "type": "object",
@@ -17262,6 +17589,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -17283,6 +17625,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         }
       }
     },
@@ -18326,12 +18789,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Dependency": {
           "type": "object",
@@ -18523,6 +19005,82 @@
       "description": "`POST /v1/repos/{repo}/branches/{branch}/report`: a message to the\nbranch's parent with no answer expected, like `by report`, and\noptionally the branch's result.",
       "title": "ReportRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "HandoffRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Producer branch whose current-turn result is frozen."
+        },
+        "to": {
+          "type": "string",
+          "description": "Existing recipient branch; handing off never starts another turn."
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Artifact IDs to share explicitly with this recipient.",
+          "default": []
+        },
+        "note": {
+          "type": "string",
+          "description": "Context from the relaying lead, kept beside the frozen result.",
+          "default": ""
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceVersion"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Refuse a producer version that differs from this reviewed version."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "description": "Relay one settled producer's result and selected artifacts to a coworker.",
+      "title": "HandoffRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        }
+      }
     },
     "AnswerRequest": {
       "type": "object",
@@ -19799,12 +20357,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Dependency": {
           "type": "object",
@@ -21574,12 +22151,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Dependency": {
           "type": "object",
@@ -24149,6 +24745,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -24170,6 +24781,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         },
         "DeliveredVia": {
           "oneOf": [
@@ -26603,6 +27335,29 @@
                 "error"
               ],
               "description": "The judge was asked, and its answer was not used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The judge that was required."
+                },
+                "error": {
+                  "type": "string",
+                  "description": "Why its verdict could not be used."
+                },
+                "by": {
+                  "type": "string",
+                  "const": "required_failed"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "A required judge failed or returned an invalid verdict; no pick is accepted."
             }
           ],
           "description": "Who decided a judgement."
@@ -29401,6 +30156,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -29422,6 +30192,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         },
         "DeliveredVia": {
           "oneOf": [
@@ -31855,6 +32746,29 @@
                 "error"
               ],
               "description": "The judge was asked, and its answer was not used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The judge that was required."
+                },
+                "error": {
+                  "type": "string",
+                  "description": "Why its verdict could not be used."
+                },
+                "by": {
+                  "type": "string",
+                  "const": "required_failed"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "A required judge failed or returned an invalid verdict; no pick is accepted."
             }
           ],
           "description": "Who decided a judgement."
@@ -34374,12 +35288,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Dependency": {
           "type": "object",
@@ -36795,12 +37728,31 @@
               "type": "boolean",
               "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
               "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
             }
           },
           "required": [
             "schema"
           ],
           "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Dependency": {
           "type": "object",
@@ -39495,6 +40447,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -39516,6 +40483,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         },
         "DeliveredVia": {
           "oneOf": [
@@ -41949,6 +43037,29 @@
                 "error"
               ],
               "description": "The judge was asked, and its answer was not used."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "The judge that was required."
+                },
+                "error": {
+                  "type": "string",
+                  "description": "Why its verdict could not be used."
+                },
+                "by": {
+                  "type": "string",
+                  "const": "required_failed"
+                }
+              },
+              "required": [
+                "by",
+                "name",
+                "error"
+              ],
+              "description": "A required judge failed or returned an invalid verdict; no pick is accepted."
             }
           ],
           "description": "Who decided a judgement."
@@ -42724,6 +43835,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -42745,6 +43871,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         }
       }
     },
@@ -42788,6 +44035,21 @@
           "type": "boolean",
           "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
           "default": false
+        },
+        "handoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Handoff"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+        },
+        "next_turn": {
+          "type": "boolean",
+          "description": "Leave this message for the next turn instead of steering a running one."
         }
       },
       "required": [
@@ -42811,6 +44073,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         }
       }
     },
@@ -42879,6 +44262,21 @@
               "type": "boolean",
               "description": "Whether it has been delivered to its recipient's turn (at the start\nof one, or through a running turn's delivery hook). `inbox --unread`\nis the messages for which this is `false`.",
               "default": false
+            },
+            "handoff": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Handoff"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "A frozen result and artifact handoff, delivered only at the recipient's next turn."
+            },
+            "next_turn": {
+              "type": "boolean",
+              "description": "Leave this message for the next turn instead of steering a running one."
             }
           },
           "required": [
@@ -42900,6 +44298,127 @@
             "answer"
           ],
           "description": "What a message means, and so who it may go to: a `question` and a\n`report` go to the sender's parent; an `escalation` goes to the parent\ntoo, or further up an ancestor its rig seat's `escalates_to` names; an\n`answer` goes from a branch to one of its own descendants, and normally\ncarries `in_reply_to` a question's id."
+        },
+        "Handoff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Producer branch name, for display; version binds its incarnation."
+            },
+            "version": {
+              "$ref": "#/$defs/SourceVersion",
+              "description": "Producer identity, turn and accepted result event."
+            },
+            "result": {
+              "description": "Accepted result JSON, copied rather than read again at delivery."
+            },
+            "candidate": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Candidate commit at handoff, when the producer has code changes."
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "description": "Store-provided metadata for the explicitly selected artifacts."
+            }
+          },
+          "required": [
+            "source",
+            "version",
+            "result",
+            "artifacts"
+          ],
+          "description": "An immutable result snapshot carried by one durable inbox message."
+        },
+        "SourceVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "incarnation": {
+              "type": "integer",
+              "format": "int64",
+              "description": "Never-reused producer identity in this repository."
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Producer turn containing the result."
+            },
+            "result_event": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per-branch event sequence of the accepted result."
+            }
+          },
+          "required": [
+            "incarnation",
+            "turn",
+            "result_event"
+          ],
+          "description": "One producer incarnation and its accepted current-turn result event."
+        },
+        "ArtifactRef": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            },
+            "size": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "name": {
+              "type": "string"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "publisher_branch": {
+              "type": "string"
+            },
+            "turn": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The publisher's turn count when it published, from its record."
+            },
+            "created_at": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            }
+          },
+          "required": [
+            "id",
+            "digest",
+            "size",
+            "name",
+            "media_type",
+            "publisher_branch",
+            "turn",
+            "created_at"
+          ],
+          "description": "An immutable published artifact's provenance, as `by artifact list/get`,\nthe SDK and the server report it. `id` identifies this publish; `digest`\nis the blake3 hash (hex, lower case) of its bytes, the artifact's content\nidentity, checked on every read."
         }
       }
     },
@@ -44018,6 +45537,17 @@
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
             },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -45166,6 +46696,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -45250,6 +46798,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -45897,6 +47482,17 @@
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
             },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -47045,6 +48641,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -47129,6 +48743,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -47795,6 +49446,17 @@
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
             },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -48943,6 +50605,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -49027,6 +50707,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -49689,6 +51406,17 @@
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
             },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -50837,6 +52565,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -50921,6 +52667,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",
@@ -51948,6 +53731,17 @@
               ],
               "description": "A goal a judge verifies, like `by run --goal`."
             },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured native final-answer contract; deliverables may complete without Git changes."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -53096,6 +54890,24 @@
               },
               "description": "The child's merge check; `None` keeps its parent's."
             },
+            "owns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Paths this seat may change; a spawn may narrow this assignment."
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultContract"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The result contract inherited by every child in this seat."
+            },
             "deny": {
               "type": "array",
               "items": {
@@ -53180,6 +54992,43 @@
             }
           },
           "description": "A child's limits as the tools show them."
+        },
+        "ResultContract": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema": {
+              "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+            },
+            "required": {
+              "type": "boolean",
+              "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+              "default": false
+            },
+            "purpose": {
+              "$ref": "#/$defs/ResultPurpose",
+              "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            }
+          },
+          "required": [
+            "schema"
+          ],
+          "description": "What a parent says, at spawn, about the answer it wants from a child."
+        },
+        "ResultPurpose": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "report",
+              "description": "Report metadata; code acceptance still requires a Git candidate."
+            },
+            {
+              "type": "string",
+              "const": "deliverable",
+              "description": "A validated current-turn answer can complete work without Git changes."
+            }
+          ],
+          "description": "Whether a structured answer is metadata or the task's deliverable."
         },
         "Binding": {
           "type": "object",

@@ -1,0 +1,43 @@
+#:schema ../../schema/rig.json
+# by rig check examples/rigs/cooperative-research.toml
+# by rig run examples/rigs/cooperative-research.toml "Compare the options using supplied evidence" --allow-unapproved-tools
+version = 1
+name = "cooperative-research"
+root = "lead"
+description = "Native researchers return structured evidence; the lead reviews and relays settled findings"
+
+[startup]
+files = ["guidance/cooperative-team.md", "guidance/cooperative-research.md"]
+
+[seats.lead]
+harness = "antigravity"
+description = "Choose independent research questions, review the evidence, and return a synthesis"
+budget = { max_usd = 6, max_turns = 12 }
+delegates_to = ["researcher", "synthesizer"]
+policy = { default = "allow", delegation_commands = true }
+
+[seats.lead.result]
+purpose = "deliverable"
+required = true
+schema = { type = "object", required = ["summary", "evidence"], additionalProperties = false, properties = { summary = { type = "string", minLength = 1 }, evidence = { type = "array", items = { type = "string" } } } }
+
+[seats.researcher]
+harness = "antigravity"
+description = "Research the assigned question, preserve sources, and return native final JSON"
+budget = { max_usd = 1.5, max_turns = 4 }
+instances = 2
+
+[seats.researcher.result]
+purpose = "deliverable"
+required = true
+schema = { type = "object", required = ["summary", "evidence"], additionalProperties = false, properties = { summary = { type = "string", minLength = 1 }, evidence = { type = "array", items = { type = "string" } } } }
+
+[seats.synthesizer]
+harness = "antigravity"
+description = "Synthesize only findings explicitly handed to you; distinguish evidence from inference"
+budget = { max_usd = 1.5, max_turns = 4 }
+
+[seats.synthesizer.result]
+purpose = "deliverable"
+required = true
+schema = { type = "object", required = ["summary", "evidence"], additionalProperties = false, properties = { summary = { type = "string", minLength = 1 }, evidence = { type = "array", items = { type = "string" } } } }

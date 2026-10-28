@@ -65,19 +65,19 @@
     }
   },
   "tests": {
-    "total": 2791,
-    "ignored": 31,
+    "total": 2833,
+    "ignored": 32,
     "by_crate": {
       "branchyard": {
-        "tests": 883,
-        "ignored": 15
+        "tests": 904,
+        "ignored": 16
       },
       "branchyard-bridge": {
         "tests": 50,
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 696,
+        "tests": 715,
         "ignored": 3
       },
       "branchyard-client": {
@@ -101,7 +101,7 @@
         "ignored": 0
       },
       "branchyard-mcp": {
-        "tests": 26,
+        "tests": 27,
         "ignored": 0
       },
       "branchyard-microsandbox": {
@@ -129,7 +129,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 282,
+        "tests": 283,
         "ignored": 0
       },
       "branchyard-setup": {
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 90,
+    "route_count": 91,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -204,6 +204,7 @@
       "/v1/repos/{repo}/branches/{branch}/events",
       "/v1/repos/{repo}/branches/{branch}/fork",
       "/v1/repos/{repo}/branches/{branch}/graph",
+      "/v1/repos/{repo}/branches/{branch}/handoff",
       "/v1/repos/{repo}/branches/{branch}/inbox",
       "/v1/repos/{repo}/branches/{branch}/inspection",
       "/v1/repos/{repo}/branches/{branch}/integrate",

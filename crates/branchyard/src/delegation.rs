@@ -1420,6 +1420,15 @@ impl Delegate {
         )
     }
 
+    /// Freeze a settled descendant's result for another descendant, without
+    /// steering or starting the recipient's native turn.
+    pub fn handoff(&self, request: crate::HandoffRequest) -> Result<Message, Error> {
+        self.typed(
+            "handoff",
+            serde_json::to_value(request).map_err(|e| Error::State(e.to_string()))?,
+        )
+    }
+
     /// Report to this branch's parent; no answer is expected.
     pub fn report(&self, text: &str) -> Result<Message, Error> {
         self.typed("report", json!({"text": text}))
@@ -3287,6 +3296,16 @@ impl Local {
             }
             None => request,
         };
+        if request.land
+            && request
+                .result
+                .as_ref()
+                .is_some_and(|result| result.purpose == crate::contract::ResultPurpose::Deliverable)
+        {
+            return Err(Error::Denied(
+                "a deliverable result cannot use automatic code landing".into(),
+            ));
+        }
         let own = profiles::by_id(&caller.info.profile)
             .ok_or_else(|| Error::UnknownHarness(caller.info.profile.clone()))?;
         let profile = match &request.harness {
@@ -3469,11 +3488,18 @@ impl Local {
             &stem,
             taken,
         )?;
+        let prompt = crate::contract::prompt(
+            &request.prompt,
+            request
+                .result
+                .as_ref()
+                .filter(|contract| contract.is_deliverable()),
+        );
         let mut record = run::new_record(
             &store,
             NewBranch {
                 name: &name,
-                prompt: &request.prompt,
+                prompt: &prompt,
                 profile,
                 base: base.clone().unwrap_or_default(),
                 parent: Some(self.branch.clone()),
@@ -3919,6 +3945,10 @@ impl Local {
         if !owns.is_empty() {
             owns_within.remove(0);
         }
+        let result = match record.result_contract.as_ref() {
+            Some(contract) if contract.is_deliverable() => contract::current(&events),
+            _ => contract::latest(&events),
+        };
         Ok(Inspection {
             owns,
             owns_within,
@@ -3970,7 +4000,7 @@ impl Local {
             last_message: last_message(&events),
             reported: reported::latest(&events, branchyard_support::time::now_ms()),
             result_contract: record.result_contract,
-            result: contract::latest(&events),
+            result,
             seat,
             seats: may_spawn,
             stalled: info.stalled,
@@ -4514,6 +4544,8 @@ impl Local {
             in_reply_to,
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         })?;
         // `authorize` above refused `to == self.branch`, so these are two
         // distinct logs.
@@ -4571,6 +4603,31 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
     if request.harnesses.is_some() {
         return fixed("delegation harnesses");
     }
+    let result = match (&seat.result, &request.result) {
+        (Some(contract), Some(asked)) if contract != asked => return fixed("result contract"),
+        (Some(fixed), _) => Some(fixed.clone()),
+        (_, asked) => asked.clone(),
+    };
+    let fixed_owns = crate::scope::normalize_all(&seat.owns)?;
+    let asked_owns = crate::scope::normalize_all(&request.owns)?;
+    let owns = if asked_owns.is_empty() {
+        fixed_owns
+    } else {
+        for entry in &asked_owns {
+            // Equal globs preserve the exact bound. A literal seat directory
+            // also safely bounds every child path or glob below it.
+            if !fixed_owns.is_empty()
+                && !fixed_owns.iter().any(|outer| {
+                    outer == entry
+                        || (!outer.contains(['*', '?', '['])
+                            && crate::scope::covers(std::slice::from_ref(outer), entry))
+                })
+            {
+                return fixed("owned paths");
+            }
+        }
+        asked_owns
+    };
     let limit = seat.budget.to_budget()?;
     let asked = &request.budget;
     fn narrower<T: PartialOrd + Copy + fmt::Debug>(
@@ -4648,9 +4705,9 @@ fn fill(request: &Spawn, name: &str, seat: &Seat, below: &Seats) -> Result<Spawn
         connectors: request.connectors.clone(),
         plan: request.plan,
         model: request.model.clone(),
-        result: request.result.clone(),
+        result,
         why: request.why.clone(),
-        owns: request.owns.clone(),
+        owns,
         land: request.land,
         review: request.review.clone(),
     })
@@ -5080,6 +5137,15 @@ pub(crate) fn dispatch(local: &Local, tool: &str, arguments: Value) -> Result<Va
                 )),
             }
         }
+        "handoff" => {
+            local.require(Capability::Delegate, "hand off results to a descendant")?;
+            let request: crate::HandoffRequest = parse(tool, arguments)?;
+            to_json(&crate::handoff::relay(
+                &local.yard,
+                Some(&local.branch),
+                request,
+            )?)
+        }
         "approve_plan" => {
             let args: ApprovePlanArgs = parse(tool, arguments)?;
             to_json(&local.approve_plan(&args.branch, args.edited.as_deref())?)
@@ -5499,6 +5565,66 @@ Checks on the merged result: \
         CheckVerdict, IntegrationCheck, PermissionDecision, PermissionKey, PermissionRequest,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn seats_inherit_contracts_and_only_narrow_owned_directories() {
+        let contract = ResultContract::new(json!({"type": "object"}), true).unwrap();
+        let seat = Seat {
+            harness: "gemini-cli".into(),
+            budget: ChildBudget::default(),
+            check: None,
+            owns: vec!["src/parser".into()],
+            result: Some(contract.clone()),
+            deny: Vec::new(),
+            isolated: false,
+            provision: None,
+            delegates_to: Vec::new(),
+            escalates_to: Vec::new(),
+            instances: 1,
+            bindings: Vec::new(),
+        };
+        let below = Seats {
+            rig: "r".into(),
+            seat: "worker".into(),
+            delegates_to: Vec::new(),
+            escalates_to: Vec::new(),
+            table: BTreeMap::new(),
+        };
+        let request = Spawn::new("implement");
+        let inherited = fill(&request, "worker", &seat, &below).unwrap();
+        assert_eq!(inherited.owns, seat.owns);
+        assert_eq!(inherited.result, Some(contract.clone()));
+        let narrower = Spawn {
+            owns: vec!["src/parser/lexer.rs".into()],
+            result: Some(contract),
+            ..request.clone()
+        };
+        assert_eq!(
+            fill(&narrower, "worker", &seat, &below).unwrap().owns,
+            narrower.owns
+        );
+        let outside = Spawn {
+            owns: vec!["src".into()],
+            ..request.clone()
+        };
+        assert!(fill(&outside, "worker", &seat, &below)
+            .unwrap_err()
+            .to_string()
+            .contains("owned paths"));
+        let changed = Spawn {
+            result: Some(ResultContract::new(json!({"type": "string"}), true).unwrap()),
+            ..request
+        };
+        assert!(fill(&changed, "worker", &seat, &below)
+            .unwrap_err()
+            .to_string()
+            .contains("result contract"));
+        let glob = Seat {
+            owns: vec!["src/*.rs".into()],
+            ..seat
+        };
+        assert!(fill(&narrower, "worker", &glob, &below).is_err());
+    }
 
     struct Temp(PathBuf);
 

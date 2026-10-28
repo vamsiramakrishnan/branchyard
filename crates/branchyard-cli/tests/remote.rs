@@ -18,6 +18,7 @@ use serde_json::Value;
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
+const ANSWER_SCHEMA: &str = r#"{"type":"object","required":["answer"],"additionalProperties":false,"properties":{"answer":{"type":"string"}}}"#;
 
 /// A temporary directory holding repositories. Removed on drop.
 struct Dir(PathBuf);
@@ -189,6 +190,362 @@ fn with_agent(args: &[&str]) -> Vec<String> {
 
 fn local(root: &Path, args: &[&str]) -> Output {
     command(BY, root).args(with_agent(args)).output().unwrap()
+}
+
+#[test]
+fn remote_contracted_native_answers_survive_run_and_fan_without_git_changes() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let answer = dir.0.join("answer.json");
+    fs::write(&answer, r#"{"answer":"supported finding"}"#).unwrap();
+    let prompt = format!("Research the answer\nREPLY_FILE {}", answer.display());
+    let server = Served::start(&dir.0, &[("app", &repo)], &["--allow-client-commands"]);
+    for kind in ["run", "fan"] {
+        let harnesses = if kind == "run" {
+            "gemini-cli"
+        } else {
+            "gemini-cli,qwen-code"
+        };
+        let args = with_agent(&[
+            kind,
+            &prompt,
+            "--name",
+            &format!("valid-{kind}"),
+            "--harness",
+            harnesses,
+            "--result-schema",
+            ANSWER_SCHEMA,
+            "--result-deliverable",
+            "--json",
+        ]);
+        let output = server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(
+            output.status.success(),
+            "{kind}: {}\n{}",
+            text(&output.stderr),
+            text(&output.stdout)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let branches = if kind == "run" {
+            vec![&value]
+        } else {
+            value["branches"].as_array().unwrap().iter().collect()
+        };
+        assert_eq!(branches.len(), if kind == "run" { 1 } else { 2 });
+        for branch in branches {
+            assert_eq!(branch["status"]["state"], "no_changes", "{branch}");
+            assert!(branch["candidate"].is_null());
+            assert_eq!(branch["turns"], 1);
+            assert_eq!(branch["children"], serde_json::json!([]));
+            assert_eq!(
+                branch["result"],
+                serde_json::json!({"answer":"supported finding"})
+            );
+            assert_eq!(branch["result_complete"], true);
+            assert_eq!(branch["result_contract"]["purpose"], "deliverable");
+            assert_eq!(branch["result_contract"]["required"], true);
+            assert!(branch["result_event"].as_u64().is_some_and(|seq| seq > 0));
+            assert!(branch["result_error"].is_null());
+        }
+    }
+    assert_eq!(
+        branchyard::Yard::open(&repo)
+            .unwrap()
+            .branches()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn remote_contracted_schema_stdin_is_consumed_once_for_run_and_fan() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let answer = dir.0.join("answer.json");
+    fs::write(&answer, r#"{"answer":"schema supplied on stdin"}"#).unwrap();
+    let prompt = format!("REPLY_FILE {}", answer.display());
+    let server = Served::start(&dir.0, &[("app", &repo)], &["--allow-client-commands"]);
+    let schema: Value = serde_json::from_str(ANSWER_SCHEMA).unwrap();
+    for kind in ["run", "fan"] {
+        let harnesses = if kind == "run" {
+            "gemini-cli"
+        } else {
+            "gemini-cli,qwen-code"
+        };
+        let mut args = vec![
+            "--remote".to_owned(),
+            server.url.clone(),
+            "--token-file".to_owned(),
+            server.token_file.display().to_string(),
+        ];
+        args.extend(with_agent(&[
+            kind,
+            &prompt,
+            "--name",
+            &format!("stdin-{kind}"),
+            "--harness",
+            harnesses,
+            "--result-schema-file",
+            "-",
+            "--result-deliverable",
+            "--json",
+        ]));
+        let (output, _) = session(
+            &dir.0,
+            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+            &schema,
+            &[],
+        );
+        let value: Value = serde_json::from_str(&output).unwrap();
+        let branches = if kind == "run" {
+            vec![&value]
+        } else {
+            value["branches"].as_array().unwrap().iter().collect()
+        };
+        assert_eq!(branches.len(), if kind == "run" { 1 } else { 2 });
+        for branch in branches {
+            assert_eq!(branch["result_contract"]["schema"], schema);
+            assert_eq!(branch["result_complete"], true);
+            assert_eq!(branch["result"]["answer"], "schema supplied on stdin");
+            assert_eq!(branch["turns"], 1);
+        }
+    }
+}
+
+#[test]
+fn remote_contracted_fan_accepts_one_complete_answer_and_uses_remote_hints() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    // Both profiles use the same fake command. The fake selects its final
+    // answer from the fan's named worktree, without changing any files.
+    let bad = format!("gemini-cli={}", fake_agent!().display());
+    let good = format!("qwen-code={}", fake_agent!().display());
+    let server = Served::start(
+        &dir.0,
+        &[("app", &repo)],
+        &["--harness-command", &bad, "--harness-command", &good],
+    );
+    let prompt = r#"SH case "$PWD" in *-gemini-cli) printf '```json\n{"answer":42}\n```\n';; *) printf '```json\n{"answer":"supported finding"}\n```\n';; esac"#;
+    let output = server.by(
+        &dir.0,
+        &[
+            "fan",
+            prompt,
+            "--name",
+            "mixed",
+            "--harness",
+            "gemini-cli,qwen-code",
+            "--result-schema",
+            ANSWER_SCHEMA,
+            "--result-deliverable",
+            "--json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        text(&output.stderr),
+        text(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let branches = value["branches"].as_array().unwrap();
+    assert_eq!(branches.len(), 2);
+    let invalid = branches
+        .iter()
+        .find(|branch| branch["harness"] == "gemini-cli")
+        .unwrap();
+    let valid = branches
+        .iter()
+        .find(|branch| branch["harness"] == "qwen-code")
+        .unwrap();
+    assert_eq!(invalid["result_complete"], false);
+    assert!(invalid["result_error"].is_string());
+    assert_eq!(valid["result_complete"], true);
+    assert_eq!(valid["result"]["answer"], "supported finding");
+    for branch in branches {
+        assert_eq!(branch["status"]["state"], "no_changes");
+        assert_eq!(branch["turns"], 1);
+        assert!(branch["candidate"].is_null());
+    }
+    let output = server.by(
+        &dir.0,
+        &[
+            "fan",
+            prompt,
+            "--name",
+            "mixed-text",
+            "--harness",
+            "gemini-cli,qwen-code",
+            "--result-schema",
+            ANSWER_SCHEMA,
+            "--result-deliverable",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        text(&output.stderr),
+        text(&output.stdout)
+    );
+    let stdout = text(&output.stdout);
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("next:") && line.contains("inspect"))
+        .unwrap();
+    assert!(hint.contains("by --remote"), "{stdout}");
+    assert!(hint.contains(&server.url), "{hint}");
+    assert!(
+        hint.contains("--token-file") && hint.contains(&server.token_file.display().to_string()),
+        "{hint}"
+    );
+    assert!(
+        hint.contains("--repo app") && hint.contains("--json"),
+        "{hint}"
+    );
+    assert!(
+        !hint.contains("--check") && !hint.contains("compare"),
+        "{hint}"
+    );
+}
+
+#[test]
+fn remote_contracted_required_failures_add_no_turns_and_optional_reports_keep_legacy_success() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let answer = dir.0.join("invalid.json");
+    fs::write(&answer, r#"{"answer":42}"#).unwrap();
+    let prompt = format!("Research the answer\nREPLY_FILE {}", answer.display());
+    let server = Served::start(&dir.0, &[("app", &repo)], &["--allow-client-commands"]);
+    for kind in ["run", "fan"] {
+        let harnesses = if kind == "run" {
+            "gemini-cli"
+        } else {
+            "gemini-cli,qwen-code"
+        };
+        let args = with_agent(&[
+            kind,
+            &prompt,
+            "--name",
+            &format!("invalid-{kind}"),
+            "--harness",
+            harnesses,
+            "--result-schema",
+            ANSWER_SCHEMA,
+            "--result-deliverable",
+            "--json",
+        ]);
+        let output = server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{}\n{}",
+            text(&output.stderr),
+            text(&output.stdout)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let branches = if kind == "run" {
+            vec![&value]
+        } else {
+            value["branches"].as_array().unwrap().iter().collect()
+        };
+        assert_eq!(branches.len(), if kind == "run" { 1 } else { 2 });
+        for branch in branches {
+            assert_eq!(branch["status"]["state"], "no_changes");
+            assert_eq!(branch["turns"], 1);
+            assert_eq!(branch["children"], serde_json::json!([]));
+            assert_eq!(branch["result_complete"], false);
+            assert!(branch["result"].is_null());
+            assert!(branch["result_error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        }
+    }
+    for (name, flags, required, status) in [
+        ("optional", vec!["--result-schema", ANSWER_SCHEMA], false, 0),
+        (
+            "required",
+            vec!["--result-schema", ANSWER_SCHEMA, "--result-required"],
+            true,
+            1,
+        ),
+        ("legacy", Vec::new(), false, 0),
+    ] {
+        let mut args = with_agent(&["run", &prompt, "--name", name, "--json"]);
+        args.extend(flags.iter().map(|flag| (*flag).to_owned()));
+        let output = server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            output.status.code(),
+            Some(status),
+            "{name}: {}\n{}",
+            text(&output.stderr),
+            text(&output.stdout)
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["status"]["state"], "no_changes");
+        assert_eq!(value["turns"], 1);
+        if flags.is_empty() {
+            assert!(
+                value.get("result_complete").is_none(),
+                "legacy output changed: {value}"
+            );
+        } else {
+            assert_eq!(value["result_complete"], false);
+            assert_eq!(value["result_contract"]["required"], required);
+            assert!(
+                value["result_contract"].get("purpose").is_none(),
+                "report is the default"
+            );
+            assert!(value["result_error"].is_string());
+        }
+    }
+    let branches = branchyard::Yard::open(&repo).unwrap().branches().unwrap();
+    assert_eq!(branches.len(), 6);
+    assert!(branches
+        .iter()
+        .all(|branch| branch.turns == 1 && branch.children.is_empty()));
+}
+
+#[test]
+fn remote_contracted_checks_are_refused_before_any_submission() {
+    let dir = Dir::new();
+    let repo = dir.repo("remote");
+    let server = Served::start(&dir.0, &[("app", &repo)], &["--allow-client-commands"]);
+    for kind in ["run", "fan"] {
+        let args = with_agent(&[
+            kind,
+            "WRITE forbidden.txt=never",
+            "--name",
+            &format!("blocked-{kind}"),
+            "--harness",
+            "gemini-cli",
+            "--result-schema",
+            ANSWER_SCHEMA,
+            "--result-deliverable",
+            "--check",
+            "true",
+            "--json",
+        ]);
+        let output = server.by(&dir.0, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(!output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["kind"], "unsupported", "{value}");
+        assert!(value.to_string().contains("coordinator"), "{value}");
+    }
+    let token = fs::read_to_string(&server.token_file).unwrap();
+    let client = branchyard_client::Client::new(&server.url, token.trim()).unwrap();
+    assert!(
+        client.repo("app").operations(None).unwrap().is_empty(),
+        "no task was admitted"
+    );
+    assert!(
+        branchyard::Yard::open(&repo)
+            .unwrap()
+            .branches()
+            .unwrap()
+            .is_empty(),
+        "no native prompt or branch was created"
+    );
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -2397,9 +2754,8 @@ fn by_services_lists_a_servers_fleet_and_the_local_registry_finds_by_serve() {
     assert_eq!(after["services"], serde_json::json!([]));
 }
 
-/// `by hook <event>` or `by statusline` (`args`) as a Claude Code session
-/// in `cwd` runs it, with `input` on stdin and `env` set: its output and
-/// how long it took. It must exit 0.
+/// The built `by` in `cwd`, with JSON `input` on stdin and `env` set:
+/// its output and how long it took. It must exit 0.
 fn session(cwd: &Path, args: &[&str], input: &Value, env: &[(&str, String)]) -> (String, Duration) {
     use std::io::Write as _;
     let mut command = command(BY, cwd);

@@ -115,10 +115,25 @@ pub(crate) fn render_running(message: &Message) -> String {
 }
 
 fn line(message: &Message) -> String {
-    format!(
+    let mut text = format!(
         "[#{}] {} from {}: {}\n",
         message.id, message.kind, message.from, message.text
-    )
+    );
+    if let Some(handoff) = &message.handoff {
+        let result: String = handoff.result.to_string().chars().take(2000).collect();
+        text.push_str(&format!(
+            "Handoff from {} turn {} result event {}: {}\n",
+            handoff.source, handoff.version.turn, handoff.version.result_event, result
+        ));
+        for artifact in &handoff.artifacts {
+            text.push_str(&format!(
+                "artifact {} ({}, blake3 {})\n",
+                artifact.id, artifact.name, artifact.digest
+            ));
+        }
+        text.push_str("The full frozen result and artifact metadata are in `by inbox --json`.\n");
+    }
+    text
 }
 
 /// Whether `from` may send a message of `kind` to `to`, given the
@@ -192,6 +207,9 @@ fn escalates_to(store: &Store, from: &str, to: &str) -> Result<bool, Error> {
 /// fatal to sending the message, so they are swallowed here. For
 /// [`SteerDelivery`] the engine has already marked it, so this is a no-op.
 pub(crate) fn try_deliver_now(yard: &Yard, store: &Store, to: &str, message: &Message) {
+    if message.next_turn {
+        return;
+    }
     let Some(hook) = yard.delivery_hook() else {
         return;
     };
@@ -237,16 +255,6 @@ pub(crate) fn steered_this_turn(store: &Store, branch: &str) -> Result<Vec<u64>,
         }
     }
     Ok(steered)
-}
-
-/// Every message pending delivery to `branch`, oldest first.
-pub(crate) fn pending(store: &Store, branch: &str) -> Result<Vec<Message>, Error> {
-    Ok(store
-        .backend()
-        .inbox(branch)?
-        .into_iter()
-        .filter(|m| !m.delivered)
-        .collect())
 }
 
 /// Whether `message` is carried by steered input still queued for engine
@@ -307,7 +315,12 @@ pub(crate) fn compose_turn_start(
     prompt: &str,
 ) -> Result<(String, Vec<u64>), Error> {
     let mut waiting = Vec::new();
-    for message in pending(store, branch)? {
+    for message in store
+        .backend()
+        .inbox_for_turn(branch, turn)?
+        .into_iter()
+        .filter(|message| !message.delivered)
+    {
         if !steering(store, branch, turn, &message)? {
             waiting.push(message);
         }
@@ -552,6 +565,8 @@ mod tests {
             in_reply_to: None,
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         }
     }
 

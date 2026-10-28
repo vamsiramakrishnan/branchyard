@@ -853,6 +853,17 @@ class Message(Record):
     text: str
     at_ms: int
 
+    @property
+    def handoff(self) -> Optional[Record]:
+        """The frozen source version, result and selected artifact metadata, when present."""
+        value = self.get("handoff")
+        return Record(value) if isinstance(value, dict) else None
+
+    @property
+    def next_turn(self) -> bool:
+        """Whether delivery waits for a later turn without steering the active one."""
+        return bool(self.get("next_turn", False))
+
 
 class Approval(Record):
     """`ApprovalAsk`: `id`, `branch`, `turn`, `subject`, `about`
@@ -2168,6 +2179,18 @@ class Repo:
         """`branch`'s own inbox, as `Message`s."""
         return [Message(m) for m in self.client.get(self._branch(branch, "/inbox")).get("messages", [])]
 
+    def handoff(
+        self,
+        source: str,
+        to: str,
+        artifacts: Sequence[str] = (),
+        note: str = "",
+        expected: Optional[JSON] = None,
+    ) -> Message:
+        """Queue a frozen result and selected artifact grants without starting a recipient turn."""
+        body = _drop_none({"from": source, "to": to, "artifacts": list(artifacts), "note": note, "expected": expected})
+        return Message(self.client.post(self._branch(source, "/handoff"), body, key=new_key()))
+
     def ask(self, branch: str, text: str, wait_seconds: Optional[float] = None) -> Record:
         """Ask `branch`'s parent a question, as `branch`. With `wait_seconds` (capped at 120 on the server) it waits for
         the answer, `answer` being None when none came."""
@@ -3261,6 +3284,19 @@ class Delegator:
         if self.inside:
             return Record(self._by("events", branch, cursor, limit))
         return self._http().event_page(branch or self._acting("events"), cursor, limit)
+
+    def handoff(
+        self,
+        source: str,
+        to: str,
+        artifacts: Optional[Sequence[str]] = None,
+        note: str = "",
+        expected: Optional[JSON] = None,
+    ) -> Message:
+        """Relay a coworker's settled result; the recipient retains its native execution."""
+        if self.inside:
+            return Message(self._by("handoff", source, to, list(artifacts or ()), note, expected))
+        return self._http().handoff(source, to, artifacts or (), note, expected)
 
     # -- reporting, as this branch -----------------------------------------
 

@@ -10,7 +10,13 @@ What to do when a newer Branchyard arrives, and the one step you cannot take bac
 
 ## The binary
 
-No release is published yet, so upgrading is rebuilding from source:
+For a binary installation, rerun the installer with `--no-setup` to retain project configuration:
+
+```sh
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --no-setup
+```
+
+For a source installation, rebuild from the updated checkout:
 
 ```sh
 cd branchyard
@@ -25,13 +31,15 @@ Between source releases, `by --version` keeps the workspace version, so `git log
 
 ## The store
 
+Frozen handoffs add durable message metadata. Stores from before handoffs retain ordinary message behavior after migration.
+
 The first `by` command that opens a repository after an upgrade migrates `.branchyard/state.db` to the schema the new binary reads, in one step. Nothing asks. `by doctor` warns before that happens, in the `repository.schema` row:
 
 ```text
-schema 1; this binary reads 2 and upgrades the store in place the first time any `by` command opens it, after which an older `by` cannot read it
+schema 1; this binary reads 3 and upgrades the store in place the first time any `by` command opens it, after which an older `by` cannot read it
 ```
 
-and the `To do:` list under the report adds `back up .branchyard/state.db if you may go back to an older by, then run any by command`. Once it has happened the row reads `schema 2, the version this binary reads`. The other direction fails: a store written by a newer `by` gives `schema N was written by a newer by; this binary reads M`, and the fix is the newer `by` (or the backup).
+and the `To do:` list under the report adds `back up .branchyard/state.db if you may go back to an older by, then run any by command`. Once it has happened the row reads `schema 3, the version this binary reads`. The other direction fails: a store written by a newer `by` gives `schema N was written by a newer by; this binary reads M`, and the fix is the newer `by` (or the backup).
 
 A server (`by serve`, `by worker`) migrates its own store the same way when the new binary starts, on SQLite or PostgreSQL. Back the database up first (`pg_dump` for PostgreSQL), stop every old server and worker on it, and start the new ones. Servers and workers sharing one database should run the same build.
 
@@ -58,4 +66,4 @@ by doctor                # repository.schema reads "the version this binary read
 by harnesses
 ```
 
-Not done: the schema warning text is the code's, but no store was migrated in this session (this build reads schema 2 and there was no older `by` to write schema 1), so the `schema 1` line above is the template filled in, not a capture. The hook-duplication warning follows from the merge rules in [distribution](distribution.md) and was not seen across a real version change. `cargo install` was run with `--debug --offline` into a scratch root, not in release mode. The advice for servers and workers (stop the old ones, run one build, back up PostgreSQL) was not run.
+The schema warning above is an illustrative template. Hermetic backend conformance tests cover older-store migration and ordinary-message defaults for SQLite and PostgreSQL. Not done: a live upgrade with mixed old and new server binaries. The hook-duplication warning follows from the merge rules in [distribution](distribution.md) and was not seen across a real version change. `cargo install` was run with `--debug --offline` into a scratch root, not in release mode. The advice for servers and workers (stop the old ones, run one build, back up PostgreSQL) was not run.

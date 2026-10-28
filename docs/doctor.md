@@ -94,7 +94,7 @@ A repository with no `.branchyard/` is a `todo` (`not set up yet`, with `by setu
 
 The row is `ok` for a harness that can be used, including one whose login cannot be read. `todo` is a login still to make (`login not verified`, or `logged out` by the harness's own command), with `by harnesses login ID` as the fix, the same command `by up` gives. `warn` is a harness found off `PATH` or at its usage limit. A login that is only not verified is never called "cannot run". `harnesses.default` says the same about the default harness: `warn` with that command when its login is not verified.
 
-A route whose model is a pattern (`claude-*`) is priced per model when a call is made; the row names such patterns as not checked. The Substrate provider is chosen by flags, never by a file, so there is nothing configured for doctor to check; no cheap reachability check for it exists.
+A route whose model is a pattern (`claude-*`) is priced per model when a call is made; the row names such patterns as not checked. A saved Substrate connection is also checked for connection and credential readiness; `by substrate check --smoke` runs a disposable bridge probe without a model. See [Substrate setup](substrate-setup.md).
 
 ## An example
 
@@ -106,7 +106,7 @@ Mode: local, no isolation · SQLite (.branchyard/state.db) · no server
 STATUS  CHECK                   DETAIL
 ok      repository.git          /home/me/app (on branch main)
 ok      repository.state        /home/me/app/.branchyard opens; 3 branches
-ok      repository.schema       schema 2, the version this binary reads
+ok      repository.schema       schema 3, the version this binary reads
 ok      repository.services     no registry yet: nothing has registered a service
 ok      config.user             no user file at /home/me/.config/branchyard/config.toml (optional)
 ok      config.project          /home/me/app/branchyard.toml loads and validates

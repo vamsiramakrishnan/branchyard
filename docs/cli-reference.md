@@ -99,6 +99,10 @@ by run [OPTIONS] [PROMPT]
 | `--goal-rounds <N>` | Follow-up turns at most for an unmet goal (default 2), within the budget |
 | `--goal-judge <ID>` | The goal's judge harness, read-only on a scratch branch (default: the [fleet] entry's goal_judge; without one, the branch's check and a non-empty diff decide) |
 | `--goal-judge-command <CMD>` | Launch the goal judge with this instead of its executable, for development and testing |
+| `--result-schema <JSON>` | JSON Schema for the structured result using only type, properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description; anything else is refused. Read accepted results with inspect, wait or compare |
+| `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
+| `--result-required` | Require a structured result matching the schema |
+| `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
 
 ## `by fan`
 
@@ -115,6 +119,7 @@ by fan [OPTIONS] [PROMPT]
 | `--attempts <N>` | Branches to start when routed (default: the [fleet] entry's attempts) |
 | `--judge` | Then judge the attempts and propose one, as `by judge` does |
 | `--json` | Print JSON: the branches, as `by ls --json` prints them (activity goes to standard error), and with --judge the judgement |
+| `--no-files` | Run in a private task without project files, even outside a Git repository |
 | `-n, --name <NAME>` | Branch name prefix (default: a slug of the prompt) |
 | `--auto` | Pick the harness from the [fleet] table in branchyard.toml, learning from outcomes, and fail over to the next candidate when a harness fails |
 | `--kind <KIND>` | The task's kind (default: inferred from the prompt): bugfix, feature, refactor, review, research, docs, migration, tests, other |
@@ -185,6 +190,10 @@ by fan [OPTIONS] [PROMPT]
 | `--goal-rounds <N>` | Follow-up turns at most for an unmet goal (default 2), within the budget |
 | `--goal-judge <ID>` | The goal's judge harness, read-only on a scratch branch (default: the [fleet] entry's goal_judge; without one, the branch's check and a non-empty diff decide) |
 | `--goal-judge-command <CMD>` | Launch the goal judge with this instead of its executable, for development and testing |
+| `--result-schema <JSON>` | JSON Schema for the structured result using only type, properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description; anything else is refused. Read accepted results with inspect, wait or compare |
+| `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
+| `--result-required` | Require a structured result matching the schema |
+| `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
 
 ## `by map`
 
@@ -674,6 +683,10 @@ by task new [OPTIONS] <PROMPT>
 | `--goal-rounds <N>` | Follow-up turns at most for an unmet goal (default 2), within the budget |
 | `--goal-judge <ID>` | The goal's judge harness, read-only on a scratch branch (default: the [fleet] entry's goal_judge; without one, the branch's check and a non-empty diff decide) |
 | `--goal-judge-command <CMD>` | Launch the goal judge with this instead of its executable, for development and testing |
+| `--result-schema <JSON>` | JSON Schema for the structured result using only type, properties, required, additionalProperties, items, enum, const, minimum, maximum, exclusiveMinimum, exclusiveMaximum, minLength, maxLength, pattern, minItems, maxItems, uniqueItems, anyOf, oneOf and annotations such as title and description; anything else is refused. Read accepted results with inspect, wait or compare |
+| `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
+| `--result-required` | Require a structured result matching the schema |
+| `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
 
 ### `by task ls`
 
@@ -876,6 +889,7 @@ by judge [OPTIONS] <FAN|BRANCH>...
 | `<FAN|BRANCH>...` | A `by fan`'s name, or the branches to judge |
 | `--harness <ID>` | Ask this harness for a verdict (default: the [fleet] entry's judge, if any) |
 | `--deterministic` | Score without a judge harness, even when the [fleet] names one |
+| `--require-judge` | Require a valid model verdict; a failed judge leaves every attempt unpickable |
 | `--command <CMD>` | Launch the judge harness with this instead of its executable, for development and testing |
 | `--rubric <TEXT>` | More rubric for the judge harness, after the default |
 | `--pick` | Merge the proposed pick, as `by compare --pick` does |
@@ -1833,6 +1847,23 @@ by stats [OPTIONS]
 | Option | What it does |
 |---|---|
 | `--json` | Print JSON |
+
+## `by handoff`
+
+Relay a settled result and selected artifacts without steering its recipient
+
+```text
+by handoff [OPTIONS] --to <BRANCH> <SOURCE>
+```
+
+| Option | What it does |
+|---|---|
+| `<SOURCE>` | The settled branch whose current result to relay |
+| `--to <BRANCH>` | The branch that receives the frozen result in its next turn |
+| `--artifact <ID>` | An immutable artifact to share with the recipient; repeatable |
+| `--note <TEXT>` | Context for the recipient, beside the result and its provenance |
+| `--expected-version <JSON>` | Refuse if this JSON source version (incarnation, turn, result_event) is stale |
+| `--json` | Print the durable message and frozen handoff as JSON |
 
 ## `by check`
 

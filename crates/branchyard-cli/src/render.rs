@@ -96,6 +96,33 @@ pub fn truncate(text: &str, max: usize) -> String {
     short
 }
 
+/// A message's human-readable payload, including frozen handoff evidence.
+pub(crate) fn message_body(message: &branchyard::Message) -> String {
+    let Some(handoff) = &message.handoff else {
+        return message.text.clone();
+    };
+    let artifacts = handoff
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{}\n  handoff from {} (incarnation {}, turn {}, event {})\n  result: {}\n  artifacts: {}",
+        message.text,
+        handoff.source,
+        handoff.version.incarnation,
+        handoff.version.turn,
+        handoff.version.result_event,
+        truncate(&handoff.result.to_string(), 2000),
+        if artifacts.is_empty() {
+            "none"
+        } else {
+            &artifacts
+        },
+    )
+}
+
 /// Shorten `text` to `max` terminal columns by cutting its middle, marked
 /// with an ellipsis: for a branch name, whose end (`-2`, `-codex`) is what
 /// tells it from its siblings.
@@ -747,8 +774,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                     message.from,
                     message.to,
                     truncate(
-                        &message
-                            .text
+                        &message_body(message)
                             .split_whitespace()
                             .collect::<Vec<_>>()
                             .join(" "),
@@ -2071,6 +2097,38 @@ pub fn log_text(events: &[RecordedEvent], style: Style) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_handoff_note_still_displays_frozen_evidence() {
+        let mut message: branchyard::Message = serde_json::from_value(serde_json::json!({
+            "id": 1, "from": "lead", "to": "writer", "kind": "answer",
+            "text": "", "at_ms": 0, "next_turn": true,
+            "handoff": {
+                "source": "research", "version": {"incarnation": 7, "turn": 2, "result_event": 14},
+                "result": {"finding": "measured"}, "artifacts": [{
+                    "id": "art1", "digest": "abc", "size": 8, "name": "evidence.txt",
+                    "media_type": "text/plain", "publisher_branch": "research",
+                    "turn": 2, "created_at": 0
+                }]
+            }
+        }))
+        .unwrap();
+        let text = message_body(&message);
+        for evidence in [
+            "research",
+            "incarnation 7",
+            "turn 2",
+            "event 14",
+            "measured",
+            "art1",
+        ] {
+            assert!(text.contains(evidence), "{text}");
+        }
+        message.handoff = None;
+        message.next_turn = false;
+        message.text = "ordinary message".into();
+        assert_eq!(message_body(&message), "ordinary message");
+    }
 
     #[test]
     fn widths_count_terminal_columns() {

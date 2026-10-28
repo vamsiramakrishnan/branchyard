@@ -750,6 +750,16 @@ pub(crate) fn task_options(
         ));
     }
     let budget = request.budget.to_budget().map_err(ApiError::bad_request)?;
+    if let Some(contract) = &request.result {
+        contract
+            .check()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if contract.is_deliverable() && request.goal.is_some() {
+            return Err(ApiError::bad_request(
+                "a result deliverable does not run automatic goal follow-up turns",
+            ));
+        }
+    }
     let provider = app.provider(request.provider.clone())?;
     app.opt_ins(
         request.delegation.is_some() || request.seats.is_some(),
@@ -781,6 +791,7 @@ pub(crate) fn task_options(
         workspace: app.workspace(repo)?,
         plan: request.plan,
         goal: goal(app, request)?,
+        result: request.result.clone(),
         deny: request.deny.clone(),
         ..app.options(
             repo,

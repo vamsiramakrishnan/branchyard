@@ -1,8 +1,8 @@
 # Branchyard
 
-**Delegate coding work to agent harnesses on git branches, and merge only validated results.**
+**Coordinate agent harnesses for code and knowledge work, and validate what they return.**
 
-`by` starts a task on a new git branch, in a worktree of its own, with the coding harness you choose: Claude Code, Codex, Gemini CLI and others. The harness works there while you do something else. You read the diff, and `by merge` runs your check on the exact merge before it moves your branch. A harness can delegate to child branches, several harnesses can attempt the same task, and a branch outlives the terminal that started it. The same engine is a Rust and Python SDK ([SDKs](docs/sdk.md)), and `by serve` offers it over HTTP.
+`by` starts a task on a new git branch, in a worktree of its own, with the coding harness you choose: Claude Code, Codex, Gemini CLI and others. The harness works there while you do something else. You read the diff, and `by merge` runs your check on the exact merge before it moves your branch. A harness can delegate to child branches, several harnesses can attempt the same task, and a branch outlives the terminal that started it. Each harness keeps its own planning, native subagents and task graph. For research and other knowledge work, a required JSON deliverable can complete without a Git change; [cooperative teams](docs/cooperative-teams.md) covers native leads, seats and frozen handoffs. The same engine is a Rust and Python SDK ([SDKs](docs/sdk.md)), and `by serve` offers it over HTTP.
 
 > **Status: early development.** Tests include hermetic fixtures and dated live runtime and harness qualification. Read [the remote validation record](docs/remote-validation-2026-10-28.md) for the tested environments and remaining limits, and [status](docs/status.md) for the wider project.
 
@@ -28,7 +28,7 @@ by ls                                                  # your branches and their
 by merge make-the-flaky-parser-test-deterministic      # run the check on the exact merge, then merge
 ```
 
-A real run spends what the harness's login or key costs; add `--budget-usd 1` to cap a branch.
+A real run spends what the harness's login or key costs; `--budget-usd 1` limits reported cost. Unknown usage is not a hard spending guarantee ([cost limits](docs/delegation.md#what-a-cost-limit-guarantees)).
 
 `by setup` asks only what it cannot detect; `by setup --yes` asks nothing, and `by init project --defaults --apply` writes just the project file. It also installs Branchyard's hooks, so a session you start in a harness hears when its branches finish. Codex runs no hook until you trust it: start `codex` once and choose "Trust all and continue". `by init plugin codex` installs only Codex's hooks; its skills come with the Codex plugin ([setup](docs/setup.md#one-command), [distribution](docs/distribution.md#install-per-harness)).
 
@@ -60,6 +60,7 @@ The source build above reaches local, isolated and server mode. Substrate is in 
 |---|---|
 | Set up for the harnesses I have | `by setup`: [setup](docs/setup.md#one-command), [doctor](docs/doctor.md), [up](docs/up.md) |
 | Run one task on several harnesses and pick a result | `by fan`: [fleet](docs/fleet.md), [checkpoints and compare](docs/checkpoints.md) |
+| Coordinate code and knowledge workers from an existing lead | [cooperative teams](docs/cooperative-teams.md) |
 | Delegate from inside a harness session | [delegation](docs/delegation.md), [rigs](docs/rigs.md) |
 | Open a pull request from an issue | `by run --issue 42`, `by pr`: [pull requests](docs/pull-requests.md) |
 | Watch branches and steer them | `by watch`: [watching branches](docs/watch.md) |

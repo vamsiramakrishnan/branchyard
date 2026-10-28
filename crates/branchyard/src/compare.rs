@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use branchyard_workspace::{Check, CheckResult, Commit};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{git, ops, Activity, BranchInfo, BranchStatus, Error, Event, RecordedEvent, Yard};
 use branchyard_support::time::now_ms;
@@ -25,6 +26,18 @@ pub struct Attempt {
     pub duration_ms: Option<u64>,
     pub check: AttemptCheck,
     pub candidate: Option<String>,
+    /// The declared structured output, including its acceptance purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<crate::ResultContract>,
+    /// A schema-valid accepted result from this attempt's latest turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    /// Sequence of that result in the complete oldest-first log, numbered from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_event: Option<u64>,
+    /// Why a deliverable lacks valid current-turn output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error: Option<String>,
     pub files_changed: u32,
     pub insertions: u32,
     pub deletions: u32,
@@ -32,6 +45,52 @@ pub struct Attempt {
     pub files: Vec<String>,
     /// The paths no other compared attempt changes.
     pub unique_files: Vec<String>,
+}
+
+impl Attempt {
+    /// Whether structured output, rather than a Git change, is this task's deliverable.
+    pub fn is_deliverable(&self) -> bool {
+        self.result_contract
+            .as_ref()
+            .is_some_and(crate::ResultContract::is_deliverable)
+    }
+
+    /// Attach validated current-turn output from a local record or a server's
+    /// inspection and complete event log. Invalid, missing or stale output
+    /// remains visible as incomplete evidence. This does not run a check.
+    pub fn with_result(
+        mut self,
+        contract: Option<crate::ResultContract>,
+        events: &[RecordedEvent],
+    ) -> Self {
+        self.result_contract = contract;
+        self.result = None;
+        self.result_event = None;
+        self.result_error = None;
+        if let Some(contract) = &self.result_contract {
+            if let Err(error) = contract.check() {
+                self.result_error = Some(error.to_string());
+                return self;
+            }
+            match crate::contract::current_event(events) {
+                Some((index, value)) => {
+                    match crate::contract::accept(Some(contract), Some(value.clone())) {
+                        Ok(Some(value)) => {
+                            self.result = Some(value);
+                            self.result_event = Some(index);
+                        }
+                        Ok(None) => {}
+                        Err(error) => self.result_error = Some(error.to_string()),
+                    }
+                }
+                None if contract.required => {
+                    self.result_error = Some("no accepted result in its latest turn".into())
+                }
+                None => {}
+            }
+        }
+        self
+    }
 }
 
 /// An attempt's check. Serialized as an object tagged by `state`.
@@ -96,6 +155,10 @@ pub fn attempt(info: &BranchInfo, events: &[RecordedEvent], files: Vec<String>) 
             _ => AttemptCheck::NotRun,
         },
         candidate: info.candidate.as_ref().map(|c| c.commit.clone()),
+        result_contract: None,
+        result: None,
+        result_event: None,
+        result_error: None,
         files_changed,
         insertions,
         deletions,
@@ -206,17 +269,25 @@ pub(crate) fn compare(
             None => Vec::new(),
         };
         let mut attempt = attempt(&record.info, &events, files);
-        match (&record.check, &record.info.candidate) {
+        attempt = attempt.with_result(record.result_contract.clone(), &events);
+        let commit = record
+            .info
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.commit.as_str())
+            .or_else(|| {
+                attempt
+                    .is_deliverable()
+                    .then_some(record.info.base.as_str())
+            });
+        match (&record.check, commit) {
             (None, Some(_)) => attempt.check = AttemptCheck::None,
-            (Some(argv), Some(candidate)) if run_checks => {
+            (Some(argv), Some(commit)) if run_checks => {
                 let check = Check {
                     argv: argv.clone(),
                     timeout: ops::CHECK_TIMEOUT,
                 };
-                attempt.check = match yard
-                    .repo
-                    .check_commit(&Commit(candidate.commit.clone()), &check)
-                {
+                attempt.check = match yard.repo.check_commit(&Commit(commit.to_owned()), &check) {
                     Ok(CheckResult::Passed { .. }) => AttemptCheck::Passed,
                     Ok(CheckResult::Failed { output_tail }) => AttemptCheck::Failed { output_tail },
                     Ok(CheckResult::TimedOut { output_tail }) => {
@@ -227,6 +298,7 @@ pub(crate) fn compare(
                     },
                 };
             }
+            (Some(_), Some(_)) => attempt.check = AttemptCheck::NotRun,
             _ => {}
         }
         attempts.push(attempt);

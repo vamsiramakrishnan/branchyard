@@ -283,6 +283,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Relay a settled result and selected artifacts without steering its recipient
+    #[command(display_order = 226)]
+    Handoff(HandoffArgs),
     /// Compare attempts side by side, and pick one to merge
     #[command(display_order = 109, after_help = COMPARE_EXAMPLES)]
     Compare {
@@ -328,6 +331,9 @@ pub enum Command {
         /// Score without a judge harness, even when the [fleet] names one
         #[arg(long)]
         deterministic: bool,
+        /// Require a valid model verdict; a failed judge leaves every attempt unpickable
+        #[arg(long, conflicts_with = "deterministic")]
+        require_judge: bool,
         /// Launch the judge harness with this instead of its executable, for development and
         /// testing
         #[arg(long, value_name = "CMD", value_parser = command_argv, requires = "harness")]

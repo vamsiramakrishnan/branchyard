@@ -175,6 +175,7 @@ impl Live {
             trace_parent: None,
             plan: task.plan,
             goal: crate::plan_cmd::goal(task),
+            result: result_for_task(task)?,
             fleet: task.fleet.clone(),
             join_task: None,
             deny: task.deny.clone(),
@@ -203,6 +204,10 @@ impl Live {
         let branch = branch.yard().branch(&branch.info().name).unwrap_or(branch);
         self.console.finish();
         descendants?;
+        if let Some(view) = ResultView::local(branch.yard(), branch.info())? {
+            print(&(json::text(&view.json(branch.info())) + "\n"))?;
+            return view.outcome(branch.info());
+        }
         show(env, &Target::Local, &branch.info().name, true, false)?;
         branch_outcome(branch.info())
     }
@@ -233,7 +238,174 @@ impl Live {
                 render::comparison_table(&infos, env.style())
             ))?;
         }
+        if let Some(view) = ResultView::local(branch.yard(), branch.info())? {
+            print(&view.text(None))?;
+            return view.outcome(branch.info());
+        }
         branch_outcome(branch.info())
+    }
+}
+
+/// One branch's structured-output view, shared by local and remote finishers.
+pub(crate) struct ResultView {
+    attempt: branchyard::Attempt,
+    complete: bool,
+    required: bool,
+    error: Option<String>,
+}
+
+impl ResultView {
+    /// Read output and run a declared deliverable check on its exact tree.
+    /// A branch without a contract retains the legacy finishing path.
+    pub(crate) fn local(yard: &Yard, info: &BranchInfo) -> Result<Option<Self>, Failure> {
+        if yard.branch(&info.name)?.result_contract()?.is_none() {
+            return Ok(None);
+        }
+        let names = std::slice::from_ref(&info.name);
+        let mut attempts = yard.compare(names, false)?;
+        let mut attempt = attempts
+            .pop()
+            .ok_or_else(|| Report::new("internal", "result inspection returned no attempt"))?;
+        if attempt.is_deliverable()
+            && Self::same_snapshot(info, &attempt)
+            && Self::successful(info)
+            && attempt.result.is_some()
+            && attempt.result_error.is_none()
+            && matches!(attempt.check, branchyard::AttemptCheck::NotRun)
+        {
+            attempt = yard.compare(names, true)?.pop().ok_or_else(|| {
+                Report::new("internal", "checked result inspection returned no attempt")
+            })?;
+        }
+        Ok(Self::from_attempt(info, attempt))
+    }
+
+    /// Use core result assessment supplied by a judge or remote adapter.
+    pub(crate) fn from_attempt(
+        info: &BranchInfo,
+        mut attempt: branchyard::Attempt,
+    ) -> Option<Self> {
+        let contract = attempt.result_contract.as_ref()?;
+        let deliverable = contract.is_deliverable();
+        let required = deliverable || (contract.required && info.depth == 0);
+        let mut error = attempt.result_error.clone();
+        if !Self::same_snapshot(info, &attempt) {
+            attempt.result = None;
+            attempt.result_event = None;
+            error = Some(
+                "branch changed while its structured result was inspected; inspect it again".into(),
+            );
+        }
+        if error.is_none() && attempt.result.is_none() {
+            error = Some("no accepted structured result in the latest turn".into());
+        }
+        if error.is_none() && !Self::successful(info) {
+            error = Some("the native task did not complete successfully".into());
+        }
+        if error.is_none() && deliverable {
+            error = match &attempt.check {
+                branchyard::AttemptCheck::None
+                | branchyard::AttemptCheck::Passed
+                | branchyard::AttemptCheck::PassedAtMerge => None,
+                branchyard::AttemptCheck::Failed { .. } => {
+                    Some("the configured check failed".into())
+                }
+                branchyard::AttemptCheck::TimedOut { .. } => {
+                    Some("the configured check timed out".into())
+                }
+                branchyard::AttemptCheck::Error { message } => {
+                    Some(format!("the configured check could not run: {message}"))
+                }
+                _ => Some("the configured check has not passed".into()),
+            };
+        }
+        let complete = error.is_none() && attempt.result.is_some();
+        Some(Self {
+            attempt,
+            complete,
+            required,
+            error,
+        })
+    }
+
+    fn successful(info: &BranchInfo) -> bool {
+        matches!(
+            info.status,
+            BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
+        )
+    }
+
+    fn same_snapshot(info: &BranchInfo, attempt: &branchyard::Attempt) -> bool {
+        attempt.turns == info.turns
+            && attempt.status == info.status
+            && attempt.candidate.as_deref()
+                == info
+                    .candidate
+                    .as_ref()
+                    .map(|candidate| candidate.commit.as_str())
+    }
+
+    /// Whether incomplete output makes the root task unsuccessful.
+    pub(crate) fn required(&self) -> bool {
+        self.required
+    }
+    /// Whether this turn supplied accepted output and any deliverable check passed.
+    pub(crate) fn complete(&self) -> bool {
+        self.complete
+    }
+    /// Whether the output itself can be selected without a Git candidate.
+    pub(crate) fn is_deliverable(&self) -> bool {
+        self.attempt.is_deliverable()
+    }
+
+    /// Keep the native BranchInfo shape/status and add explicit output evidence.
+    pub(crate) fn json(&self, info: &BranchInfo) -> serde_json::Value {
+        let mut value = json::branch(info);
+        value["result_contract"] = serde_json::json!(self.attempt.result_contract);
+        value["result"] = serde_json::json!(self.attempt.result);
+        value["result_event"] = serde_json::json!(self.attempt.result_event);
+        value["result_error"] = serde_json::json!(self.error);
+        value["result_complete"] = serde_json::json!(self.complete);
+        if self.is_deliverable() {
+            value["result_check"] = serde_json::json!(self.attempt.check);
+        }
+        value
+    }
+
+    /// Render the answer or an incomplete-output reason. A remote adapter
+    /// supplies its own next command; local callers use the comparison hint.
+    pub(crate) fn text(&self, next: Option<&str>) -> String {
+        match &self.error {
+            Some(error) => {
+                let local_next = format!(
+                    "by compare {} --check --json",
+                    shell_quote(&self.attempt.branch)
+                );
+                format!(
+                    "\nresult {}: incomplete: {error}\nnext: {}\n",
+                    self.attempt.branch,
+                    next.unwrap_or(&local_next)
+                )
+            }
+            None => format!(
+                "\nresult {}: complete; semantic accuracy not verified\n{}\n",
+                self.attempt.branch,
+                self.attempt
+                    .result
+                    .as_ref()
+                    .map(|value| branchyard::contract::one_line(value, 1000))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+
+    /// Preserve native execution failures and enforce required root output.
+    pub(crate) fn outcome(&self, info: &BranchInfo) -> Outcome {
+        if self.required && !self.complete {
+            Err(Failure::Reported)
+        } else {
+            branch_outcome(info)
+        }
     }
 }
 
@@ -286,4 +458,45 @@ pub(crate) fn workspace(
     yard: &Yard,
 ) -> Result<Option<branchyard::WorkspaceSpec>, Failure> {
     crate::workspace_cmd::for_new_branch(env, yard.root())
+}
+
+#[cfg(test)]
+mod result_view_tests {
+    use super::*;
+
+    #[test]
+    fn incomplete_output_uses_the_adapters_explicit_next_command() {
+        let view = ResultView {
+            attempt: branchyard::Attempt {
+                branch: "answer".into(),
+                harness: "fake".into(),
+                status: BranchStatus::NoChanges,
+                turns: 1,
+                cost_usd: None,
+                tokens: None,
+                duration_ms: None,
+                check: branchyard::AttemptCheck::None,
+                candidate: None,
+                result_contract: None,
+                result: None,
+                result_event: None,
+                result_error: None,
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                files: Vec::new(),
+                unique_files: Vec::new(),
+            },
+            complete: false,
+            required: true,
+            error: Some("no accepted answer".into()),
+        };
+        assert!(view
+            .text(None)
+            .contains("next: by compare answer --check --json"));
+        let next = "by --remote URL inspect answer --json";
+        let remote = view.text(Some(next));
+        assert!(remote.contains(&format!("next: {next}")));
+        assert!(!remote.contains("by compare"));
+    }
 }

@@ -804,6 +804,10 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/v1/repos/{repo}/branches/{branch}/inbox", get(inbox))
         .route(
+            "/v1/repos/{repo}/branches/{branch}/handoff",
+            axum::routing::post(post_handoff),
+        )
+        .route(
             "/v1/repos/{repo}/branches/{branch}/ask",
             axum::routing::post(post_ask),
         )
@@ -2322,6 +2326,25 @@ async fn inbox(
     as_person(&app, &caller, &repo, branch, "read", |d, _| d.inbox())
         .await
         .map(Json)
+}
+
+async fn post_handoff(
+    State(app): State<Shared>,
+    Path((repo, branch)): Path<(String, String)>,
+    Extension(caller): Extension<Caller>,
+    JsonBody(request, _): JsonBody<branchyard::HandoffRequest>,
+) -> Result<Json<branchyard::Message>, ApiError> {
+    if request.from != branch {
+        return Err(ApiError::bad_request(
+            "handoff source differs from the request path",
+        ));
+    }
+    let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
+    app.opt_ins(true, false, false)?;
+    blocking(move || yard.handoff(request))
+        .await?
+        .map(Json)
+        .map_err(|error| error::sdk(&error))
 }
 
 /// Blocking a server worker for a long wait is bounded: a caller that wants

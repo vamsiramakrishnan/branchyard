@@ -245,6 +245,17 @@
             }
           ]
         },
+        "owns": {
+          "description": "Repository-relative paths this seat may change.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "result": {
+          "description": "Schema and purpose of this seat's reported answer.",
+          "$ref": "#/$defs/ResultContract"
+        },
         "policy": {
           "$ref": "#/$defs/Policy"
         },
@@ -343,6 +354,43 @@
         }
       },
       "additionalProperties": false
+    },
+    "ResultContract": {
+      "description": "What a parent says, at spawn, about the answer it wants from a child.",
+      "type": "object",
+      "properties": {
+        "schema": {
+          "description": "A JSON Schema in the subset the contract supports: `type`,\n`properties`, `required`, `additionalProperties`, `items`, `enum`,\n`const`, `minimum`, `maximum`, `exclusiveMinimum`,\n`exclusiveMaximum`, `minLength`, `maxLength`, `pattern`,\n`minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, with the\nannotations `title`, `description`, `$comment`, `default`,\n`examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and\n`$id`. A result reported with `report` must match it."
+        },
+        "required": {
+          "description": "Whether the child must report a result: a `report` without one is\nrefused, and a child whose turn ends with none leaves a warning in\nits parent's log. Default false.",
+          "type": "boolean",
+          "default": false
+        },
+        "purpose": {
+          "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior.",
+          "$ref": "#/$defs/ResultPurpose"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema"
+      ]
+    },
+    "ResultPurpose": {
+      "description": "Whether a structured answer is metadata or the task's deliverable.",
+      "oneOf": [
+        {
+          "description": "Report metadata; code acceptance still requires a Git candidate.",
+          "type": "string",
+          "const": "report"
+        },
+        {
+          "description": "A validated current-turn answer can complete work without Git changes.",
+          "type": "string",
+          "const": "deliverable"
+        }
+      ]
     },
     "Policy": {
       "description": "How permission requests are answered. A child seat may set only deny.",

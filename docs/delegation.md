@@ -13,6 +13,19 @@ There is one set of operations and one authority model. Four surfaces reach them
 
 Each surface calls the same operations in the engine that runs the harness's turn, so they give the same answers and refusals. One table, [`branchyard::operations`](../crates/branchyard/src/operations.rs), names every operation on every surface: its `by` subcommand and flags, its MCP tool and arguments, its Python function and keyword arguments, its `Delegate` method, where it may run (inside a harness, outside one, through a server), which flags a harness may not pass and why, and the capability a harness's token needs for it. Parity tests fail when a surface lacks an operation or an argument the table lists, or has one it does not (`branchyard`: the Python module, `Delegate` and the engine's dispatch; `branchyard-mcp`: the tools and their schemas; `branchyard-cli`: each subcommand's flags), and when this page, [storage](storage.md) or the delegation skill shows a `by` command or flag that does not exist. `by <command> --help` takes its notes on what a harness may not pass from the same table, and so does `--allow-delegation`'s list of commands. A new operation, such as a command that waits for children, is a row there; the tests then name each surface still missing it. Children may depend on one another, and a branch can change its graph of children in one atomic proposal; see [task graphs](graph.md). The same four surfaces also reach [artifacts and scratch areas](storage.md) (`by artifact`, `by scratch`, `branchyard.publish`/`create_scratch`, `Delegate::publish_artifact`, the MCP `publish_artifact`/`create_scratch` tools and their siblings): shared storage a branch's descendants and ancestors can read without a merge, tested the same way.
 
+## Keep the native lead
+
+An existing native lead can use operator commands such as `by run`, `by fan`,
+and `by handoff` without being adopted or replaced. Branchyard coordinates
+coworkers' outputs and access. Each harness keeps its own planning, task graph,
+and native subagents. The Branchyard envelope bounds Branchyard branches.
+
+A managed lead may end its turn to await Branchyard children after its own
+native work finishes. Keep native tasks and tools active until they finish.
+An external lead uses explicit waits or status commands and has no automatic
+Branchyard wake. See [cooperative teams](cooperative-teams.md) for code and
+research recipes using the same rig format.
+
 ## Turning it on
 
 ```sh
@@ -280,7 +293,10 @@ A message sits *pending* until it is acknowledged. Acknowledging it (marking it 
 
 `boundary` names the protocol boundary the message actually landed at, per harness, from [`Driver::steer_boundary`](../crates/branchyard-harness/src/lib.rs) — the same mechanisms `docs/harness-integration.md` "Steering a running turn" documents (idea from Straitjacket's cross-harness relay, `docs/comparison.md` Absorption plan → Straitjacket): `claude_next_model_call` (queued as a stream-json `user` message, delivered before the next model call), `codex_turn_steer` (`turn/steer`, recorded once the model response in progress finishes), `pi_steer` (the `steer` command, delivered before the next model call within the same run), or `acp_session_steering` (the `_session/steering` extension, only when the agent advertises it). A driver that cannot steer at all reports `unsupported` (never reachable, since [`try_deliver_now`](../crates/branchyard/src/inbox.rs) never delivers through it); `turn_start` is the same for every profile, since prepending to the prompt is not protocol-specific. The field is additive and defaults on read (`"not_recorded"` for a `steer` row logged before this field existed, `"turn_start"` for `turn_start`), so an older event log still deserializes.
 
-**Into a running turn, by steering.** Every `Yard` — so the SDK, `by` and `by serve` alike — starts with one `DeliveryHook`, `SteerDelivery`. When a message is sent and its recipient has a running turn, the hook queues it as [steered input](#how-it-runs) for that turn from the sender (`Activity::Steered { by: <sender> }` on the recipient's log), rendered as the same `<branchyard-inbox>` block as below with one message in it, and waits up to 2 seconds for the engine running the turn, in whichever process, to write it to the harness. The steer is linked to the message in the same store transaction that queues it, and the engine marks the message delivered in the same transaction that settles the steer as written or accepted; if the harness then refuses it, the same settle returns the message to pending. So `delivered` flips exactly when the running turn has the text, whether or not the sender was still waiting. No running turn (`NotRunning`), a profile that cannot take input mid-turn (`Unsupported`), or a harness that refuses it at runtime (an ACP agent without the `_session/steering` extension, say) leaves the message pending for the next turn's start.
+Frozen handoffs skip delivery hooks and wait for a later recipient turn, even
+when the recipient is already opening a turn. See [frozen result handoffs](#frozen-result-handoffs).
+
+**Ordinary messages into a running turn, by steering.** Every `Yard` — so the SDK, `by` and `by serve` alike — starts with one `DeliveryHook`, `SteerDelivery`. When a message is sent and its recipient has a running turn, the hook queues it as [steered input](#how-it-runs) for that turn from the sender (`Activity::Steered { by: <sender> }` on the recipient's log), rendered as the same `<branchyard-inbox>` block as below with one message in it, and waits up to 2 seconds for the engine running the turn, in whichever process, to write it to the harness. The steer is linked to the message in the same store transaction that queues it, and the engine marks the message delivered in the same transaction that settles the steer as written or accepted; if the harness then refuses it, the same settle returns the message to pending. So `delivered` flips exactly when the running turn has the text, whether or not the sender was still waiting. No running turn (`NotRunning`), a profile that cannot take input mid-turn (`Unsupported`), or a harness that refuses it at runtime (an ACP agent without the `_session/steering` extension, say) leaves the message pending for the next turn's start.
 
 **At the start of the next turn.** Otherwise a branch's pending messages are given to it at the start of its next turn: prepended to the prompt it actually submits, as one `<branchyard-inbox>...</branchyard-inbox>` block, oldest first, each line `[#id] kind from sender: text`. The block is bounded (at most 20 messages or about 8,000 characters at once); whatever does not fit stays pending, noted as `...and N more messages queued for a later turn`. Only the messages actually included are acknowledged, so a large backlog drains gradually across turns rather than in one giant prompt. The recorded `Activity::Prompt` and the journaled `submit` step hold the combined text, so recovery's replay guarantee ([durability](durability.md)) covers it too: a crash before the prompt reaches the harness leaves those messages pending, and one after never gives them again.
 
@@ -314,14 +330,38 @@ Not done: the companion page and the server's push notices do not know the activ
 
 A parent that reads its children's answers as prose misreads them. At spawn it can say what shape the answer must take, and read the answer back as JSON.
 
+`purpose` distinguishes an ordinary report from a deliverable. An omitted
+purpose is `report`, preserving the code workflow. `deliverable` requires a
+schema and `required: true`, and permits completion without Git changes.
+Root `by run` and `by fan` accept `--result-schema '<JSON Schema>'` or
+`--result-schema-file PATH`, `--result-required`, and `--result-deliverable`.
+Rig seats carry the same contract in `result`. A seat fixes that contract:
+a spawn override must equal it.
+
 **Asking.** `by spawn "..." --result-schema '<JSON Schema>' [--result-required]` (or `--result-schema-file PATH`), the MCP `spawn` tool's `result` (`{"schema": {...}, "required": true}`), `branchyard.spawn(..., result={"schema": {...}, "required": True})`, `Spawn::result` (a `ResultContract`), a graph proposal's `spawn` edit, and the server's `POST …/spawn` body (`result`) all take the same contract. It is stored with the child's record for its life and shown by `inspect` as `result_contract`, so the child can read what it was asked for.
 
 **The schema subset.** The one `by map` checks ([map](map.md#schemas)), with one checker: `type` (`object`, `array`, `string`, `number`, `integer`, `boolean`, `null`, or a list of them), `properties`, `required`, `additionalProperties` (a boolean or a schema), `items` (one schema), `enum`, `const`, `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`, `maxLength`, `pattern` (Rust `regex` syntax, searched anywhere unless anchored), `minItems`, `maxItems`, `uniqueItems`, `anyOf` and `oneOf`, and a schema may be `true` or `false`. The annotations `title`, `description`, `$comment`, `default`, `examples`, `deprecated`, `readOnly`, `writeOnly`, `$schema` and `$id` are allowed and not checked. Keywords apply as in JSON Schema: `properties` constrains an object and says nothing about a string, so declare `type` for the shape you want. Anything else is refused at spawn, by name, before any child is created: ``result.schema uses `$ref`, which the contract does not support`` (a nested one names its place, `result.schema.properties.id`); unlike a map, a contract refuses `format` too, since nothing would check it. So are a keyword of the right name with the wrong form (`type` that is not one of the seven names, `items` as a list, an empty `oneOf`), a `pattern` that does not compile (`result.schema.properties.id.pattern is not a valid regular expression: unclosed group`), bounds no value could meet (`minItems` above `maxItems`), a `required` that names a property `properties` lacks while `additionalProperties` is `false` (nothing could match), a schema of `false`, and a schema over 16 KiB.
 
-**Answering.** The child reports with a result: `by report "found two" --result '{"files": ["a.rs"]}'` (`--result-file PATH`, `-` for standard input), the MCP `report` tool's `result`, `branchyard.report(text, result=...)`, `Delegate::report_result`, or `POST …/report` with `result`. The message to the parent goes as before; the result rides beside it.
+**Native final answers.** A deliverable contract accepts the harness's native
+final JSON after a successful completion. An explicit result accepted during
+the current turn takes precedence. Branchyard reuses the contract's parser and
+schema checker. Missing, invalid, and earlier-turn answers remain incomplete
+evidence, with no forced send, retry, or restart. A result-only task needs no
+code check or invented Git changes. Compare and judge expose the accepted
+current result and its event provenance. An ordinary report does not make
+unchanged code eligible. A result-only winner cannot use Git-only `--pick` or
+`--into`.
+
+A remote CLI deliverable with a declared `--check` is refused before it runs.
+Remote capture without that check is supported. Use a local coordinator with a
+remote compute provider when you need checks or judging. The native branch
+status remains separate from result eligibility: `no_changes` can hold a valid
+deliverable or an invalid answer, which compare and task results distinguish.
+
+**Answering a report contract.** The child reports with a result: `by report "found two" --result '{"files": ["a.rs"]}'` (`--result-file PATH`, `-` for standard input), the MCP `report` tool's `result`, `branchyard.report(text, result=...)`, `Delegate::report_result`, or `POST …/report` with `result`. The message to the parent goes as before; the result rides beside it.
 
 - **Checked first.** With a contract, a result that does not match is refused `denied`, naming each place and the rule, the first eight: `result.files[2]: expected string, got number`; ``result: missing the required field "ok"``; `result.n: 0 is less than the minimum 1`; `result.id: "by-7" does not match the pattern "^[A-Z]+-[0-9]+$"`; `result.files[1]: repeats the item at [0]`; for `anyOf`/`oneOf`, the closest alternative and its first two errors (`result: matches none of the 2 alternatives in oneOf (closest, oneOf[1]: ...)`). Nothing is recorded and no message is sent, so the child fixes it and reports again.
-- **Required.** With `required: true`, a `report` without a result is refused (`this branch's result contract requires a result: report with a result that matches the result_contract in your inspect`). A required contract makes `report` the result channel; a child that wants to say how it is getting on uses `report_status`, `ask` or `escalate`.
+- **Required.** With `required: true`, an explicit `report` without a result is refused (`this branch's result contract requires a result: report with a result that matches the result_contract in your inspect`). A required report contract makes `report` its result channel. A deliverable may instead use native final JSON. A child reporting progress uses `report_status`, `ask` or `escalate`.
 - **Recorded.** An accepted result is recorded on the child as `Activity::Result` (`{"result": {"value": ...}}`) before the message is sent, so a parent woken by the message finds it. A later report replaces it as the child's result; the log keeps both. `by log` prints a compact line, `result {"files":["a.rs"]}`, cut at 400 characters; `by log --json` has the whole value (`{"activity": "result", "value": ...}`).
 - **No contract.** A result is recorded as it is, of any shape, up to 64 KiB. A JSON `null` is the same as none.
 - **Null.** A reported `null` is the same as none (no result, refused under `required`), except under a contract whose schema accepts `null` (`{"type": "null"}`, `"type": ["object", "null"]`, an `anyOf`/`oneOf` with it, `{}`): there it is a result, recorded and read back as `null` in `Inspection.result` (`"result": null` in JSON, where a branch with no result has no `result` field), and it satisfies `required`.
@@ -332,7 +372,38 @@ A parent that reads its children's answers as prose misreads them. At spawn it c
 
 Tested against the fake ACP agent through the SDK, the MCP server, the CLI and the server's HTTP API; no real harness has been asked to answer in a contract yet.
 
-Not done: a result is the child's claim, like a self-reported status, and nothing checks that it is true or that the work behind it exists; the contract cannot be changed after spawn, and a seat in a [rig](rigs.md) cannot carry one; a child does not pass its contract on to its own children; the subset has no `$ref`, `allOf`, `not`, conditionals, `patternProperties`, `prefixItems` or `format`; `pattern` is the Rust `regex` dialect, not ECMA-262 (no look-around or backreferences); and nothing stops a child from ending its turn without one, a `required` contract only says so to its parent.
+Not done: a result is the child's claim, like a self-reported status, and nothing checks that it is true or that the work behind it exists; the contract cannot be changed after spawn; a child does not pass its contract on to its own children; the subset has no `$ref`, `allOf`, `not`, conditionals, `patternProperties`, `prefixItems` or `format`; `pattern` is the Rust `regex` dialect, not ECMA-262 (no look-around or backreferences); and nothing stops a child from ending its turn without one, a `required` contract only says so to its parent.
+
+## Frozen result handoffs
+
+```sh
+by handoff research --to synthesis --artifact art1 --note "Preserve the uncertainty." --json
+```
+
+The producer must have settled with an accepted result in its current turn.
+The recipient must already exist in the same yard. Replace `art1` with a
+published artifact ID, repeat `--artifact` for further selections, or omit it
+for a JSON-only result. The message freezes the result, producer incarnation,
+turn, result event, candidate commit when present, and selected `ArtifactRef`s.
+It grants the recipient access to those exact immutable artifacts.
+
+A handoff waits for the recipient's next turn. It does not steer a running turn
+or schedule another one. Ordinary messages keep their existing delivery rules.
+The recipient may read the queued handoff in its inbox before delivery.
+
+`--expected-version` takes a reviewed version object containing `incarnation`,
+`turn`, and `result_event`. A mismatch is refused. Repeating an unchanged
+handoff with the same sender, recipient, artifacts, and note returns the same
+message ID, including its delivery state. A later producer result needs a new
+handoff. Removed and reused branch names inherit neither the message nor its
+artifact grants.
+
+A delegated lead must be a common ancestor of producer and recipient. Both
+lead and source must have read access to each artifact. An operator can relay
+between separate coworkers, with source access still required. Source version,
+endpoint incarnations, grants, and message insertion are checked in one SQLite
+or PostgreSQL transaction. A valid schema and provenance do not establish that
+a result is factually correct. See [cooperative teams](cooperative-teams.md).
 
 ## Ownership
 

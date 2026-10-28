@@ -252,6 +252,7 @@ pub fn judge_names(
     spec: Option<JudgeSpec>,
     rubric: Option<String>,
     fleet: Option<&Fleet>,
+    require_judge: bool,
     options: &TaskOptions,
 ) -> Result<Judgement, Failure> {
     let spec = chosen_judge(yard, names, spec, fleet)?;
@@ -276,6 +277,7 @@ pub fn judge_names(
             judge,
             rubric: rubric.or(spec.and_then(|s| s.rubric)),
             record: true,
+            require_judge,
         },
     )?)
 }
@@ -330,7 +332,9 @@ pub fn judgement_table(judgement: &Judgement, style: Style) -> String {
         .collect();
     let mut text = render::table(&columns, &rows, style);
     text.push_str(&format!("\njudged by {}\n", judgement.by.describe()));
-    if let branchyard::JudgedBy::Fallback { error, .. } = &judgement.by {
+    if let branchyard::JudgedBy::Fallback { error, .. }
+    | branchyard::JudgedBy::RequiredFailed { error, .. } = &judgement.by
+    {
         text.push_str(&format!("  (its answer was not used: {error})\n"));
     }
     match &judgement.pick {
@@ -347,6 +351,7 @@ pub struct JudgeArgs {
     pub targets: Vec<String>,
     pub harness: Option<String>,
     pub deterministic: bool,
+    pub require_judge: bool,
     pub command: Option<Vec<String>>,
     pub rubric: Option<String>,
     pub pick: bool,
@@ -388,7 +393,24 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
             .map_err(|why| crate::errors::config(&why))?;
     }
     let options = crate::commands::Live::start(env, &task, false, None).options(&task)?;
-    let judgement = judge_names(&yard, &names, spec, args.rubric.clone(), fleet, &options)?;
+    let judgement = judge_names(
+        &yard,
+        &names,
+        spec,
+        args.rubric.clone(),
+        fleet,
+        args.require_judge,
+        &options,
+    )?;
+    if matches!(judgement.by, branchyard::JudgedBy::RequiredFailed { .. }) {
+        match args.json {
+            true => print(&json::text(
+                &serde_json::to_value(&judgement).unwrap_or_default(),
+            ))?,
+            false => print(&judgement_table(&judgement, style(env)))?,
+        }
+        return Err(Failure::Reported);
+    }
     if !args.json {
         print(&judgement_table(&judgement, style(env)))?;
     }
@@ -399,10 +421,21 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
             ));
         }
         if let Some(pick) = &judgement.pick {
+            let deliverable = judgement
+                .candidates
+                .iter()
+                .any(|scored| &scored.attempt.branch == pick && scored.attempt.is_deliverable());
+            let next = if deliverable {
+                format!("by inspect {pick} --json")
+            } else {
+                format!(
+                    "by judge {} --pick\n  by diff {pick}",
+                    args.targets.join(" ")
+                )
+            };
             print(&format!(
-                "\n{}\n  by judge {} --pick\n  by diff {pick}\n",
-                style(env).paint(Tone::Dim, "next"),
-                args.targets.join(" ")
+                "\n{}\n  {next}\n",
+                style(env).paint(Tone::Dim, "next")
             ))?;
         }
         return Ok(());
@@ -418,6 +451,13 @@ pub fn judge(env: &Env, target: &Target, args: &JudgeArgs, fleet: Option<&Fleet>
         ))
         .into());
     };
+    if let Some(scored) = judgement
+        .candidates
+        .iter()
+        .find(|scored| scored.attempt.branch == pick)
+    {
+        attempts::check_git_pick(&scored.attempt)?;
+    }
     let compare = CompareArgs {
         branches: names.clone(),
         fan: None,

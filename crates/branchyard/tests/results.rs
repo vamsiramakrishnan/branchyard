@@ -363,6 +363,7 @@ fn a_contract_outside_the_subset_is_refused_at_spawn_and_creates_no_child() {
     let unsupported = ResultContract {
         schema: json!({"type": "object", "properties": {"id": {"type": "string", "$ref": "#/a"}}}),
         required: false,
+        purpose: branchyard::ResultPurpose::Report,
     };
     let needle = "result.schema.properties.id uses `$ref`, which the contract does not support";
     denied(
@@ -461,6 +462,7 @@ fn a_contract_with_the_richer_keywords_and_a_null_result_works_end_to_end() {
     let bad = ResultContract {
         schema: json!({"properties": {"id": {"pattern": "(x"}}}),
         required: false,
+        purpose: branchyard::ResultPurpose::Report,
     };
     denied(
         parent.spawn(spawn("say hi", "bad", Some(bad))),
@@ -535,4 +537,40 @@ fn a_contract_with_the_richer_keywords_and_a_null_result_works_end_to_end() {
     assert!(warnings(&f, "root")
         .iter()
         .all(|w| !w.contains("without the result")));
+}
+
+/// An explicit in-turn report wins over the native final prose, with no retry.
+#[test]
+fn an_explicit_deliverable_report_is_not_replaced_by_native_final_output() {
+    let f = Fixture::new();
+    let options = delegating(&f);
+    let (_root, parent) = root(&f, &options);
+    let wanted = ResultContract::deliverable(serde_json::json!({"type":"object", "required":["answer"], "properties":{"answer":{"type":"string"}}})).unwrap();
+    spawn_waiting(&f, &parent, "answer", Some(wanted));
+    let kid = child(&f, &options, "answer");
+    kid.report_result(
+        "explicit evidence",
+        &serde_json::json!({"answer":"accepted report"}),
+    )
+    .unwrap();
+    parent.steer("answer", "finish with prose").unwrap();
+    let waited = parent
+        .wait_for(&["answer"], false, Some(Duration::from_secs(60)))
+        .unwrap();
+    assert!(!waited.timed_out);
+    assert_eq!(
+        waited.settled[0].result,
+        Some(serde_json::json!({"answer":"accepted report"}))
+    );
+    let events = log(&f, "answer");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.activity, Activity::Result { .. }))
+            .count(),
+        1
+    );
+    assert!(warnings(&f, "answer")
+        .iter()
+        .all(|w| !w.contains("native final answer")));
 }

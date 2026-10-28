@@ -512,6 +512,8 @@ class Message:
     in_reply_to: Optional[int]
     at_ms: int
     delivered: bool
+    handoff: Optional[Dict[str, Any]] = None
+    next_turn: bool = False
 
 
 def _message(value: Dict[str, Any]) -> Message:
@@ -525,6 +527,8 @@ def _message(value: Dict[str, Any]) -> Message:
         in_reply_to=value.get("in_reply_to"),
         at_ms=value["at_ms"],
         delivered=value.get("delivered", False),
+        handoff=value.get("handoff"),
+        next_turn=value.get("next_turn", False),
     )
 
 
@@ -768,11 +772,20 @@ def spawn(
             if reviewer.get(key) is not None:
                 flags += [flag, str(reviewer[key])]
     if result is not None:
-        if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required"}:
-            raise ValueError('result must be {"schema": {...}, "required": bool}')
+        if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required", "purpose"}:
+            raise ValueError('result must contain schema and optional required/purpose')
+        purpose = result.get("purpose", "report")
+        if not isinstance(purpose, str) or purpose not in {"report", "deliverable"}:
+            raise ValueError("result purpose must be report or deliverable")
+        if "required" in result and not isinstance(result["required"], bool):
+            raise ValueError("result required must be a bool")
+        if purpose == "deliverable" and not result.get("required", False):
+            raise ValueError("a deliverable result requires required=True")
         flags += ["--result-schema", json.dumps(result["schema"])]
         if result.get("required"):
             flags.append("--result-required")
+        if purpose == "deliverable":
+            flags.append("--result-deliverable")
     # On stdin, so a prompt of any length fits: a command-line argument is
     # limited to 128 KiB on Linux.
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
@@ -999,6 +1012,24 @@ def ask(text: str, wait: Optional[float] = None) -> Asked:
         message=_message(value["message"]),
         answer=_message(value["answer"]) if value.get("answer") else None,
     )
+
+
+def handoff(
+    source: str,
+    to: str,
+    artifacts: Optional[List[str]] = None,
+    note: str = "",
+    expected: Optional[Dict[str, Any]] = None,
+) -> Message:
+    """Relay a settled result and selected artifacts without starting or steering the recipient."""
+    args = ["handoff", "--to", to]
+    for artifact in artifacts or []:
+        args += ["--artifact", artifact]
+    if note:
+        args += ["--note", note]
+    if expected is not None:
+        args += ["--expected-version", json.dumps(expected)]
+    return _message(_run([*args, "--", source]))
 
 
 def report(text: str, result: Optional[Any] = None) -> Message:

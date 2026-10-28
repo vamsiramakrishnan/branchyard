@@ -1,19 +1,55 @@
 ---
 name: delegate
-description: Use whenever you run on a Branchyard branch (BRANCHYARD_BRANCH is set), before you start and before you finish. Covers when to split work into child branches (`by delegate` with a plan, or `by spawn`), how to write a child's brief and prompt, ending your turn while children run, integrating and checking results, and the `by check` you run before you end.
+description: Coordinate coworkers from an existing native lead or a managed Branchyard branch. Keep each harness's own planning and subagents. Choose owned code changes or structured deliverables, review evidence, relay frozen results, and use checked integration for code.
 ---
 
 # Delegating with Branchyard
 
-You are running on a Branchyard branch: your own git branch and worktree.
-You may create child branches, each with its own harness, budget and
-worktree, and have their work brought into your branch. You act only as
-your own branch and only on your descendants. Branchyard enforces your
-envelope (depth, number of children, allowed harnesses) and your budget; a
-refusal says why.
+Keep your native plan, task graph, tools, and subagents. Branchyard coordinates
+work between harness sessions. You do not need to import your internal task
+graph or replace your current lead.
 
-The rules below apply to every task on a branch, split or not: run `by check`
-before you finish, and end your turn when you wait on children.
+- **Existing native lead:** when `BRANCHYARD_BRANCH` is unset, use operator
+  commands such as `by run`, `by fan`, and `by handoff` from the yard. They
+  create or coordinate coworkers without adopting or restarting your session.
+  Use explicit waits or status commands. Branchyard does not wake this lead.
+- **Managed lead:** when `BRANCHYARD_BRANCH` is set, `by` acts as that branch.
+  It can create Branchyard children only within its envelope and budget, and
+  acts on its own descendants. These limits count Branchyard branches, not
+  the harness's native subagents. Native permissions and limits still apply.
+
+Decide whether each coworker produces checked code or a structured answer.
+A researcher with a deliverable contract can return native final JSON without
+Git changes or a Branchyard reporting tool. A code worker runs its configured
+check before its candidate is integrated.
+
+Continue while your own native tasks or tools are active. A managed lead may
+end its turn to await Branchyard children after its native work finishes.
+Automatic landing is an opt-in coding workflow, not a requirement for research.
+
+## An existing lead starts coworkers
+
+```sh
+by run "Assess the supplied notes; return final JSON with summary and evidence." \
+  --harness antigravity --allow-unapproved-tools --name research \
+  --result-schema '{"type":"object","required":["summary","evidence"],"properties":{"summary":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}}}}' \
+  --result-required --result-deliverable --json
+by compare research --json
+```
+
+The `antigravity` harness profile runs the `agy` CLI. AGY keeps its native approvals. `--allow-unapproved-tools` acknowledges that
+it does not route individual tool approvals through Branchyard. With AGY-only
+inventory, use deterministic judging or review the evidence in your native
+lead. A required model judge needs a harness that enforces the read-only judge
+policy. A worker's `--allow-unapproved-tools` never bypasses this judge
+requirement. Schema acceptance proves structure, not truth.
+
+`by fan` accepts the same result flags for independent attempts. Knowledge
+work outside a repository can use `--no-files`; read the returned task with
+`by task show ID --json`. Its initial fan `--judge` is supported. Later
+`by judge` and `by compare` need the owning yard context. Obtain an attempt's
+private worktree with `by task open ID --attempt BRANCH --print` and run the
+commands from that directory. Handoffs within the same private yard work there.
 
 ## When to delegate
 
@@ -28,10 +64,11 @@ before you finish, and end your turn when you wait on children.
 Do small or tightly coupled work yourself. Each child costs a harness
 session, and work split along lines that cross the same files conflicts.
 
-## The short way: delegate, end your turn, be resumed
+## A managed code lead can delegate and land
 
-You do not have to orchestrate. Say the whole split once, let the engine
-run it, and end your turn; your next turn starts with the result.
+When automatic code landing is authorized, say the split once and let the
+engine run it. After your own native work finishes, you may end the managed
+turn and receive the children's results on your next turn.
 
 1. **Split by ownership.** Give each part the paths it owns (`owns`), so no
    two children touch the same file: siblings that own disjoint paths cannot
@@ -120,7 +157,7 @@ no files, no interface and no check, so the child guesses all three; the second
 points at a conversation the child never saw. Either one costs you a turn at
 integration.
 
-## The loop, by hand
+## A managed lead coordinates code by hand
 
 1. Decompose. Give each child a self-contained prompt (see "Writing a
    child's prompt"): the goal, the files involved, the constraints, and how
@@ -137,7 +174,7 @@ integration.
    and anything you would have to redo. A harness that cannot choose a model
    refuses the spawn and says why; `by inspect <child>` shows its model.
 3. Wait. Either way works:
-   - **End your turn.** You do not have to stay awake: when every child
+   - **End a managed turn when native work is finished.** When every child
      you delegated has settled, Branchyard starts your next turn by itself
      with a summary of each child (status, diffstat, cost, last message,
      why it failed) and what you can do next. Do not leave a background
@@ -297,7 +334,7 @@ it pays when the children run in parallel or on a cheaper tier.
 
 ## Commits and scratch files
 
-Branchyard commits everything in your worktree at the end of each of your
+On a managed branch, Branchyard commits edited files at the end of your
 turns, and in each child's, as commits named `by/<branch>: turn <n>`: you need
 not commit, and those commits are Branchyard's. Ending your turn to wait for
 your children commits your work the same way. Write scratch files under
@@ -306,7 +343,11 @@ branches share.
 
 ## Before you finish
 
-Run `by check` before you end your turn. It runs your branch's check (your
+Finish your native work before returning a final answer. For a structured
+deliverable, return the current turn's valid final JSON, or an explicit accepted
+result. Do not manufacture Git changes or require a code check for findings.
+
+For code with a configured check, run `by check` before ending a managed turn. It runs your branch's check (your
 own, or the one you inherited) on your work as it is, uncommitted files
 included, merged into your parent's branch, the way your parent's
 integration will; nothing is committed or integrated. What fails here
@@ -346,7 +387,8 @@ by cancel retry-docs
 by discard retry-docs --reason "superseded by parser-flake"
 ```
 
-`by inspect` does not wait; wait with `by wait`, or end your turn.
+`by inspect` does not wait. Use `by wait` in a managed branch, or end a
+managed turn after your native work finishes.
 
 Every command takes `--json` for a stable machine-readable result, and
 exits non-zero with `{"error": {"kind", "message"}}` on refusal. Run `by`
@@ -398,8 +440,9 @@ by spawn --seat implementer "Port the tokenizer to the new API; run its tests"
 by spawn --seat reviewer "Review the tokenizer candidate on by/parser-implementer" --wait
 ```
 
-The seat sets the child's harness, budget, check and instructions; you
-may pass a smaller budget, never a larger one. In Python, pass `seat=`;
+The seat sets the child's harness, budget, check, instructions, owned paths,
+and result contract. You may narrow its ownership or budget, never widen them.
+A result override must equal the seat's contract. In Python, pass `seat=`;
 the MCP `spawn` tool takes `seat`.
 
 ## Asking for a result
@@ -420,8 +463,22 @@ settled child of `by wait --json`; a child that ends its turn without a
 required result leaves a warning in your log. In Python,
 `branchyard.spawn(..., result={"schema": {...}, "required": True})` and
 `branchyard.inspect(child).result`; the MCP `spawn` tool takes `result`.
-The result is the child's claim: `by check` and `by integrate` still decide
-what merges.
+A result is the child's claim. A schema validates its shape, not its truth.
+
+With `--result-deliverable`, a schema is required and the native final JSON
+can be the output itself. The same flags work on `by run` and `by fan`.
+Branchyard captures it only after successful native completion, and prefers
+an explicit accepted result from that turn. Earlier-turn or invalid output
+does not qualify. No Git change, reporting tool, automatic retry, or native
+restart is required. A seat uses `result = { purpose = "deliverable",
+required = true, schema = {...} }` for this contract.
+
+Compare and judge can rank valid result-only deliverables. Ordinary report
+metadata does not turn unchanged code into a candidate. Deterministic ranking
+checks structural evidence, cost, and time. Review the evidence yourself.
+`by judge --require-judge` leaves no pick if its required model judge cannot
+supply a valid verdict. Git-only `--pick` and `--into` refuse result-only winners.
+Code integration still uses `by check` and `by integrate`.
 
 ## Sharing results and asking your parent
 
@@ -456,6 +513,29 @@ must already exist: spawn the consumer first, or have it `by artifact
 get` a copy a common ancestor republished to it. An artifact's `digest`
 is the blake3 hash of its bytes.
 
+## Relay a frozen result
+
+After the producer's current turn settles, hand its accepted result and only
+the selected artifacts to an existing coworker in the same yard:
+
+```sh
+by handoff research --to synthesis --artifact art1 \
+  --note "Use this finding and preserve its uncertainty." --json
+```
+
+Use a real published artifact ID, or omit `--artifact`. A handoff copies the
+result, its source incarnation, turn, result event, candidate commit when any,
+and immutable artifact references. It grants artifact access to the current
+recipient incarnation. It never steers a running turn or starts the next one.
+After the recipient's current turn finishes, resume it explicitly when ready.
+
+A managed lead must be a common ancestor of both endpoints and be able to
+read every selected artifact, as must the source. An operator can relay
+between separate coworkers, with source artifact access still required.
+Repeating an unchanged handoff returns its original ID. A changed producer
+needs a new handoff. `--expected-version` accepts a reviewed version object
+with `incarnation`, `turn`, and `result_event`, and refuses a stale one.
+
 ## With Python
 
 The `branchyard` module is on `PYTHONPATH`; it runs `by --json` for you.
@@ -480,7 +560,8 @@ except branchyard.BranchyardError as error:
     print(error.kind, error.message)
 ```
 
-Or hand the engine the whole split and end your turn; your next turn says
+A managed lead whose native work is finished can hand the engine the split
+and end its turn; its next turn says
 what landed:
 
 ```python
@@ -505,11 +586,12 @@ If you cannot run commands, the same operations are MCP tools on the
 `branchyard` server: `delegate` (`tasks`, `brief`, `land`, `review`), `brief`,
 `spawn` (with `depends_on`, `owns`, `land`, `review` and `result`), `inspect`, `events`, `send`,
 `steer`, `propose_integration` (`branch`, or `branches` to integrate several
-together), `check` (your own work before you finish, or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
+together), `check` (configured checks for your coding work or a child's), `wait` (`branches`, `any`, `timeout_seconds`), `cancel`, `discard`,
 `children`, `graph`, `apply_graph`, `approve_plan` and `reject_plan` (a
 plan-first child's plan), `answer_approval`, the artifact and scratch tools, and
 `ask`, `report` (with `result`), `escalate`, `report_status`, `answer` and
-`inbox`.
+`inbox`. `handoff` (`from`, `to`, optional `artifacts`, `note`, and
+`expected`) relays a settled result without starting a recipient turn.
 
 ## Substrate setup and readiness
 

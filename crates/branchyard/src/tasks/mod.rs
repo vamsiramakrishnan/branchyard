@@ -124,6 +124,18 @@ pub struct AttemptView {
     /// The checkpoint the branch is at.
     pub checkpoint: Option<u32>,
     pub candidate: Option<String>,
+    /// The declared structured output, when this attempt has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_contract: Option<crate::ResultContract>,
+    /// A schema-valid result from the current turn, never an earlier answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Sequence of the result in the complete event log, numbered from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_event: Option<u64>,
+    /// Why a required structured answer is missing or invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_error: Option<String>,
     pub worktree: Option<PathBuf>,
     /// The attempt this one was forked from, and at which checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -768,6 +780,16 @@ fn view_of(yard: &Yard, task: Task) -> Result<TaskView, Error> {
         let attempt = match store.read(&name) {
             Ok(record) if task_of(&yard.root, &name)?.is_some_and(|t| t.id == task.id) => {
                 let at = record_at(yard, &record, record.checkpoint)?;
+                let output = match &record.result_contract {
+                    Some(_) => {
+                        let events = crate::record::read(&store, &name)?;
+                        Some(
+                            crate::compare::attempt(&record.info, &events, Vec::new())
+                                .with_result(record.result_contract.clone(), &events),
+                        )
+                    }
+                    None => None,
+                };
                 AttemptView {
                     conversation: at
                         .as_deref()
@@ -780,6 +802,14 @@ fn view_of(yard: &Yard, task: Task) -> Result<TaskView, Error> {
                     turns: record.info.turns,
                     checkpoint: record.checkpoint,
                     candidate: record.info.candidate.as_ref().map(|c| c.commit.clone()),
+                    result_contract: output
+                        .as_ref()
+                        .and_then(|output| output.result_contract.clone()),
+                    result: output.as_ref().and_then(|output| output.result.clone()),
+                    result_event: output.as_ref().and_then(|output| output.result_event),
+                    result_error: output
+                        .as_ref()
+                        .and_then(|output| output.result_error.clone()),
                     worktree: Some(record.info.worktree.clone()),
                     forked_from: record
                         .info
@@ -795,6 +825,10 @@ fn view_of(yard: &Yard, task: Task) -> Result<TaskView, Error> {
                 turns: 0,
                 checkpoint: None,
                 candidate: None,
+                result_contract: None,
+                result: None,
+                result_event: None,
+                result_error: None,
                 worktree: None,
                 forked_from: None,
                 record: None,

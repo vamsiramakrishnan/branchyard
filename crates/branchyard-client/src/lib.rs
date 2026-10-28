@@ -721,6 +721,15 @@ impl Repo {
         self.client.get(&self.branch_path(branch, "/inbox"))
     }
 
+    /// Relay a frozen result and selected artifacts without starting a recipient turn.
+    pub fn handoff(&self, request: &branchyard::HandoffRequest) -> Result<Message, Error> {
+        self.client.post(
+            &self.branch_path(&request.from, "/handoff"),
+            request,
+            &new_key(),
+        )
+    }
+
     /// Ask `branch`'s parent a question; like `by ask`. Without
     /// `wait_seconds`, returns once the question is sent; with it, blocks
     /// on the server for up to that long for an answer.
