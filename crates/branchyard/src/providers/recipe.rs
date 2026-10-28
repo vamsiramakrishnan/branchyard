@@ -158,7 +158,7 @@ pub(crate) fn recipe_provider(yard: &Yard, options: &RecipeOptions) -> Arc<Recip
 /// holds exactly what was sent) and the home come back, and the machine is
 /// destroyed through the recipe. Returns what recovery should report.
 fn recover_machine(yard: &Yard, record: &Record, options: &RecipeOptions, machine: &str) -> String {
-    // A machine's name is `by-<branch>-<ms>`; a branch name may hold dots.
+    // A machine's name is `by-<branch>-<ulid>`; a branch name may hold dots.
     let stage = (!machine.is_empty() && !machine.contains('/') && !machine.starts_with('.'))
         .then(|| staging(yard, machine));
     let provider = recipe_provider(yard, options);

@@ -44,8 +44,15 @@ JSON_FIELDS: dict[str, list[tuple[str | int, ...]]] = {
 # TOML files: the table (None for the top level) whose `version` it is, and
 # whether the value is spelled the PEP 440 way.
 TOML_FIELDS: dict[str, tuple[str | None, bool]] = {
+    "packaging/runtime/dist.toml": ("package", False),
     "plugins/herdr/herdr-plugin.toml": (None, False),
     "sdk/python/pyproject.toml": ("project", True),
+}
+# Standalone helpers are embedded into the CLI, so they carry a checked literal
+# rather than trying to locate Cargo.toml on the developer's machine.
+TEXT_FIELDS: dict[str, str] = {
+    "tools/compute_gce.py": r'^RELEASE_VERSION = "([^"\n]+)"$',
+    "docs/compute-gce.md": r"(?:--version=|branchyard-agy:)(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?)",
 }
 
 
@@ -118,6 +125,11 @@ def fields(root: Path = ROOT) -> list[tuple[str, str, str]]:
         found.append(
             (relative, f"{table}.version" if table else "version", (data[table] if table else data)["version"])
         )
+    for relative, pattern in TEXT_FIELDS.items():
+        matches = list(re.finditer(pattern, (root / relative).read_text(), re.M))
+        if not matches:
+            raise ValueError(f"{relative}: no release version field matches its expected format")
+        found.extend((relative, "release version", match.group(1)) for match in matches)
     return found
 
 
@@ -200,6 +212,12 @@ def set_version(new: str, root: Path = ROOT) -> list[str]:
         changed[relative] = _replace_version_line(
             text(relative), table, current, python if is_python else new, relative
         )
+    for relative, pattern in TEXT_FIELDS.items():
+        changed[relative], count = re.subn(
+            pattern, lambda match: match.group(0).replace(match.group(1), new), text(relative), flags=re.M
+        )
+        if not count:
+            raise ValueError(f"{relative}: no release version field matches its expected format")
     written = []
     for relative, updated in sorted(changed.items()):
         if updated != (root / relative).read_text():

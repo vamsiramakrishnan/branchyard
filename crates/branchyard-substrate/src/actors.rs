@@ -7,7 +7,6 @@ use tonic::{Code, Status};
 
 use crate::capabilities::{capabilities, state, TemplateError};
 use crate::pb;
-use crate::pb::control_client::ControlClient;
 
 /// An actor bound to the identity Substrate assigned when it was created.
 ///
@@ -126,21 +125,32 @@ impl From<TemplateError> for Error {
 
 /// Lifecycle operations on actors in one atespace.
 ///
-/// The caller builds the channel, including TLS and credentials for the
-/// Substrate API endpoint, and chooses the atespace. Branchyard should map one
-/// tenant authorization domain to one atespace; this adapter never publishes a
+/// [`crate::Config::actors`] builds the TLS channel and attaches API credentials.
+/// Branchyard should map one tenant authorization domain to one atespace;
+/// this adapter never publishes a
 /// tag outside it.
 #[derive(Clone, Debug)]
 pub struct Actors {
-    client: ControlClient<Channel>,
-    atespace: String,
+    pub(crate) client: crate::control::Client,
+    pub(crate) atespace: String,
+    egress: crate::EgressPolicy,
 }
 
 impl Actors {
     pub fn new(channel: Channel, atespace: impl Into<String>) -> Self {
+        Self::configured(channel, atespace.into(), None, crate::EgressPolicy::Deny)
+    }
+
+    pub(crate) fn configured(
+        channel: Channel,
+        atespace: String,
+        token_file: Option<std::path::PathBuf>,
+        egress: crate::EgressPolicy,
+    ) -> Self {
         Self {
-            client: ControlClient::new(channel),
-            atespace: atespace.into(),
+            client: crate::control::client(channel, token_file),
+            atespace,
+            egress,
         }
     }
 
@@ -150,19 +160,34 @@ impl Actors {
 
     /// The template itself, as Substrate stores it.
     pub async fn template(&mut self, template: &str) -> Result<pb::ActorTemplate, Error> {
-        Ok(self
-            .client
-            .get_actor_template(pb::GetActorTemplateRequest {
-                actor_template: self.reference(template),
-            })
-            .await?
-            .into_inner())
+        let mut request = tonic::Request::new(pb::GetActorTemplateRequest {
+            actor_template: Some(template_reference(&self.atespace, template)?),
+        });
+        request.set_timeout(std::time::Duration::from_secs(30));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.client.get_actor_template(request),
+        )
+        .await
+        .map_err(|_| {
+            Status::deadline_exceeded("Substrate template inspection exceeded 30 seconds")
+        })??;
+        Ok(response.into_inner())
     }
 
     /// The actor now named `name` and its state, or `None` if there is none.
-    pub async fn find(&mut self, name: &str) -> Result<Option<(ActorHandle, SandboxState)>, Error> {
+    /// Refuse a different template before adopting its identity for recovery.
+    pub async fn find(
+        &mut self,
+        name: &str,
+        template: &str,
+    ) -> Result<Option<(ActorHandle, SandboxState)>, Error> {
+        let expected = template_reference(&self.atespace, template)?;
         match self.get(name).await {
-            Ok(actor) => Ok(Some((handle(&actor)?, state(&actor)))),
+            Ok(actor) => {
+                check_template(name, &actor, &expected)?;
+                Ok(Some((handle(&actor)?, state(&actor))))
+            }
             Err(Error::Rpc(status)) if status.code() == Code::NotFound => Ok(None),
             Err(error) => Err(error),
         }
@@ -186,6 +211,7 @@ impl Actors {
     /// Retrying after an ambiguous failure is safe: an existing actor is
     /// adopted only if it came from the same template.
     pub async fn ensure(&mut self, name: &str, template: &str) -> Result<ActorHandle, Error> {
+        let template_ref = template_reference(&self.atespace, template)?;
         let created = self
             .client
             .create_actor(pb::CreateActorRequest {
@@ -195,7 +221,7 @@ impl Actors {
                         name: name.into(),
                         ..Default::default()
                     }),
-                    actor_template: self.reference(template),
+                    actor_template: Some(template_ref.clone()),
                     ..Default::default()
                 }),
             })
@@ -204,19 +230,13 @@ impl Actors {
             Ok(response) => response.into_inner(),
             Err(status) if status.code() == Code::AlreadyExists => {
                 let existing = self.get(name).await?;
-                let actual = existing.actor_template.as_ref().map(|t| t.name.clone());
-                if actual.as_deref() != Some(template) {
-                    return Err(Error::TemplateMismatch {
-                        actor: name.into(),
-                        expected: template.into(),
-                        actual,
-                    });
-                }
+                check_template(name, &existing, &template_ref)?;
                 existing
             }
             Err(status) => return Err(status.into()),
         };
         let handle = handle(&actor)?;
+        self.reconcile_egress(name).await?;
         self.start(&handle).await?;
         Ok(handle)
     }
@@ -422,7 +442,7 @@ impl Actors {
                         name: name.into(),
                         ..Default::default()
                     }),
-                    actor_template: self.reference(template),
+                    actor_template: Some(template_reference(&self.atespace, template)?),
                     source_tag: Some(pb::ObjectRef {
                         atespace: checkpoint.atespace.clone(),
                         name: checkpoint.name.clone(),
@@ -432,7 +452,41 @@ impl Actors {
             })
             .await?
             .into_inner();
-        handle(&actor)
+        let handle = handle(&actor)?;
+        self.reconcile_egress(name).await?;
+        Ok(handle)
+    }
+
+    async fn reconcile_egress(&mut self, name: &str) -> Result<(), Error> {
+        let desired = self.egress.rules();
+        let request = pb::CreateActorEgressPolicyRequest {
+            actor: self.reference(name),
+            egress_policy: Some(pb::EgressPolicy {
+                metadata: Some(pb::ResourceMetadata {
+                    atespace: self.atespace.clone(),
+                    name: "default".into(),
+                    ..Default::default()
+                }),
+                rules: desired.clone(),
+            }),
+        };
+        match self.client.create_actor_egress_policy(request).await {
+            Ok(_) => Ok(()),
+            Err(error) if error.code() == Code::AlreadyExists => {
+                let existing = self
+                    .client
+                    .get_actor_egress_policy(pb::GetActorEgressPolicyRequest {
+                        actor: self.reference(name),
+                    })
+                    .await?
+                    .into_inner();
+                if existing.rules != desired {
+                    return Err(Status::failed_precondition("actor has a different egress policy; use a new actor instead of replacing its policy").into());
+                }
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Return a running, paused or crashed actor to its latest suspend,
@@ -484,6 +538,20 @@ impl Actors {
     }
 }
 
+fn check_template(name: &str, actor: &pb::Actor, expected: &pb::ObjectRef) -> Result<(), Error> {
+    if actor.actor_template.as_ref() != Some(expected) {
+        return Err(Error::TemplateMismatch {
+            actor: name.into(),
+            expected: format!("{}/{}", expected.atespace, expected.name),
+            actual: actor
+                .actor_template
+                .as_ref()
+                .map(|template| format!("{}/{}", template.atespace, template.name)),
+        });
+    }
+    Ok(())
+}
+
 fn handle(actor: &pb::Actor) -> Result<ActorHandle, Error> {
     let metadata = actor
         .metadata
@@ -497,4 +565,27 @@ fn handle(actor: &pb::Actor) -> Result<ActorHandle, Error> {
         name: metadata.name.clone(),
         uid: metadata.uid.clone(),
     })
+}
+
+pub(crate) fn template_reference(atespace: &str, template: &str) -> Result<pb::ObjectRef, Error> {
+    let (atespace, name) = template.split_once('/').unwrap_or((atespace, template));
+    if !resource_name(atespace) || !resource_name(name) {
+        return Err(
+            Status::invalid_argument("template must be a DNS label or atespace/name").into(),
+        );
+    }
+    Ok(pb::ObjectRef {
+        atespace: atespace.into(),
+        name: name.into(),
+    })
+}
+
+pub(crate) fn resource_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
 }

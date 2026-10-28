@@ -97,8 +97,9 @@ pub(crate) const EXITS: [(Exit, &str); 6] = [
     ),
     (
         Exit::Interrupted,
-        "interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT \
-         (`by serve` and `by worker` catch it and shut down)",
+        "interrupted with Ctrl-C: the shell reports 128 + SIGINT. `by serve` and `by worker` \
+         catch it and shut down; `by substrate check --smoke` catches SIGINT and SIGTERM to \
+         remove its actor, then reports the cancelled smoke with exit 1",
     ),
 ];
 

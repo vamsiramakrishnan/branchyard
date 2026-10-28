@@ -993,12 +993,18 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
-        /// Say what would be done and what is missing; change nothing
+        /// Inspect readiness without installing harnesses or starting services
         #[arg(long)]
         plan: bool,
         /// Make the installs the [harnesses] policy would ask about, without asking
         #[arg(long)]
         yes: bool,
+    },
+    /// Prepare or check the saved Agent Substrate connection
+    #[command(display_order = 605)]
+    Substrate {
+        #[command(subcommand)]
+        action: crate::substrate_cmd::Action,
     },
     /// Tell a harness session what changed in this repository
     ///

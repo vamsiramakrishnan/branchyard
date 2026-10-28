@@ -38,7 +38,7 @@ use branchyard_controls::catalog;
 use branchyard_setup::config::{self, WorkspaceConfig};
 use branchyard_setup::install::{self, Manifest};
 use branchyard_setup::plan::{FileAction, Plan};
-use branchyard_setup::probe::{harness_label, Facts, HarnessFact};
+use branchyard_setup::probe::{harness_label, unapproved_tools, Facts, HarnessFact};
 use branchyard_setup::Topic;
 use serde_json::{json, Value};
 
@@ -91,6 +91,10 @@ enum ConfigState {
 /// The project defaults step.
 #[derive(Clone)]
 struct ConfigStep {
+    /// Harnesses run in remote actors rather than on the host.
+    substrate: bool,
+    /// Harnesses run on the configured HTTP or SSH server.
+    server: bool,
     path: String,
     state: ConfigState,
     /// `harness codex · check "cargo test" · local, no isolation`.
@@ -172,6 +176,7 @@ struct Report {
     unchanged: Vec<String>,
     todo: Vec<Todo>,
     next: String,
+    readiness: Option<branchyard::up::Plan>,
 }
 
 // ------------------------------------------------------------------- command
@@ -186,6 +191,7 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
         .next("run by setup from your own terminal")
         .into());
     }
+    crate::onboarding::directory(env, args)?;
     let cwd = std::env::current_dir()?;
     let interactive = env.stdin_tty && env.stdout_tty && !args.json;
     let writing = args.yes && !args.dry_run;
@@ -213,7 +219,8 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
         print(&detected_text(&facts))?;
     }
 
-    let config = plan_config(args, asking, &facts, &probe)?;
+    let answers = crate::onboarding::answers(env, args, &facts)?;
+    let config = plan_config(args, asking, &facts, &probe, answers)?;
     let hooks = plan_hooks(args, &facts, &probe)?;
     if !args.harnesses.is_empty() {
         // Named on purpose: a refusal is an error, not a line to read later.
@@ -247,6 +254,7 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
         unchanged: Vec::new(),
         todo: Vec::new(),
         next: String::new(),
+        readiness: None,
     };
 
     let scripts = report.config.scripts.is_some() && report.config.state == ConfigState::Pending;
@@ -294,11 +302,90 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
         }
     }
     finish(&mut report);
-
-    if args.json {
-        return print(&format!("{}\n", crate::json::text(&report_json(&report))));
+    if (args.up || args.guided) && !dry_run {
+        report.readiness = Some(readiness(env, args, &report.root)?);
+        report.next = match report.readiness.as_ref().is_some_and(|plan| plan.ready()) {
+            true => run_command(
+                report.config.check.as_deref(),
+                default_harness(&report).as_deref(),
+            ),
+            false => "by setup --up".into(),
+        };
     }
-    print(&format!("\n{}", card_text(&report)))
+    let ready = report.readiness.as_ref().is_none_or(|plan| plan.ready());
+    if args.json {
+        print(&format!("{}\n", crate::json::text(&report_json(&report))))?;
+    } else {
+        print(&format!("\n{}", card_text(&report)))?;
+        if let Some(plan) = &report.readiness {
+            print(&crate::up_cmd::text(plan, env.style()))?;
+        }
+    }
+    if ready {
+        Ok(())
+    } else {
+        Err(Failure::Reported)
+    }
+}
+
+/// Check the configured execution machine; a server's harnesses live remotely.
+fn readiness(env: &Env, args: &SetupFlags, root: &Path) -> Result<branchyard::up::Plan, Failure> {
+    let config = branchyard::configure::configuration(root)?
+        .map(|located| located.config)
+        .unwrap_or_default();
+    if config.remote.url.is_none() {
+        return crate::up_cmd::run(env, false, args.yes, args.json);
+    }
+    let mut globals = crate::args::Globals::default();
+    crate::defaults::apply_globals(&config, &mut globals);
+    let remote = crate::remote::Remote::connect(&globals)?;
+    let inventory = remote.client.inventory()?;
+    let harness = config.defaults.harness.as_deref().unwrap_or("claude-code");
+    Ok(remote_plan(&inventory, remote.repo.name(), harness))
+}
+
+/// Convert advertised worker evidence into setup's shared readiness shape.
+fn remote_plan(
+    inventory: &branchyard_client::api::InventoryReport,
+    repository: &str,
+    harness: &str,
+) -> branchyard::up::Plan {
+    use branchyard::inventory::LoginState;
+    use branchyard::up::{Plan, Step};
+
+    let mut steps = vec![Step::ready(
+        "remote.connection",
+        "server authenticated and inventory received",
+    )];
+    let installed = inventory
+        .workers
+        .iter()
+        .filter(|worker| worker.repos.iter().any(|name| name == repository))
+        .filter_map(|worker| worker.inventory.as_ref())
+        .flat_map(|inventory| &inventory.harnesses)
+        .find(|state| state.id == harness && state.on_path);
+    match installed {
+        Some(state) => {
+            steps.push(Step::ready(
+                format!("remote.harness.{harness}"),
+                format!("{} on remote worker", state.path),
+            ));
+            if state.login.state == LoginState::LoggedIn {
+                steps.push(Step::ready(
+                    format!("remote.login.{harness}"),
+                    "remote credential source detected; model authentication unverified",
+                ));
+            } else {
+                steps.push(Step::needs_person(format!("remote.login.{harness}"), "remote model credentials not verified", format!("configure credentials on the worker with by harnesses login {harness}, then rerun by setup --up"), None));
+            }
+        }
+        None => steps.push(Step::blocked(
+            format!("remote.harness.{harness}"),
+            "no serving worker advertises this harness on PATH",
+            format!("install {harness} on the worker, then rerun by setup --up"),
+        )),
+    }
+    Plan { steps }
 }
 
 // ----------------------------------------------------------------- detecting
@@ -396,9 +483,12 @@ fn plan_config(
     asking: bool,
     facts: &Facts,
     probe: &CachedProbe<HostProbe>,
+    guided_answers: BTreeMap<String, Value>,
 ) -> Result<ConfigStep, Failure> {
     let path = config::PROJECT_FILE.to_owned();
     let none = |state: ConfigState, summary: String| ConfigStep {
+        substrate: false,
+        server: false,
         path: path.clone(),
         state,
         summary,
@@ -412,20 +502,21 @@ fn plan_config(
         return Ok(none(ConfigState::Skipped, String::new()));
     }
     if facts.project_config {
-        let defaults = facts
+        let current = facts
             .project_text
             .as_deref()
             .and_then(|text| config::parse(text).ok())
-            .map(|c| c.defaults)
             .unwrap_or_default();
         let mut step = none(ConfigState::Exists, String::new());
-        step.harness = defaults.harness;
-        step.check = defaults.check;
+        step.substrate = current.defaults.provider == Some(config::ProviderKind::Substrate);
+        step.server = current.remote.url.is_some();
+        step.harness = current.defaults.harness;
+        step.check = current.defaults.check;
         return Ok(step);
     }
-    let raw = match asking {
+    let raw = match asking && !args.guided {
         true => ask_what_cannot_be_detected(facts)?,
-        false => BTreeMap::new(),
+        false => guided_answers,
     };
     let response = branchyard_setup::next(
         Topic::Project,
@@ -480,9 +571,13 @@ fn plan_config(
             Some(check) => format!("check \"{check}\""),
             None => "no check".to_owned(),
         }),
-        Some(match isolated {
-            true => "isolated".to_owned(),
-            false => "local, no isolation".to_owned(),
+        Some(if answer("provider").as_deref() == Some("substrate") {
+            "remote Agent Substrate, private home".to_owned()
+        } else {
+            match isolated {
+                true => "isolated".to_owned(),
+                false => "local, no isolation".to_owned(),
+            }
         }),
     ]
     .into_iter()
@@ -501,6 +596,8 @@ fn plan_config(
         false => ConfigState::Exists,
     };
     Ok(ConfigStep {
+        substrate: answer("provider").as_deref() == Some("substrate"),
+        server: answer("remote").as_deref() == Some("server"),
         path,
         state,
         summary,
@@ -552,6 +649,35 @@ fn ask_what_cannot_be_detected(facts: &Facts) -> Result<BTreeMap<String, Value>,
     }
     if let Some(q) = find("isolated") {
         ask(&q)?;
+    }
+    if let Some(q) = find("provider") {
+        ask(&q)?;
+    }
+    if raw.get("provider").and_then(Value::as_str) == Some("substrate") {
+        for id in [
+            "harness",
+            "substrate.endpoint",
+            "substrate.router",
+            "substrate.atespace",
+            "substrate.template",
+            "substrate.key",
+            "substrate.api_token_file",
+            "substrate.ca",
+            "substrate.server_name",
+            "substrate.egress",
+            "secrets",
+        ] {
+            let questions = branchyard_setup::questions(Topic::Project, facts, &raw);
+            if let Some(q) = questions.iter().find(|q| q.id == id) {
+                let value = crate::wizard::ask(q).map_err(crate::wizard::cancelled)?;
+                raw.insert(id.into(), value);
+            }
+        }
+        let questions = branchyard_setup::questions(Topic::Project, facts, &raw);
+        for q in questions.iter().filter(|q| q.id.starts_with("secret.")) {
+            let value = crate::wizard::ask(q).map_err(crate::wizard::cancelled)?;
+            raw.insert(q.id.clone(), value);
+        }
     }
     Ok(raw)
 }
@@ -903,7 +1029,7 @@ fn run_hook(
 fn finish(report: &mut Report) {
     let facts = &report.facts;
     let mut todo = Vec::new();
-    if facts.installed().next().is_none() {
+    if !report.config.substrate && !report.config.server && facts.installed().next().is_none() {
         todo.push(Todo {
             kind: "install",
             harness: None,
@@ -913,8 +1039,24 @@ fn finish(report: &mut Report) {
             command: Some("by harnesses install claude-code".into()),
         });
     }
+    if report.config.substrate {
+        todo.push(Todo { kind: "note", harness: report.config.harness.clone(),
+            text: "Remote actors use the configured image and private-home secrets. Run by up to check Control authentication, template readiness and credential sources; model access remains unverified.".into(),
+            command: Some("by up".into()) });
+    }
+    if report.config.server {
+        todo.push(Todo {
+            kind: "note",
+            harness: report.config.harness.clone(),
+            text: "Tasks use the configured server's harnesses and credentials. Run by setup --up to authenticate and inspect its serving workers; model access remains unverified.".into(),
+            command: Some("by setup --up".into()),
+        });
+    }
     let default_harness = default_harness(report);
-    for h in facts.installed() {
+    for h in facts
+        .installed()
+        .filter(|_| !report.config.substrate && !report.config.server)
+    {
         let label = harness_label(&h.harness);
         let login = format!("by harnesses login {}", h.harness);
         let how = match catalog::harness(&h.harness).and_then(|e| e.login.clone()) {
@@ -1051,7 +1193,7 @@ fn default_harness(report: &Report) -> Option<String> {
 
 /// `by run "fix the flaky test" --check "cargo test"`, with the check the
 /// file names or the files suggest.
-fn run_command(check: Option<&str>) -> String {
+fn run_command(check: Option<&str>, harness: Option<&str>) -> String {
     let mut command = format!("by run \"{EXAMPLE_TASK}\"");
     if let Some(check) = check {
         let quoted = match check.chars().any(|c| matches!(c, '"' | '\\' | '$' | '`')) {
@@ -1059,6 +1201,9 @@ fn run_command(check: Option<&str>) -> String {
             false => format!("\"{check}\""),
         };
         command.push_str(&format!(" --check {quoted}"));
+    }
+    if harness.is_some_and(unapproved_tools) {
+        command.push_str(" --allow-unapproved-tools");
     }
     command
 }
@@ -1073,6 +1218,11 @@ fn next_command(report: &Report) -> String {
             false => "by setup --yes".into(),
         };
     }
+    if report.config.server {
+        return "by setup --up".into();
+    } else if report.config.substrate {
+        return "by up".into();
+    }
     if report.facts.installed().next().is_none() {
         return "by harnesses install claude-code".into();
     }
@@ -1081,7 +1231,7 @@ fn next_command(report: &Report) -> String {
         .check
         .clone()
         .or_else(|| report.facts.suggested_check.clone());
-    run_command(check.as_deref())
+    run_command(check.as_deref(), default_harness(report).as_deref())
 }
 
 // ---------------------------------------------------------------- rendering
@@ -1452,6 +1602,10 @@ fn report_json(report: &Report) -> Value {
     });
     if report.dry_run {
         object["would_write"] = json!(planned);
+    }
+    if let Some(plan) = &report.readiness {
+        object["readiness"] = plan.json();
+        object["ready"] = Value::Bool(plan.ready());
     }
     object
 }
@@ -1928,12 +2082,16 @@ mod tests {
     #[test]
     fn the_next_run_names_the_check_safely() {
         assert_eq!(
-            run_command(Some("cargo test")),
+            run_command(Some("cargo test"), None),
             "by run \"fix the flaky test\" --check \"cargo test\""
         );
-        assert_eq!(run_command(None), "by run \"fix the flaky test\"");
+        assert_eq!(run_command(None, None), "by run \"fix the flaky test\"");
+        assert_eq!(
+            run_command(None, Some("antigravity")),
+            "by run \"fix the flaky test\" --allow-unapproved-tools"
+        );
         // A check with quotes or a `$` survives a shell reading the line.
-        let line = run_command(Some("sh -c 'x $Y'"));
+        let line = run_command(Some("sh -c 'x $Y'"), None);
         assert_eq!(
             config::split_words(&line).unwrap(),
             ["by", "run", "fix the flaky test", "--check", "sh -c 'x $Y'"]
@@ -2039,5 +2197,59 @@ mod tests {
                 manifest.harness
             );
         }
+    }
+
+    #[test]
+    fn remote_readiness_requires_the_serving_workers_harness_and_credentials() {
+        use branchyard::inventory::{HarnessState, Inventory, Login, LoginState};
+        use branchyard_client::api::{InventoryReport, WorkerInventory};
+
+        let mut report = InventoryReport {
+            workers: vec![WorkerInventory {
+                id: "worker".into(),
+                host: "host".into(),
+                labels: Vec::new(),
+                repos: vec!["project".into()],
+                seen_ms_ago: 0,
+                this: true,
+                inventory: Some(Inventory {
+                    harnesses: vec![HarnessState {
+                        id: "antigravity".into(),
+                        path: "/usr/local/bin/agy".into(),
+                        on_path: true,
+                        login: Login {
+                            state: LoginState::LoggedIn,
+                            ..Login::default()
+                        },
+                        ..HarnessState::default()
+                    }],
+                    ..Inventory::default()
+                }),
+            }],
+        };
+        let plan = remote_plan(&report, "project", "antigravity");
+        assert!(plan.ready());
+        assert!(plan
+            .steps
+            .iter()
+            .any(|step| step.detail.contains("model authentication unverified")));
+        assert!(!remote_plan(&report, "another-project", "antigravity").ready());
+        report.workers[0].inventory.as_mut().unwrap().harnesses[0]
+            .login
+            .state = LoginState::Unknown;
+        let plan = remote_plan(&report, "project", "antigravity");
+        assert!(!plan.ready());
+        assert_eq!(
+            plan.steps.last().unwrap().state,
+            branchyard::up::State::NeedsPerson
+        );
+        assert!(!remote_plan(
+            &InventoryReport {
+                workers: Vec::new()
+            },
+            "project",
+            "antigravity"
+        )
+        .ready());
     }
 }

@@ -46,6 +46,7 @@ pub struct Endpoint {
     port: u16,
     path: String,
     credential: String,
+    actor_route: Option<String>,
     /// How long connecting may take.
     pub connect_timeout: Duration,
 }
@@ -109,6 +110,7 @@ impl Endpoint {
             port,
             path: path.to_owned(),
             credential: credential.into(),
+            actor_route: None,
             connect_timeout: Duration::from_secs(30),
         })
     }
@@ -141,8 +143,30 @@ impl Endpoint {
         Ok(Endpoint {
             connect_timeout: self.connect_timeout,
             tls: self.tls.clone(),
+            actor_route: self.actor_route.clone(),
             ..Endpoint::new(url, self.credential.clone())?
         })
+    }
+
+    /// Route health checks and WebSocket requests to a Substrate actor.
+    pub fn with_actor(mut self, atespace: &str, actor: &str) -> io::Result<Endpoint> {
+        let valid = |name: &str| {
+            !name.is_empty()
+                && name.len() <= 63
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && name.as_bytes()[0].is_ascii_alphanumeric()
+                && name.as_bytes()[name.len() - 1].is_ascii_alphanumeric()
+        };
+        if !valid(atespace) || !valid(actor) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid Substrate actor reference",
+            ));
+        }
+        self.actor_route = Some(format!("{atespace}/{actor}"));
+        Ok(self)
     }
 
     /// The same bridge with another credential.
@@ -198,13 +222,11 @@ impl Endpoint {
             (port, _) => format!("{}:{port}", self.host),
         };
         let bearer = format!("Bearer {}", self.credential);
-        let (reader, writer) = ws::client(
-            stream,
-            &authority,
-            &self.path,
-            SUBPROTOCOL,
-            &[("Authorization", &bearer)],
-        )?;
+        let mut headers = vec![("Authorization", bearer.as_str())];
+        if let Some(actor) = &self.actor_route {
+            headers.push(("ate-target-actor", actor.as_str()));
+        }
+        let (reader, writer) = ws::client(stream, &authority, &self.path, SUBPROTOCOL, &headers)?;
         Ok(Connection { reader, writer })
     }
 
@@ -221,8 +243,11 @@ impl Endpoint {
         let mut stream = self.stream()?;
         stream.set_read_timeout(Some(self.connect_timeout))?;
         let path = format!("{}/healthz", self.path.trim_end_matches('/'));
+        let route = self.actor_route.as_ref().map_or_else(String::new, |actor| {
+            format!("ate-target-actor: {actor}\r\n")
+        });
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{route}Connection: close\r\n\r\n",
             self.host
         );
         stream.write_all(request.as_bytes())?;
@@ -705,16 +730,24 @@ mod tests {
 
     #[test]
     fn a_derived_endpoint_keeps_what_it_is_not_given() {
-        let mut endpoint = Endpoint::new("https://router.example:8443/a/", "token").unwrap();
+        let mut endpoint = Endpoint::new("https://router.example:8443/a/", "token")
+            .unwrap()
+            .with_actor("tenant", "actor")
+            .unwrap();
         endpoint.connect_timeout = Duration::from_secs(3);
         let moved = endpoint.with_url("http://10.0.0.7:8080/").unwrap();
         assert_eq!(moved.url(), "http://10.0.0.7:8080/");
         assert_eq!(moved.connect_timeout, Duration::from_secs(3));
         assert_eq!(moved.credential, "token");
+        assert_eq!(moved.actor_route.as_deref(), Some("tenant/actor"));
         assert!(endpoint.with_url("gopher://x").is_err());
         let other = endpoint.with_credential("another");
         assert_eq!(other.url(), endpoint.url());
         assert_eq!(other.connect_timeout, Duration::from_secs(3));
         assert_eq!(other.credential, "another");
+        assert_eq!(other.actor_route, endpoint.actor_route);
+        for name in ["", "actor\r\nHeader: value", "a/b", "-actor", "Actor"] {
+            assert!(endpoint.clone().with_actor("tenant", name).is_err());
+        }
     }
 }

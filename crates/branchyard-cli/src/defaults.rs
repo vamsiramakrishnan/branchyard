@@ -270,6 +270,37 @@ pub fn apply_task(config: &ProjectConfig, task: &mut TaskArgs, scope: Scope) -> 
             });
         }
     }
+    if !chose_provider && d.provider == Some(ProviderKind::Substrate) {
+        if let Some(saved) = &config.substrate {
+            task.substrate = Some(crate::args::SubstrateArgs {
+                endpoint: saved.endpoint.clone(),
+                router: saved.router.clone(),
+                template: saved.template.clone(),
+                key: saved.key.clone(),
+                api_token_file: saved.api_token_file.clone(),
+                server_name: saved.server_name.clone(),
+                egress: saved.egress.clone(),
+                atespace: Some(saved.atespace.clone()),
+                workdir: Some(saved.workdir.clone()),
+                home: Some(saved.home.clone()),
+                pass_env: saved.pass_env.clone(),
+                ca: saved.ca.clone(),
+                client_cert: saved.client_cert.clone(),
+                client_key: saved.client_key.clone(),
+                router_ca: saved.router_ca.clone(),
+                insecure: saved.insecure,
+                lifecycle: crate::args::LifecycleArgs {
+                    keep: saved.keep.as_deref().map(|keep| match keep {
+                        "pause" => branchyard::SandboxKeep::Pause,
+                        _ => branchyard::SandboxKeep::Destroy,
+                    }),
+                    snapshots: saved.snapshots,
+                    max_paused: saved.max_paused,
+                    max_kept_minutes: saved.max_kept_minutes,
+                },
+            });
+        }
+    }
     if task.instructions.is_none() {
         task.instructions = d.instructions.clone();
     }
@@ -390,6 +421,80 @@ mod tests {
 
     fn config(text: &str) -> ProjectConfig {
         branchyard_setup::config::parse(text).unwrap()
+    }
+
+    #[test]
+    fn saved_substrate_defaults_preserve_explicit_provider_choices() {
+        let saved = config(
+            r#"
+[defaults]
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+template = "agy"
+key = "/keys/bridge.key"
+api_token_file = "/keys/control.token"
+server_name = "control.example"
+egress = { mode = "unrestricted" }
+keep = "pause"
+[secrets]
+GEMINI_API_KEY = "MY_GEMINI_KEY"
+"#,
+        );
+        let mut task = TaskArgs::default();
+        apply_task(&saved, &mut task, Scope::NewBranch).unwrap();
+        let substrate = task.substrate.as_ref().unwrap();
+        assert_eq!(substrate.endpoint, "https://control.example");
+        assert_eq!(
+            substrate.api_token_file.as_deref(),
+            Some("/keys/control.token")
+        );
+        assert_eq!(substrate.server_name.as_deref(), Some("control.example"));
+        assert_eq!(
+            substrate.egress,
+            branchyard::config::SubstrateEgress::Unrestricted
+        );
+        assert_eq!(
+            substrate.lifecycle.keep,
+            Some(branchyard::SandboxKeep::Pause)
+        );
+        assert!(!task.provision.as_ref().unwrap().secrets.is_empty());
+        for mut explicit in [
+            TaskArgs {
+                local: true,
+                ..Default::default()
+            },
+            TaskArgs {
+                sandbox: Some(SandboxArgs {
+                    image: "image".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            TaskArgs {
+                recipe: Some(crate::args::RecipeArgs {
+                    name: "machine".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ] {
+            apply_task(&saved, &mut explicit, Scope::NewBranch).unwrap();
+            assert!(explicit.substrate.is_none());
+        }
+        let mut explicit = TaskArgs {
+            substrate: Some(crate::args::SubstrateArgs {
+                template: "command-choice".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_task(&saved, &mut explicit, Scope::NewBranch).unwrap();
+        assert_eq!(explicit.substrate.unwrap().template, "command-choice");
+        let mut continued = TaskArgs::default();
+        apply_task(&saved, &mut continued, Scope::Continue).unwrap();
+        assert!(continued.substrate.is_none());
     }
 
     const FILE: &str = r#"

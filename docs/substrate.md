@@ -2,7 +2,7 @@
 
 [Agent Substrate](https://github.com/agent-substrate/substrate) runs many mostly idle sandboxes ("actors") on fewer warm Kubernetes pods ("workers"). It suspends an idle actor to object storage and resumes it on any free worker. Branchyard uses it as an optional sandbox provider that runs harnesses: `by run --provider substrate` gives each turn its own actor. The provider is **unqualified**: it has run only against the in-process fake described below, never against a cluster, and stays unqualified until it passes the runtime gates in the [implementation plan](implementation-plan.md) and the steps in [live testing](testing-live.md#6-agent-substrate-cluster).
 
-Reviewed at Substrate revision `1d7ca8ced056192a1801d6565251adcaab3eb0c9`. Only the API contract is vendored: [`ateapi.proto`](../vendor/substrate/pkg/proto/ateapipb/ateapi.proto), unmodified. The router (atenet), the node agent (atelet) and the egress gateway are not, so everything this page says about them beyond what the proto states is an assumption for qualification to confirm.
+Reviewed at Substrate revision `1d7ca8ced056192a1801d6565251adcaab3eb0c9`. Only the API contract is vendored: [`ateapi.proto`](../vendor/substrate/pkg/proto/ateapipb/ateapi.proto), unmodified. The adapter also follows this revision's router header, default actor port, API bearer authentication and per-actor egress policy contracts. These runtime components were read from upstream source; cluster qualification must still confirm their behavior.
 
 ## Division of responsibility
 
@@ -71,19 +71,20 @@ Because a UID is never reused, equal UIDs before and after a call prove the call
 
 `branchyard_substrate::template::bridge_template` builds the `ActorTemplate` to pass to `CreateActorTemplate`:
 
-- One container whose `command` is `branchyard-bridge serve --listen 0.0.0.0:8080 --identity /run/branchyard/identity --state /var/lib/branchyard-bridge/attempts`, and whose image, pinned by digest (`Container.image`, proto line 946 onward), also holds `git` and every harness executable. The bridge execs the harness in the same container. `bridge_template_with` adds `--run-as UID:GID` (a user the image provides) and, for a router that passes TLS through, `--tls-cert FILE --tls-key FILE` (paths in the image).
+- One container whose `command` is `branchyard-bridge serve --listen 0.0.0.0:80 --identity /run/branchyard/identity --state /var/lib/branchyard-bridge/attempts`, and whose image, pinned by digest (`Container.image`, proto line 946 onward), also holds `git` and every harness executable. Port 80 is the actor port used by ordinary Substrate ingress. The bridge execs the harness in the same container. `bridge_template_with` adds `--run-as UID:GID` for a user the image provides. The bridge itself runs as root and can bind port 80. The [shipped actor image recipe](substrate-setup.md#prepare-the-image-and-template) prepares the private workspace and HOME after extraction, using only `CHOWN`, `SETUID` and `SETGID` in addition to the upstream defaults.
 - `BRANCHYARD_BRIDGE_KEY` in `Container.env` (line 986): the **public** half of the host's signing key. Template environment is shared by every actor made from it, which is why nothing secret is put there.
 - A `system_info` volume with an `actor_metadata` projection (`SystemInfoVolumeSource`, `ActorMetadataDataSource` and `ActorMetadataField`, lines 1174-1240) of the actor's atespace, name and UID to `/run/branchyard/identity/{atespace,name,uid}`. The proto says atelet regenerates these files "on every Run/Restore", so a branched actor's bridge sees its new identity even when its memory came from the parent. The bridge re-reads them on every connection.
-- A `wakeup_probe` on `GET /healthz`, port 8080 (`ContainerWakeupProbe`, line 1072), so `ResumeActor` returns only once the bridge listens.
+- A `wakeup_probe` on `GET /healthz`, port 80 (`ContainerWakeupProbe`, line 1072), so `ResumeActor` returns only once the bridge listens.
 - Full-scope pause and commit snapshots.
+- Optional worker label selection and explicit CPU/memory quantities in `BridgeOptions`. Limits size the sandbox and reserve worker capacity. Omitting them leaves runtime defaults and does not reserve those resources.
 
-The template's name goes in `--substrate-template`. `branchyard-bridge keygen --out FILE` writes the host's signing key (PKCS#8, mode 0600) and prints the public key for the template.
+The template's name goes in `--substrate-template`. A qualified `atespace/name` selects a template outside the actor's atespace; an unqualified name uses the actor's atespace. Existing actors are adopted only when both template reference fields match. `branchyard-bridge keygen --out FILE` writes the host's signing key (PKCS#8, mode 0600) and prints the public key for the template. The setup API plans and creates missing atespaces and the immutable template, rechecks before applying, and refuses conflicting existing templates. See [Substrate setup](substrate-setup.md).
 
 The bridge can be the container's process 1; it needs no separate init. See [processes, signals and users](#processes-signals-and-users).
 
 ## The bridge
 
-The host reaches the bridge through the router: `--substrate-router` is a URL template with `{atespace}` and `{actor}`, such as `https://router.example/{atespace}/{actor}/`. The vendored source says only that atenet routes requests to an actor's worker (`WorkerAssignment`, proto line 618: "atenet reads worker_pod_ip on the request-routing path"), not how an actor is addressed, so the template is configuration, to be fixed during qualification.
+The host reaches the bridge through the router's base URL, such as `https://router.example/`. Every health check and WebSocket upgrade carries `ate-target-actor: <atespace>/<actor>`. The router selects and resumes the actor using that header, forwards the unchanged application path to actor port 80, and preserves the bridge's Authorization header. The router does not use the actor's name as a URL path prefix.
 
 ### Transport
 
@@ -93,11 +94,17 @@ An HTTP/1.1 `GET` upgraded to WebSocket (RFC 6455), because routers that forward
 
 Both hops can use TLS, with rustls and its `ring` provider (TLS 1.2 and 1.3):
 
-- **`Control`.** `--substrate-endpoint https://…` verifies the server against `--substrate-ca` (PEM), or the Mozilla roots bundled at build time (`webpki-roots`) when none is given; never the host's certificate store. `--substrate-client-cert` and `--substrate-client-key` present a client certificate (mutual TLS).
+- **`Control`.** `--substrate-endpoint https://…` verifies the server against `--substrate-ca` (PEM), or the Mozilla roots bundled at build time (`webpki-roots`) when none is given; never the host's certificate store. `--substrate-server-name` selects the verified service name when connecting through a loopback port-forward. The API still requires TLS behind that forward. `--substrate-client-cert` and `--substrate-client-key` present a client certificate (mutual TLS).
 - **Router.** `https://` or `wss://` (the same thing to the bridge's client) verifies the router against `--substrate-router-ca`, else `--substrate-ca`, else the bundled roots. Where the router passes TLS through rather than terminating it, the bridge serves TLS itself (`--tls-cert`, `--tls-key`), and the same verification applies to the bridge's certificate. Such a bridge still answers the wakeup probe's plain `GET /healthz`, because `HTTPGetAction` (proto line 1088) has no scheme: it reads a connection's first byte, and anything that is not a TLS handshake may fetch the health check and is refused (403) otherwise.
 - **In the clear.** `http://` and `ws://` are accepted only to `localhost` or a loopback address (a port-forward) unless `--substrate-insecure` is given. TLS files for a URL in the clear, half a client identity, and an unreadable or malformed PEM file are refused before anything is contacted. A router certificate that does not verify fails `ensure` at once rather than after the ready timeout.
 
 Certificate revocation is not checked. Whoever terminates TLS (a router that does not pass it through) sees credentials and code in the clear.
+
+### API credentials and outbound access
+
+`--substrate-api-token-file` names a file containing the Control API bearer token. The client reads it before every RPC, so replacing the file rotates credentials without restarting a provider. Only the path is stored in branch records. Token values are excluded from diagnostics. Upstream's ordinary client authentication uses an audience-bound service-account token; an authenticated mTLS client identity is an alternative.
+
+Every fresh, adopted or tag-created actor receives the explicitly configured egress policy before the harness runs. `deny` creates an empty policy, `allow_hosts` permits the specified DNS patterns, and `unrestricted` permits every destination. An existing conflicting policy fails instead of being overwritten. The pinned upstream gateway denies outbound connections when no actor policy exists. Passing a model credential alone therefore does not grant model connectivity. The adapter does not yet map Branchyard's generic egress declaration or credential injection into Substrate policy rules.
 
 ### Frames (protocol version 2)
 
@@ -143,7 +150,7 @@ Each attempt gets its own credential. In the engine an attempt is one turn, whic
 
 - **Reaping.** On Linux the bridge makes itself a child subreaper (`PR_SET_CHILD_SUBREAPER`), so a process an exec orphans is reparented to it rather than to process 1, and it reaps every zombie child that no exec is waiting for (on `SIGCHLD`, and each second). So nothing accumulates whether or not it is the container's process 1.
 - **Signals.** `SIGTERM` or `SIGINT` is forwarded as `SIGTERM` to every exec's process group; ten seconds later what is left is killed; once each exec's last output and exit status have reached its client (up to two seconds more), the bridge exits with status 0. The bridge blocks these signals in its threads and waits for them on one; processes it starts get an empty signal mask. As process 1 it ignores them when the sender is inside the sandbox (a nonzero `si_pid` in its PID namespace), so only the container runtime stops it; the kernel never delivers `SIGKILL` to a namespace's init from inside it.
-- **Another user.** With `--run-as UID:GID` (the bridge running as root), execs run as that user and group with no supplementary groups, and `PutFile`, `GetFile`, `PutTree` and `GetTree` run with that user's file-system identity (`setfsuid`, per thread), so files belong to it and a link it planted is followed only with its own rights. The attempt state file is created mode 0600 in a directory the bridge creates with mode 0700.
+- **Another user.** With `--run-as UID:GID` (the bridge running as root), execs run as that user and group with no supplementary groups, and `PutFile`, `GetFile`, `PutTree` and `GetTree` run with that user's file-system identity (`setfsuid`, per thread; Rustix per-thread effective IDs when the runtime returns `ENOSYS`), so files belong to it and a link it planted is followed only with its own rights. The compatibility path clears supplementary groups and effective capabilities, preserves the bridge's real and saved IDs, and restores the captured credentials before the worker continues. The attempt state file is created mode 0600 in a directory the bridge creates with mode 0700.
 - **Memory.** The bridge is not dumpable (`PR_SET_DUMPABLE` 0), so a process of its own user without `CAP_SYS_PTRACE` cannot read its memory or environment through `/proc` or `ptrace`.
 
 ### Attempt state
@@ -179,17 +186,62 @@ Only commits and files cross. The bundles carry objects reachable from the two s
 
 ## In the engine and the CLI
 
+Save a connection in `branchyard.toml` or your user configuration to run without
+repeating the provider flags:
+
+```toml
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+
+[substrate]
+endpoint = "https://control.example:443"
+router = "https://router.example/"
+atespace = "branchyard"
+template = "agy"
+key = "~/.config/branchyard/bridge.key"
+api_token_file = "~/.config/branchyard/substrate.token"
+egress = { mode = "deny" }
+
+[secrets]
+GEMINI_API_KEY = "GEMINI_API_KEY"
+```
+
+This example denies outgoing connections. Before a real model turn, select
+`egress = { mode = "allow_hosts", hosts = ["generativelanguage.googleapis.com"] }`
+with every DNS host your chosen harness requires, or explicitly select
+`egress = { mode = "unrestricted" }`. The example hostname alone is not a
+claim that every Antigravity request can complete. An allowlist has 1 to 256
+lowercase DNS names, optionally beginning with `*.` for one subdomain label.
+IP addresses, ports, URLs and paths are refused.
+
+`key`, `api_token_file`, `ca`, `client_cert`, `client_key` and `router_ca` are
+file paths. Relative paths resolve against the configuration file that supplies
+them; `~/` resolves against your home. The file stores no credential contents.
+`server_name` selects the verified Control TLS name when a loopback port-forward
+reaches a service certificate. `client_cert` and `client_key` must appear together.
+`workdir` and `home` are absolute paths inside the actor and default to
+`/workspace` and `/branchyard/home`. `pass_env`, `keep`, `snapshots`, `max_paused`
+and `max_kept_minutes` have the same meanings as the corresponding run flags.
+
+Then use `by run "Fix the flaky parser test"`. An explicit command-line provider
+overrides the saved choice, so `--provider local` runs locally even when a
+Substrate connection is saved. `--provider substrate` with its connection flags
+selects a separate connection for that command. The Rust SDK applies the saved
+provider through `Yard::open_configured` too. Existing branches retain the
+provider stored with them.
+
 ```sh
 branchyard-bridge keygen --out ~/.config/branchyard/bridge.key    # prints the public key
 by run "Fix the flaky parser test" --provider substrate \
   --substrate-endpoint https://substrate.example:443 --substrate-ca ca.pem \
   --substrate-client-cert by.crt --substrate-client-key by.key \
-  --substrate-router 'wss://router.example/{atespace}/{actor}/' \
+  --substrate-router 'wss://router.example/' \
   --substrate-template by-claude --substrate-key ~/.config/branchyard/bridge.key \
   --pass-env ANTHROPIC_API_KEY --check "cargo test" --yes
 ```
 
-`--substrate-atespace` (default `default`), `--substrate-workdir` (default `/workspace`), `--substrate-home` (default `/branchyard/home`), and the [TLS](#tls) flags `--substrate-ca`, `--substrate-client-cert`, `--substrate-client-key`, `--substrate-router-ca` and `--substrate-insecure` are optional; `SubstrateOptions` has a field for each; the flags work on `by run`, `by fan` and `by fork`, and a send keeps the branch's provider. Each turn:
+`--substrate-atespace` (default `default`), `--substrate-workdir` (default `/workspace`), `--substrate-home` (default `/branchyard/home`), `--substrate-api-token-file`, and the [TLS](#tls) flags `--substrate-ca`, `--substrate-server-name`, `--substrate-client-cert`, `--substrate-client-key`, `--substrate-router-ca` and `--substrate-insecure` are optional; `SubstrateOptions` has a field for each; the flags work on `by run`, `by fan` and `by fork`, and a send keeps the branch's provider. Each turn:
 
 1. Journals the actor's name as the turn's `sandbox` step, then creates and starts it and mints the attempt's credential.
 2. Copies the worktree and the private home in, and runs the harness in the workdir with `HOME` and the `--pass-env` variables on top of the image's environment.
@@ -201,7 +253,7 @@ Delegation is refused to a sandboxed harness, as for Microsandbox. If the engine
 
 ## Testing
 
-The fake in `branchyard_substrate::fake` serves `Control` over real gRPC, runs a router that forwards `/actors/<atespace>/<actor>/<rest>` to the actor's bridge as `/<rest>` (WebSocket upgrades included, 503 for an actor that is not running), and "runs" an actor from a bridge template as a real `branchyard-bridge` process on this host with the template's key, identity files written as atelet would, and a per-actor directory standing in for its root filesystem (kept across suspend, copied by a tag). `FakeCluster::start_tls` serves TLS on every hop (the `Control` API optionally requiring a client certificate, the router verifying each bridge's), and `replace_before` swaps an actor under its name just before a given call. Certificates are generated at test time with `rcgen`. Against it, hermetically:
+The fake in `branchyard_substrate::fake` serves `Control` over real gRPC and requires the real `ate-target-actor` routing header on health checks and WebSocket upgrades. It forwards application paths unchanged and answers 503 for an actor that is not running. It runs each actor as a real `branchyard-bridge` process on this host with the template's key, projected identity files and a per-actor directory standing in for its root filesystem. `FakeCluster::start_tls` serves TLS on every hop. Tests can require a rotating API bearer token, reconcile immutable templates, inspect per-actor policies, and replace actors before a lifecycle call. Certificates are generated at test time with `rcgen`. Against it, hermetically:
 
 - the bridge's codec, WebSocket framing, TLS, credentials and trees, and the binary over TCP: stdio, exit status, teardown naming survivors, files and trees, and refusal of missing, forged, expired, foreign, superseded and ended credentials, across a restart;
 - the bridge serving TLS, refusing requests in the clear except the health check, and refused by a client that trusts another authority or only the public roots;
@@ -220,8 +272,8 @@ The ignored tests in [`tests/cluster.rs`](../crates/branchyard-substrate/tests/c
 
 ## Gaps and required decisions
 
-1. **Router addressing and activation are unverified.** The URL template, whether the router forwards WebSocket upgrades and long-lived connections, whether it activates a suspended actor on a request, whether it terminates TLS or passes it through, and whether it adds its own authentication all come from outside the vendored source.
-2. **TLS is implemented but not tried against a cluster.** Both hops support TLS with a private authority and mutual TLS to `Control` ([TLS](#tls)), and plain HTTP is refused off loopback unless `--substrate-insecure`. Unverified: whether Substrate's `Control` endpoint serves TLS itself and negotiates HTTP/2 over ALPN, and how its router handles TLS. Revocation is not checked. A router that terminates TLS sees credentials in the clear, and a credential can be replayed by whoever holds it until its attempt ends. A bridge serving TLS itself has its key in the image.
+1. **Router behavior needs cluster qualification.** Header routing, port 80 and WebSocket upgrades follow the pinned upstream source. Activation, long-lived quiet connections and drain behavior still need measured cluster evidence. The upstream router has an idle timeout; the bridge currently answers pings but does not send a periodic heartbeat.
+2. **TLS and API authentication need cluster qualification.** Both hops support TLS with a private authority, Control supports bearer tokens and mTLS, and a forwarded API can verify its service DNS name. Hermetic tests exercise these paths. Revocation is not checked. A router that terminates TLS sees credentials in the clear, and a credential can be replayed by whoever holds it until its attempt ends.
 3. **Secrets inherited by branches.** A full-scope branch copies the source's memory and root filesystem, including passed variables and the harness's home. Use Substrate's egress credential injection so secrets never enter the guest, or checkpoint before any credential is present. Otherwise the design's "no secret inheritance" gate fails.
 4. **Quiescence sees processes, not tool calls.** `stop_with` and `checkpoint_with` refuse or wait while any exec runs, and name the processes at work under it ([quiescence](#quiescence)); the contract's `stop` still kills without asking, and the provider cannot tell an idle harness from a busy one. A checkpoint of an open session therefore needs the session closed or `Force`, which is only crash-consistent. No harness-level handshake exists.
 5. **Fencing detects replacement during a call but cannot prevent it.** The API has UID preconditions only for deletes and updates. Resume, suspend, revert and tag are checked before and after ([UID fencing](#uid-fencing)); a call that raced a replacement has already acted on the newer actor when it is reported.

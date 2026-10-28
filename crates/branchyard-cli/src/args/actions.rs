@@ -329,6 +329,12 @@ pub struct SubstrateArgs {
     pub router: String,
     pub template: String,
     pub key: String,
+    /// Control bearer token source, reread per RPC.
+    pub api_token_file: Option<String>,
+    /// TLS service name used to verify Control.
+    pub server_name: Option<String>,
+    /// Explicit actor network policy.
+    pub egress: branchyard::config::SubstrateEgress,
     pub atespace: Option<String>,
     pub workdir: Option<String>,
     pub home: Option<String>,
@@ -943,6 +949,15 @@ impl Flags for InitFlags {
 /// `by setup`'s options.
 #[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetupFlags {
+    /// Guide repository selection, compute setup and readiness checks
+    #[arg(long)]
+    pub guided: bool,
+    /// Bring configured prerequisites up and include their readiness in the result
+    #[arg(long)]
+    pub up: bool,
+    /// Set up this repository instead of the current directory
+    #[arg(long, value_name = "PATH")]
+    pub directory: Option<std::path::PathBuf>,
     /// Take every default and ask nothing (the only way to write without a terminal)
     #[arg(long)]
     pub yes: bool,

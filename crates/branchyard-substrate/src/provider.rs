@@ -70,15 +70,20 @@ use crate::actors::{ActorHandle, Actors, CheckpointRef, Error};
 /// How a [`SubstrateProvider`] reaches Substrate and the bridges.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// File containing the API bearer token, re-read before every RPC.
+    pub api_token_file: Option<PathBuf>,
+    /// Verified TLS service name when the dial address is a port-forward.
+    pub server_name: Option<String>,
+    /// Outbound destinations every actor may reach.
+    pub egress: crate::EgressPolicy,
     /// The `Control` API, as `https://host:port`, or `http://host:port`
     /// on loopback or with [`Config::insecure`].
     pub endpoint: String,
     pub atespace: String,
     /// The actor template every sandbox is created from.
     pub template: String,
-    /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
-    /// in place of the names, such as
-    /// `https://router.example/{atespace}/{actor}/`. `https` and `wss` use
+    /// The router base URL, such as `https://router.example/`. Requests
+    /// select their actor through the `ate-target-actor` header. `https` and `wss` use
     /// TLS; `http` and `ws` are in the clear.
     pub router: String,
     /// Signs attempt credentials. Without one, lifecycle calls work and
@@ -113,6 +118,9 @@ impl Config {
         router: impl Into<String>,
     ) -> Config {
         Config {
+            api_token_file: None,
+            server_name: None,
+            egress: crate::EgressPolicy::default(),
             endpoint: endpoint.into(),
             atespace: atespace.into(),
             template: template.into(),
@@ -144,6 +152,14 @@ impl Config {
     /// schemes, plain HTTP only to loopback unless [`Config::insecure`],
     /// TLS files only for TLS URLs, and every file readable and valid PEM.
     pub fn check(&self) -> Result<(), ProviderError> {
+        if !crate::actors::resource_name(&self.atespace) {
+            return Err(ProviderError::Invalid(
+                "Substrate atespace must be a DNS label".into(),
+            ));
+        }
+        self.egress.check()?;
+        crate::actors::template_reference(&self.atespace, &self.template)
+            .map_err(|error| ProviderError::Invalid(error.to_string()))?;
         self.control_tls()?;
         self.router_tls()?;
         Ok(())
@@ -158,12 +174,24 @@ impl Config {
         let mut endpoint = Channel::from_shared(self.endpoint.clone())
             .map_err(|e| invalid(e.to_string()))?
             .connect_timeout(Duration::from_secs(30));
+        endpoint = endpoint.timeout(Duration::from_secs(300));
         if let Some(tls) = self.control_tls()? {
             endpoint = endpoint
                 .tls_config(tls)
                 .map_err(|e| invalid(e.to_string()))?;
         }
         Ok(endpoint.connect_lazy())
+    }
+
+    /// Build the authenticated lifecycle client inside a Tokio runtime.
+    pub fn actors(&self) -> Result<Actors, ProviderError> {
+        self.check()?;
+        Ok(Actors::configured(
+            self.channel()?,
+            self.atespace.clone(),
+            self.api_token_file.clone(),
+            self.egress.clone(),
+        ))
     }
 
     /// The TLS settings for the `Control` channel, or `None` in the clear.
@@ -174,8 +202,10 @@ impl Config {
             .split_once("://")
             .ok_or_else(|| invalid(format!("{:?} is not a URL", self.endpoint)))?;
         let host = url_host(rest);
-        let tls_files =
-            self.ca.is_some() || self.client_cert.is_some() || self.client_key.is_some();
+        let tls_files = self.ca.is_some()
+            || self.client_cert.is_some()
+            || self.client_key.is_some()
+            || self.server_name.is_some();
         match scheme {
             "http" => {
                 if tls_files {
@@ -194,6 +224,14 @@ impl Config {
                     })
                 };
                 let mut tls = ClientTlsConfig::new();
+                if let Some(name) = &self.server_name {
+                    if name.is_empty() || name.bytes().any(|b| b.is_ascii_whitespace()) {
+                        return Err(invalid(
+                            "TLS server name must be nonempty and contain no whitespace".into(),
+                        ));
+                    }
+                    tls = tls.domain_name(name.clone());
+                }
                 tls = match &self.ca {
                     Some(ca) => {
                         let pem = read(ca, "CA file")?;
@@ -237,12 +275,6 @@ impl Config {
 
     /// Who the router must prove itself to, or `None` in the clear.
     fn router_tls(&self) -> Result<Option<ClientTls>, ProviderError> {
-        if !self.router.contains("{actor}") {
-            return Err(ProviderError::Invalid(format!(
-                "the router URL {} does not name the actor with {{actor}}",
-                self.router
-            )));
-        }
         let probe = Endpoint::new(&self.router_url("probe"), "")?;
         if !probe.is_secure() {
             if self.router_ca.is_some() {
@@ -348,6 +380,7 @@ fn runtime(error: Error) -> ProviderError {
 impl SubstrateProvider {
     /// Prepare a provider. Nothing is contacted until the first call.
     pub fn connect(config: Config) -> Result<SubstrateProvider, ProviderError> {
+        config.check()?;
         let router_tls = config.router_tls()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -360,7 +393,12 @@ impl SubstrateProvider {
         };
         Ok(SubstrateProvider {
             runtime,
-            actors: Actors::new(channel, config.atespace.clone()),
+            actors: Actors::configured(
+                channel,
+                config.atespace.clone(),
+                config.api_token_file.clone(),
+                config.egress.clone(),
+            ),
             config,
             router_tls,
             live: Mutex::new(HashMap::new()),
@@ -372,7 +410,7 @@ impl SubstrateProvider {
         &self.config
     }
 
-    fn block<T>(
+    pub(crate) fn block<T>(
         &self,
         call: impl AsyncFnOnce(&mut Actors) -> Result<T, Error>,
     ) -> Result<T, ProviderError> {
@@ -392,15 +430,29 @@ impl SubstrateProvider {
     }
 
     /// The handle of the actor named `name`, from this provider's memory or
-    /// from Substrate.
+    /// from Substrate after checking its template. Remember the UID so a
+    /// later cleanup retry cannot adopt a replacement actor with the same name.
     pub fn handle(&self, name: &str) -> Result<Option<ActorHandle>, ProviderError> {
         if let Some(live) = self.lock().get(name) {
             return Ok(Some(live.handle.clone()));
         }
-        let name = name.to_owned();
-        Ok(self
-            .block(async move |actors| actors.find(&name).await)?
-            .map(|(handle, _)| handle))
+        let queried = name.to_owned();
+        let template = self.config.template.clone();
+        let Some((handle, _)) =
+            self.block(async move |actors| actors.find(&queried, &template).await)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.lock()
+                .entry(name.to_owned())
+                .or_insert(Live {
+                    handle,
+                    attempt: None,
+                })
+                .handle
+                .clone(),
+        ))
     }
 
     /// A strictly increasing sequence number from the clock, so a later
@@ -444,7 +496,8 @@ impl SubstrateProvider {
         let credential = signer
             .sign(&claims)
             .map_err(|e| ProviderError::Invalid(e.to_string()))?;
-        let mut endpoint = Endpoint::new(&self.config.router_url(&handle.name), credential)?;
+        let mut endpoint = Endpoint::new(&self.config.router_url(&handle.name), credential)?
+            .with_actor(&handle.atespace, &handle.name)?;
         if let Some(tls) = &self.router_tls {
             endpoint = endpoint.with_tls(tls.clone());
         }
@@ -656,20 +709,18 @@ impl SubstrateProvider {
         Ok(())
     }
 
-    /// Forget and delete the actor, fenced by its UID.
+    /// Delete the actor fenced by its UID, forgetting it only after success.
     fn delete(&self, name: &str) -> Result<(), ProviderError> {
-        let handle = self.lock().remove(name).map(|live| live.handle);
-        let handle = match handle {
-            Some(handle) => handle,
-            None => {
-                let name = name.to_owned();
-                match self.block(async move |actors| actors.find(&name).await)? {
-                    Some((handle, _)) => handle,
-                    None => return Ok(()),
-                }
-            }
+        let Some(handle) = self.handle(name)? else {
+            return Ok(());
         };
-        self.block(async move |actors| actors.destroy(&handle).await)
+        let target = handle.clone();
+        self.block(async move |actors| actors.destroy(&target).await)?;
+        let mut live = self.lock();
+        if live.get(name).is_some_and(|live| live.handle == handle) {
+            live.remove(name);
+        }
+        Ok(())
     }
 }
 
@@ -718,7 +769,8 @@ impl SandboxProvider for SubstrateProvider {
             }
             None => {
                 let name = name.to_owned();
-                self.block(async move |actors| actors.find(&name).await)?
+                let template = self.config.template.clone();
+                self.block(async move |actors| actors.find(&name, &template).await)?
                     .map(|(_, state)| state)
             }
         };

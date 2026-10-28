@@ -16,8 +16,8 @@
 //!   modelled), and a paused actor cannot be tagged until it is suspended.
 //! - Tags copy a suspended actor's directory; an actor created from a tag
 //!   starts from that copy, with its own UID.
-//! - The router forwards `/actors/<atespace>/<actor>/<rest>` to the running
-//!   actor's bridge as `/<rest>`, WebSocket upgrades included, and answers
+//! - The router requires `ate-target-actor: <atespace>/<actor>` and forwards
+//!   the unchanged path, WebSocket upgrades included, and answers
 //!   503 for an actor that is not running.
 //! - With [`FakeTls`] ([`FakeCluster::start_tls`]), the `Control` API, the
 //!   router and every bridge serve TLS with one certificate, the `Control`
@@ -27,8 +27,9 @@
 //!   before the next call of a given RPC acts on it
 //!   ([`FakeCluster::replace_before`]), to exercise UID fencing.
 //!
-//! Nothing here is evidence about a real cluster: the real router's
-//! addressing, activation and authentication are not modelled.
+//! Header routing and optional API bearer authentication follow the pinned
+//! upstream contract. Worker scheduling, ingress activation, egress enforcement
+//! and process snapshots are not modelled. This is not cluster evidence.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-substrate
 use branchyard_support::LockExt as _;
@@ -83,6 +84,8 @@ struct Actor {
 
 #[derive(Default)]
 struct State {
+    atespaces: HashMap<String, pb::Atespace>,
+    policies: HashMap<String, pb::EgressPolicy>,
     templates: HashMap<String, pb::ActorTemplate>,
     actors: HashMap<String, Actor>,
     tags: HashMap<String, (pb::Tag, PathBuf)>,
@@ -111,6 +114,7 @@ struct RouterTls {
 }
 
 struct Inner {
+    token: Mutex<Option<String>>,
     atespace: String,
     state: Mutex<State>,
     bridge: Option<PathBuf>,
@@ -218,6 +222,7 @@ impl Inner {
             let Some(old) = state.actors.remove(name) else {
                 return;
             };
+            state.policies.remove(name);
             state.next_uid += 1;
             let mut proto = old.proto.clone();
             let metadata = proto.metadata.get_or_insert_with(Default::default);
@@ -266,7 +271,7 @@ impl Inner {
                     .proto
                     .actor_template
                     .as_ref()
-                    .map(|t| t.name.clone())
+                    .map(|t| format!("{}/{}", t.atespace, t.name))
                     .unwrap_or_default();
                 state.templates.get(&template).and_then(bridge_key)
             };
@@ -326,11 +331,85 @@ struct Service(Arc<Inner>);
 
 #[tonic::async_trait]
 impl Control for Service {
+    async fn get_atespace(
+        &self,
+        request: Request<pb::GetAtespaceRequest>,
+    ) -> Result<Response<pb::Atespace>, Status> {
+        let reference = request
+            .into_inner()
+            .atespace
+            .ok_or_else(|| Status::invalid_argument("atespace"))?;
+        let found = self
+            .0
+            .lock()
+            .atespaces
+            .get(&reference.name)
+            .cloned()
+            .ok_or_else(|| Status::not_found("atespace"))?;
+        Ok(Response::new(found))
+    }
+
+    async fn create_atespace(
+        &self,
+        request: Request<pb::CreateAtespaceRequest>,
+    ) -> Result<Response<pb::Atespace>, Status> {
+        let mut atespace = request
+            .into_inner()
+            .atespace
+            .ok_or_else(|| Status::invalid_argument("atespace"))?;
+        let metadata = atespace
+            .metadata
+            .as_mut()
+            .ok_or_else(|| Status::invalid_argument("metadata"))?;
+        let mut state = self.0.lock();
+        if state.atespaces.contains_key(&metadata.name) {
+            return Err(Status::already_exists("atespace"));
+        }
+        state.next_uid += 1;
+        metadata.uid = format!("atespace-{}", state.next_uid);
+        metadata.version = 1;
+        state
+            .atespaces
+            .insert(metadata.name.clone(), atespace.clone());
+        Ok(Response::new(atespace))
+    }
+
+    async fn create_actor_template(
+        &self,
+        request: Request<pb::CreateActorTemplateRequest>,
+    ) -> Result<Response<pb::ActorTemplate>, Status> {
+        let mut template = request
+            .into_inner()
+            .actor_template
+            .ok_or_else(|| Status::invalid_argument("template"))?;
+        let metadata = template
+            .metadata
+            .as_mut()
+            .ok_or_else(|| Status::invalid_argument("metadata"))?;
+        let key = format!("{}/{}", metadata.atespace, metadata.name);
+        let mut state = self.0.lock();
+        if !state.atespaces.contains_key(&metadata.atespace) {
+            return Err(Status::failed_precondition("atespace missing"));
+        }
+        if state.templates.contains_key(&key) {
+            return Err(Status::already_exists("template"));
+        }
+        state.next_uid += 1;
+        metadata.uid = format!("template-{}", state.next_uid);
+        metadata.version = 1;
+        state.templates.insert(key, template.clone());
+        Ok(Response::new(template))
+    }
+
     async fn get_actor_template(
         &self,
         request: Request<pb::GetActorTemplateRequest>,
     ) -> Result<Response<pb::ActorTemplate>, Status> {
-        let name = self.0.name_of(request.into_inner().actor_template)?;
+        let reference = request
+            .into_inner()
+            .actor_template
+            .ok_or_else(|| Status::invalid_argument("template"))?;
+        let name = format!("{}/{}", reference.atespace, reference.name);
         let state = self.0.lock();
         let template = state
             .templates
@@ -362,7 +441,7 @@ impl Control for Service {
         let template = actor
             .actor_template
             .as_ref()
-            .map(|t| t.name.clone())
+            .map(|t| format!("{}/{}", t.atespace, t.name))
             .unwrap_or_default();
         if !state.templates.contains_key(&template) {
             return Err(Status::failed_precondition(format!(
@@ -405,6 +484,51 @@ impl Control for Service {
             },
         );
         Ok(Response::new(actor))
+    }
+
+    async fn create_actor_egress_policy(
+        &self,
+        request: Request<pb::CreateActorEgressPolicyRequest>,
+    ) -> Result<Response<pb::EgressPolicy>, Status> {
+        let request = request.into_inner();
+        let name = self.0.name_of(request.actor)?;
+        let mut policy = request
+            .egress_policy
+            .ok_or_else(|| Status::invalid_argument("policy"))?;
+        let metadata = policy
+            .metadata
+            .as_mut()
+            .ok_or_else(|| Status::invalid_argument("metadata"))?;
+        if metadata.atespace != self.0.atespace || metadata.name != "default" {
+            return Err(Status::invalid_argument("policy identity"));
+        }
+        let mut state = self.0.lock();
+        if !state.actors.contains_key(&name) {
+            return Err(Status::not_found("actor"));
+        }
+        if state.policies.contains_key(&name) {
+            return Err(Status::already_exists("policy"));
+        }
+        state.next_uid += 1;
+        metadata.uid = format!("policy-{}", state.next_uid);
+        metadata.version = 1;
+        state.policies.insert(name, policy.clone());
+        Ok(Response::new(policy))
+    }
+
+    async fn get_actor_egress_policy(
+        &self,
+        request: Request<pb::GetActorEgressPolicyRequest>,
+    ) -> Result<Response<pb::EgressPolicy>, Status> {
+        let name = self.0.name_of(request.into_inner().actor)?;
+        let policy = self
+            .0
+            .lock()
+            .policies
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| Status::not_found("policy"))?;
+        Ok(Response::new(policy))
     }
 
     async fn get_actor(
@@ -596,6 +720,7 @@ impl Control for Service {
             if !request.any_state && state_of(&actor.proto) == pb::ActorState::Running as i32 {
                 return Err(Status::failed_precondition("actor is running"));
             }
+            state.policies.remove(&name);
             state.actors.remove(&name).expect("checked above")
         };
         let Actor {
@@ -625,11 +750,15 @@ fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
     let head = branchyard_bridge::ws::read_head(&mut client)?;
     let mut start = head.start.split_whitespace();
     let (method, path) = (start.next().unwrap_or(""), start.next().unwrap_or(""));
-    let segments: Vec<&str> = path.splitn(5, '/').collect();
-    let (atespace, actor, rest) = match segments.as_slice() {
-        ["", "actors", atespace, actor, rest] => (*atespace, *actor, *rest),
-        ["", "actors", atespace, actor] => (*atespace, *actor, ""),
-        _ => return branchyard_bridge::ws::respond(&mut client, "404 Not Found", "no route\n"),
+    let Some((atespace, actor)) = head
+        .header("ate-target-actor")
+        .and_then(|value| value.split_once('/'))
+    else {
+        return branchyard_bridge::ws::respond(
+            &mut client,
+            "404 Not Found",
+            "missing actor route\n",
+        );
     };
     let address = {
         let state = inner.lock();
@@ -662,8 +791,11 @@ fn route(inner: &Inner, client: TcpStream) -> io::Result<()> {
             Duration::from_secs(10),
         )?,
     };
-    let mut forwarded = format!("{method} /{rest} HTTP/1.1\r\n");
+    let mut forwarded = format!("{method} {path} HTTP/1.1\r\n");
     for (name, value) in &head.headers {
+        if name == "ate-target-actor" {
+            continue;
+        }
         forwarded.push_str(&format!("{name}: {value}\r\n"));
     }
     forwarded.push_str("\r\n");
@@ -728,8 +860,23 @@ impl FakeCluster {
             files: files.clone(),
         });
         let inner = Arc::new(Inner {
+            token: Mutex::new(None),
             atespace: atespace.to_owned(),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                atespaces: [(
+                    atespace.into(),
+                    pb::Atespace {
+                        metadata: Some(pb::ResourceMetadata {
+                            name: atespace.into(),
+                            uid: "initial-atespace".into(),
+                            version: 1,
+                            ..Default::default()
+                        }),
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            }),
             bridge,
             scratch: scratch.to_path_buf(),
             tls: router_tls,
@@ -747,7 +894,24 @@ impl FakeCluster {
             .expect("bind the fake control API");
         let scheme = if tls.is_some() { "https" } else { "http" };
         let endpoint = format!("{scheme}://{}", listener.local_addr().unwrap());
-        let service = ControlServer::new(Service(inner.clone()));
+        let auth = inner.clone();
+        let service =
+            ControlServer::with_interceptor(Service(inner.clone()), move |request: Request<()>| {
+                if let Some(token) = auth.token.lock_recovering("fake API token").as_ref() {
+                    let expected = format!("Bearer {token}");
+                    if request
+                        .metadata()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        != Some(expected.as_str())
+                    {
+                        return Err(Status::unauthenticated(
+                            "missing or incorrect API bearer token",
+                        ));
+                    }
+                }
+                Ok(request)
+            });
         let mut server = Server::builder();
         if let Some(files) = &tls {
             let mut config = ServerTlsConfig::new()
@@ -767,10 +931,7 @@ impl FakeCluster {
             );
         });
         let router = TcpListener::bind("127.0.0.1:0").expect("bind the fake router");
-        let router_url = format!(
-            "{scheme}://{}/actors/{{atespace}}/{{actor}}/",
-            router.local_addr().unwrap()
-        );
+        let router_url = format!("{scheme}://{}/", router.local_addr().unwrap());
         {
             let inner = inner.clone();
             thread::spawn(move || {
@@ -807,9 +968,19 @@ impl FakeCluster {
         let name = template
             .metadata
             .as_ref()
-            .map(|m| m.name.clone())
+            .map(|m| format!("{}/{}", m.atespace, m.name))
             .unwrap_or_default();
         self.inner.lock().templates.insert(name, template);
+    }
+
+    /// Require this bearer token on every Control RPC; replacing it models rotation.
+    pub fn require_api_token(&self, token: impl Into<String>) {
+        *self.inner.token.lock_recovering("fake API token") = Some(token.into());
+    }
+
+    /// The explicit egress policy of an actor, if one was created.
+    pub fn egress_policy(&self, actor: &str) -> Option<pb::EgressPolicy> {
+        self.inner.lock().policies.get(actor).cloned()
     }
 
     /// Remove `path` whenever an actor is created, as a fresh root

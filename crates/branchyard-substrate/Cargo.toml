@@ -26,6 +26,7 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-workspace = { version = "0.1.0-rc.1", path = "../branchyard-workspace" }
 prost = { workspace = true }
 prost-types = "0.14"
+serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["net"], optional = true }
 tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }

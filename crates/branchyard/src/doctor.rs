@@ -148,6 +148,9 @@ pub fn check_microsandbox(yard: &Yard, options: &SandboxOptions) -> Result<(), E
     ProviderKind::check(options, yard)
 }
 
+/// Host KVM access check shared with the runtime adapter.
+pub use branchyard_microsandbox::host_readiness as check_microsandbox_host;
+
 /// What a sandbox row holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeldKind {

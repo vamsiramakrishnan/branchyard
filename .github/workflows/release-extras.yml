@@ -1,0 +1,40 @@
+name: Release bootstrap
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: sh -n install.sh && python3 tests/test_distribution.py
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Build the plugin, skills and Python SDK archives
+        run: python3 tools/package.py --output artifacts
+      - name: Build and install the Python wheel outside the checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/release-build"
+          build_python="$RUNNER_TEMP/release-build/bin/python"
+          "$build_python" -m pip install build 'setuptools>=77' wheel
+          "$build_python" -m build sdk/python --outdir artifacts
+          python3 -m venv "$RUNNER_TEMP/release-sdk-install"
+          sdk_python="$RUNNER_TEMP/release-sdk-install/bin/python"
+          "$sdk_python" -m pip install --no-index --find-links artifacts branchyard
+          expected="$(python3 tools/release_version.py --pep440)"
+          "$sdk_python" -I -c 'import sys, importlib.metadata, branchyard, branchyard_client; assert importlib.metadata.version("branchyard") == sys.argv[1]' "$expected"
+      - run: python3 tools/release_assets.py --artifacts artifacts --output extras
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: artifacts-bootstrap
+          path: extras/*

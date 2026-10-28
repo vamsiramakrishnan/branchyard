@@ -1,151 +1,154 @@
 #!/bin/sh
-# Install a released `by` and `branchyard-server` for this machine, after
-# checking the archive's SHA-256 against the release's SHA256SUMS.
-#
-#   sh install.sh --version 0.1.0-rc.1                  # into ~/.local/bin
-#   sh install.sh --version 0.1.0-rc.1 --prefix /opt/by
-#   sh install.sh --version 0.1.0-rc.1 --base-url ./downloaded-release
-#
-# Download it, read it, then run it as the user who will own the files; it
-# never calls sudo. For a prefix you cannot write, run it with the
-# privileges that can (after reading it), not through a pipe.
-# See docs/distribution.md.
+# Install Branchyard's verified prebuilt binaries and start guided setup.
+#   curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --setup
+#   sh install.sh --version 0.1.0-rc.1 --prefix "$HOME/.local" --no-setup
 set -eu
 
-repo="vamsiramakrishnan/branchyard"
-version="${BRANCHYARD_VERSION:-}"
-prefix="${BRANCHYARD_PREFIX:-${HOME:-}/.local}"
-base_url="${BRANCHYARD_INSTALL_BASE:-}"
-target=""
+repo=vamsiramakrishnan/branchyard
+version=${BRANCHYARD_VERSION:-}
+prefix=${BRANCHYARD_PREFIX:-${HOME:-}/.local}
+base_url=${BRANCHYARD_INSTALL_BASE:-}
+setup=auto
+yes=0
 dry_run=0
+runtime=0
 
-die() {
-    printf 'install.sh: %s\n' "$*" >&2
-    exit 1
-}
-
+fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 usage() {
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
-    cat <<EOF
-Options:
-  --version V     the release to install (or BRANCHYARD_VERSION); required
-  --prefix DIR    install into DIR/bin (default: ~/.local)
-  --base-url URL  where the release's files are (or BRANCHYARD_INSTALL_BASE;
-                  default: its GitHub release): https://, file:// or a
-                  directory, such as a draft's files from gh release download
-  --target T      the archive's target triple (default: this machine's)
-  --dry-run       say what would be installed, change nothing
-EOF
-}
+    cat <<'HELP'
+Install Branchyard without a Rust toolchain or a source checkout.
 
-while [ $# -gt 0 ]; do
+Options:
+  --version VERSION  install this release (default: latest stable release)
+  --prefix DIR       install into DIR/bin (default: ~/.local)
+  --base-url URL     use an HTTPS release mirror or a file:// directory
+  --runtime          install the Linux GNU build with Microsandbox support
+  --setup            start the guided setup after installation
+  --no-setup         install binaries only
+  --yes              take setup defaults without a terminal; creates no cloud resources
+  --dry-run          show the release and installation path without downloading or writing
+  -h, --help         print this help
+HELP
+}
+while [ "$#" -gt 0 ]; do
     case "$1" in
-        --version) [ $# -ge 2 ] || die "--version needs a value"; version=$2; shift 2 ;;
+        --version|--prefix|--base-url)
+            option=$1; [ "$#" -ge 2 ] || fail "$option needs a value"
+            case "$option" in --version) version=$2 ;; --prefix) prefix=$2 ;; --base-url) base_url=$2 ;; esac
+            shift 2 ;;
         --version=*) version=${1#*=}; shift ;;
-        --prefix) [ $# -ge 2 ] || die "--prefix needs a value"; prefix=$2; shift 2 ;;
         --prefix=*) prefix=${1#*=}; shift ;;
-        --base-url) [ $# -ge 2 ] || die "--base-url needs a value"; base_url=$2; shift 2 ;;
         --base-url=*) base_url=${1#*=}; shift ;;
-        --target) [ $# -ge 2 ] || die "--target needs a value"; target=$2; shift 2 ;;
-        --target=*) target=${1#*=}; shift ;;
+        --runtime) runtime=1; shift ;;
+        --setup) setup=yes; shift ;;
+        --no-setup) setup=no; shift ;;
+        --yes) yes=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         -h|--help) usage; exit 0 ;;
-        *) die "unknown option $1 (see --help)" ;;
+        *) fail "unknown option $1; run with --help" ;;
     esac
 done
-
 version=${version#v}
-[ -n "$version" ] || die "name the release: --version X.Y.Z (or set BRANCHYARD_VERSION)"
-case "$version" in
-    *[!0-9A-Za-z.+-]*) die "unusable version $version" ;;
+case "$version" in *[!0-9A-Za-z.+-]*) fail 'version must be a release version such as 0.0.1' ;; esac
+[ -n "$prefix" ] && [ "$prefix" != / ] || fail 'choose a nonempty --prefix directory you own'
+case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path' ;; esac
+case "$base_url" in
+    http://*) fail "refusing plain http: $base_url" ;;
+    https://*|file://*|'') ;;
+    *://*) fail '--base-url must use https:// or file://' ;;
+    *) base_url="file://$base_url" ;;
 esac
-[ -n "$prefix" ] || die "no --prefix and no HOME"
-
-if [ -z "$target" ]; then
-    os=$(uname -s)
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64|amd64) arch=x86_64 ;;
-        arm64|aarch64) arch=aarch64 ;;
-        *) die "no prebuilt binary for $arch; build from source (cargo install --locked --path crates/branchyard-cli)" ;;
-    esac
-    case "$os" in
-        Linux) target="$arch-unknown-linux-musl" ;;
-        Darwin) target="$arch-apple-darwin" ;;
-        *) die "no prebuilt binary for $os; build from source" ;;
-    esac
+if [ -z "$base_url" ]; then
+    if [ -n "$version" ]; then base_url="https://github.com/$repo/releases/download/v$version"
+    else base_url="https://github.com/$repo/releases/latest/download"; fi
 fi
-
-[ -n "$base_url" ] || base_url="https://github.com/$repo/releases/download/v$version"
-name="branchyard-$version-$target"
-archive="$name.tar.gz"
-
-if [ "$dry_run" -eq 1 ]; then
-    printf 'would install %s from %s into %s/bin\n' "$archive" "$base_url" "$prefix"
+if [ "$dry_run" = 1 ]; then
+    printf 'would install by, branchyard-server and branchyard-bridge from %s into %s/bin\n' "$base_url" "$prefix"
+    [ "$setup" = no ] || printf 'would continue with guided setup when a terminal is available\n'
     exit 0
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/branchyard-install.XXXXXX")
-trap 'rm -rf "$work"' EXIT INT TERM
-
+trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 fetch() {
     case "$base_url" in
         file://*) cp "${base_url#file://}/$1" "$work/$1" ;;
-        http://*) die "refusing plain http: $base_url" ;;
         https://*)
             if command -v curl >/dev/null 2>&1; then
-                curl --proto '=https' --tlsv1.2 -fsSL -o "$work/$1" "$base_url/$1"
+                curl --proto '=https' --tlsv1.2 -fsSL "$base_url/$1" -o "$work/$1"
             elif command -v wget >/dev/null 2>&1; then
-                wget -q -O "$work/$1" "$base_url/$1"
-            else
-                die "needs curl or wget"
-            fi ;;
-        *) cp "$base_url/$1" "$work/$1" ;;
-    esac || die "could not fetch $base_url/$1"
+                wget --https-only -q "$base_url/$1" -O "$work/$1"
+            else fail 'install curl or wget, then rerun this command'; fi ;;
+    esac || fail "could not download $1 from $base_url; check the release and retry"
 }
 
-fetch SHA256SUMS
-fetch "$archive"
-
-expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1 }' "$work/SHA256SUMS")
-[ -n "$expected" ] || die "SHA256SUMS lists no $archive"
-if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$work/$archive" | awk '{ print $1 }')
-elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$work/$archive" | awk '{ print $1 }')
-else
-    die "needs sha256sum or shasum to verify the download"
+# dist owns platform selection, archive checksums, installation and shell PATH setup.
+# Its sha256 implementation expects sha256sum; provide macOS's equivalent locally.
+if ! command -v sha256sum >/dev/null 2>&1; then
+    command -v shasum >/dev/null 2>&1 || fail 'install sha256sum or shasum to verify downloads'
+    mkdir "$work/bin"
+    cat > "$work/bin/sha256sum" <<'SHIM'
+#!/bin/sh
+exec shasum -a 256 "$@"
+SHIM
+    chmod 0755 "$work/bin/sha256sum"
+    PATH="$work/bin:$PATH"; export PATH
 fi
-[ "$expected" = "$actual" ] || die "checksum mismatch for $archive: expected $expected, got $actual; nothing was installed"
-
-tar -xzf "$work/$archive" -C "$work"
-[ -x "$work/$name/by" ] || die "$archive has no by"
-
-mkdir -p "$prefix/bin" "$prefix/share/branchyard" 2>/dev/null \
-    || die "cannot create $prefix/bin; choose a --prefix you own"
-[ -w "$prefix/bin" ] || die "$prefix/bin is not writable; choose a --prefix you own"
-# An absolute path without a trailing slash, as PATH would name it.
-prefix=$(CDPATH='' cd -- "$prefix" && pwd) || die "cannot enter $prefix"
-for bin in by branchyard-server; do
-    if [ -f "$work/$name/$bin" ]; then
-        cp "$work/$name/$bin" "$prefix/bin/$bin.new"
-        chmod 0755 "$prefix/bin/$bin.new"
-        mv -f "$prefix/bin/$bin.new" "$prefix/bin/$bin"
-    fi
-done
-cp "$work/$name/LICENSE" "$work/$name/THIRD_PARTY.md" "$prefix/share/branchyard/" 2>/dev/null || true
-if [ -d "$work/$name/licenses" ]; then
-    cp -R "$work/$name/licenses" "$prefix/share/branchyard/"
-fi
-
-printf 'installed %s into %s/bin (sha256 %s)\n' "$("$prefix/bin/by" --version 2>/dev/null || echo by)" "$prefix" "$actual"
-case ":${PATH:-}:" in
-    *":$prefix/bin:"*)
-        found=$(command -v by 2>/dev/null || true)
-        if [ -n "$found" ] && [ "$found" != "$prefix/bin/by" ]; then
-            printf 'note: %s comes first on your PATH; remove it or put %s/bin before it\n' "$found" "$prefix"
-        fi ;;
-    *)
-        printf '%s/bin is not on your PATH; add it (in ~/.profile, ~/.bashrc or ~/.zshrc):\n' "$prefix"
-        printf '  export PATH="%s/bin:%s"\n' "$prefix" "\$PATH" ;;
+case "$base_url" in
+    file://*)
+        mirror=$(cd "${base_url#file://}" && pwd) || fail 'release mirror directory does not exist'
+        base_url="file://$mirror" ;;
 esac
+packages="branchyard-cli branchyard-server branchyard-bridge"
+first=branchyard-cli
+if [ "$runtime" = 1 ]; then packages=branchyard-runtime; first=branchyard-runtime; fi
+fetch "$first-installer.sh"
+release_version=$(sed -n 's/^APP_VERSION="\([0-9A-Za-z.+-]*\)"$/\1/p' "$work/$first-installer.sh")
+[ -n "$release_version" ] || fail 'release installer has no version; use a valid Branchyard release'
+case "$release_version" in *[!0-9A-Za-z.+-]*) fail 'release installer has an invalid version' ;; esac
+if [ -n "$version" ] && [ "$release_version" != "$version" ]; then
+    fail "requested $version but mirror supplied $release_version"
+fi
+# Pin all remaining downloads to the same release even if latest changes midway.
+case "$base_url" in
+    "https://github.com/$repo/releases/latest/download")
+        base_url="https://github.com/$repo/releases/download/v$release_version" ;;
+esac
+for package in $packages; do
+    [ "$package" = "$first" ] || fetch "$package-installer.sh"
+done
+for package in $packages; do
+    actual_version=$(sed -n 's/^APP_VERSION="\([0-9A-Za-z.+-]*\)"$/\1/p' "$work/$package-installer.sh")
+    [ "$actual_version" = "$release_version" ] || fail "$package installer belongs to a different release"
+done
+export BRANCHYARD_PREFIX="$prefix"
+export INSTALLER_DOWNLOAD_URL="$base_url"
+export CARGO_DIST_FORCE_INSTALL_DIR="$prefix/bin"
+export INSTALLER_NO_MODIFY_PATH=${INSTALLER_NO_MODIFY_PATH:-0}
+for package in $packages; do
+    sh "$work/$package-installer.sh" || fail "$package installation failed; rerun the same command to resume"
+done
+PATH="$prefix/bin:$PATH"; export PATH
+for binary in by branchyard-server branchyard-bridge; do
+    "$prefix/bin/$binary" --version >/dev/null ||
+        fail "installed $binary could not execute; check native runtime libraries and rerun the installer"
+done
+installed_version=$("$prefix/bin/by" --version)
+printf 'Installed %s into %s/bin\n' "$installed_version" "$prefix"
+case ":${PATH#"$prefix/bin:"}:" in
+    *":$prefix/bin:"*) ;;
+    *) printf 'For future shells, add %s/bin to PATH.\n' "$prefix" ;;
+esac
+if [ "$setup" != no ]; then
+    if [ "$yes" = 1 ]; then
+        "$prefix/bin/by" setup --yes --up
+    elif ( : </dev/tty ) 2>/dev/null; then
+        "$prefix/bin/by" setup --guided </dev/tty
+    elif [ "$setup" = yes ]; then
+        fail "installed successfully; guided setup needs a terminal. Run $prefix/bin/by setup --guided, or rerun with --setup --yes"
+    else
+        printf 'Next: %s/bin/by setup --guided\n' "$prefix"
+    fi
+fi

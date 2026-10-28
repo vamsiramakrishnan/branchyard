@@ -1,0 +1,42 @@
+name: Install released packages
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            runtime: false
+          - runner: ubuntu-24.04-arm
+            runtime: false
+          - runner: macos-14
+            runtime: false
+          - runner: macos-15-intel
+            runtime: false
+          - runner: ubuntu-24.04
+            runtime: true
+          - runner: ubuntu-24.04-arm
+            runtime: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install runtime libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Install and exercise the packaged CLI
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: python3 tools/release_smoke.py --artifacts artifacts --runtime "$RUNTIME"

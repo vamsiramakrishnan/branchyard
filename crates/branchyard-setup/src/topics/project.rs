@@ -222,51 +222,45 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             Choice::new(true, "Yes", "private HOME, not a sandbox; give the harness a secret next"),
         ]),
     ];
-    // A recipe chosen by hand is kept: this question offers only local and
-    // Microsandbox. Microsandbox is offered where this build can run it and
-    // the host has KVM; a file that already names it keeps the choice, and
-    // says what the build lacks.
-    if ((facts.platform.kvm && facts.build.microsandbox)
-        || d.provider == Some(ProviderKind::Microsandbox))
-        && d.provider != Some(ProviderKind::Recipe)
-    {
-        qs.push(
-            Question::new(
-                "provider",
-                Kind::Select,
-                "Provider",
-                "Where should harnesses run?",
-                &match facts.build.microsandbox {
-                    true => "KVM is available, so Microsandbox can run each turn in a microVM.".to_owned(),
-                    false => format!(
-                        "This build has no Microsandbox support: rebuild with `{}` (needs KVM and libcap-ng).",
-                        crate::probe::REBUILD_MICROSANDBOX
-                    ),
-                },
-            )
+    // Preserve a manually selected recipe; all other users can choose a remote image.
+    if d.provider != Some(ProviderKind::Recipe) {
+        let mut providers = vec![
+            Choice::new(
+                "local",
+                "Local process",
+                "in its own worktree, as your user",
+            ),
+            Choice::new(
+                "substrate",
+                "Agent Substrate",
+                "remote actors from an existing cluster and bridge template",
+            ),
+        ];
+        if (facts.platform.kvm && facts.build.microsandbox)
+            || d.provider == Some(ProviderKind::Microsandbox)
+            || text(answers, "remote").as_deref() == Some("server")
+        {
+            providers.push(Choice::new(
+                "microsandbox",
+                "Microsandbox",
+                "a microVM per turn from an OCI image",
+            ));
+        }
+        qs.push(Question::new("provider", Kind::Select, "Provider",
+            "Where should harnesses run?",
+            "Remote actors use their image's harness and a private home; host login does not transfer.")
             .default(match d.provider {
                 Some(ProviderKind::Microsandbox) => "microsandbox",
+                Some(ProviderKind::Substrate) => "substrate",
                 _ => "local",
-            })
-            .choices(vec![
-                Choice::new("local", "Local process", "in its own worktree, as your user"),
-                Choice::new(
-                    "microsandbox",
-                    "Microsandbox",
-                    match facts.build.microsandbox {
-                        true => "a microVM per turn from an OCI image",
-                        false => "needs a build with --features microsandbox",
-                    },
-                ),
-            ]),
-        );
+            }).choices(providers));
         qs.push(
             Question::new(
                 "microsandbox.image",
                 Kind::Text,
                 "Image",
                 "Which OCI image has the harness installed?",
-                "--image: the microVM boots from it.",
+                "The microVM boots from it.",
             )
             .default(or(
                 current
@@ -277,10 +271,97 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             ))
             .when(Condition::equals("provider", "microsandbox")),
         );
+        let saved = current.substrate.as_ref();
+        for (id, header, prompt, value) in [
+            (
+                "endpoint",
+                "Control API",
+                "Which HTTPS Control API endpoint?",
+                saved.map(|s| s.endpoint.as_str()),
+            ),
+            (
+                "router",
+                "Router",
+                "Which router base URL reaches the actors?",
+                saved.map(|s| s.router.as_str()),
+            ),
+            (
+                "atespace",
+                "Atespace",
+                "Which atespace contains the template?",
+                saved.map(|s| s.atespace.as_str()),
+            ),
+            (
+                "template",
+                "Template",
+                "Which existing bridge actor template?",
+                saved.map(|s| s.template.as_str()),
+            ),
+            (
+                "key",
+                "Signing key",
+                "Where is the bridge signing key file?",
+                saved.map(|s| s.key.as_str()),
+            ),
+        ] {
+            qs.push(Question::new(&format!("substrate.{id}"), Kind::Text, header, prompt,
+                "Only configuration and file paths are saved. Existing cluster resources are not changed.")
+                .default(value.map_or(Value::Null, Value::from))
+                .when(Condition::equals("provider", "substrate")));
+        }
+        for (id, header, prompt, value) in [
+            (
+                "api_token_file",
+                "API token file",
+                "Where is the rotating Control bearer token file?",
+                saved.and_then(|s| s.api_token_file.as_deref()),
+            ),
+            (
+                "ca",
+                "Control CA",
+                "Where is the Control CA certificate file?",
+                saved.and_then(|s| s.ca.as_deref()),
+            ),
+            (
+                "server_name",
+                "TLS name",
+                "Which TLS server name should a port-forward verify?",
+                saved.and_then(|s| s.server_name.as_deref()),
+            ),
+        ] {
+            qs.push(Question::new(&format!("substrate.{id}"), Kind::Text, header, prompt,
+                "Optional when the endpoint uses public TLS or another configured authentication method; enter a path, never a token.")
+                .optional().default(value.map_or(Value::Null, Value::from))
+                .when(Condition::equals("provider", "substrate")));
+        }
+        let mut egress_choices = vec![
+            Choice::new("deny", "Deny", "no outbound network access"),
+            Choice::new(
+                "unrestricted",
+                "Unrestricted",
+                "allow outbound network access",
+            ),
+        ];
+        if saved.is_some() {
+            egress_choices.insert(
+                0,
+                Choice::new(
+                    "keep",
+                    "Keep existing policy",
+                    "preserve the configured policy",
+                ),
+            );
+        }
+        qs.push(Question::new("substrate.egress", Kind::Select, "Actor network",
+            "Which egress policy should new actors use?",
+            "Deny blocks model traffic. Unrestricted explicitly allows outbound connections; configure allow_hosts by editing [substrate].")
+            .default(if saved.is_some() { "keep" } else { "deny" }).choices(egress_choices)
+            .when(Condition::equals("provider", "substrate")));
     }
     let needs_secrets = Condition::Any(vec![
         Condition::truthy("isolated"),
         Condition::equals("provider", "microsandbox"),
+        Condition::equals("provider", "substrate"),
     ]);
     let (choices, set) = secret_choices(facts, std::slice::from_ref(&harness));
     let existing_secrets: Vec<Value> = current
@@ -373,39 +454,46 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             ),
         ])
         .rule(Rule::Url {
-            schemes: vec!["http".into(), "https".into()],
+            schemes: vec!["http".into(), "https".into(), "ssh".into()],
         })
         .when(Condition::equals("remote", "server")),
     );
-    qs.push(
-        Question::new(
-            "remote.token_file",
-            Kind::Path,
-            "Token file",
-            "Which file holds your bearer token?",
-            "--token-file: the token stays in that file; only its path is stored.",
-        )
-        .default(
+    let ssh_remote = text(answers, "remote.url").is_some_and(|url| url.starts_with("ssh://"));
+    let mut token_question = Question::new(
+        "remote.token_file",
+        Kind::Path,
+        "Token file",
+        "Which file holds your bearer token?",
+        "--token-file: the token stays in that file; only its path is stored.",
+    )
+    .default(if ssh_remote {
+        Value::Null
+    } else {
+        Value::from(
             current
                 .remote
                 .token_file
                 .clone()
                 .unwrap_or_else(|| ".branchyard/server/token".into()),
         )
-        .choices(vec![
-            Choice::new(
-                ".branchyard/server/token",
-                "by serve's token",
-                "what by serve creates by default",
-            ),
-            Choice::new(
-                ".branchyard/tokens/admin.token",
-                "by init server's",
-                "the admin token by init server writes",
-            ),
-        ])
-        .when(Condition::equals("remote", "server")),
-    );
+    })
+    .choices(vec![
+        Choice::new(
+            ".branchyard/server/token",
+            "by serve's token",
+            "what by serve creates by default",
+        ),
+        Choice::new(
+            ".branchyard/tokens/admin.token",
+            "by init server's",
+            "the admin token by init server writes",
+        ),
+    ])
+    .when(Condition::equals("remote", "server"));
+    if ssh_remote {
+        token_question = token_question.optional();
+    }
+    qs.push(token_question);
     qs.push(
         Question::new(
             "remote.ca_file",
@@ -440,7 +528,11 @@ fn after_isolation() -> Condition {
 /// Whether new branches get a private home by default: isolated, or a
 /// sandbox.
 fn private_home(answers: &Answers) -> bool {
-    flag(answers, "isolated") || text(answers, "provider").as_deref() == Some("microsandbox")
+    flag(answers, "isolated")
+        || matches!(
+            text(answers, "provider").as_deref(),
+            Some("microsandbox" | "substrate")
+        )
 }
 
 /// The source a login file is recorded under: `@~/.codex/auth.json`.
@@ -964,13 +1056,34 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     if answers.contains_key("provider") {
         set!("defaults.provider", get("provider"));
     }
+    let substrate = text(answers, "provider").as_deref() == Some("substrate");
+    if substrate {
+        for id in [
+            "endpoint",
+            "router",
+            "atespace",
+            "template",
+            "key",
+            "api_token_file",
+            "ca",
+            "server_name",
+        ] {
+            let key = format!("substrate.{id}");
+            if answers.contains_key(&key) {
+                flat.insert(key.clone(), get(&key).unwrap_or(Value::Null));
+            }
+        }
+        if let Some(mode) = text(answers, "substrate.egress").filter(|mode| mode != "keep") {
+            flat.insert("substrate.egress".into(), json!({ "mode": mode }));
+        }
+    }
     let sandbox = text(answers, "provider").as_deref() == Some("microsandbox");
     if sandbox {
         set!("microsandbox.image", get("microsandbox.image"));
     }
     // Secrets apply only with a private home; without one, keep whatever
     // the file already had, since this interview did not ask.
-    if flag(answers, "isolated") || sandbox {
+    if flag(answers, "isolated") || sandbox || substrate {
         flat.retain(|key, _| !key.starts_with("secrets."));
         for name in list(answers, "secrets") {
             let source =
@@ -1179,7 +1292,10 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     }
     // The default harness must run here, unless branches run elsewhere.
     let runs_here = text(answers, "remote").as_deref() != Some("server")
-        && text(answers, "provider").as_deref() != Some("microsandbox");
+        && !matches!(
+            text(answers, "provider").as_deref(),
+            Some("microsandbox" | "substrate")
+        );
     if let Some(harness) = text(answers, "harness").filter(|_| runs_here) {
         if !facts.installed().any(|h| h.harness == harness) {
             let found: Vec<&str> = facts.installed().map(|h| h.harness.as_str()).collect();
@@ -1271,6 +1387,8 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
     );
     if text(answers, "remote").as_deref() == Some("server") {
         plan.command("by ls", "Reach the server with the new [remote] settings.");
+    } else if text(answers, "provider").as_deref() == Some("substrate") {
+        plan.command("by up", "Check authenticated Control/template readiness and remote credential sources without creating an actor.");
     } else {
         plan.command("by harnesses", "Confirm the default harness is installed.");
     }
@@ -1283,6 +1401,68 @@ mod tests {
     use crate::interview::resolve;
     use crate::probe::FakeProbe;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn remote_microsandbox_does_not_require_a_local_kvm_build() {
+        let mut facts = Facts::gather(&FakeProbe::typical());
+        facts.platform.kvm = false;
+        facts.build.microsandbox = false;
+        let answers = BTreeMap::from([
+            ("remote".into(), json!("server")),
+            ("remote.url".into(), json!("ssh://worker/project")),
+            ("provider".into(), json!("microsandbox")),
+            ("microsandbox.image".into(), json!("example.invalid/agy:1")),
+        ]);
+        let state = resolve(&|answers| questions(&facts, answers), &answers, true);
+        assert!(state.done(), "{state:?}");
+        assert_eq!(state.answers["provider"], "microsandbox");
+        assert_eq!(state.answers["remote"], "server");
+        assert!(state.answers["remote.token_file"].is_null());
+    }
+
+    #[test]
+    fn substrate_interview_saves_paths_and_requires_private_home_secrets() {
+        let probe = FakeProbe::typical();
+        let facts = Facts::gather(&probe);
+        let raw = BTreeMap::from([
+            ("provider".into(), json!("substrate")),
+            ("harness".into(), json!("antigravity")),
+            (
+                "substrate.endpoint".into(),
+                json!("https://control.example"),
+            ),
+            ("substrate.router".into(), json!("https://router.example")),
+            ("substrate.atespace".into(), json!("branchyard")),
+            ("substrate.template".into(), json!("agy")),
+            ("substrate.key".into(), json!("/keys/bridge")),
+            ("substrate.api_token_file".into(), json!("/keys/token")),
+            ("substrate.egress".into(), json!("unrestricted")),
+        ]);
+        let state = resolve(&|answers| questions(&facts, answers), &raw, true);
+        assert!(state.done(), "{state:?}");
+        assert!(state.answers.contains_key("secrets"));
+        assert!(private_home(&state.answers));
+        assert_eq!(
+            state.answers["substrate.api_token_file"],
+            json!("/keys/token")
+        );
+        assert_eq!(state.answers["substrate.egress"], json!("unrestricted"));
+        let body = plan_body(&facts, &state.answers, &probe);
+        let configured = config::parse(&body).unwrap();
+        assert_eq!(configured.defaults.provider, Some(ProviderKind::Substrate));
+        let substrate = configured.substrate.unwrap();
+        assert_eq!(substrate.api_token_file.as_deref(), Some("/keys/token"));
+        assert_eq!(substrate.egress, config::SubstrateEgress::Unrestricted);
+
+        let questions = questions(&facts, &raw);
+        assert!(questions
+            .iter()
+            .find(|q| q.id == "provider")
+            .unwrap()
+            .choices
+            .iter()
+            .any(|choice| choice.value == json!("substrate")));
+    }
 
     #[test]
     fn detected_harnesses_and_check_become_defaults() {

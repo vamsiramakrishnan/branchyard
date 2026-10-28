@@ -19,7 +19,9 @@ cargo install --locked --force --path crates/branchyard-cli    # add --features 
 by --version
 ```
 
-`--force` makes cargo replace the installed `by` even though the version number is the same. Between releases, `by --version` reads the same version for every build from a clone (`by 0.1.0-rc.1` now, the version the first release is prepared for), so `git log -1` in the clone says which revision you last built. When releases exist, you will re-run `install.sh` for the version you want ([distribution](distribution.md#installsh)).
+`--force` replaces a source installation even when its version number is unchanged. For a binary installation, rerun the single-command installer with `--no-setup` to update the binaries and retain project configuration. Add `--version X.Y.Z` to pin a release and `--runtime` to retain Microsandbox build support. See [distribution](distribution.md#install-by) for the installer and platform requirements.
+
+Between source releases, `by --version` keeps the workspace version, so `git log -1` in the clone identifies the exact source revision.
 
 ## The store
 

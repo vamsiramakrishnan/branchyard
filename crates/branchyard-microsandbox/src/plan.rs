@@ -23,8 +23,8 @@ pub const DISK_SNAPSHOT: SnapshotGuarantee = SnapshotGuarantee {
 
 /// The full-scope guarantee declared with live branching on: memory,
 /// processes and the root disk, captured without the workload's
-/// cooperation, restorable only on this host (`Sandbox::branch` is local
-/// only, and a full snapshot needs the same CPU and memory geometry).
+/// cooperation, restorable only on this host. A full snapshot needs the
+/// same CPU and memory geometry.
 pub const FULL_SNAPSHOT: SnapshotGuarantee = SnapshotGuarantee {
     scope: SnapshotScope::Full,
     consistency: Consistency::Crash,
@@ -42,7 +42,7 @@ pub fn capabilities() -> Capabilities {
 /// [`capabilities`], plus, with `live_branch` (the opt-in
 /// `live_branch = true` in the provider options, until qualified): pause
 /// and resume (`Sandbox::pause`/`resume`), live branching of a running or
-/// paused sandbox (`Sandbox::branch`/`branch_many`), and full-scope
+/// paused sandbox through a temporary full checkpoint, and full-scope
 /// checkpoints (`Snapshot::builder(..).full()`) that branch with a forked
 /// restore (`Sandbox::restore(..).forked()`).
 pub fn capabilities_with(live_branch: bool) -> Capabilities {
@@ -80,13 +80,6 @@ pub fn live_child(spec: &SandboxSpec) -> Result<CreatePlan, ProviderError> {
         ));
     }
     branch(spec)
-}
-
-/// Whether one `branch_many` call can create every child: the SDK applies
-/// one set of mounts to every child of a batch, so only children with the
-/// same mounts can share one.
-pub fn one_batch(children: &[CreatePlan]) -> bool {
-    children.len() > 1 && children.windows(2).all(|w| w[0].mounts == w[1].mounts)
 }
 
 /// A host directory bound into the guest.
@@ -406,18 +399,15 @@ mod tests {
     }
 
     #[test]
-    fn live_children_rebind_their_own_mounts_and_batch_only_when_equal() {
+    fn live_children_rebind_their_own_mounts() {
         let child = |name: &str, worktree: &str| {
             SandboxSpec::new(name).mount(Mount::writable(worktree, "/workspace"))
         };
         let a = live_child(&child("a", "/wt/a")).unwrap();
         let b = live_child(&child("b", "/wt/b")).unwrap();
-        let c = live_child(&child("c", "/wt/a")).unwrap();
         assert_eq!(a.image, None);
         assert_eq!(a.mounts[0].host, PathBuf::from("/wt/a"));
-        assert!(!one_batch(&[a.clone(), b]));
-        assert!(one_batch(&[a.clone(), c]));
-        assert!(!one_batch(&[a]));
+        assert_eq!(b.mounts[0].host, PathBuf::from("/wt/b"));
         assert!(live_child(&spec()).is_err(), "an image is refused");
         let limited = SandboxSpec {
             image: None,

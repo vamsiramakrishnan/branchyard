@@ -1,18 +1,47 @@
 # Distribution
 
-Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has three slash commands, `/branchyard:setup` ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)), which starts the setup skill, `/branchyard:status` and `/branchyard:wait`, and two hooks ([`hooks/hooks.json`](../plugins/branchyard/hooks/hooks.json)) that tell a session when its branches finish ([harness integration](harness-integration.md#claude-code)). Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; [build it from source](#install-by) (no prebuilt release exists yet).
+Two canonical skills: [`plugins/branchyard/skills/setup`](../plugins/branchyard/skills/setup/SKILL.md) teaches a harness to set Branchyard up by interviewing the user through `by init --json` ([setup](setup.md)), and [`plugins/branchyard/skills/delegate`](../plugins/branchyard/skills/delegate/SKILL.md) teaches it to use `by`'s delegation commands (`docs/delegation.md`). The Claude plugin also has three slash commands, `/branchyard:setup` ([`commands/setup.md`](../plugins/branchyard/commands/setup.md)), which starts the setup skill, `/branchyard:status` and `/branchyard:wait`, and two hooks ([`hooks/hooks.json`](../plugins/branchyard/hooks/hooks.json)) that tell a session when its branches finish ([harness integration](harness-integration.md#claude-code)). Two plugin manifests, [`.claude-plugin/plugin.json`](../plugins/branchyard/.claude-plugin/plugin.json) and [`.codex-plugin/plugin.json`](../plugins/branchyard/.codex-plugin/plugin.json), point at the same `./skills/` directory, so Claude Code and Codex load an identical skill; a host with neither plugin loader installs an exact standalone copy with the shipped installer. The skills call the `by` CLI by name; [install it](#install-by) before installing a plugin.
 
 ## Install `by`
 
-Build from source. It is the only path until the first release.
+Install and enter the guided setup with one command:
+
+```sh
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --setup
+```
+
+The installer downloads prebuilt `by`, `branchyard-server` and `branchyard-bridge`
+from the latest stable GitHub release. It verifies archive checksums through the
+pinned dist-generated installers, installs into `~/.local/bin` and starts
+`by setup --guided` using the controlling terminal. It needs Git, curl or wget,
+and a SHA-256 tool; it does not need Rust, Python or a source checkout to install
+and use local or existing remote backends. Guided cloud provisioning reports its
+additional tools before creating resources.
+
+To install a particular version or prepare a headless machine:
+
+```sh
+sh install.sh --version 0.1.0-rc.1 --prefix "$HOME/.local" --no-setup
+sh install.sh --version 0.1.0-rc.1 --setup --yes
+```
+
+`--yes` follows the existing noninteractive setup defaults and readiness checks;
+it does not create cloud resources. Without a terminal, an explicit `--setup`
+requires `--yes`; installation remains available with `--no-setup`. A default
+install without either option starts guided setup when a terminal is available
+and prints the next command otherwise. Existing shell profiles are managed by
+the dist installer; open a new shell to pick up its PATH change.
+
+For a source build, clone the repository and use the pinned toolchain:
 
 ```sh
 git clone https://github.com/vamsiramakrishnan/branchyard && cd branchyard
-cargo install --locked --path crates/branchyard-cli    # installs `by` into ~/.cargo/bin
-by --version
+cargo install --locked --path crates/branchyard-cli
 ```
 
-`rust-toolchain.toml` pins Rust 1.94.0. Prebuilt binaries, `install.sh`, the Python SDK's wheel and a Homebrew formula are [prepared for the first release and not published](#prebuilt-binaries); [First release](#first-release) is how a person with push rights makes it.
+`rust-toolchain.toml` pins Rust 1.94.0. Source builds need that toolchain; binary
+installation does not. [Prebuilt packaging](#prebuilt-binaries) describes the
+release artifacts and their verification.
 
 ## Install into a harness
 
@@ -134,101 +163,105 @@ python3 tests/test_distribution.py
 
 ## Prebuilt binaries
 
-> **Not published yet.** No tag or GitHub release exists, so there is nothing to download: [build from source](#install-by) until the first one. The workflow has never run on GitHub; the parts this machine can run, ran ([Verified here](#verified-here)). Its first full run is the dry run in [First release](#first-release).
+The release pipeline uses [dist](https://github.com/axodotdev/cargo-dist), pinned
+in [`dist-workspace.toml`](../dist-workspace.toml). It builds the portable CLI,
+server and bridge as separate archives and generates their platform-aware shell
+installers. The supported portable targets are declared in that file. Each
+archive includes the applicable license files and third-party notices; the CLI
+archive also carries the cloud helpers and bridge image resources. Those helpers
+are embedded in the executable for setup outside a checkout.
 
-`.github/workflows/release.yml` builds `by` and `branchyard-server` (with the `postgres` feature, as the container image does) for four targets, and packs each with `LICENSE`, `THIRD_PARTY.md`, `README.md` and the Orca and emdash license texts their ported code requires, as `branchyard-VERSION-TARGET.tar.gz` holding one directory of that name:
-
-| Target | Runner | Linking |
-|---|---|---|
-| `x86_64-unknown-linux-musl` | `ubuntu-24.04` | static (musl-gcc) |
-| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` | static (musl-gcc) |
-| `aarch64-apple-darwin` | `macos-14` | system libraries only |
-| `x86_64-apple-darwin` | `macos-14`, cross-compiled | system libraries only |
-
-Beside the four archives a release carries the Python SDK's wheel and sdist (`python -m build`: `branchyard-0.1.0rc1-py3-none-any.whl` for `0.1.0-rc.1`), the plugin, skill and SDK archives of [Archives](#archives), `install.sh`, the [Homebrew formula](#homebrew) filled in for it, and `SHA256SUMS` over every one of them.
-
-**When it runs, and what it may change.**
-
-| Trigger | What the run does |
-|---|---|
-| a `v*` tag pushed | every job below, then attests every file and **drafts** a GitHub release for a person to publish: a pre-release when the version is `-alpha.N`, `-beta.N` or `-rc.N`, so publishing it does not make it the latest release |
-| Run workflow (Actions, Release) on a branch | a dry run: the same builds, packaging and installs, kept as the run's artifacts; nothing is attested, no release is drafted, no image is pushed. On a `v*` tag with `draft` ticked it is the tag push again (to draft once more after deleting a draft) |
-| a pull request that changes `release.yml`, `install.sh`, `packaging/`, `sdk/python/pyproject.toml`, `tools/package.py`, `tools/release_version.py` or `tools/homebrew_formula.py` | a dry run, without the image |
-
-The jobs, in order:
-
-| Job | What it does |
-|---|---|
-| `version` | Reads the version every file is named for from `Cargo.toml`, after [`tools/release_version.py`](#the-version) checks that every version field agrees and, on a tag, that the tag is `v` and that version; decides whether the run drafts |
-| `build` (one per target) | Installs the pinned toolchain with the target, runs `cargo build --release --locked --offline --target …`, checks that a Linux binary is static (`file` says `static-pie linked`: Rust links musl executables static-pie) and that `by --version` prints `by VERSION`, packs the archive and its `.sha256`, then installs it with `install.sh` from a directory and runs the installed `by --version` and `by` outside a repository (the x86_64 macOS binary only where the Apple silicon runner can execute it) |
-| `python` | Runs `tools/package.py` and `python -m build sdk/python`, installs the wheel into a fresh venv and imports both modules, checking the installed version |
-| `assemble` | Gathers every file into one directory, checks each archive against its `.sha256`, writes `SHA256SUMS`, fills the Homebrew formula from it, runs `install.sh` against the directory as a person would, and uploads the lot as the run's `release` artifact; the release notes ([`packaging/release-notes.md.in`](../packaging/release-notes.md.in), filled in) and `SHA256SUMS` are the job's summary |
-| `draft` | Only when the run drafts: attests `SHA256SUMS` and runs `gh release create TAG --draft --verify-tag` with the notes and every file. The only job with `contents: write` |
-| `image` | The [image with harnesses](deploy.md#image-with-harnesses): built and smoke-tested (its `by --version` must be the release's) except on a pull request, whose paths leave `deploy/` out; pushed to GHCR only when the run drafts and the repository variable `PUBLISH_IMAGES` is `true` |
-
-**Why musl works with this dependency set.** The default and `postgres` builds link no OpenSSL and no aws-lc: TLS is rustls on `ring` everywhere (the server's `reqwest` is built `rustls-no-provider`), and PostgreSQL is `postgres` without TLS. Their C code is `ring`'s, SQLite (`rusqlite`'s `bundled` feature) and BLAKE3's, which musl-gcc compiles; `protoc-bin-vendored` runs on the build host only. aws-lc appears only with the `microsandbox` feature (its SDK pulls `aws-lc-rs`), which needs `libcap-ng` and KVM anyway and is not in the release.
-
-The archives, the wheel, the sdist and the zips each get a [build provenance attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations) (`actions/attest-build-provenance`, pinned by commit like every action) in the job that built them, and so does `SHA256SUMS`, which also lists `install.sh` and `branchyard.rb`. Check one with `gh attestation verify branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard`.
-
-### The version
-
-One version names everything: `[workspace.package] version` in `Cargo.toml`. Every other file that carries Branchyard's own version must carry the same one: the crates' path dependencies on one another and their `Cargo.lock` entries, each host's plugin manifest, both marketplaces, the Herdr plugin, and `sdk/python/pyproject.toml`, which spells it the PEP 440 way (`0.1.0-rc.1` is `0.1.0rc1`).
+A separate [`branchyard-runtime` package](../packaging/runtime/dist.toml) builds
+all three binaries with Microsandbox and PostgreSQL support on its declared
+Linux GNU targets. Choose it with:
 
 ```sh
-python3 tools/release_version.py                     # checks every field and prints 0.1.0-rc.1
-python3 tools/release_version.py --tag v0.1.0-rc.1   # and that the tag names it, as the workflow does first
-python3 tools/release_version.py --pep440            # 0.1.0rc1
-python3 tools/release_version.py --set 0.1.0         # rewrites every field, Cargo.lock included
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --runtime --setup
 ```
 
-A release version is `X.Y.Z`, or `X.Y.Z-alpha.N`, `-beta.N` or `-rc.N`: the forms Cargo and Python can both say. A field that disagrees is named, with the command that fixes it. `tools/package.py` refuses to build archives while one disagrees, and `tests/test_distribution.py` runs the check on every `tools/check.py`, so a bump is one command and one commit.
+The native runtime is built on Ubuntu 24.04 and needs compatible glibc and
+`libcap-ng0`, plus the pinned `msb` runtime and working KVM access for actual VM
+execution. The guided checks distinguish a feature-enabled build from a host
+that can run a VM. The portable build supports local processes, recipes and
+Substrate without the Microsandbox compile-time feature. Installing a shared
+library cannot add that feature to a portable executable.
 
-### `install.sh`
+The agy worker image is published separately by the release's image job. Its
+immutable digest is recorded in `runtime-images.json`; cloud setup uses that
+record instead of asking a developer to build an image. A model task remains a
+separate action from installation and smoke checks.
+
+### Installer behavior
+
+The Branchyard bootstrap selects the release, downloads its generated
+installers, checks that they all name the same release, and delegates platform
+selection and archive installation to dist. The first generated installer pins
+an unversioned install to one release before the remaining downloads begin.
+`--prefix` accepts an absolute writable directory, including spaces;
+`--base-url` supports an HTTPS mirror, a `file://` directory or a local directory.
+`--dry-run` downloads and writes nothing. Plain HTTP is refused. Setup failures
+return their exit status, and repeating the same command can finish a partial
+installation.
+
+The release publishes dist's `sha256.sum` and an additional `SHA256SUMS` for the
+entrypoint assets and built archives. Build provenance is attached to the
+platform artifacts. For a manual check, use `gh attestation verify` with the
+archive and `--repo vamsiramakrishnan/branchyard`.
+
+### Release maintenance
+
+Use the pinned dist tool, then run:
 
 ```sh
-curl -fsSLO https://github.com/vamsiramakrishnan/branchyard/releases/download/v0.1.0-rc.1/install.sh
-less install.sh                                       # read it
-sh install.sh --version 0.1.0-rc.1                    # ~/.local/bin/by and branchyard-server
-sh install.sh --version 0.1.0-rc.1 --prefix /opt/branchyard
-BRANCHYARD_INSTALL_BASE=./downloaded sh install.sh --version 0.1.0-rc.1   # from files you already have
+python3 tools/release_workflow.py
+python3 tools/release_workflow.py --check
 ```
 
-POSIX `sh`. It picks the archive for this machine (`--target` overrides), fetches it and `SHA256SUMS` over `https` only (curl or wget) or from a local directory or `file://` URL (`--base-url`, or `BRANCHYARD_INSTALL_BASE`: how the workflow installs what it just built, and how a draft's files are checked before publishing), compares the archive's SHA-256 with the listed one and installs nothing on a mismatch, then copies the binaries with mode 0755 (through a temporary name and a rename) and the license files into `PREFIX/share/branchyard`. When `PREFIX/bin` is not on `PATH` it prints the `export PATH=…` line to add; when another `by` comes first on `PATH` (a `cargo install` in `~/.cargo/bin`, say) it names it. It never calls `sudo` and is not meant to be piped into a shell: for a prefix you cannot write, run the file you read with the privileges that can.
+The first command regenerates dist's CI and adds the required package-smoke
+publication gate. `allow-dirty = ["ci"]` records this explicit CI customization;
+installer and binary packaging remain owned by dist. Native build caches are
+retained after a failed external attestation. A failed attestation gets one
+required retry; a second failure prevents publication. `release-smoke.yml` installs
+actual artifacts on matching native runners, checks reinstall, setup,
+readiness and checksum refusal, and calls no model. Publication depends on its
+successful result. The image job runs executable probes, also without a model.
 
 ### Homebrew
 
-`packaging/homebrew/branchyard.rb.in` is a formula template for a tap of your own; `python3 tools/homebrew_formula.py --version 0.1.0-rc.1 --sums SHA256SUMS > branchyard.rb` fills its URLs and checksums from a release's `SHA256SUMS` (and fails if one is missing), and the release workflow attaches the filled `branchyard.rb`. The formula installs both binaries, shell completions (`by completions`) and the man page (`by man`); its test runs `by --version`, and `by recipe list` in a new repository. Nothing publishes it to a tap.
+`tools/homebrew_formula.py` renders the formula template from actual dist archive
+checksums. The release attaches `branchyard.rb`; a tap can install that formula.
+A tap is not created or published automatically by the binary release.
+
+### Verified here
+
+Hermetic verification on 28 October 2026 runs `tests/test_distribution.py` against
+local release fixtures: binary installation, latest-release pinning, a prefix
+with spaces, reinstall, tampered-archive refusal, explicit headless setup,
+setup-error propagation, dry-run and generated release dependencies. It also
+checks packaged license freshness and Homebrew rendering. Not done: these
+fixture checks alone do not establish successful native release builds or public
+installation; the release workflow and its post-publication record provide that
+evidence.
+
+## The version
+
+`tools/release_version.py` checks workspace crate versions, plugin manifests, the
+Python SDK's PEP 440 version, and the generic native runtime package together.
+`python3 tools/release_version.py --set VERSION` updates these fields as one
+operation. `--tag vVERSION` verifies that a tag names the exact workspace version.
+The release plan runs this check before building any artifact.
 
 ## First release
 
-The first tag is `v0.1.0-rc.1`: a release candidate, so its draft is a pre-release and the repository has no "latest" release until a plain `X.Y.Z` is published. The workspace already carries the version (`python3 tools/release_version.py` prints `0.1.0-rc.1`). Nothing below has run; the person with push rights to `vamsiramakrishnan/branchyard` runs it.
+Use the Release workflow's manual run on a branch to rehearse the complete
+build, installation and SDK packaging before tagging. A rehearsal creates a
+`release` run artifact containing the files a tag would draft. It creates no
+GitHub release, image push or provenance attestation. Pull requests changing
+release inputs run the same rehearsal.
 
-1. **Rehearse on `main`.** Once the change that set the version is merged: Actions, Release, Run workflow, branch `main`, `draft` unticked (or `gh workflow run release.yml --ref main`, then `gh run watch`). Every job but `draft` runs. When it is green, download the `release` artifact (`gh run download RUN_ID --name release`) and read the file list and `release-notes.md`; the `assemble` job's summary shows the notes and `SHA256SUMS`. Fix what is red before tagging.
-
-2. **Tag the merged commit and push the tag.**
-
-   ```sh
-   git switch main && git pull --ff-only
-   python3 tools/release_version.py --tag v0.1.0-rc.1    # prints 0.1.0-rc.1, or names what disagrees
-   git tag -a v0.1.0-rc.1 -m "Branchyard 0.1.0-rc.1" && git push origin v0.1.0-rc.1
-   ```
-
-   The push starts Release on the tag. When every job passes, Releases shows a draft `v0.1.0-rc.1` marked pre-release; only people with write access see it, and nothing is public.
-
-3. **Check the draft.** A draft's files cannot be fetched from the public `releases/download/` URL until it is published, so take them with `gh`:
-
-   ```sh
-   gh release download v0.1.0-rc.1 --repo vamsiramakrishnan/branchyard --dir rc1
-   (cd rc1 && sha256sum -c SHA256SUMS)                  # shasum -a 256 -c SHA256SUMS on macOS
-   BRANCHYARD_INSTALL_BASE=rc1 sh rc1/install.sh --version 0.1.0-rc.1 --prefix "$PWD/rc1-prefix"
-   rc1-prefix/bin/by --version                           # by 0.1.0-rc.1
-   gh attestation verify rc1/branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz --repo vamsiramakrishnan/branchyard
-   ```
-
-4. **Publish.** Open the draft (Releases, the `v0.1.0-rc.1` draft, the pencil icon), read the notes, leave "Set as a pre-release" ticked and click **Publish release**. From then on the `install.sh` lines in the notes work for anyone. To withdraw it instead, delete the draft and the tag (`git push origin :refs/tags/v0.1.0-rc.1`, then `git tag -d v0.1.0-rc.1`), fix, and tag again.
-
-5. **After publishing**, in one change: say on this page, in the README and in [getting started](getting-started.md) that a release exists, and set the next version (`python3 tools/release_version.py --set 0.1.0-rc.2`, or `0.1.0`), so builds from `main` no longer claim to be the published one.
-
-## Verified here
-
-**27 October 2026, on this x86_64 Linux machine; no model, nothing pushed or published.** `python3 tools/release_version.py --set 0.1.0-rc.1` rewrote 18 files (23 `Cargo.lock` entries) and `cargo metadata --locked --offline` accepted the lock. With musl-tools 1.2.4 from apt and the musl target added by the workflow's own `rustup toolchain install 1.94.0 --profile minimal --target x86_64-unknown-linux-musl`, the workflow's build command (`cargo build --release --locked --offline --target x86_64-unknown-linux-musl -p branchyard-cli -p branchyard-server --features "$FEATURES"`, `CC_x86_64_unknown_linux_musl=musl-gcc`, symbols stripped) compiled 335 crates in 6 minutes 22 seconds on four shared cores, SQLite's C included this time: `by` is 60,224,000 bytes and `branchyard-server` 40,688,768, and `file` 5.45 calls both `ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), static-pie linked, … stripped` (`ldd`: statically linked). The workflow's first version grepped that line for `statically linked` and would have failed every Linux build; it now accepts `static-pie linked`. `by --version` printed `by 0.1.0-rc.1`. Then the workflow's own step scripts, cut from `release.yml` and run with bash, ran on those binaries: Check the binaries; Package (`branchyard-0.1.0-rc.1-x86_64-unknown-linux-musl.tar.gz`, 39,469,762 bytes, one directory holding `by`, `branchyard-server`, `LICENSE`, `THIRD_PARTY.md`, `README.md` and `licenses/`); Install the archive with `install.sh` (`installed by 0.1.0-rc.1 into …/runner/by/bin (sha256 2501d275…)`, the `export PATH=…` advice, and the status card outside a repository, `Branchyard: …/runner is not inside a git repository.`); the python job's Build with `build` 1.2.2.post1 (`branchyard-0.1.0rc1.tar.gz`, `branchyard-0.1.0rc1-py3-none-any.whl` and the four archives) and its install of the wheel into a fresh venv, which imported both modules and printed `0.1.0rc1`; and the assemble job's checksums, formula, install and notes steps, with stand-ins for the three archives this machine cannot build: 12 files in `SHA256SUMS`, every one `OK` under `sha256sum -c`. The installed `by` in a new repository printed `No recipes: add [recipes.NAME] to …` for `by recipe list`, which the formula's test had matched as lower-case `no recipes` (it now ignores case), and `by man` titled its page `by 0.1.0-rc.1`. Building the SDK warned that a `project.license` table is deprecated and stops building after 18 February 2027; it is now the SPDX `license = "Apache-2.0"`, with `setuptools>=77`. `tests/test_distribution.py` (48 tests) runs the version check, `install.sh` from `BRANCHYARD_INSTALL_BASE` and its `PATH` advice, the workflow's triggers and what a dry run may not do, and the same step scripts against stand-in binaries. The aarch64 and macOS matrix lines were checked by reading: the musl and `file` steps are conditioned on `musl`, the rustup step installs rustup where an image lacks it, `shasum` and BSD `sed` are what macOS has, and the x86_64 macOS binary is run only where the Apple silicon runner can execute it. On 1 October 2026 a glibc build for this host was 45.9 MB, 36.8 MB stripped. **Not done:** the workflow on GitHub (no push from here; its first run is the rehearsal in [First release](#first-release)), the aarch64 Linux and macOS builds, the attestations and `gh attestation verify`, a draft and its publishing, `docker build` of the image (no daemon), the formula under `brew`, and `/plugin marketplace add` against a live Claude Code.
+After a successful rehearsal, push a matching `vVERSION` tag. The workflow
+builds and checks the artifacts, publishes the tested worker image, and creates
+a draft GitHub release. A manual run on a tag drafts only when its `draft` input
+is enabled. Publish the reviewed draft after checking its records. A prerelease
+such as `0.1.0-rc.1` does not become GitHub's latest stable release; install that
+release with the explicit `--version` option until a stable release is published.

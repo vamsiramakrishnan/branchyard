@@ -55,6 +55,17 @@
       ],
       "description": "Options for `provider = \"microsandbox\"`."
     },
+    "substrate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Substrate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Saved Agent Substrate connection and actor egress policy."
+    },
     "notify": {
       "$ref": "#/$defs/Notify",
       "description": "Telling you when a branch needs you or ends, from `by watch` and a\nwaiting `by run`, `by fan`, `by send` or `by fork`."
@@ -287,6 +298,11 @@
         },
         {
           "type": "string",
+          "const": "substrate",
+          "description": "An actor in the cluster configured by `[substrate]`."
+        },
+        {
+          "type": "string",
           "const": "recipe",
           "description": "The machine an environment recipe makes (`--provider recipe:NAME`);\n`defaults.recipe` names it."
         }
@@ -419,6 +435,193 @@
       "required": [
         "image"
       ]
+    },
+    "Substrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "The Control API URL."
+        },
+        "router": {
+          "type": "string",
+          "description": "The router base URL; actors are addressed by the routing header."
+        },
+        "template": {
+          "type": "string",
+          "description": "The actor template, as a name or `atespace/name`."
+        },
+        "key": {
+          "type": "string",
+          "description": "Path to the bridge signing key, relative to this configuration file."
+        },
+        "egress": {
+          "$ref": "#/$defs/SubstrateEgress",
+          "description": "Explicit outgoing network policy for actors."
+        },
+        "atespace": {
+          "type": "string",
+          "description": "The actor namespace. Empty selects `default`."
+        },
+        "workdir": {
+          "type": "string",
+          "description": "Absolute worktree directory in each actor. Empty selects `/workspace`."
+        },
+        "home": {
+          "type": "string",
+          "description": "Absolute harness home in each actor. Empty selects `/branchyard/home`."
+        },
+        "pass_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Environment variable names to copy into actors."
+        },
+        "api_token_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Path to the Control bearer token file, reread for each RPC."
+        },
+        "server_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Verified TLS service name, including when Control is port-forwarded."
+        },
+        "ca": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PEM authorities for Control and, unless overridden, the router."
+        },
+        "client_cert": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PEM client certificate for Control mutual TLS."
+        },
+        "client_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PEM private key for `client_cert`."
+        },
+        "router_ca": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PEM authorities for the router."
+        },
+        "insecure": {
+          "type": "boolean",
+          "description": "Allow unencrypted connections beyond loopback."
+        },
+        "keep": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Actor behavior after a turn, `destroy` or `pause`."
+        },
+        "snapshots": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Number of checkpoints retaining a provider snapshot."
+        },
+        "max_paused": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Maximum kept actors per repository."
+        },
+        "max_kept_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Maximum idle minutes before a kept actor is destroyed."
+        }
+      },
+      "required": [
+        "endpoint",
+        "router",
+        "template",
+        "key",
+        "egress"
+      ],
+      "description": "`[substrate]`: a remote actor environment, with credential paths only."
+    },
+    "SubstrateEgress": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "deny"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false,
+          "description": "Deny outgoing connections."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "allow_hosts"
+            },
+            "hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "mode",
+            "hosts"
+          ],
+          "additionalProperties": false,
+          "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "unrestricted"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false,
+          "description": "Allow all destinations, selected explicitly by the operator."
+        }
+      ],
+      "description": "The destinations actors may reach through Substrate's egress gateway."
     },
     "Notify": {
       "type": "object",

@@ -516,8 +516,26 @@ fn the_project_file_points_from_the_flags_spelling_to_its_own() {
     )
     .unwrap();
     let out = repo.by(&["config", "validate"]);
+    assert_eq!(out.status.code(), Some(1));
     let text = format!("{}{}", stdout(&out), stderr(&out));
-    assert!(text.contains("--provider substrate"), "{text}");
+    assert!(
+        text.contains("substrate needs a [substrate] table"),
+        "{text}"
+    );
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        "version = 1\n[defaults]\nprovider = \"substrate\"\n[substrate]\n\
+         endpoint = \"https://control.example\"\nrouter = \"https://router.example\"\n\
+         template = \"agy\"\nkey = \"/keys/bridge.key\"\negress = { mode = \"deny\" }\n",
+    )
+    .unwrap();
+    let valid = repo.by(&["config", "validate"]);
+    assert!(
+        valid.status.success(),
+        "{}{}",
+        stdout(&valid),
+        stderr(&valid)
+    );
 
     // The flags' names work as keys, and mean the same.
     fs::write(

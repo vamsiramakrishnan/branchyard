@@ -1,0 +1,38 @@
+[workspace]
+members = ["cargo:.", "dist:packaging/runtime"]
+
+[dist]
+cargo-dist-version = "0.33.1"
+ci = "github"
+installers = ["shell"]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+install-path = ["$BRANCHYARD_PREFIX/bin", "~/.local/bin"]
+install-updater = false
+checksum = "sha256"
+unix-archive = ".tar.gz"
+github-build-setup = "../dist-build-setup.yml"
+local-artifacts-jobs = ["./agy-image"]
+global-artifacts-jobs = ["./release-extras"]
+host-jobs = ["./release-smoke"]
+github-attestations = true
+pr-run-mode = "upload"
+cache-builds = false
+allow-dirty = ["ci"]
+
+[dist.github-custom-runners]
+x86_64-unknown-linux-musl = "ubuntu-24.04"
+x86_64-unknown-linux-gnu = "ubuntu-24.04"
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
+aarch64-apple-darwin = "macos-14"
+x86_64-apple-darwin = "macos-15-intel"
+
+[dist.github-action-commits]
+"swatinem/rust-cache" = "e9d7b9f1e587218970671bac74e5511ed9506e6a"
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803"
+"actions/upload-artifact" = "cf430e030ddbb5b0abf93d22962f4752f3646cd9"
+"actions/download-artifact" = "9000827ccba6bdab643e8b6fd33ac0654aef8333"
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6"
+
+[dist.github-custom-job-permissions]
+"agy-image" = { contents = "read", packages = "write" }

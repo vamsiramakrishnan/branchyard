@@ -26,7 +26,49 @@ by setup --json             # one object: detected, written, installed, todo, ne
 by setup --yes --harness claude-code,codex   # hooks for these only (named even if not on PATH)
 by setup --yes --no-hooks   # branchyard.toml only
 by setup --yes --no-config  # hooks only
+by setup --guided          # choose a project and compute backend, then check readiness
+by setup --directory /path/to/project
+by setup --yes --up --json  # apply setup and return one readiness result
 ```
+
+The single-command installer hands its terminal to `by setup --guided`. This
+flow can select an existing project or initialize a selected directory with
+consent. It offers local execution, a local Microsandbox runtime, an existing
+Substrate connection, or a dedicated GKE/GCE deployment. Antigravity is selected
+when `agy` is detected; remote setup defaults to its packaged image. Cloud setup
+reviews the named resources and asks before creating them. The cloud helpers are
+packaged with the CLI, so a Branchyard source checkout is unnecessary.
+
+Guided setup reuses the project interview and hook installers above. An existing
+`branchyard.toml` is preserved and its compute resources are checked again. Use
+`by init project` to change an existing connection. A local microVM requires a
+runtime-enabled Linux build and KVM; the portable package reports the missing
+build support before attempting setup.
+
+For GKE connections created by the guided workflow, rerunning `by setup --guided`
+refreshes the Control token and its owned local forwarding processes. It checks
+the private deployment records before doing so and changes no cloud resources
+or actor template. If a forwarding port changed, only the saved endpoint/router
+fields are updated, retaining the rest of the configuration and its comments.
+Manually configured connections are left to their operator. Cloud helpers require
+Python 3.10 or newer; setup checks that version before invoking them.
+
+`--guided` finishes by applying the shared `up` checks. `--up` adds that step to
+ordinary setup too. For a saved HTTP or SSH server, setup authenticates to that
+server and checks its serving workers' advertised harness and credential
+evidence. These checks make no model call. With either option, a readiness step
+that needs attention exits 1; `--json` includes `readiness` and `ready` in the
+same setup object. A dry run skips application and readiness. Without a terminal,
+guided setup requires explicit `--yes`; a missing terminal reports `manual`
+with exit 3. Initializing a repository also requires
+an explicit `--directory`. Headless defaults select local execution, while cloud
+creation uses the interactive resource review.
+
+The suggested first command includes `--allow-unapproved-tools` for a harness
+such as agy that cannot route individual tool approvals through Branchyard.
+Installing a cloud worker does not approve repository workspace scripts or run
+project dependency installation; review and trust those explicitly on the worker
+and configure its server workspace policy before the first task that needs them.
 
 Without a terminal, and without `--yes`, `by setup` behaves as `--dry-run` and says to rerun with `--yes`; `--json` never prompts either. Detecting refreshes the harness inventory cache that `by harnesses` keeps beside the user configuration (a minute old at most); a dry run touches nothing else. A second run writes nothing and says so (`Nothing to write: already set up.`): the config exists, each harness's files are already as packaged, and the hook check still runs. `by setup` exits 0 when it is done, even with things left for you, and non-zero only on a real error, with the status of its kind ([exit status](cli.md#exit-status)): 3 outside a git repository (`not_a_repository`; with `--no-config` it installs hooks anywhere), 2 for a harness named with `--harness` that it has no install for (`unknown_harness`), 1 for a harness named with `--harness` whose files cannot be installed (`would_overwrite` or `invalid_plan`, as `by init plugin` says it), project defaults that would not load, or a write that failed. Each says what failed and the command to run next; with `--json` it is the error envelope with its `exit`. It does not run inside a harness's branch (`denied`, exit 4).
 
@@ -319,7 +361,7 @@ max_minutes = 30
 permissions = "ask"         # or "yes"; unset: ask on a terminal, else deny
 isolated = true            # a private HOME, not a sandbox (docs/modes.md#isolated); --isolated=false for one run
 check = "cargo test"
-provider = "local"          # or "microsandbox", with [microsandbox]
+provider = "local"          # or "microsandbox" / "substrate", with the matching table
 instructions = "docs/agents.md"
 
 [secrets]                   # applied only with a private home (isolated or sandboxed)

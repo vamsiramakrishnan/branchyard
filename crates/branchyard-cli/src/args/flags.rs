@@ -414,7 +414,7 @@ pub struct SubstrateFlags {
     /// Agent Substrate Control API, https://HOST:PORT
     #[arg(long, value_name = "URL")]
     substrate_endpoint: Option<String>,
-    /// Router URL of an actor's bridge, with {atespace} and {actor}
+    /// Router base URL; requests identify the actor with its routing header
     #[arg(long, value_name = "URL")]
     substrate_router: Option<String>,
     /// Actor template that runs branchyard-bridge and the harness
@@ -423,6 +423,18 @@ pub struct SubstrateFlags {
     /// Bridge signing key from `branchyard-bridge keygen`
     #[arg(long, value_name = "FILE")]
     substrate_key: Option<String>,
+    /// File holding the Control bearer token, reread for every request
+    #[arg(long, value_name = "FILE")]
+    substrate_api_token_file: Option<String>,
+    /// Verified TLS service name for Control, including port-forwards
+    #[arg(long, value_name = "NAME")]
+    substrate_server_name: Option<String>,
+    /// Actor egress policy (default: deny); use --substrate-allow-host for an allowlist
+    #[arg(long, value_parser = ["deny", "unrestricted"], conflicts_with = "substrate_allow_host")]
+    substrate_egress: Option<String>,
+    /// DNS host the actor may reach; repeat for more hosts, *. matches one label
+    #[arg(long, value_name = "HOST")]
+    substrate_allow_host: Vec<String>,
     /// Atespace for the actors (default: default)
     #[arg(long, value_name = "NAME")]
     substrate_atespace: Option<String>,
@@ -457,6 +469,19 @@ impl SubstrateFlags {
             ("substrate-router", self.substrate_router.is_some()),
             ("substrate-template", self.substrate_template.is_some()),
             ("substrate-key", self.substrate_key.is_some()),
+            (
+                "substrate-api-token-file",
+                self.substrate_api_token_file.is_some(),
+            ),
+            (
+                "substrate-server-name",
+                self.substrate_server_name.is_some(),
+            ),
+            ("substrate-egress", self.substrate_egress.is_some()),
+            (
+                "substrate-allow-host",
+                !self.substrate_allow_host.is_empty(),
+            ),
             ("substrate-atespace", self.substrate_atespace.is_some()),
             ("substrate-workdir", self.substrate_workdir.is_some()),
             ("substrate-home", self.substrate_home.is_some()),
@@ -579,6 +604,15 @@ impl Launch {
                     router: required(s.substrate_router, "substrate-router")?,
                     template: required(s.substrate_template, "substrate-template")?,
                     key: required(s.substrate_key, "substrate-key")?,
+                    api_token_file: s.substrate_api_token_file,
+                    server_name: s.substrate_server_name,
+                    egress: if !s.substrate_allow_host.is_empty() {
+                        branchyard::config::SubstrateEgress::AllowHosts(s.substrate_allow_host)
+                    } else if s.substrate_egress.as_deref() == Some("unrestricted") {
+                        branchyard::config::SubstrateEgress::Unrestricted
+                    } else {
+                        branchyard::config::SubstrateEgress::Deny
+                    },
                     atespace: s.substrate_atespace,
                     workdir: s.substrate_workdir,
                     home: s.substrate_home,

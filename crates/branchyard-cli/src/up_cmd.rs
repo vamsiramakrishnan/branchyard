@@ -73,6 +73,10 @@ impl Machine for Here {
         }
     }
 
+    fn microsandbox_host(&self) -> Result<(), String> {
+        self.inner.microsandbox_host()
+    }
+
     fn recipe(&self, yard: &Yard, name: &str) -> Readiness {
         let root = std::fs::canonicalize(yard.root()).unwrap_or_else(|_| yard.root().to_path_buf());
         match recipe_cmd::readiness(&root, name) {
@@ -125,6 +129,13 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
         .next("run by up in your own terminal, outside any branch")
         .into());
     }
+    let plan = run(env, plan_only, yes, as_json)?;
+    report(env, &plan, as_json)
+}
+
+/// Compute and optionally apply readiness without writing its final report.
+/// Setup embeds this result in its own single structured response.
+pub(crate) fn run(env: &Env, plan_only: bool, yes: bool, as_json: bool) -> Result<Plan, Failure> {
     let yard = commands::open().map_err(|failure| match failure {
         // The fix, and where: not "`.` is not inside a git work tree".
         Failure::Sdk(branchyard::Error::NotARepository(_)) => crate::errors::Report::new(
@@ -135,14 +146,25 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
         other => other,
     })?;
     let config = yard.configured().unwrap_or_default();
-    let interactive = env.stdin_tty && env.stderr_tty;
+    let interactive = env.stdin_tty && env.stderr_tty && !as_json;
     let options = Options { yes, interactive };
     let mut machine = Here {
         inner: LocalMachine::new(),
     };
-    let mut plan = yard.up_plan(&config, &options, &mut machine)?;
+    let progress = (env.stderr_tty && !as_json).then(cliclack::spinner);
+    if let Some(progress) = &progress {
+        progress.start("Checking configured backends and credential sources");
+    }
+    let planned = yard.up_plan(&config, &options, &mut machine);
+    if let Some(progress) = &progress {
+        match &planned {
+            Ok(_) => progress.stop("Readiness checked"),
+            Err(_) => progress.error("Readiness check failed; run by doctor"),
+        }
+    }
+    let mut plan = planned?;
     if plan_only {
-        return report(env, &plan, as_json);
+        return Ok(plan);
     }
     // On a terminal, each install the policy leaves to you is asked about.
     if interactive && !yes {
@@ -155,10 +177,11 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
             .collect();
         for (name, command) in askable {
             let harness = name.trim_start_matches("harness.");
-            let answer = crate::console::terminal_prompt(&format!(
-                "by: install {harness} by running `{command}`? [y/N] "
-            ))?;
-            if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
+            let approved = cliclack::confirm(format!("Install {harness} by running `{command}`?"))
+                .initial_value(false)
+                .interact()
+                .map_err(Failure::Io)?;
+            if approved {
                 plan.approve(&name);
             }
         }
@@ -170,8 +193,21 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
             None => {}
         }
     }
-    let applied = yard.up_apply(&config, plan, &mut machine)?;
-    report(env, &applied, as_json)
+    let progress =
+        (env.stderr_tty && !as_json && plan.planned().next().is_some()).then(cliclack::spinner);
+    if let Some(progress) = &progress {
+        progress.start("Applying planned changes; checking each result");
+    }
+    let result = yard.up_apply(&config, plan, &mut machine);
+    if let Some(progress) = &progress {
+        match &result {
+            Ok(applied) if applied.ready() => progress.stop("Configured backends are ready"),
+            Ok(_) => progress
+                .cancel("Some steps need attention; follow the remedies below, then rerun by up"),
+            Err(_) => progress.error("Setup stopped; run by doctor, then rerun by up"),
+        }
+    }
+    result.map_err(Failure::from)
 }
 
 /// Print the plan; exit 0 only when every step is ready.
@@ -197,7 +233,7 @@ fn tone(state: State) -> Tone {
 
 /// A table of the steps, what to do about each that is not ready, and a
 /// summary line.
-fn text(plan: &Plan, style: Style) -> String {
+pub(crate) fn text(plan: &Plan, style: Style) -> String {
     let columns = [
         Column {
             header: "STATE",

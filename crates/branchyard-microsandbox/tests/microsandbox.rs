@@ -12,6 +12,7 @@
 
 #![cfg(feature = "microsandbox")]
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -157,6 +158,7 @@ fn a_disk_checkpoint_branches_into_a_new_sandbox() {
     );
     let checkpoint = provider.checkpoint(source, &DISK_SNAPSHOT).unwrap();
     assert_eq!(checkpoint.guarantee, DISK_SNAPSHOT);
+    assert!(PathBuf::from(&checkpoint.reference).is_absolute());
     let branched = provider.branch(&checkpoint, &spec(&setup, child)).unwrap();
     assert_eq!(branched.state, SandboxState::Running);
     let (code, out) = run(&provider, child, "cat /root/marker");
@@ -168,6 +170,8 @@ fn a_disk_checkpoint_branches_into_a_new_sandbox() {
     for name in [source, child] {
         provider.destroy(name).unwrap();
     }
+    provider.release_checkpoint(&checkpoint).unwrap();
+    provider.release_checkpoint(&checkpoint).unwrap();
 }
 
 // Live branching, the pattern mario-never-dies probes: a paused source is
@@ -179,16 +183,48 @@ fn live_provider() -> MicrosandboxProvider {
     MicrosandboxProvider::new().unwrap().with_live_branch(true)
 }
 
-/// A long-running process in `sandbox`, started detached from the exec,
-/// and its PID.
-fn start_sleeper(provider: &dyn SandboxProvider, sandbox: &str) -> String {
-    let (code, pid) = run(
-        provider,
-        sandbox,
-        "sleep 3600 >/dev/null 2>&1 & echo $! > /root/sleeper.pid; cat /root/sleeper.pid",
+fn snapshot_references() -> Vec<String> {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut references: Vec<String> = runtime
+        .block_on(microsandbox::Snapshot::list())
+        .unwrap()
+        .into_iter()
+        .map(|snapshot| snapshot.reference().value().to_owned())
+        .collect();
+    references.sort();
+    references
+}
+
+fn alive_sleeper(provider: &dyn SandboxProvider, sandbox: &str, pid: &str) -> bool {
+    let script = format!(
+        "read -r s < /proc/{pid}/stat && \
+         case $s in *' (sleep) S '*|*' (sleep) R '*) exit 0;; *) exit 1;; esac"
     );
-    assert_eq!(code, Some(0));
-    pid.trim().to_owned()
+    run(provider, sandbox, &script).0 == Some(0)
+}
+
+/// Keep the process group owned until the snapshot has captured its live child.
+fn start_sleeper(provider: &dyn SandboxProvider, sandbox: &str) -> (Box<dyn Process>, String) {
+    let spec = ExecSpec {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "sleep 3600 >/dev/null 2>&1 & echo $!; wait".into(),
+        ],
+        cwd: GUEST.into(),
+        env: Default::default(),
+    };
+    let mut process = provider.exec(sandbox, &spec).unwrap();
+    drop(process.take_stdin());
+    let mut reader = BufReader::new(process.take_stdout().unwrap());
+    let mut pid = String::new();
+    reader.read_line(&mut pid).unwrap();
+    let pid = pid.trim().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "child PID: {pid:?}");
+    branchyard_testkit::wait::until("the guest child execs sleep", || {
+        alive_sleeper(provider, sandbox, &pid)
+    });
+    (process, pid)
 }
 
 #[test]
@@ -204,20 +240,32 @@ fn a_live_branch_child_keeps_the_sources_processes() {
         );
     }
     provider.ensure(&spec(&setup, source).persist()).unwrap();
-    let pid = start_sleeper(&provider, source);
-    provider.pause(source).unwrap();
+    let (sleeper, pid) = start_sleeper(&provider, source);
+    let snapshots = snapshot_references();
     let children = [SandboxSpec::new(child).mount(Mount::writable(&setup.workspace, GUEST))];
     let made = provider.branch_live(source, &children);
     assert!(made[0].is_ok(), "{:?}", made[0]);
-    let (code, alive) = run(&provider, child, &format!("kill -0 {pid} && echo alive"));
-    assert_eq!(
-        (code, alive.trim()),
-        (Some(0), "alive"),
+    assert!(
+        alive_sleeper(&provider, child, &pid),
         "PID {pid} in the child"
+    );
+    assert!(
+        alive_sleeper(&provider, source, &pid),
+        "PID {pid} in the source"
+    );
+    assert_eq!(
+        provider.inspect(source).unwrap().unwrap().state,
+        SandboxState::Running
+    );
+    assert_eq!(
+        snapshot_references(),
+        snapshots,
+        "temporary capture was released"
     );
     for name in [child, source] {
         provider.destroy(name).unwrap();
     }
+    drop(sleeper);
 }
 
 #[test]
@@ -238,6 +286,9 @@ fn a_live_branch_childs_writes_are_private_and_the_paused_source_stays_paused() 
         run(&provider, source, "echo source > /root/marker && sync").0,
         Some(0)
     );
+    let saved = provider.checkpoint(source, &DISK_SNAPSHOT).unwrap();
+    let snapshots = snapshot_references();
+    let (sleeper, pid) = start_sleeper(&provider, source);
     provider.pause(source).unwrap();
     // Each child gets its own workspace, rebound at the same guest path.
     let specs: Vec<SandboxSpec> = children
@@ -246,6 +297,17 @@ fn a_live_branch_childs_writes_are_private_and_the_paused_source_stays_paused() 
         .collect();
     for made in provider.branch_live(source, &specs) {
         made.unwrap();
+    }
+    assert_eq!(
+        snapshot_references(),
+        snapshots,
+        "saved checkpoint was retained"
+    );
+    for child in children {
+        assert!(
+            alive_sleeper(&provider, child, &pid),
+            "PID {pid} in {child}"
+        );
     }
     assert_eq!(
         provider.inspect(source).unwrap().unwrap().state,
@@ -261,12 +323,95 @@ fn a_live_branch_childs_writes_are_private_and_the_paused_source_stays_paused() 
     assert_eq!(other, "source\n", "c2 saw c1's root-disk write");
     assert!(workspace_file(children[0], "c1-was-here"));
     assert!(!workspace_file(children[1], "c1-was-here"));
+    assert!(!setup.workspace.join("c1-was-here").exists());
     provider.resume(source).unwrap();
     let (_, own) = run(&provider, source, "cat /root/marker");
     assert_eq!(own, "source\n");
     for name in children.into_iter().chain([source]) {
         provider.destroy(name).unwrap();
     }
+    drop(sleeper);
+    provider.release_checkpoint(&saved).unwrap();
+}
+
+#[test]
+#[ignore = "needs Linux with KVM and the msb 0.7.3 runtime"]
+fn a_live_branch_rejects_changed_open_files_and_still_creates_compatible_siblings() {
+    let setup = setup("live-open-file");
+    let provider = live_provider();
+    let (source, refused, child) = (
+        "by-msb-live-open",
+        "by-msb-live-changed",
+        "by-msb-live-matched",
+    );
+    for name in [source, refused, child] {
+        provider.destroy(name).unwrap();
+    }
+    std::fs::write(setup.workspace.join("held"), "original").unwrap();
+    let changed = workspace(refused);
+    let matched = workspace(child);
+    std::fs::write(changed.join("held"), "replacement").unwrap();
+    std::fs::write(matched.join("held"), "original").unwrap();
+    provider.ensure(&spec(&setup, source)).unwrap();
+    let command = ExecSpec {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "exec 3< /workspace/held; echo ready; cat".into(),
+        ],
+        cwd: GUEST.into(),
+        env: Default::default(),
+    };
+    let mut holder = provider.exec(source, &command).unwrap();
+    let mut ready = String::new();
+    BufReader::new(holder.take_stdout().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready.trim(), "ready");
+    provider.pause(source).unwrap();
+    let snapshots = snapshot_references();
+    let specs = [
+        SandboxSpec::new(source).mount(Mount::writable(&setup.workspace, GUEST)),
+        SandboxSpec::new(refused).mount(Mount::writable(changed, GUEST)),
+        SandboxSpec::new(child).mount(Mount::writable(matched, GUEST)),
+    ];
+    let outcomes = provider.branch_live(source, &specs);
+    assert!(matches!(
+        outcomes[0],
+        Err(branchyard_sandbox::ProviderError::Invalid(_))
+    ));
+    assert!(
+        outcomes[1]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("external object"),
+        "{:?}",
+        outcomes[1]
+    );
+    assert!(outcomes[2].is_ok(), "{:?}", outcomes[2]);
+    assert_eq!(
+        provider.inspect(refused).unwrap(),
+        None,
+        "failed child was removed"
+    );
+    assert_eq!(
+        run(&provider, child, "cat /workspace/held"),
+        (Some(0), "original".into())
+    );
+    assert_eq!(
+        provider.inspect(source).unwrap().unwrap().state,
+        SandboxState::Paused
+    );
+    assert_eq!(
+        snapshot_references(),
+        snapshots,
+        "failed child left no checkpoint"
+    );
+    for name in [refused, child, source] {
+        provider.destroy(name).unwrap();
+    }
+    drop(holder);
 }
 
 fn workspace_file(name: &str, file: &str) -> bool {

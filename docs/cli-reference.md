@@ -55,9 +55,13 @@ by run [OPTIONS] [PROMPT]
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -137,9 +141,13 @@ by fan [OPTIONS] [PROMPT]
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -229,9 +237,13 @@ by map [OPTIONS] <PROMPT>
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -407,9 +419,13 @@ by fork [OPTIONS] <BRANCH> <PROMPT>
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -474,9 +490,13 @@ by reincarnate [OPTIONS] <BRANCH>
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -610,9 +630,13 @@ by task new [OPTIONS] <PROMPT>
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -735,9 +759,13 @@ by task fork [OPTIONS] <TASK> <PROMPT>
 | `--memory <MIB>` | Sandbox memory in MiB |
 | `--live-branch` | Use the SDK's pause, live branching and full snapshots (unqualified; needs KVM) |
 | `--substrate-endpoint <URL>` | Agent Substrate Control API, https://HOST:PORT |
-| `--substrate-router <URL>` | Router URL of an actor's bridge, with {atespace} and {actor} |
+| `--substrate-router <URL>` | Router base URL; requests identify the actor with its routing header |
 | `--substrate-template <NAME>` | Actor template that runs branchyard-bridge and the harness |
 | `--substrate-key <FILE>` | Bridge signing key from `branchyard-bridge keygen` |
+| `--substrate-api-token-file <FILE>` | File holding the Control bearer token, reread for every request |
+| `--substrate-server-name <NAME>` | Verified TLS service name for Control, including port-forwards |
+| `--substrate-egress <SUBSTRATE_EGRESS>` | Actor egress policy (default: deny); use --substrate-allow-host for an allowlist (one of `deny`, `unrestricted`) |
+| `--substrate-allow-host <HOST>` | DNS host the actor may reach; repeat for more hosts, *. matches one label |
 | `--substrate-atespace <NAME>` | Atespace for the actors (default: default) |
 | `--substrate-workdir <PATH>` | Where the worktree is copied in the actor (default: /workspace) |
 | `--substrate-home <PATH>` | The harness's HOME in the actor (default: /branchyard/home) |
@@ -2540,6 +2568,9 @@ by setup [OPTIONS]
 
 | Option | What it does |
 |---|---|
+| `--guided` | Guide repository selection, compute setup and readiness checks |
+| `--up` | Bring configured prerequisites up and include their readiness in the result |
+| `--directory <PATH>` | Set up this repository instead of the current directory |
 | `--yes` | Take every default and ask nothing (the only way to write without a terminal) |
 | `--dry-run` | Show what would be detected, written and installed; write nothing |
 | `--json` | Print one JSON object: detected, written, installed, todo, next |
@@ -2606,6 +2637,51 @@ by doctor [OPTIONS]
 | `--path <PATH>` | Check the repository at PATH instead of the one around the current directory |
 | `--refresh` | Ask the harnesses again instead of reading the inventory `by harnesses` cached |
 
+## `by substrate`
+
+Prepare or check the saved Agent Substrate connection
+
+```text
+by substrate [OPTIONS] <COMMAND>
+```
+
+### `by substrate setup`
+
+Create or verify the atespace and immutable bridge template in saved configuration
+
+```text
+by substrate setup [OPTIONS] --image <IMAGE> --storage <STORAGE>
+```
+
+| Option | What it does |
+|---|---|
+| `--image <IMAGE>` | OCI image containing the bridge, git and harness, pinned with @sha256:... |
+| `--sandbox-config <SANDBOX_CONFIG>` | Cluster SandboxConfig to use (default `gvisor-default`) |
+| `--storage <STORAGE>` | Snapshot storage URI supported by this Substrate deployment |
+| `--runtime <RUNTIME>` | Runtime class of the SandboxConfig (one of `gvisor`, `microvm`) (default `gvisor`) |
+| `--bridge <BRIDGE>` | Bridge executable in the image (default `/usr/local/bin/branchyard-bridge`) |
+| `--run-as <RUN_AS>` | Unprivileged UID:GID for harness execution and transferred files (default `1000:1000`) |
+| `--cpu <CPU>` | CPU quantity reserved for each actor (default `2`) |
+| `--memory <MEMORY>` | Memory quantity reserved for each actor (default `4Gi`) |
+| `--worker-label <KEY=VALUE>` | WorkerPool label selector; repeat for each KEY=VALUE |
+| `--plan` | Inspect and print proposed changes without creating a key or remote resources |
+| `--yes` | Apply the displayed setup without an interactive confirmation |
+| `--json` | Print a machine-readable report |
+
+### `by substrate check`
+
+Authenticate and inspect the template; optionally execute a disposable actor
+
+```text
+by substrate check [OPTIONS]
+```
+
+| Option | What it does |
+|---|---|
+| `--smoke` | Prove bridge execution and file transfer, then delete the actor; calls no model |
+| `--harness <PROGRAM>` | Also run this harness executable with --version inside the smoke actor |
+| `--json` | Print a machine-readable report |
+
 ## `by up`
 
 Bring the configured backends up
@@ -2619,7 +2695,7 @@ by up [OPTIONS]
 | Option | What it does |
 |---|---|
 | `--json` | Print JSON |
-| `--plan` | Say what would be done and what is missing; change nothing |
+| `--plan` | Inspect readiness without installing harnesses or starting services |
 | `--yes` | Make the installs the [harnesses] policy would ask about, without asking |
 
 ## Exit status
@@ -2633,4 +2709,4 @@ Every command ends with one of these; `--json` puts the same number in an error'
 | 2 | the command line asks for what cannot be: a bad flag or value (clap's own usage errors too), an unknown branch, harness or repository, a name already taken |
 | 3 | something around the command must change first: not a repository, a harness (or gh, ssh) not installed, a configuration file that does not load, a server that does not answer or refuses the token, a login only you can do |
 | 4 | refused before anything ran: a policy, a delegation envelope, a budget or quota, or a capability the harness lacks |
-| 130 | interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT (`by serve` and `by worker` catch it and shut down) |
+| 130 | interrupted with Ctrl-C: the shell reports 128 + SIGINT. `by serve` and `by worker` catch it and shut down; `by substrate check --smoke` catches SIGINT and SIGTERM to remove its actor, then reports the cancelled smoke with exit 1 |

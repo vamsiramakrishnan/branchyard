@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "The by command: delegate coding work to agent harnesses on git branches"
 
@@ -66,6 +67,10 @@ sha2 = { workspace = true }
 # `by recipe`: environment recipes and their sandbox provider.
 branchyard-recipe = { path = "../branchyard-recipe" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
+branchyard-substrate = { path = "../branchyard-substrate" }
+branchyard-bridge = { path = "../branchyard-bridge" }
+# Scoped SIGINT/SIGTERM cleanup for the disposable Substrate smoke actor.
+signal-hook = "0.3.18"
 # `by sync`: tasks replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 
@@ -78,3 +83,9 @@ branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-bridge = { path = "../branchyard-bridge" }
 branchyard-substrate = { path = "../branchyard-substrate", features = ["fake"] }
 tempfile = { workspace = true }
+
+# Binary distribution is independent of crates.io publication.
+[package.metadata.dist]
+dist = true
+include = ["../../LICENSE", "../../THIRD_PARTY.md", "../../packaging/licenses", "../../tools/cloud_setup.py", "../../tools/compute_gce.py", "../../tools/substrate_gke.py", "../../deploy/Dockerfile.substrate", "../../deploy/substrate-entrypoint.sh"]
+features = ["postgres"]

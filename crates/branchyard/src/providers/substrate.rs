@@ -91,6 +91,17 @@ impl ProviderKind for SubstrateOptions {
 }
 
 fn check_substrate(options: &SubstrateOptions) -> Result<(), Error> {
+    check_connection(options)?;
+    branchyard_bridge::Signer::read(&options.key)
+        .map(|_| ())
+        .map_err(|e| {
+            Error::Unsupported(format!(
+                "the substrate provider cannot use its bridge key: {e}"
+            ))
+        })
+}
+
+fn check_connection(options: &SubstrateOptions) -> Result<(), Error> {
     let refuse = |why: String| Err(Error::Unsupported(format!("the substrate provider {why}")));
     // Schemes, loopback-only plain HTTP, and the TLS files.
     if let Err(error) = substrate_config(options).check() {
@@ -104,9 +115,7 @@ fn check_substrate(options: &SubstrateOptions) -> Result<(), Error> {
             return refuse(format!("needs an absolute {what}, not {path:?}"));
         }
     }
-    branchyard_bridge::Signer::read(&options.key)
-        .map(|_| ())
-        .or_else(|e| refuse(format!("cannot use its bridge key: {e}")))
+    Ok(())
 }
 
 /// The provider configuration `options` describe, without the key.
@@ -117,12 +126,45 @@ fn substrate_config(options: &SubstrateOptions) -> branchyard_substrate::Config 
         &options.template,
         &options.router,
     );
+    config.api_token_file = options.api_token_file.clone();
+    config.server_name = options.server_name.clone();
+    config.egress = match &options.egress {
+        crate::config::SubstrateEgress::Deny => branchyard_substrate::EgressPolicy::Deny,
+        crate::config::SubstrateEgress::AllowHosts(hosts) => {
+            branchyard_substrate::EgressPolicy::AllowHosts(hosts.clone())
+        }
+        crate::config::SubstrateEgress::Unrestricted => {
+            branchyard_substrate::EgressPolicy::Unrestricted
+        }
+    };
     config.ca = options.ca.clone();
     config.client_cert = options.client_cert.clone();
     config.client_key = options.client_key.clone();
     config.router_ca = options.router_ca.clone();
     config.insecure = options.insecure;
     config
+}
+
+impl SubstrateOptions {
+    /// Validate a saved connection and load its bridge signer without contacting Control.
+    /// Token contents remain in their file and are read by the client for each RPC.
+    pub fn connection_config(&self) -> Result<branchyard_substrate::Config, Error> {
+        let signer = branchyard_bridge::Signer::read(&self.key)
+            .map_err(|e| Error::Unsupported(format!("cannot use the Substrate bridge key: {e}")))?;
+        self.connection_config_with_signer(signer)
+    }
+
+    /// Validate a connection using an in-memory signer, including setup before its key is saved.
+    /// This does not read or create the configured signing-key file.
+    pub fn connection_config_with_signer(
+        &self,
+        signer: branchyard_bridge::Signer,
+    ) -> Result<branchyard_substrate::Config, Error> {
+        check_connection(self)?;
+        let mut config = substrate_config(self).signer(signer);
+        config.ready_timeout = Duration::from_secs(300);
+        Ok(config)
+    }
 }
 
 /// A provider for `options`; `signed` includes the bridge key.
@@ -216,6 +258,31 @@ mod tests {
         };
         assert!(check_substrate(&good.clone()).is_ok());
         assert!(good.sandboxed());
+        let token = dir.path().join("control.token");
+        let configured = SubstrateOptions {
+            api_token_file: Some(token.clone()),
+            egress: crate::config::SubstrateEgress::AllowHosts(vec!["api.example.com".into()]),
+            ..good.clone()
+        };
+        let connection = configured.connection_config().unwrap();
+        assert_eq!(connection.api_token_file, Some(token));
+        assert_eq!(
+            connection.egress,
+            branchyard_substrate::EgressPolicy::AllowHosts(vec!["api.example.com".into()])
+        );
+        assert_eq!(
+            connection.signer.as_ref().unwrap().public_key(),
+            branchyard_bridge::Signer::read(&key).unwrap().public_key()
+        );
+        let unwritten = SubstrateOptions {
+            key: dir.path().join("not-created"),
+            ..configured.clone()
+        };
+        let (signer, _) = branchyard_bridge::Signer::generate().unwrap();
+        let public_key = signer.public_key();
+        let connection = unwritten.connection_config_with_signer(signer).unwrap();
+        assert_eq!(connection.signer.as_ref().unwrap().public_key(), public_key);
+        assert!(!unwritten.key.exists());
         // TLS anywhere, or plain HTTP to another host when asked for.
         for fine in [
             SubstrateOptions {

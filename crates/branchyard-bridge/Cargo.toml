@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "The in-sandbox exec bridge for sandboxes without an exec API, and its host-side client"
 
@@ -21,6 +22,14 @@ ring = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["thread"] }
+
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 rcgen = { workspace = true }
+
+# Binary distribution is independent of crates.io publication.
+[package.metadata.dist]
+dist = true
+include = ["../../LICENSE", "../../THIRD_PARTY.md", "../../packaging/licenses"]

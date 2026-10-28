@@ -15,7 +15,6 @@ use crate::placement::{
 use crate::snapshots::Lifecycle;
 use crate::state::{Fence, Record};
 use crate::{git, Error, SandboxOptions, Yard};
-use branchyard_support::time::now_ms;
 
 impl ProviderKind for SandboxOptions {
     fn banner(&self, _isolated: bool, server: bool) -> (&'static str, String) {
@@ -147,7 +146,7 @@ pub(crate) fn spec(
     }
     let keep = options.lifecycle().is_some_and(|l| l.keep);
     let spec = SandboxSpec {
-        name: sandbox_name(&record.info.name, now_ms()),
+        name: sandbox_name(&record.info.name)?,
         image: Some(options.image.clone()),
         resources: Resources {
             cpus: options.cpus,

@@ -1,0 +1,19 @@
+- name: Cache Rust builds, including failed external attestations
+  uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a
+  with:
+    shared-key: dist-${{ join(matrix.targets, '-') }}
+    cache-on-failure: true
+- name: Install Linux build dependencies
+  if: runner.os == 'Linux'
+  run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev pkg-config
+- name: Select the native musl compiler
+  if: runner.os == 'Linux'
+  shell: bash
+  run: |
+    echo 'CC_x86_64_unknown_linux_musl=musl-gcc' >> "$GITHUB_ENV"
+    echo 'CC_aarch64_unknown_linux_musl=musl-gcc' >> "$GITHUB_ENV"
+- name: Fetch locked dependencies
+  run: cargo fetch --locked
+- name: Keep Cargo builds offline after fetching
+  shell: bash
+  run: echo 'CARGO_NET_OFFLINE=true' >> "$GITHUB_ENV"

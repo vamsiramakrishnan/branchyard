@@ -1,0 +1,31 @@
+# Build context: branchyard-bridge, agy, and substrate-entrypoint.sh.
+# Use binaries for linux/amd64 (or the architecture selected for your workers).
+# Pin BASE_IMAGE by digest when publishing a reproducible actor image.
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+ARG BRIDGE_BINARY=branchyard-bridge
+ARG HARNESS_BINARY=agy
+ARG ACTOR_UID=1000
+ARG ACTOR_GID=1000
+ARG ACTOR_WORKDIR=/workspace
+ARG ACTOR_HOME=/branchyard/home
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git python3 procps ca-certificates coreutils libcap-ng0 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=755 ${BRIDGE_BINARY} /usr/local/libexec/branchyard-bridge
+COPY --chmod=755 ${HARNESS_BINARY} /usr/local/bin/${HARNESS_BINARY}
+COPY --chmod=755 substrate-entrypoint.sh /usr/local/bin/branchyard-bridge
+ENV BRANCHYARD_ACTOR_UID=${ACTOR_UID} \
+    BRANCHYARD_ACTOR_GID=${ACTOR_GID} \
+    BRANCHYARD_ACTOR_WORKDIR=${ACTOR_WORKDIR} \
+    BRANCHYARD_ACTOR_HOME=${ACTOR_HOME} \
+    HOME=${ACTOR_HOME}
+RUN install -d -o "$ACTOR_UID" -g "$ACTOR_GID" -m 0700 -- "$ACTOR_WORKDIR" "$ACTOR_HOME"
+USER ${ACTOR_UID}:${ACTOR_GID}
+RUN /usr/local/libexec/branchyard-bridge --version && "$HARNESS_BINARY" --version
+USER 0:0
+WORKDIR ${ACTOR_WORKDIR}
+# The Substrate template explicitly invokes this same path with `serve`.
+ENTRYPOINT ["/usr/local/bin/branchyard-bridge"]

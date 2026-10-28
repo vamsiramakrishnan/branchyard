@@ -65,19 +65,19 @@
     }
   },
   "tests": {
-    "total": 2726,
-    "ignored": 29,
+    "total": 2783,
+    "ignored": 31,
     "by_crate": {
       "branchyard": {
-        "tests": 876,
+        "tests": 883,
         "ignored": 15
       },
       "branchyard-bridge": {
-        "tests": 41,
+        "tests": 45,
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 670,
+        "tests": 696,
         "ignored": 3
       },
       "branchyard-client": {
@@ -85,7 +85,7 @@
         "ignored": 0
       },
       "branchyard-config": {
-        "tests": 21,
+        "tests": 24,
         "ignored": 0
       },
       "branchyard-controls": {
@@ -105,8 +105,8 @@
         "ignored": 0
       },
       "branchyard-microsandbox": {
-        "tests": 24,
-        "ignored": 7
+        "tests": 27,
+        "ignored": 8
       },
       "branchyard-provision": {
         "tests": 179,
@@ -133,12 +133,12 @@
         "ignored": 0
       },
       "branchyard-setup": {
-        "tests": 83,
+        "tests": 85,
         "ignored": 0
       },
       "branchyard-substrate": {
-        "tests": 53,
-        "ignored": 4
+        "tests": 64,
+        "ignored": 5
       },
       "branchyard-support": {
         "tests": 35,
@@ -149,7 +149,7 @@
         "ignored": 0
       },
       "branchyard-testkit": {
-        "tests": 20,
+        "tests": 21,
         "ignored": 0
       },
       "branchyard-wire": {
@@ -604,7 +604,7 @@
       {
         "code": 130,
         "name": "Interrupted",
-        "meaning": "interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT (`by serve` and `by worker` catch it and shut down)",
+        "meaning": "interrupted with Ctrl-C: the shell reports 128 + SIGINT. `by serve` and `by worker` catch it and shut down; `by substrate check --smoke` catches SIGINT and SIGTERM to remove its actor, then reports the cancelled smoke with exit 1",
         "kinds": []
       }
     ]

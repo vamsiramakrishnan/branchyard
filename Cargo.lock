@@ -685,6 +685,7 @@ dependencies = [
  "libc",
  "rcgen",
  "ring",
+ "rustix",
  "rustls",
  "webpki-roots",
 ]
@@ -724,6 +725,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "shlex",
+ "signal-hook",
  "tempfile",
  "toml_edit",
  "unicode-width",
@@ -823,6 +825,7 @@ dependencies = [
  "branchyard-support",
  "branchyard-testkit",
  "microsandbox",
+ "tempfile",
  "tokio",
 ]
 
@@ -960,6 +963,7 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "rcgen",
+ "serde",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -4533,9 +4537,9 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags 2.13.2",
  "memchr",

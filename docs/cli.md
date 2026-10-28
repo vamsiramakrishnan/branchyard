@@ -38,7 +38,7 @@ A failure says what failed and the command to run next (`by: …` then `  next: 
 | 2 | the command line asks for what cannot be: a bad flag or value (clap's own usage errors too), an unknown branch, harness or repository, a name already taken | `branch_exists`, `invalid_name`, `invalid_request`, `invalid_rig`, `not_found`, `unknown_branch`, `unknown_harness`, `unknown_knowledge`, `unknown_message`, `unknown_operation`, `unknown_repo`, `unknown_trigger`, `usage` |
 | 3 | something around the command must change first: not a repository, a harness (or gh, ssh) not installed, a configuration file that does not load, a server that does not answer or refuses the token, a login only you can do | `config`, `harness_unavailable`, `manual`, `not_a_repository`, `remote_protocol`, `remote_unreachable`, `shutting_down`, `tool_unavailable`, `unauthorized` |
 | 4 | refused before anything ran: a policy, a delegation envelope, a budget or quota, or a capability the harness lacks | `command_not_allowed`, `delegation_not_allowed`, `denied`, `provider_not_allowed`, `quota_exceeded`, `rate_limited`, `repo_not_allowed`, `scope_required`, `secret_not_allowed`, `unapproved_tools_not_allowed`, `unsupported` |
-| 130 | interrupted with Ctrl-C: `by` installs no handler, so the shell reports 128 + SIGINT (`by serve` and `by worker` catch it and shut down) | — |
+| 130 | interrupted with Ctrl-C: the shell reports 128 + SIGINT. `by serve` and `by worker` catch it and shut down; `by substrate check --smoke` catches SIGINT and SIGTERM to remove its actor, then reports the cancelled smoke with exit 1 | — |
 
 <!-- /fact -->
 

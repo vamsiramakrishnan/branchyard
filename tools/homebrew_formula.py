@@ -8,12 +8,14 @@ nothing. See docs/distribution.md.
 """
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "packaging/homebrew/branchyard.rb.in"
+PACKAGES = ["branchyard-cli", "branchyard-server", "branchyard-bridge"]
 TARGETS = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -31,11 +33,16 @@ def render(version, sums_text, template=None):
         if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
             sums[parts[1].lstrip("*")] = parts[0]
     text = template if template is not None else TEMPLATE.read_text()
+    checksums = []
     for target in TARGETS:
-        archive = f"branchyard-{version}-{target}.tar.gz"
-        if archive not in sums:
-            raise ValueError(f"SHA256SUMS lists no {archive}")
-        text = text.replace("@SHA256_" + target.upper().replace("-", "_") + "@", sums[archive])
+        binaries = []
+        for package in PACKAGES:
+            archive = f"{package}-{target}.tar.gz"
+            if archive not in sums:
+                raise ValueError(f"SHA256SUMS lists no {archive}")
+            binaries.append(f"{json.dumps(package)} => {json.dumps(sums[archive])}")
+        checksums.append(f"    {json.dumps(target)} => {{{', '.join(binaries)}}}")
+    text = text.replace("@CHECKSUMS@", ",\n".join(checksums))
     text = text.replace("@VERSION@", version)
     left = re.findall(r"@[A-Z0-9_]+@", text)
     if left:

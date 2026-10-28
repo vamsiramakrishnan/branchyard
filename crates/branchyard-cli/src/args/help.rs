@@ -448,13 +448,14 @@ Steps, each ready, planned, needs_person or blocked, with a line on what to do:
   secret.<NAME>    each [secrets] entry and [models] key: its variable set or file present
   models           the model gateway [models] describes
   connectors       the connector gateway: listening, started here, or without Anvil
-  provider         [defaults] provider: a build that runs it, a recipe you trust
+  provider         [defaults] provider: build and host access, Substrate connection,
+                   or a recipe you trust
   workspace        [workspace] scripts trusted (by workspace trust)
 Exit 0 when every step is ready, 1 otherwise. Nothing prints a secret's value.
 
 Examples:
   by up                    # install what is allowed, start the gateway, list the rest
-  by up --plan             # what it would do and what is missing; changes nothing
+  by up --plan             # inspect readiness without installing or starting services
   by up --yes              # confirm the installs the policy asks about
   by up --json             # the steps as JSON, for a script or the Python SDK
 

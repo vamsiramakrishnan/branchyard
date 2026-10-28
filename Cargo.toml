@@ -32,6 +32,7 @@ resolver = "2"
 version = "0.1.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/vamsiramakrishnan/branchyard"
 publish = false
 rust-version = "1.94"
 
@@ -97,3 +98,9 @@ dbg_macro = "deny"
 # zstd 0.14 on the fixed zstd-safe 8.2. See patches/zstd-0.13/src/lib.rs.
 [patch.crates-io]
 zstd = { path = "patches/zstd-0.13" }
+
+# Optimized portable release artifacts built by dist.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+strip = "symbols"

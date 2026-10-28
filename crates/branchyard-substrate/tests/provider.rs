@@ -102,6 +102,23 @@ fn capabilities_declare_exec_through_the_bridge() {
 }
 
 #[test]
+fn router_requires_actor_headers_for_health_and_websocket() {
+    let cluster = Cluster::start("router-headers");
+    let provider = cluster.provider();
+    provider.ensure(&SandboxSpec::new("actor")).unwrap();
+    let without_route = branchyard_bridge::Endpoint::new(cluster.fake.router(), "").unwrap();
+    assert!(without_route.health().is_err());
+    let endpoint = provider.endpoint("actor").unwrap();
+    endpoint
+        .with_url(cluster.fake.router())
+        .unwrap()
+        .health()
+        .unwrap();
+    assert_eq!(run(&provider, "actor", "echo routed").unwrap(), "routed\n");
+    provider.destroy("actor").unwrap();
+}
+
+#[test]
 fn specs_it_cannot_honor_are_refused_and_create_nothing() {
     let cluster = Cluster::start("refuse");
     let provider = cluster.provider();
@@ -223,7 +240,11 @@ fn a_branch_has_a_new_identity_and_never_accepts_its_parents_credential() {
     let parent = provider.endpoint("parent").unwrap();
     assert_eq!(run(&provider, "parent", "echo parent").unwrap(), "parent\n");
     let url = provider.config().router_url("child");
-    let at_child = parent.with_url(&url).unwrap();
+    let at_child = parent
+        .with_url(&url)
+        .unwrap()
+        .with_actor(common::ATESPACE, "child")
+        .unwrap();
     let crossed = at_child
         .exec(&sh(Path::new("/"), "true"))
         .map(|_| String::new());
@@ -309,6 +330,11 @@ fn a_name_reused_by_another_actor_is_never_acted_on() {
     let cluster = Cluster::start("reuse");
     let first = cluster.provider();
     first.ensure(&SandboxSpec::new("worker")).unwrap();
+    let recovered = cluster.provider();
+    assert_eq!(
+        recovered.handle("worker").unwrap(),
+        first.handle("worker").unwrap()
+    );
     // Someone else deletes and recreates the name.
     let other = cluster.provider();
     other.destroy("worker").unwrap();
@@ -318,11 +344,68 @@ fn a_name_reused_by_another_actor_is_never_acted_on() {
         Err(ProviderError::Runtime(why)) if why.contains("is now")
     ));
     assert!(first.destroy("worker").is_err());
+    // A failed cleanup must retain the old UID; retrying cannot adopt the
+    // newer actor just because both came from the same template.
+    assert!(first.destroy("worker").is_err());
+    assert!(recovered.destroy("worker").is_err());
+    assert!(recovered.destroy("worker").is_err());
     assert_eq!(
         other.inspect("worker").unwrap().unwrap().state,
         SandboxState::Running
     );
     other.destroy("worker").unwrap();
+}
+
+#[test]
+fn failed_ensure_and_cleanup_never_adopt_another_templates_actor() {
+    let cluster = Cluster::start("foreign-template-cleanup");
+    let owner = cluster.provider();
+    owner.ensure(&SandboxSpec::new("shared-name")).unwrap();
+    let original = owner.handle("shared-name").unwrap().unwrap();
+    let mut config = cluster.config();
+    config.template = "another-template".into();
+    cluster
+        .fake
+        .add_template(branchyard_substrate::template::bridge_template(
+            common::ATESPACE,
+            &branchyard_substrate::template::BridgeTemplate {
+                name: config.template.clone(),
+                image: "registry.example/branchyard-micro@sha256:00".into(),
+                bridge: "/usr/local/bin/branchyard-bridge".into(),
+                public_key: config.signer.as_ref().unwrap().public_key(),
+                sandbox_class: branchyard_substrate::pb::SandboxClass::Microvm,
+                sandbox_config: "microvm".into(),
+                storage_location: "gs://bucket/branchyard".into(),
+            },
+        ));
+    let foreign = SubstrateProvider::connect(config.clone()).unwrap();
+    assert!(matches!(
+        foreign.ensure(&SandboxSpec::new("shared-name")),
+        Err(ProviderError::Runtime(why)) if why.contains("exists from template")
+    ));
+    assert!(foreign.handle("shared-name").is_err());
+    assert!(foreign.inspect("shared-name").is_err());
+    assert!(foreign.begin_attempt("shared-name", "foreign").is_err());
+    for _ in 0..2 {
+        assert!(foreign.destroy("shared-name").is_err());
+    }
+    let restarted_foreign = SubstrateProvider::connect(config).unwrap();
+    assert!(restarted_foreign.destroy("shared-name").is_err());
+    assert_eq!(owner.handle("shared-name").unwrap().unwrap(), original);
+    assert_eq!(
+        run(&owner, "shared-name", "echo untouched").unwrap(),
+        "untouched\n"
+    );
+
+    // Legitimate recovery still works in a fresh process without a signer,
+    // including a qualified spelling of the same template.
+    let mut recovery = cluster.config();
+    recovery.signer = None;
+    recovery.template = format!("{}/{}", common::ATESPACE, common::TEMPLATE);
+    let recovered = SubstrateProvider::connect(recovery).unwrap();
+    recovered.destroy("shared-name").unwrap();
+    recovered.destroy("shared-name").unwrap();
+    assert!(cluster.fake.actor_names().is_empty());
 }
 
 #[test]

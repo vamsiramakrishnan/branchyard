@@ -61,7 +61,6 @@ use crate::state::{Begun, Fence, Record, SandboxKind};
 use crate::{
     harness, Activity, Error, Provider, RecipeOptions, SandboxOptions, SubstrateOptions, Yard,
 };
-use branchyard_support::time::now_ms;
 
 /// Where the worktree appears in a sandbox.
 pub const WORKSPACE: &str = "/workspace";
@@ -470,7 +469,7 @@ impl Placement {
             Copied {
                 remote: Remote::Substrate(Box::new(provider)),
                 kind: "substrate",
-                spec: SandboxSpec::new(actor_name(&record.info.name, now_ms())),
+                spec: SandboxSpec::new(actor_name(&record.info.name)?),
                 // Journaled before the actor exists, so recovery can delete it.
                 intent: Box::new(
                     move |name| json!({ "provider": "substrate", "actor": name, "atespace": atespace }),
@@ -499,7 +498,7 @@ impl Placement {
             Copied {
                 remote: Remote::Recipe(recipe_provider(yard, options)),
                 kind: "recipe",
-                spec: SandboxSpec::new(sandbox_name(&record.info.name, now_ms())),
+                spec: SandboxSpec::new(sandbox_name(&record.info.name)?),
                 // Journaled before `create` runs, so recovery can destroy it.
                 intent: Box::new(
                     move |name| json!({ "provider": "recipe", "sandbox": name, "recipe": recipe }),
@@ -898,19 +897,21 @@ pub(crate) fn sandbox_env(
     Ok(env)
 }
 
-/// `by-<branch>-<ms>`, within the runtime's 128-byte limit. Branch names
-/// are already `[a-z0-9._-]`.
-pub(crate) fn sandbox_name(branch: &str, ms: u64) -> String {
-    let suffix = format!("-{ms}");
+/// `by-<branch>-<ulid>`, unique across repositories and concurrent allocations,
+/// within the runtime's 128-byte limit. Branch names are already `[a-z0-9._-]`.
+pub(crate) fn sandbox_name(branch: &str) -> Result<String, String> {
+    let id = branchyard_support::new_ulid().map_err(|error| error.to_string())?;
+    let suffix = format!("-{}", id.to_ascii_lowercase());
     let room = 128 - "by-".len() - suffix.len();
     let branch: String = branch.chars().take(room).collect();
-    format!("by-{branch}{suffix}")
+    Ok(format!("by-{branch}{suffix}"))
 }
 
-/// `by-<branch>-<ms>` as a Substrate resource name: a DNS label of at most
-/// 63 characters, so `.` and `_` become `-` and the branch is shortened.
-fn actor_name(branch: &str, ms: u64) -> String {
-    let suffix = format!("-{ms}");
+/// A unique `by-<branch>-<ulid>` DNS label of at most 63 characters;
+/// `.` and `_` become `-` and the branch is shortened.
+fn actor_name(branch: &str) -> Result<String, String> {
+    let id = branchyard_support::new_ulid().map_err(|error| error.to_string())?;
+    let suffix = format!("-{}", id.to_ascii_lowercase());
     let room = 63 - "by-".len() - suffix.len();
     let branch: String = branch
         .chars()
@@ -920,7 +921,7 @@ fn actor_name(branch: &str, ms: u64) -> String {
         })
         .take(room)
         .collect();
-    format!("by-{}{suffix}", branch.trim_end_matches('-'))
+    Ok(format!("by-{}{suffix}", branch.trim_end_matches('-')))
 }
 
 /// Where a turn's transfer to `actor` is staged, so recovery can delete it.
@@ -1017,19 +1018,35 @@ mod tests {
 
     #[test]
     fn sandbox_names_fit_the_runtime() {
-        assert_eq!(sandbox_name("fix-parser", 17), "by-fix-parser-17");
-        let long = sandbox_name(&"a".repeat(200), u64::MAX);
+        let short = sandbox_name("fix-parser").unwrap();
+        assert!(short.starts_with("by-fix-parser-"));
+        assert_eq!(short.len(), "by-fix-parser-".len() + 26);
+        let long = sandbox_name(&"a".repeat(200)).unwrap();
         assert_eq!(long.len(), 128);
         assert!(branchyard_microsandbox::plan::name(&long).is_ok());
     }
 
     #[test]
     fn actor_names_are_dns_labels() {
-        assert_eq!(actor_name("fix.parser_2", 17), "by-fix-parser-2-17");
-        let long = actor_name(&"a".repeat(200), 1_790_000_000_000);
+        let short = actor_name("fix.parser_2").unwrap();
+        assert!(short.starts_with("by-fix-parser-2-"));
+        assert_eq!(short.len(), "by-fix-parser-2-".len() + 26);
+        let long = actor_name(&"a".repeat(200)).unwrap();
         assert_eq!(long.len(), 63);
-        assert!(long.ends_with("-1790000000000"));
-        let dashed = actor_name(&format!("{}.x", "a".repeat(45)), 1_790_000_000_000);
+        assert!(long
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'));
+        let dashed = actor_name(&format!("{}.x", "a".repeat(32))).unwrap();
         assert!(!dashed.contains("--"), "{dashed}");
+    }
+
+    #[test]
+    fn same_branch_allocations_always_receive_distinct_names() {
+        let mut actors = std::collections::HashSet::new();
+        let mut sandboxes = std::collections::HashSet::new();
+        for _ in 0..256 {
+            assert!(actors.insert(actor_name("agy-substrate").unwrap()));
+            assert!(sandboxes.insert(sandbox_name("agy-substrate").unwrap()));
+        }
     }
 }

@@ -447,6 +447,43 @@ fn substrate_flags_configure_tls_and_the_insecure_escape() {
 }
 
 #[test]
+fn substrate_flags_select_token_service_name_and_egress() {
+    let base = "run go --provider substrate --substrate-endpoint https://control \
+        --substrate-router https://router --substrate-template agy --substrate-key bridge.key";
+    let chosen = task(&format!(
+        "{base} --substrate-api-token-file control.token \
+        --substrate-server-name ate-api.ate-system.svc --substrate-allow-host api.example.com \
+        --substrate-allow-host '*.googleapis.com'"
+    ));
+    let saved = chosen.substrate.unwrap();
+    assert_eq!(saved.api_token_file.as_deref(), Some("control.token"));
+    assert_eq!(saved.server_name.as_deref(), Some("ate-api.ate-system.svc"));
+    assert_eq!(
+        saved.egress,
+        branchyard::config::SubstrateEgress::AllowHosts(vec![
+            "api.example.com".into(),
+            "*.googleapis.com".into()
+        ])
+    );
+    assert_eq!(
+        task(base).substrate.unwrap().egress,
+        branchyard::config::SubstrateEgress::Deny
+    );
+    assert_eq!(
+        task(&format!("{base} --substrate-egress unrestricted"))
+            .substrate
+            .unwrap()
+            .egress,
+        branchyard::config::SubstrateEgress::Unrestricted
+    );
+    assert!(err(&format!(
+        "{base} --substrate-egress unrestricted --substrate-allow-host api.example.com"
+    ))
+    .contains("cannot be used with"));
+    assert!(err("run go --substrate-api-token-file t").contains("needs --provider substrate"));
+}
+
+#[test]
 fn provider_flags_select_and_configure_a_sandbox() {
     let task = task(
         "run go --provider microsandbox --image ghcr.io/x/claude:1 --cpus 2 \
@@ -2172,6 +2209,12 @@ fn setup_takes_its_flags_and_is_the_first_command_listed() {
         ["claude-code", "codex"]
     );
     assert!(setup("setup --no-hooks").no_hooks);
+    let guided = setup("setup --guided --up --directory /example/project");
+    assert!(guided.guided && guided.up);
+    assert_eq!(
+        guided.directory,
+        Some(std::path::PathBuf::from("/example/project"))
+    );
     // Ask the harnesses again rather than read the cached inventory.
     assert!(setup("setup --dry-run --refresh").refresh);
     // Naming harnesses and installing none contradict.
@@ -2202,6 +2245,9 @@ fn setup_takes_its_flags_and_is_the_first_command_listed() {
         "--harness <ID>",
         "--no-hooks",
         "--no-config",
+        "--guided",
+        "--up",
+        "--directory <PATH>",
     ] {
         assert!(help.contains(word), "{word} missing from:\n{help}");
     }

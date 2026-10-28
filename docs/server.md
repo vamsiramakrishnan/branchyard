@@ -671,6 +671,10 @@ What the run changed, each with a test: a `by --remote` command following an ope
 
 Not done: Claude Code was not run through the server (Codex was the second harness, so the container's own Claude login stayed out); no server on another host, no TLS, no `ssh://` remote, no load beyond ten turns, no live `by watch` screen (only `--once`); a refused `--model` on Gemini CLI without `--isolated` still leaves a failed branch whose card offers only `by log` and `by rm`, and an operation a dead server ran still ends its client with no `next:` line; `by wait`, `merge` and `integrate` against a server do not wait through a restart; the permission lines still print raw JSON (`asks acp:edit: {"toolCallId":…`).
 
+## Live validation
+
+Live on 28 October 2026: a dedicated `by` 0.0.1 server on GCE, using loopback HTTP on port 8789, ran Antigravity `agy` 1.4.8 through write, check, diff and merge. The client used the server's generated token file; the server supplied `GEMINI_API_KEY` through its secret registry and fixed the harness executable with `--harness-command`. The server shut down after the run. Record: `logs/agy-backends/exec-http` in the [remote validation record](remote-validation-2026-10-28.md). Not done: TLS, multiple tenants, distributed workers, or sandbox providers through this HTTP server in this live run.
+
 ## Code
 
 | Crate | Contents |

@@ -65,7 +65,20 @@ impl Report {
 
 impl Repo {
     fn new() -> Repo {
-        Repo(branchyard_testkit::repo!())
+        let mut repo = Repo(branchyard_testkit::repo!());
+        let tools = repo.dir.join("tools");
+        branchyard_testkit::system_tools(&tools).unwrap();
+        let home = repo.dir.join("default-home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/.credentials.json"), "{}").unwrap();
+        let bin = repo.dir.join("default-bin");
+        fake(&bin, "claude", "echo '2.1.310 (Claude Code)'\n");
+        repo.0.set_env("HOME", &home.display().to_string());
+        repo.0
+            .set_env("PATH", &format!("{}:{}", bin.display(), tools.display()));
+        repo.0.set_env("BRANCHYARD_HARNESS_DIRS", "");
+        repo.0.remove_env("XDG_CONFIG_HOME");
+        repo
     }
 
     /// No harness key variable of the host's reaches a command: the tests
@@ -561,7 +574,10 @@ fn machine(repo: &Repo, bin: &Path) -> Vec<(String, String)> {
     let home = repo.dir.join("home");
     fs::create_dir_all(&home).unwrap();
     vec![
-        ("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())),
+        (
+            "PATH".into(),
+            format!("{}:{}", bin.display(), repo.dir.join("tools").display()),
+        ),
         ("BRANCHYARD_HARNESS_DIRS".into(), String::new()),
         ("HOME".into(), home.display().to_string()),
     ]
@@ -855,11 +871,10 @@ fn the_default_harness_must_be_known_and_installed() {
 
     // Unset, `by run` starts claude-code, which must be there.
     repo.project_file("");
-    let system = [("PATH", "/usr/bin:/bin"), ("BRANCHYARD_HARNESS_DIRS", "")];
+    let tools = repo.dir.join("tools").display().to_string();
+    let system = [("PATH", tools.as_str()), ("BRANCHYARD_HARNESS_DIRS", "")];
     let report = repo.doctor_in(&repo.root, &[], &system);
-    let claude_in_system_dirs =
-        Path::new("/usr/bin/claude").exists() || Path::new("/bin/claude").exists();
-    if !claude_in_system_dirs {
+    {
         assert_eq!(report.status("harnesses.default"), "warn");
         assert!(report
             .detail("harnesses.default")
@@ -888,7 +903,18 @@ fn the_provider_is_checked_as_the_engine_checks_it() {
     );
     let report = repo.doctor(&[]);
     if cfg!(feature = "microsandbox") {
-        assert_eq!(report.status("provider.default"), "ok", "{}", report.stdout);
+        let expected = if cfg!(target_os = "linux") && report.status("host.kvm") != "ok" {
+            assert!(report.fix("provider.default").contains("/dev/kvm"));
+            "fail"
+        } else {
+            "ok"
+        };
+        assert_eq!(
+            report.status("provider.default"),
+            expected,
+            "{}",
+            report.stdout
+        );
     } else {
         assert_eq!(report.status("provider.default"), "fail");
         assert!(report
@@ -1097,4 +1123,37 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
     );
     let report = repo.doctor(&[]);
     assert_eq!(report.status("models.prices"), "ok", "{}", report.stdout);
+}
+
+#[test]
+fn remote_harness_readiness_does_not_depend_on_workstation_login() {
+    let repo = Repo::used().without_keys();
+    repo.project_file(
+        r#"
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+atespace = "branchyard"
+template = "agy"
+key = "/missing-bridge-key"
+egress = { mode = "deny" }
+[secrets]
+GEMINI_API_KEY = "REMOTE_MODEL_KEY"
+"#,
+    );
+    let report = repo.doctor_in(
+        &repo.root,
+        &[],
+        &[("REMOTE_MODEL_KEY", "test-secret-never-print")],
+    );
+    assert_eq!(report.status("harnesses.summary"), "ok");
+    assert_eq!(report.status("harnesses.remote.login.antigravity"), "ok");
+    assert!(report
+        .detail("harnesses.remote.login.antigravity")
+        .contains("model authentication unverified"));
+    assert_eq!(report.status("provider.default"), "fail");
+    assert!(!report.stdout.contains("test-secret-never-print"));
 }

@@ -15,6 +15,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod substrate;
+
+pub use substrate::{Substrate, SubstrateEgress};
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -72,6 +76,9 @@ pub struct ProjectConfig {
     /// Options for `provider = "microsandbox"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microsandbox: Option<Microsandbox>,
+    /// Saved Agent Substrate connection and actor egress policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub substrate: Option<Substrate>,
     /// Telling you when a branch needs you or ends, from `by watch` and a
     /// waiting `by run`, `by fan`, `by send` or `by fork`.
     #[serde(default, skip_serializing_if = "Notify::is_empty")]
@@ -1724,6 +1731,8 @@ pub enum ProviderKind {
     /// A microVM per turn; needs `[microsandbox]` and a build with the
     /// `microsandbox` feature.
     Microsandbox,
+    /// An actor in the cluster configured by `[substrate]`.
+    Substrate,
     /// The machine an environment recipe makes (`--provider recipe:NAME`);
     /// `defaults.recipe` names it.
     Recipe,
@@ -1736,6 +1745,7 @@ impl<'de> Deserialize<'de> for ProviderKind {
         match text.as_str() {
             "local" => Ok(ProviderKind::Local),
             "microsandbox" => Ok(ProviderKind::Microsandbox),
+            "substrate" => Ok(ProviderKind::Substrate),
             "recipe" => Ok(ProviderKind::Recipe),
             other => Err(D::Error::custom(unknown_provider(other))),
         }
@@ -1750,10 +1760,9 @@ fn unknown_provider(text: &str) -> String {
             "{text:?} is the flag's spelling (--provider recipe:NAME); in the file write \
              provider = \"recipe\" and recipe = {name:?}"
         ),
-        None if text == "substrate" => "substrate is chosen per run with --provider substrate \
-             (and its --substrate-* flags); the file takes local, microsandbox or recipe"
-            .to_owned(),
-        None => format!("unknown variant `{text}`, expected one of local, microsandbox, recipe"),
+        None => format!(
+            "unknown variant `{text}`, expected one of local, microsandbox, substrate, recipe"
+        ),
     }
 }
 
@@ -2061,6 +2070,15 @@ impl ProjectConfig {
                 "defaults.provider",
                 "microsandbox needs a [microsandbox] table with an image".into(),
             );
+        }
+        if d.provider == Some(ProviderKind::Substrate) && self.substrate.is_none() {
+            return fail(
+                "defaults.provider",
+                "substrate needs a [substrate] table".into(),
+            );
+        }
+        if let Some(substrate) = &self.substrate {
+            substrate.check()?;
         }
         for (name, source) in &self.secrets {
             secret_source(name, source).map_err(|e| ConfigError(format!("secrets.{name}: {e}")))?;
@@ -2391,6 +2409,9 @@ impl ProjectConfig {
                 *path = resolve_path(path, dir, home).display().to_string();
             }
         };
+        if let Some(substrate) = &mut self.substrate {
+            substrate.resolve_paths(dir, home);
+        }
         resolve(&mut self.remote.token_file);
         resolve(&mut self.remote.ca_file);
         resolve(&mut self.serve.config);
@@ -2686,6 +2707,7 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
                 toml_string(match p {
                     ProviderKind::Local => "local",
                     ProviderKind::Microsandbox => "microsandbox",
+                    ProviderKind::Substrate => "substrate",
                     ProviderKind::Recipe => "recipe",
                 })
             }),
@@ -2735,6 +2757,11 @@ pub fn render(config: &ProjectConfig, heading: &str) -> String {
         if let Some(on) = sandbox.live_branch {
             out.push_str(&format!("live_branch = {on}\n"));
         }
+    }
+    if let Some(substrate) = &config.substrate {
+        out.push('\n');
+        let table = BTreeMap::from([("substrate", substrate)]);
+        out.push_str(&toml::to_string(&table).unwrap_or_default());
     }
     if !config.remote.is_empty() {
         out.push_str("\n# A Branchyard server to run commands against; BRANCHYARD_REMOTE and friends override it.\n[remote]\n");
@@ -3014,7 +3041,12 @@ pub fn read_layer(path: &Path) -> Result<ProjectConfig, ConfigError> {
     parsed
         .check_layer(Layer::of(path))
         .map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
-    parsed.resolve_paths(path.parent().unwrap_or(Path::new(".")), home().as_deref());
+    let absolute =
+        std::path::absolute(path).map_err(|e| ConfigError(format!("{}: {e}", path.display())))?;
+    parsed.resolve_paths(
+        absolute.parent().unwrap_or(Path::new(".")),
+        home().as_deref(),
+    );
     Ok(parsed)
 }
 
@@ -3474,12 +3506,12 @@ classes = { compensable = "allow" }
         let error = parse("[defaults]\nprovider = \"substrate\"")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("--provider substrate"), "{error}");
+        assert!(error.contains("[substrate]"), "{error}");
         let error = parse("[defaults]\nprovider = \"docker\"")
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("expected one of local, microsandbox, recipe"),
+            error.contains("expected one of local, microsandbox, substrate, recipe"),
             "{error}"
         );
         assert!(parse("[defaults]\nprovider = \"local\"").is_ok());

@@ -924,3 +924,19 @@ See [knowledge](knowledge.md) and [pull requests](pull-requests.md#the-events).
 | `Activity::Feedback` (`Feedback`, `FeedbackItem`, `FeedbackKind`, `FeedbackSource`); `Branch::record_feedback`, `prompt_digest` | none | `by review` and `by pr --watch` record their feedback as data beside the prompt, naming it by digest; in `schema/contract.json` |
 | `feedback` on send requests | none | the server records it just before the turn; refused with `retry` |
 | The knowledge extractor | parsed feedback out of the prompt's prose | reads the `feedback` record; the prose only for older logs |
+
+## Substrate setup and readiness
+
+`by substrate setup --image IMAGE --storage URI --plan` previews the saved
+Substrate template setup; `--yes` applies it. `by substrate check --smoke
+--harness agy` verifies bridge execution, file transfer and cleanup without a
+model call. These are operator commands, run outside a harness session.
+`by up` and `by doctor` check the saved connection and remote credential sources.
+`by setup --guided` selects a repository and compute backend, then checks readiness.
+`by setup --up --json` includes readiness in one setup report; `--directory PATH`
+selects the repository. Cloud creation is reviewed before resources change.
+`by run` accepts `--substrate-api-token-file PATH` for Control authentication and verified
+forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
+`--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
+`--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
+connection flags. See the Substrate setup documentation for image and pool prerequisites.

@@ -12,8 +12,8 @@
 //! | `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()` (disk), `.full()` for a full-scope one |
 //! | `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()`, `.forked()` from a full checkpoint |
 //! | `pause`, `resume` | `Sandbox::pause()`/`resume()`, or through `Sandbox::get(name)` from another process |
-//! | `branch_live` | `SandboxHandle::branch(name).volume(..).branch()`, or `branch_many(names)` when every child has the same mounts |
-//! | `release_checkpoint` | `Snapshot::remove(label, true)` |
+//! | `branch_live` | One temporary full checkpoint, then strict `Sandbox::restore(reference).forked().volume(..).restore()` per child |
+//! | `release_checkpoint` | `Snapshot::remove(reference, true)` |
 //!
 //! Pause, resume, live branching and full-scope checkpoints are declared only
 //! with [`MicrosandboxProvider::with_live_branch`] (the `live_branch = true`
@@ -39,7 +39,7 @@ use branchyard_sandbox::{
 };
 use microsandbox::protocol::exec::ExecFailureKind;
 use microsandbox::sandbox::exec::ExecSink;
-use microsandbox::sandbox::SandboxStatus;
+use microsandbox::sandbox::{DestroyOptions, SandboxStatus};
 use microsandbox::{ExecControl, ExecEvent, ExecHandle, MicrosandboxError, Sandbox, Snapshot};
 use tokio::runtime::{Handle, Runtime};
 
@@ -48,6 +48,11 @@ use crate::plan::{self, CreatePlan, PlannedMount};
 
 /// How long a graceful stop may take before the microVM is killed.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Removal must also terminate paused sandboxes, which cannot shut down gracefully.
+const DESTROY: DestroyOptions = DestroyOptions {
+    force: true,
+    timeout: STOP_TIMEOUT,
+};
 /// How long the in-guest teardown may take.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -141,6 +146,33 @@ impl MicrosandboxProvider {
             .cloned()
             .ok_or_else(|| ProviderError::NotFound(name.to_owned()))
     }
+
+    fn live_checkpoint(
+        &self,
+        source: &str,
+    ) -> Result<(tempfile::TempDir, Checkpoint), ProviderError> {
+        // A separate store keeps temporary capture out of the source's saved checkpoint group.
+        let directory = tempfile::Builder::new()
+            .prefix("by-msb-branch-")
+            .tempdir()?;
+        let snapshot = self
+            .handle()
+            .block_on(
+                Snapshot::builder("branch")
+                    .from_sandbox(source)
+                    .dest_dir(directory.path())
+                    .group("capture")
+                    .full()
+                    .create(),
+            )
+            .map_err(error)?;
+        let checkpoint = Checkpoint {
+            sandbox: source.to_owned(),
+            reference: snapshot.reference().value().to_owned(),
+            guarantee: plan::FULL_SNAPSHOT,
+        };
+        Ok((directory, checkpoint))
+    }
 }
 
 impl Drop for MicrosandboxProvider {
@@ -158,7 +190,7 @@ impl Drop for MicrosandboxProvider {
                     "destroy a sandbox on shutdown",
                     runtime
                         .block_on(async {
-                            tokio::time::timeout(STOP_TIMEOUT, sandbox.destroy()).await
+                            tokio::time::timeout(STOP_TIMEOUT, sandbox.destroy_with(DESTROY)).await
                         })
                         .map_err(|elapsed| elapsed.to_string())
                         .and_then(|destroyed| destroyed.map_err(|error| error.to_string())),
@@ -185,8 +217,13 @@ pub fn state(status: SandboxStatus) -> SandboxState {
 
 /// The contract's view of an SDK error.
 pub fn error(error: MicrosandboxError) -> ProviderError {
+    if let Some(help) = crate::socket_path_help(&error.to_string()) {
+        return ProviderError::Invalid(help);
+    }
     match error {
-        MicrosandboxError::SandboxNotFound(name) => ProviderError::NotFound(name),
+        MicrosandboxError::SandboxNotFound(name) | MicrosandboxError::SnapshotNotFound(name) => {
+            ProviderError::NotFound(name)
+        }
         MicrosandboxError::InvalidConfig(reason) => ProviderError::Invalid(reason),
         MicrosandboxError::Io(error) => ProviderError::Io(error),
         MicrosandboxError::ExecFailed(failed) => {
@@ -418,9 +455,9 @@ impl SandboxProvider for MicrosandboxProvider {
         let held = self.lock().remove(name);
         self.kept.lock_recovering("kept").remove(name);
         let destroyed = match held {
-            Some(sandbox) => self.handle().block_on(sandbox.destroy()),
+            Some(sandbox) => self.handle().block_on(sandbox.destroy_with(DESTROY)),
             None => match self.handle().block_on(Sandbox::get(name)) {
-                Ok(handle) => self.handle().block_on(handle.destroy()),
+                Ok(handle) => self.handle().block_on(handle.destroy_with(DESTROY)),
                 Err(error) => Err(error),
             },
         };
@@ -448,10 +485,10 @@ impl SandboxProvider for MicrosandboxProvider {
             SnapshotScope::Full => builder.full(),
             SnapshotScope::Disk => builder,
         };
-        self.handle().block_on(builder.create()).map_err(error)?;
+        let snapshot = self.handle().block_on(builder.create()).map_err(error)?;
         Ok(Checkpoint {
             sandbox: name.to_owned(),
-            reference: label,
+            reference: snapshot.reference().value().to_owned(),
             guarantee,
         })
     }
@@ -474,7 +511,7 @@ impl SandboxProvider for MicrosandboxProvider {
             ));
         }
         let plan = plan::branch(spec)?;
-        if self.lock().contains_key(&plan.name) {
+        if self.inspect(&plan.name)?.is_some() {
             return Err(ProviderError::Invalid(format!(
                 "a sandbox named {} already exists",
                 plan.name
@@ -492,11 +529,32 @@ impl SandboxProvider for MicrosandboxProvider {
         });
         if checkpoint.guarantee.scope == SnapshotScope::Full {
             restore = restore.forked();
-        } else {
-            restore = restore.disk_only();
         }
         // A restore is always detached.
-        let sandbox = self.handle().block_on(restore.restore()).map_err(error)?;
+        let sandbox = self
+            .handle()
+            .block_on(async {
+                match restore.restore().await {
+                    Ok(sandbox) => Ok(sandbox),
+                    Err(failure @ MicrosandboxError::BootStart { .. }) => {
+                        // The SDK retains a stopped record after a newly created VM fails to boot.
+                        let cleanup = async {
+                            let handle = Sandbox::get(&plan.name).await?;
+                            if handle.status_snapshot() == SandboxStatus::Stopped {
+                                handle.destroy_with(DESTROY).await?;
+                            }
+                            Ok::<(), MicrosandboxError>(())
+                        };
+                        branchyard_support::best_effort(
+                            "remove a restored sandbox that failed to boot",
+                            cleanup.await,
+                        );
+                        Err(failure)
+                    }
+                    Err(failure) => Err(failure),
+                }
+            })
+            .map_err(error)?;
         self.lock().insert(plan.name.clone(), Arc::new(sandbox));
         if spec.persist {
             self.keep(&plan.name);
@@ -544,9 +602,9 @@ impl SandboxProvider for MicrosandboxProvider {
         })
     }
 
-    /// `Sandbox::branch` per child, each with its own mounts, or one
-    /// `branch_many` when every child has the same mounts. Children are
-    /// detached; the source keeps its running or paused state. Local only.
+    /// Capture once, then restore independent children with strict mount
+    /// validation. Direct SDK branching rejects replacement host inodes.
+    /// The source keeps its running or paused state. Local only.
     fn branch_live(
         &self,
         source: &str,
@@ -561,73 +619,36 @@ impl SandboxProvider for MicrosandboxProvider {
         }
         let plans: Vec<Result<CreatePlan, ProviderError>> =
             children.iter().map(plan::live_child).collect();
-        let valid: Vec<CreatePlan> = plans
-            .iter()
-            .filter_map(|p| p.as_ref().ok().cloned())
-            .collect();
-        let source_handle = self.handle().block_on(Sandbox::get(source));
-        let handle = match source_handle {
-            Ok(handle) => handle,
+        if plans.iter().all(Result::is_err) {
+            return plans.into_iter().filter_map(Result::err).map(Err).collect();
+        }
+        let (directory, checkpoint) = match self.live_checkpoint(source) {
+            Ok(capture) => capture,
             Err(e) => {
-                let why = error(e).to_string();
-                return children
-                    .iter()
-                    .map(|_| Err(ProviderError::Runtime(why.clone())))
+                let why = e.to_string();
+                return plans
+                    .into_iter()
+                    .map(|plan| plan.and_then(|_| Err(ProviderError::Runtime(why.clone()))))
                     .collect();
             }
         };
-        let mut made: HashMap<String, Result<Sandbox, ProviderError>> = HashMap::new();
-        if valid.len() == plans.len() && plan::one_batch(&valid) {
-            let names: Vec<String> = valid.iter().map(|p| p.name.clone()).collect();
-            let builder = bind(
-                handle.branch_many(names),
-                valid[0].mounts.clone(),
-                |b, mount| b.volume(mount.guest.clone(), mount_with(mount)),
-            );
-            match self.handle().block_on(builder.branch()) {
-                Ok(outcomes) => {
-                    for outcome in outcomes {
-                        made.insert(outcome.name, outcome.result.map_err(error));
-                    }
-                }
-                Err(e) => {
-                    let why = error(e).to_string();
-                    for name in valid.iter().map(|p| p.name.clone()) {
-                        made.insert(name, Err(ProviderError::Runtime(why.clone())));
-                    }
-                }
-            }
-        } else {
-            for child in &valid {
-                let builder = bind(
-                    handle.branch(child.name.as_str()),
-                    child.mounts.clone(),
-                    |b, mount| b.volume(mount.guest.clone(), mount_with(mount)),
-                );
-                made.insert(
-                    child.name.clone(),
-                    self.handle().block_on(builder.branch()).map_err(error),
-                );
-            }
-        }
-        plans
+        let outcomes = plans
             .into_iter()
             .zip(children)
             .map(|(plan, spec)| {
-                let plan = plan?;
-                let sandbox = made
-                    .remove(&plan.name)
-                    .unwrap_or_else(|| Err(ProviderError::Runtime("no outcome".into())))?;
-                self.lock().insert(plan.name.clone(), Arc::new(sandbox));
-                if spec.persist {
-                    self.keep(&plan.name);
-                }
-                Ok(SandboxInfo {
-                    name: plan.name,
-                    state: SandboxState::Running,
-                })
+                plan?;
+                self.branch(&checkpoint, spec)
             })
-            .collect()
+            .collect();
+        branchyard_support::best_effort(
+            "release the live branch checkpoint",
+            self.release_checkpoint(&checkpoint),
+        );
+        branchyard_support::best_effort(
+            "remove the live branch checkpoint store",
+            directory.close(),
+        );
+        outcomes
     }
 
     fn release_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), ProviderError> {
@@ -662,6 +683,14 @@ mod tests {
 
     #[test]
     fn errors_and_failures_map_to_contract_errors() {
+        let long_path = error(MicrosandboxError::InvalidConfig(
+            "Unix socket path is too long: 109 bytes".into(),
+        ));
+        assert!(long_path.to_string().contains("MSB_HOME"));
+        assert!(matches!(
+            error(MicrosandboxError::SnapshotNotFound("snapshot".into())),
+            ProviderError::NotFound(name) if name == "snapshot"
+        ));
         assert!(matches!(
             error(MicrosandboxError::SandboxNotFound("x".into())),
             ProviderError::NotFound(name) if name == "x"
@@ -711,6 +740,11 @@ mod tests {
         assert!(provider.branch_live("absent", &[SandboxSpec::new("c")])[0].is_err());
         let live = MicrosandboxProvider::new().unwrap().with_live_branch(true);
         assert_eq!(live.capabilities(), plan::capabilities_with(true));
+        assert!(live.branch_live("absent", &[]).is_empty());
+        assert!(matches!(
+            live.branch_live("absent", &[SandboxSpec::new("invalid").image("alpine")])[0],
+            Err(ProviderError::Invalid(_))
+        ));
         assert!(matches!(
             provider.exec("absent", &ExecSpec::default()),
             Err(ProviderError::NotFound(_))
