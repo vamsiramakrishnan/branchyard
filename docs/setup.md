@@ -43,7 +43,12 @@ Guided setup reuses the project interview and hook installers above. An existing
 `branchyard.toml` is preserved and its compute resources are checked again. Use
 `by init project` to change an existing connection. A local microVM requires a
 runtime-enabled Linux build and KVM; the portable package reports the missing
-build support before attempting setup.
+build support before attempting setup. The project interview keeps a saved
+Microsandbox selection and its runtime settings even when this client cannot
+run it, and labels the missing build support or KVM requirement. Missing build
+support points to the [Linux runtime installer](distribution.md#prebuilt-binaries)
+first, with a source rebuild as an alternative. Remote Microsandbox names the
+server's requirements instead.
 
 For GKE connections created by the guided workflow, rerunning `by setup --guided`
 refreshes the Control token and its owned local forwarding processes. It checks

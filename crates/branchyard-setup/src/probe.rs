@@ -461,6 +461,9 @@ impl BuildFacts {
     }
 }
 
+/// Install the published Linux runtime package, including Microsandbox support.
+pub const INSTALL_RUNTIME: &str = "curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --runtime";
+
 /// The command that builds `by` with the Microsandbox SDK, from a checkout.
 pub const REBUILD_MICROSANDBOX: &str =
     "cargo install --locked --path crates/branchyard-cli --features microsandbox";
