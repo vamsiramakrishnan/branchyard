@@ -70,6 +70,7 @@ impl World {
         }
         // Only what the tests need, so no real harness is found.
         std::os::unix::fs::symlink(which("python3"), bin.join("python3")).unwrap();
+        branchyard_testkit::system_tools(&base.join("tools")).unwrap();
         let world = World {
             user: base.join("user/config.toml"),
             _dir: dir,
@@ -106,9 +107,10 @@ impl World {
 
     fn path_var(&self) -> String {
         format!(
-            "{}:{}:/usr/bin:/bin",
+            "{}:{}:{}",
             self.bin.display(),
-            self.home.join(".local/bin").display()
+            self.home.join(".local/bin").display(),
+            self.base.join("tools").display()
         )
     }
 
@@ -572,7 +574,10 @@ fn the_inventory_is_cached_for_a_minute_and_refreshed_on_request() {
     // A different PATH is a different machine as far as the cache goes.
     let out = w.by_env(
         &["harnesses", "--json"],
-        &[("PATH", &format!("{}:/usr/bin:/bin", w.base.display()))],
+        &[(
+            "PATH",
+            &format!("{}:{}", w.base.display(), w.base.join("tools").display()),
+        )],
     );
     assert!(out.status.success());
     let inventory: Value = serde_json::from_slice(&out.stdout).unwrap();
