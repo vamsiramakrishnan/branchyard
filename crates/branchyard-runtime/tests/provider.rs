@@ -81,11 +81,11 @@ impl SandboxProvider for ExecLate {
         if spec
             .argv
             .last()
-            .is_some_and(|script| script == "sleep 300 & echo $!")
+            .is_some_and(|script| script == "sleep 300 </dev/null >/dev/null 2>&1 & echo $!")
         {
             // Builtins only, so the child stays `sh` and alone in the group.
             let script = format!(
-                "{{ while [ ! -e '{}' ]; do :; done; exec sleep 300; }} & echo $!",
+                "{{ while [ ! -e '{}' ]; do :; done; exec sleep 300; }} </dev/null >/dev/null 2>&1 & echo $!",
                 self.flag.display()
             );
             *spec.argv.last_mut().unwrap() = script;

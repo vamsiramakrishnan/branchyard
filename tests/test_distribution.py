@@ -607,6 +607,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         spec.loader.exec_module(module)
         self.assertEqual(module.require_smoke(self.text), self.text)
         self.assertEqual(module.rehearsals(self.text), self.text)
+        self.assertEqual(module.python_runtime(self.text), self.text)
         checked = subprocess.run(
             [sys.executable, str(ROOT / "tools/release_workflow.py"), "--check"], capture_output=True, text=True
         )
@@ -615,6 +616,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(module.require_smoke(unguarded), self.text)
         with self.assertRaises(ValueError):
             module.require_smoke("no generated host job")
+
+    def test_python_is_selected_before_the_plan_reads_toml(self):
+        python_setup = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+        plan = self.text.split("\n  plan:\n", 1)[1].split("\n  build-local-artifacts:\n", 1)[0]
+        self.assertLess(plan.index(python_setup), plan.index("python3 tools/release_version.py"))
+        self.assertIn('python-version: "3.12"', plan)
+        for job_name in ["build-global-artifacts", "host", "announce"]:
+            job = re.split(r"\n  [\w-]+:\n", self.text.split(f"\n  {job_name}:\n", 1)[1], maxsplit=1)[0]
+            self.assertIn(python_setup, job, job_name)
+            self.assertIn('python-version: "3.12"', job, job_name)
+        spec = importlib.util.spec_from_file_location("release_python", ROOT / "tools/release_workflow.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        downgraded = self.text.replace('python-version: "3.12"', 'python-version: "3.10"', 1)
+        with self.assertRaisesRegex(ValueError, "require Python 3.12"):
+            module.python_runtime(downgraded)
 
     def test_attestation_retry_is_bounded_and_keeps_the_second_failure_required(self):
         local = self.text.split("\n  build-local-artifacts:\n", 1)[1].split("\n  custom-agy-image:\n", 1)[0]

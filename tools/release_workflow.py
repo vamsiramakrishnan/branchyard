@@ -2,10 +2,12 @@
 """Regenerate dist's workflow and require package smoke tests before publication."""
 
 import argparse
+import re
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+PYTHON_SETUP = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
 
 
 def require_smoke(text: str) -> str:
@@ -151,6 +153,32 @@ def rehearsals(text: str) -> str:
     return text
 
 
+def python_runtime(text: str) -> str:
+    """Select Python with tomllib before running release tools on Ubuntu 22.04."""
+    jobs = list(re.finditer(r"^  [\w-]+:\n", text, re.M))
+    step = (
+        "      - name: Set up Python 3.12\n"
+        f"        uses: {PYTHON_SETUP}\n"
+        "        with:\n"
+        '          python-version: "3.12"\n'
+    )
+    for index in reversed(range(len(jobs))):
+        start = jobs[index].start()
+        end = jobs[index + 1].start() if index + 1 < len(jobs) else len(text)
+        job = text[start:end]
+        if '    runs-on: "ubuntu-22.04"\n' not in job:
+            continue
+        if "actions/setup-python@" in job:
+            if step not in job:
+                raise ValueError("review the generated job's Python setup; release tools require Python 3.12")
+            continue
+        if "    steps:\n" not in job:
+            raise ValueError("generated Ubuntu release job has no steps")
+        job = job.replace("    steps:\n", "    steps:\n" + step, 1)
+        text = text[:start] + job + text[end:]
+    return text
+
+
 def main() -> None:
     """Generate pinned dist configuration and apply the publication guard."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -167,7 +195,7 @@ def main() -> None:
         finally:
             config.write_text(original)
     text = path.read_text()
-    guarded = rehearsals(require_smoke(text))
+    guarded = python_runtime(rehearsals(require_smoke(text)))
     if args.check:
         if guarded != text:
             raise SystemExit("release workflow must require smoke success before publication")
