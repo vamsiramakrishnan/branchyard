@@ -535,6 +535,12 @@ pub struct SubstrateArgs {
     pub router: String,
     pub template: String,
     pub key: String,
+    /// Control bearer token source, reread per RPC.
+    pub api_token_file: Option<String>,
+    /// TLS service name used to verify Control.
+    pub server_name: Option<String>,
+    /// Explicit actor network policy.
+    pub egress: branchyard::config::SubstrateEgress,
     pub atespace: Option<String>,
     pub workdir: Option<String>,
     pub home: Option<String>,
@@ -1176,13 +1182,14 @@ Steps, each ready, planned, needs_person or blocked, with a line on what to do:
   secret.<NAME>    each [secrets] entry and [models] key: its variable set or file present
   models           the model gateway [models] describes
   connectors       the connector gateway: listening, started here, or without Anvil
-  provider         [defaults] provider: a build that runs it, a recipe you trust
+  provider         [defaults] provider: build and host access, Substrate connection,
+                   or a recipe you trust
   workspace        [workspace] scripts trusted (by workspace trust)
 Exit 0 when every step is ready, 1 otherwise. Nothing prints a secret's value.
 
 Examples:
   by up                    # install what is allowed, start the gateway, list the rest
-  by up --plan             # what it would do and what is missing; changes nothing
+  by up --plan             # inspect readiness without installing or starting services
   by up --yes              # confirm the installs the policy asks about
   by up --json             # the steps as JSON, for a script or the Python SDK
 
@@ -2336,12 +2343,18 @@ pub enum Command {
         /// Print JSON
         #[arg(long)]
         json: bool,
-        /// Say what would be done and what is missing; change nothing
+        /// Inspect readiness without installing harnesses or starting services
         #[arg(long)]
         plan: bool,
         /// Make the installs the [harnesses] policy would ask about, without asking
         #[arg(long)]
         yes: bool,
+    },
+    /// Prepare or check the saved Agent Substrate connection
+    #[command(display_order = 605)]
+    Substrate {
+        #[command(subcommand)]
+        action: crate::substrate_cmd::Action,
     },
     /// Tell a harness session what changed in this repository
     ///
@@ -3690,7 +3703,7 @@ pub struct SubstrateFlags {
     /// Agent Substrate Control API, https://HOST:PORT
     #[arg(long, value_name = "URL")]
     substrate_endpoint: Option<String>,
-    /// Router URL of an actor's bridge, with {atespace} and {actor}
+    /// Router base URL; requests identify the actor with its routing header
     #[arg(long, value_name = "URL")]
     substrate_router: Option<String>,
     /// Actor template that runs branchyard-bridge and the harness
@@ -3699,6 +3712,18 @@ pub struct SubstrateFlags {
     /// Bridge signing key from `branchyard-bridge keygen`
     #[arg(long, value_name = "FILE")]
     substrate_key: Option<String>,
+    /// File holding the Control bearer token, reread for every request
+    #[arg(long, value_name = "FILE")]
+    substrate_api_token_file: Option<String>,
+    /// Verified TLS service name for Control, including port-forwards
+    #[arg(long, value_name = "NAME")]
+    substrate_server_name: Option<String>,
+    /// Actor egress policy (default: deny); use --substrate-allow-host for an allowlist
+    #[arg(long, value_parser = ["deny", "unrestricted"], conflicts_with = "substrate_allow_host")]
+    substrate_egress: Option<String>,
+    /// DNS host the actor may reach; repeat for more hosts, *. matches one label
+    #[arg(long, value_name = "HOST")]
+    substrate_allow_host: Vec<String>,
     /// Atespace for the actors (default: default)
     #[arg(long, value_name = "NAME")]
     substrate_atespace: Option<String>,
@@ -3733,6 +3758,19 @@ impl SubstrateFlags {
             ("substrate-router", self.substrate_router.is_some()),
             ("substrate-template", self.substrate_template.is_some()),
             ("substrate-key", self.substrate_key.is_some()),
+            (
+                "substrate-api-token-file",
+                self.substrate_api_token_file.is_some(),
+            ),
+            (
+                "substrate-server-name",
+                self.substrate_server_name.is_some(),
+            ),
+            ("substrate-egress", self.substrate_egress.is_some()),
+            (
+                "substrate-allow-host",
+                !self.substrate_allow_host.is_empty(),
+            ),
             ("substrate-atespace", self.substrate_atespace.is_some()),
             ("substrate-workdir", self.substrate_workdir.is_some()),
             ("substrate-home", self.substrate_home.is_some()),
@@ -3855,6 +3893,15 @@ impl Launch {
                     router: required(s.substrate_router, "substrate-router")?,
                     template: required(s.substrate_template, "substrate-template")?,
                     key: required(s.substrate_key, "substrate-key")?,
+                    api_token_file: s.substrate_api_token_file,
+                    server_name: s.substrate_server_name,
+                    egress: if !s.substrate_allow_host.is_empty() {
+                        branchyard::config::SubstrateEgress::AllowHosts(s.substrate_allow_host)
+                    } else if s.substrate_egress.as_deref() == Some("unrestricted") {
+                        branchyard::config::SubstrateEgress::Unrestricted
+                    } else {
+                        branchyard::config::SubstrateEgress::Deny
+                    },
                     atespace: s.substrate_atespace,
                     workdir: s.substrate_workdir,
                     home: s.substrate_home,
@@ -6021,6 +6068,43 @@ mod tests {
             kind("run go --substrate-insecure"),
             ErrorKind::ArgumentConflict
         );
+    }
+
+    #[test]
+    fn substrate_flags_select_token_service_name_and_egress() {
+        let base = "run go --provider substrate --substrate-endpoint https://control \
+            --substrate-router https://router --substrate-template agy --substrate-key bridge.key";
+        let chosen = task(&format!(
+            "{base} --substrate-api-token-file control.token \
+            --substrate-server-name ate-api.ate-system.svc --substrate-allow-host api.example.com \
+            --substrate-allow-host '*.googleapis.com'"
+        ));
+        let saved = chosen.substrate.unwrap();
+        assert_eq!(saved.api_token_file.as_deref(), Some("control.token"));
+        assert_eq!(saved.server_name.as_deref(), Some("ate-api.ate-system.svc"));
+        assert_eq!(
+            saved.egress,
+            branchyard::config::SubstrateEgress::AllowHosts(vec![
+                "api.example.com".into(),
+                "*.googleapis.com".into()
+            ])
+        );
+        assert_eq!(
+            task(base).substrate.unwrap().egress,
+            branchyard::config::SubstrateEgress::Deny
+        );
+        assert_eq!(
+            task(&format!("{base} --substrate-egress unrestricted"))
+                .substrate
+                .unwrap()
+                .egress,
+            branchyard::config::SubstrateEgress::Unrestricted
+        );
+        assert!(err(&format!(
+            "{base} --substrate-egress unrestricted --substrate-allow-host api.example.com"
+        ))
+        .contains("cannot be used with"));
+        assert!(err("run go --substrate-api-token-file t").contains("needs --provider substrate"));
     }
 
     #[test]

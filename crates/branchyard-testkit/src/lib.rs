@@ -32,6 +32,8 @@ pub use agent::{
     built, built_uninstrumented, fake_agent, fake_agent_here, fake_agent_here_uninstrumented,
 };
 pub use env::hermetic;
+#[cfg(unix)]
+pub use env::system_tools;
 pub use mock::{Banner, MockHttp, Request, Response};
 pub use repo::Repo;
 pub use scratch::Scratch;

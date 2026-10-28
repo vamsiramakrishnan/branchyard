@@ -510,3 +510,16 @@ together), `check` (your own work before you finish, or a child's), `wait` (`bra
 plan-first child's plan), `answer_approval`, the artifact and scratch tools, and
 `ask`, `report` (with `result`), `escalate`, `report_status`, `answer` and
 `inbox`.
+
+## Substrate setup and readiness
+
+`by substrate setup --image IMAGE --storage URI --plan` previews the saved
+Substrate template setup; `--yes` applies it. `by substrate check --smoke
+--harness agy` verifies bridge execution, file transfer and cleanup without a
+model call. These are operator commands, run outside a harness session.
+`by up` and `by doctor` check the saved connection and remote credential sources.
+`by run` accepts `--substrate-api-token-file PATH` for Control authentication and verified
+forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
+`--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
+`--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
+connection flags. See the Substrate setup documentation for image and pool prerequisites.

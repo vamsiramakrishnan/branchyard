@@ -70,6 +70,7 @@ pub(super) fn mode(ctx: &Context) -> String {
             _ => "local, no isolation".to_owned(),
         },
         ConfiguredProvider::Microsandbox => "sandbox: microsandbox".to_owned(),
+        ConfiguredProvider::Substrate => "remote sandbox: Agent Substrate".to_owned(),
         ConfiguredProvider::Recipe => format!(
             "sandbox: recipe {}",
             config.defaults.recipe.as_deref().unwrap_or("(none named)")
@@ -447,6 +448,13 @@ fn trust_row(resolved: &workspace_cmd::Resolved) -> Check {
 /// What `by harnesses` detects, as a summary and one row for each installed
 /// harness: version, login and live run in one short line each.
 pub(super) fn harnesses_installed(ctx: &Context) -> Vec<Check> {
+    if ctx
+        .config()
+        .is_some_and(|config| config.defaults.provider == Some(ConfiguredProvider::Substrate))
+    {
+        return vec![Check::ok("harnesses.summary",
+            "harnesses run in the Substrate image; host binaries and host logins are not required or verified")];
+    }
     match ctx.inventory() {
         Ok(inventory) => harness_rows(&inventory.harnesses, &branchyard::harnesses()),
         Err(error) => vec![Check::warn(
@@ -568,6 +576,14 @@ pub(super) fn harnesses_default(ctx: &Context) -> Vec<Check> {
             "config.merged",
         )];
     };
+    if config.defaults.provider == Some(ConfiguredProvider::Substrate) {
+        let machine = branchyard::up::LocalMachine::new();
+        let root = ctx.root().unwrap_or(&ctx.base);
+        return branchyard::up::remote_harness_readiness(root, config, &machine)
+            .into_iter()
+            .map(provider_check)
+            .collect();
+    }
     let set = config.defaults.harness.as_deref();
     let installed = ctx
         .inventory()
@@ -736,8 +752,27 @@ pub(super) fn provider_default(ctx: &Context) -> Vec<Check> {
             "local (the default): harnesses run as your user in a worktree, with no isolation",
         ),
         ConfiguredProvider::Microsandbox => microsandbox_row(ctx, config),
+        ConfiguredProvider::Substrate => {
+            provider_check(branchyard::up::substrate_readiness(config))
+        }
         ConfiguredProvider::Recipe => recipe_row(ctx, config),
     }]
+}
+
+/// Keep provider and remote credential findings identical to `by up`.
+fn provider_check(step: branchyard::up::Step) -> Check {
+    let name = if step.name == "provider" {
+        "provider.default".to_owned()
+    } else {
+        format!("harnesses.remote.{}", step.name)
+    };
+    match step.state {
+        branchyard::up::State::Ready => Check::ok(name, step.detail),
+        branchyard::up::State::Blocked => {
+            Check::fail(name, step.detail, step.todo.unwrap_or_default())
+        }
+        _ => Check::warn(name, step.detail, step.todo.unwrap_or_default()),
+    }
 }
 
 fn microsandbox_row(ctx: &Context, config: &ProjectConfig) -> Check {
@@ -751,13 +786,12 @@ fn microsandbox_row(ctx: &Context, config: &ProjectConfig) -> Check {
     };
     match ctx.store() {
         Store::Open(yard) => match doctor::check_microsandbox(yard, &options) {
-            Ok(()) => Check::ok(
-                NAME,
-                format!(
-                    "microsandbox with image {}: this build can run it",
-                    options.image
-                ),
-            ),
+            Ok(()) => match doctor::check_microsandbox_host() {
+                Ok(()) => Check::ok(NAME, format!(
+                    "microsandbox with image {}: build support and host KVM access checked; VM startup unverified", options.image)),
+                Err(error) => Check::fail(NAME, error,
+                    "fix /dev/kvm availability and permissions, then rerun `by up` (docs/providers.md)"),
+            },
             Err(error) => Check::fail(
                 NAME,
                 error.to_string(),
@@ -961,14 +995,14 @@ pub(super) fn host_loopback(_: &Context) -> Vec<Check> {
 pub(super) fn host_kvm(ctx: &Context) -> Vec<Check> {
     const NAME: &str = "host.kvm";
     let platform = crate::setup_io::HostProbe::new(&ctx.base).platform();
-    vec![match (platform.os.as_str(), platform.kvm) {
-        ("linux", true) => Check::ok(NAME, "/dev/kvm is open to you: microVMs can start"),
-        ("linux", false) => Check::warn(
-            NAME,
-            "no read-write access to /dev/kvm: `--provider microsandbox` cannot start a microVM here",
-            "load the kvm module and add your user to the kvm group; local branches need none",
-        ),
-        (os, _) => Check::ok(NAME, format!("{os}: /dev/kvm does not apply")),
+    vec![if platform.os == "linux" {
+        match doctor::check_microsandbox_host() {
+            Ok(()) => Check::ok(NAME, "/dev/kvm is open for read/write; VM startup unverified"),
+            Err(error) => Check::warn(NAME, error,
+                "fix KVM availability or group permissions and start a new login session; local branches need no KVM"),
+        }
+    } else {
+        Check::ok(NAME, format!("{}: /dev/kvm does not apply", platform.os))
     }]
 }
 

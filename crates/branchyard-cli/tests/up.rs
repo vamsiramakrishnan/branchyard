@@ -42,6 +42,7 @@ impl World {
             home,
             repo,
         };
+        branchyard_testkit::system_tools(&world.base.join("tools")).unwrap();
         world.git(&["init", "-q", "-b", "main"]);
         world.git(&["config", "user.name", "Test"]);
         world.git(&["config", "user.email", "test@localhost"]);
@@ -60,9 +61,10 @@ impl World {
 
     fn path_var(&self) -> String {
         format!(
-            "{}:{}:/usr/bin:/bin",
+            "{}:{}:{}",
             self.bin.display(),
-            self.home.join(".local/bin").display()
+            self.home.join(".local/bin").display(),
+            self.base.join("tools").display()
         )
     }
 
@@ -400,4 +402,58 @@ fn up_refuses_inside_a_harness_and_with_a_remote() {
         "{}",
         text(&out.stderr)
     );
+}
+
+#[test]
+fn remote_antigravity_uses_private_home_secret_sources_without_host_agy() {
+    let world = World::new();
+    world.project_file(
+        r#"
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+atespace = "branchyard"
+template = "agy"
+key = "/missing-bridge-key"
+egress = { mode = "deny" }
+[secrets]
+GOOGLE_API_KEY = "REMOTE_MODEL_KEY"
+"#,
+    );
+    let (plan, code) = world.up(
+        &["--plan"],
+        &[("REMOTE_MODEL_KEY", "test-secret-never-print")],
+    );
+    assert_eq!(code, Some(1)); // Signing key is absent; no network request is needed.
+    let steps = plan["steps"].as_array().unwrap();
+    assert!(!steps
+        .iter()
+        .any(|step| step["name"] == "harness.antigravity"));
+    let login = steps
+        .iter()
+        .find(|step| step["name"] == "login.antigravity")
+        .unwrap();
+    assert_eq!(login["state"], "ready");
+    assert!(login["detail"]
+        .as_str()
+        .unwrap()
+        .contains("model authentication unverified"));
+    let provider = steps
+        .iter()
+        .find(|step| step["name"] == "provider")
+        .unwrap();
+    assert_eq!(provider["state"], "blocked");
+    assert!(!plan.to_string().contains("test-secret-never-print"));
+    let (plan, _) = world.up(&["--plan"], &[("AGY_TOKEN", "host-token-never-print")]);
+    let login = plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"] == "login.antigravity")
+        .unwrap();
+    assert_eq!(login["state"], "needs_person");
+    assert!(!plan.to_string().contains("host-token-never-print"));
 }

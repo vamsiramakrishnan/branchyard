@@ -62,6 +62,9 @@ What exactly is true, and what has run.
 | [Compatibility](compatibility.md) | Which profile drives each harness, with which capabilities, and has it passed live qualification? |
 | [Driver qualification](qualification/README.md) | Which driver profiles passed live protocol qualification, and what did it find? |
 | [Validation](validation.md) | What has actually passed, what failed upstream, and what remains untested? |
+| [Substrate on GKE](substrate-gke.md) | Plan, provision or adopt a dedicated GKE cluster using pinned upstream tools |
+| [Substrate setup](substrate-setup.md) | Save a connection, prepare a template, and verify a disposable actor |
+| [Remote validation, 28 October 2026](remote-validation-2026-10-28.md) | What ran on remote compute, which execution backends passed, and what setup friction did a new developer encounter? |
 | [Live testing](testing-live.md) | What do I run on a machine with real harnesses, credentials and KVM, what should happen, and where do I record it? |
 | [CI gates](ci-gates.md) | Which checks keep dependencies, licenses, docs, features, unused code, Python and test coverage from decaying, what fails them, and how do I run each locally? |
 | [Vendoring](vendoring.md) | Which controls have been copied, why, and how are they adapted and upgraded? |

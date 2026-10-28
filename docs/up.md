@@ -1,19 +1,46 @@
 # Up
 
-Written 18 October 2026.
+Written 28 October 2026.
 
 `by up` brings a repository's configured backends up in one command. It reads `branchyard.toml` and the user file ([configuration](setup.md#configuration)), works out what the repository needs and the state of each piece, does what it can (install a harness the policy allows, start the connector gateway), and lists what only a person can do: a login, a key, a trust decision. `by doctor` ([doctor](doctor.md)) reads and repairs nothing; `by up` is the command that acts.
 
 ```sh
 by up            # install what is allowed, start the gateway, list the rest
-by up --plan     # what it would do and what is missing; changes nothing
+by up --plan     # inspect readiness; apply no install/start actions
 by up --yes      # confirm the installs the [harnesses] policy would ask about
 by up --json     # the steps as JSON, for a script or the Python SDK
 ```
 
+Opening the repository can initialize `.branchyard/` and its store, including with
+`--plan`. The plan applies no install or gateway-start action.
+
 Outside a git repository it stops before any step, with the fix: ``by: not a git repository: /path. Run `git init` here, or cd into one`` (exit 1).
 
 The same operation is the engine's ([`branchyard::up`](../crates/branchyard/src/up.rs)): `Yard::up_plan`, `Yard::up_apply` and `Yard::up` over a `Machine`, and the Python SDK's `Local.up()` ([SDKs](sdk.md#local-mode)). `by up` is one caller of it.
+
+With `[defaults] provider = "substrate"`, `up` and `doctor` authenticate to the
+Control API and inspect the configured bridge template. They create no actor and
+change no cluster resources. TLS, token-file, template and signing-key failures
+include a remedy; after fixing it, rerun `by up --plan`.
+
+Remote harnesses come from the actor image, so `up` does not require their binaries
+on the workstation. It checks whether the selected harness's provisioner can use
+the available `[secrets]` sources in a private home. A host OAuth login does not
+transfer to an actor. Antigravity currently needs a provisionable `GEMINI_API_KEY`
+or `GOOGLE_API_KEY`; `AGY_TOKEN` and a host login do not satisfy this check.
+Credential presence means a source is available, not that a model accepted it.
+Template inspection proves neither bridge execution nor model connectivity.
+
+For Microsandbox, `up` and `doctor` distinguish build support from host readiness.
+On Linux they check read/write access to `/dev/kvm`, with separate remedies for a
+missing device and a login missing the `kvm` group. This does not start or qualify
+a VM. If the runtime reports an overlong Unix socket path, it recommends a short,
+user-owned `MSB_HOME` and initializing the pinned runtime there.
+
+On a terminal, progress reports the readiness and apply phases. Piped output and
+`--json` remain deterministic; JSON never prompts. Before installing a harness or starting the connector
+gateway, apply checks again whether another invocation already completed it. Failed
+steps retain their remedies so rerunning `by up` can finish the remaining work.
 
 ## The steps
 
@@ -27,13 +54,13 @@ Each step has a stable dotted name, a state, what was found in one line and, for
 | `secret.<NAME>` | each `[secrets]` entry and each `[models]` backend's key: its variable set, or its file present, by name | | the variable is unset or the file is missing | |
 | `models` | the model gateway `[models]` describes, which starts with each turn | | | `[models]` does not convert for the gateway |
 | `connectors` | the connector gateway, when `[connectors]` is set or the repository has bundles: the URL `gateway` pins, else the one registered for this repository ([registry](registry.md)) | nothing listens and Anvil is on `PATH` (or at `[connectors] anvil`): started in the background, as `by gateway start` does, and ready only once something answers at its URL | | Anvil is not installed, or the started gateway does not answer (its log says why) |
-| `provider` | `[defaults] provider` when it is not `local`: Microsandbox, as the engine checks it; a recipe, as your trust decision says | | a recipe you have not trusted as it is now (`by recipe trust NAME`) | no `[microsandbox]` or a build without the feature; no `[recipes.NAME]` |
+| `provider` | `[defaults] provider` when it is not `local`: Microsandbox build and KVM access; Substrate authentication and template inspection; recipe configuration and trust | | a recipe you have not trusted as it is now (`by recipe trust NAME`) | missing provider configuration or build support; unavailable KVM; failed Substrate connection or template check |
 | `workspace` | the `[workspace]` scripts, when there are any | | not trusted as they are now (`by workspace trust`) | |
 
 | State | Means |
 |---|---|
 | `ready` | Nothing to do. |
-| `planned` | `up` does this itself: install, start the gateway. `--plan` shows it and does nothing. |
+| `planned` | `up` does this itself: install, start the gateway. `--plan` shows it and applies no actions. |
 | `needs_person` | A decision or a secret only you supply. A row with an `action` is an install the policy makes you confirm: on a terminal `by up` asks, `--yes` answers. |
 | `blocked` | This configuration or machine cannot do it; the row says what to change. |
 

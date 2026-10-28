@@ -86,6 +86,8 @@ enum ConfigState {
 /// The project defaults step.
 #[derive(Clone)]
 struct ConfigStep {
+    /// Harnesses run in remote actors rather than on the host.
+    substrate: bool,
     path: String,
     state: ConfigState,
     /// `harness codex · check "cargo test" · local, no isolation`.
@@ -376,6 +378,7 @@ fn plan_config(
 ) -> Result<ConfigStep, Failure> {
     let path = config::PROJECT_FILE.to_owned();
     let none = |state: ConfigState, summary: String| ConfigStep {
+        substrate: false,
         path: path.clone(),
         state,
         summary,
@@ -396,6 +399,7 @@ fn plan_config(
             .map(|c| c.defaults)
             .unwrap_or_default();
         let mut step = none(ConfigState::Exists, String::new());
+        step.substrate = defaults.provider == Some(config::ProviderKind::Substrate);
         step.harness = defaults.harness;
         step.check = defaults.check;
         return Ok(step);
@@ -451,9 +455,13 @@ fn plan_config(
             Some(check) => format!("check \"{check}\""),
             None => "no check".to_owned(),
         }),
-        Some(match isolated {
-            true => "isolated".to_owned(),
-            false => "local, no isolation".to_owned(),
+        Some(if answer("provider").as_deref() == Some("substrate") {
+            "remote Agent Substrate, private home".to_owned()
+        } else {
+            match isolated {
+                true => "isolated".to_owned(),
+                false => "local, no isolation".to_owned(),
+            }
         }),
     ]
     .into_iter()
@@ -472,6 +480,7 @@ fn plan_config(
         false => ConfigState::Exists,
     };
     Ok(ConfigStep {
+        substrate: answer("provider").as_deref() == Some("substrate"),
         path,
         state,
         summary,
@@ -523,6 +532,35 @@ fn ask_what_cannot_be_detected(facts: &Facts) -> Result<BTreeMap<String, Value>,
     }
     if let Some(q) = find("isolated") {
         ask(&q)?;
+    }
+    if let Some(q) = find("provider") {
+        ask(&q)?;
+    }
+    if raw.get("provider").and_then(Value::as_str) == Some("substrate") {
+        for id in [
+            "harness",
+            "substrate.endpoint",
+            "substrate.router",
+            "substrate.atespace",
+            "substrate.template",
+            "substrate.key",
+            "substrate.api_token_file",
+            "substrate.ca",
+            "substrate.server_name",
+            "substrate.egress",
+            "secrets",
+        ] {
+            let questions = branchyard_setup::questions(Topic::Project, facts, &raw);
+            if let Some(q) = questions.iter().find(|q| q.id == id) {
+                let value = crate::wizard::ask(q).map_err(crate::wizard::cancelled)?;
+                raw.insert(id.into(), value);
+            }
+        }
+        let questions = branchyard_setup::questions(Topic::Project, facts, &raw);
+        for q in questions.iter().filter(|q| q.id.starts_with("secret.")) {
+            let value = crate::wizard::ask(q).map_err(crate::wizard::cancelled)?;
+            raw.insert(q.id.clone(), value);
+        }
     }
     Ok(raw)
 }
@@ -847,7 +885,7 @@ fn run_hook(
 fn finish(report: &mut Report) {
     let facts = &report.facts;
     let mut todo = Vec::new();
-    if facts.installed().next().is_none() {
+    if !report.config.substrate && facts.installed().next().is_none() {
         todo.push(Todo {
             kind: "install",
             harness: None,
@@ -857,8 +895,13 @@ fn finish(report: &mut Report) {
             command: Some("by harnesses install claude-code".into()),
         });
     }
+    if report.config.substrate {
+        todo.push(Todo { kind: "note", harness: report.config.harness.clone(),
+            text: "Remote actors use the configured image and private-home secrets. Run by up to check Control authentication, template readiness and credential sources; model access remains unverified.".into(),
+            command: Some("by up".into()) });
+    }
     let default_harness = default_harness(report);
-    for h in facts.installed() {
+    for h in facts.installed().filter(|_| !report.config.substrate) {
         let label = harness_label(&h.harness);
         let login = format!("by harnesses login {}", h.harness);
         let how = match catalog::harness(&h.harness).and_then(|e| e.login.clone()) {
@@ -1016,6 +1059,9 @@ fn next_command(report: &Report) -> String {
             true => "by setup".into(),
             false => "by setup --yes".into(),
         };
+    }
+    if report.config.substrate {
+        return "by up".into();
     }
     if report.facts.installed().next().is_none() {
         return "by harnesses install claude-code".into();

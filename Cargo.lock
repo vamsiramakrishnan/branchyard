@@ -685,6 +685,7 @@ dependencies = [
  "libc",
  "rcgen",
  "ring",
+ "rustix",
  "rustls",
  "webpki-roots",
 ]
@@ -724,6 +725,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "shlex",
+ "signal-hook",
  "tempfile",
  "toml_edit",
  "unicode-width",
@@ -823,6 +825,7 @@ dependencies = [
  "branchyard-support",
  "branchyard-testkit",
  "microsandbox",
+ "tempfile",
  "tokio",
 ]
 
@@ -959,6 +962,7 @@ dependencies = [
  "prost-types",
  "protoc-bin-vendored",
  "rcgen",
+ "serde",
  "tempfile",
  "tokio",
  "tokio-stream",

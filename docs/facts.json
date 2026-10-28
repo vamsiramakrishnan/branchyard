@@ -65,19 +65,19 @@
     }
   },
   "tests": {
-    "total": 2608,
-    "ignored": 29,
+    "total": 2648,
+    "ignored": 31,
     "by_crate": {
       "branchyard": {
-        "tests": 856,
+        "tests": 862,
         "ignored": 15
       },
       "branchyard-bridge": {
-        "tests": 41,
+        "tests": 43,
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 613,
+        "tests": 626,
         "ignored": 3
       },
       "branchyard-client": {
@@ -85,7 +85,7 @@
         "ignored": 0
       },
       "branchyard-config": {
-        "tests": 21,
+        "tests": 24,
         "ignored": 0
       },
       "branchyard-controls": {
@@ -105,8 +105,8 @@
         "ignored": 0
       },
       "branchyard-microsandbox": {
-        "tests": 24,
-        "ignored": 7
+        "tests": 27,
+        "ignored": 8
       },
       "branchyard-provision": {
         "tests": 162,
@@ -133,12 +133,12 @@
         "ignored": 0
       },
       "branchyard-setup": {
-        "tests": 83,
+        "tests": 84,
         "ignored": 0
       },
       "branchyard-substrate": {
-        "tests": 53,
-        "ignored": 4
+        "tests": 64,
+        "ignored": 5
       },
       "branchyard-support": {
         "tests": 35,
@@ -149,7 +149,7 @@
         "ignored": 0
       },
       "branchyard-testkit": {
-        "tests": 19,
+        "tests": 20,
         "ignored": 0
       },
       "branchyard-wire": {

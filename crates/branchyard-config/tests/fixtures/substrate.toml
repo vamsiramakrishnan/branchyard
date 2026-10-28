@@ -1,0 +1,7 @@
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+template = "agy"
+key = "bridge.key"
+api_token_file = "control.token"
+egress = { mode = "deny" }

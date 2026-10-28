@@ -161,6 +161,59 @@ fn both_hops_run_over_tls_with_a_private_authority_and_a_client_certificate() {
 }
 
 #[test]
+fn a_port_forward_verifies_the_configured_service_name() {
+    let scratch = Scratch::new("forwarded-service");
+    let ca_path = scratch.path("ca.pem");
+    let ca = authority(&ca_path);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec!["api.ate-system.svc".into()]).unwrap();
+    let cert = params.signed_by(&key, &ca).unwrap();
+    let cert_path = scratch.path("server.crt");
+    let key_path = scratch.path("server.key");
+    fs::write(&cert_path, cert.pem()).unwrap();
+    fs::write(&key_path, key.serialize_pem()).unwrap();
+    let fake = FakeCluster::start_tls(
+        ATESPACE,
+        None,
+        &scratch.path("cluster"),
+        FakeTls {
+            ca: ca_path.clone(),
+            cert: cert_path,
+            key: key_path,
+            client_ca: None,
+        },
+    );
+    fake.add_template(pb::ActorTemplate {
+        metadata: Some(pb::ResourceMetadata {
+            atespace: ATESPACE.into(),
+            name: TEMPLATE.into(),
+            ..Default::default()
+        }),
+        snapshot_config: Some(pb::SnapshotConfig {
+            on_commit: pb::SnapshotContentScope::Full as i32,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let mut config = Config::new(fake.endpoint(), ATESPACE, TEMPLATE, fake.router());
+    config.ca = Some(ca_path);
+    assert!(SubstrateProvider::connect(config.clone())
+        .unwrap()
+        .template_capabilities()
+        .is_err());
+    config.server_name = Some("api.ate-system.svc".into());
+    assert!(SubstrateProvider::connect(config.clone())
+        .unwrap()
+        .template_capabilities()
+        .is_ok());
+    config.server_name = Some("another.ate-system.svc".into());
+    assert!(SubstrateProvider::connect(config)
+        .unwrap()
+        .template_capabilities()
+        .is_err());
+}
+
+#[test]
 fn a_wrong_authority_or_a_missing_client_certificate_is_refused() {
     let scratch = Scratch::new("tls-refused");
     let (fake, pki, key) = cluster(&scratch);

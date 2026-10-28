@@ -20,7 +20,7 @@
 //!   `destroy` end the whole guest.
 //! - Declared capabilities are exec plus live disk checkpoints that branch
 //!   into new sandboxes ([`plan::capabilities`]). The SDK's pause and
-//!   resume, live branching (`Sandbox::branch`, `branch_many`) and
+//!   resume, live branching through temporary full checkpoints and
 //!   full-memory snapshots are declared only when opted in
 //!   ([`plan::capabilities_with`], `MicrosandboxProvider::with_live_branch`),
 //!   until the ignored KVM tests qualify them. In-place restore is never
@@ -28,10 +28,12 @@
 //!
 //! What it does not guarantee:
 //!
-//! - Qualification. Nothing here has run on a KVM host in this repository;
-//!   the `#[ignore]` tests in `tests/microsandbox.rs` are the M2 gate, the
-//!   live-branch probe included. See `docs/providers.md` for the setup they
-//!   need and `docs/sandbox-snapshots.md` for what the engine does with them.
+//! - Complete qualification. The dated live KVM run in
+//!   `docs/remote-validation-2026-10-28.md` exercises the pinned runtime,
+//!   including live branches, but the hard memory-ceiling assertion still
+//!   fails. The `#[ignore]` tests in `tests/microsandbox.rs` remain the M2
+//!   gate. See `docs/providers.md` for setup and `docs/sandbox-snapshots.md`
+//!   for the engine's snapshot behavior.
 //! - That a checkpoint includes the workspace. Bound host directories are
 //!   outside the guest's root disk.
 //! - Network policy. The guest gets the runtime's default network; egress
@@ -71,3 +73,70 @@ pub const REBUILD: &str =
 pub const REBUILD_HELP: &str = "rebuild from a checkout with `cargo install --locked --path \
      crates/branchyard-cli --features microsandbox` (it needs Rust 1.94 or newer and \
      libcap-ng-dev to build, and KVM to run a microVM); see docs/modes.md#sandbox";
+
+/// Check that this process can open Linux's KVM device for read and write.
+///
+/// This does not start a VM or qualify the runtime. Other platforms retain the
+/// SDK's platform-specific checks.
+///
+/// # Errors
+///
+/// On Linux, reports a missing or inaccessible `/dev/kvm` with a recovery step.
+pub fn host_readiness() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        kvm_access(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/kvm")
+                .map(|_| ()),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn kvm_access(access: std::io::Result<()>) -> Result<(), String> {
+    access.map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound =>
+            "KVM device /dev/kvm is missing; enable KVM or nested virtualization on this host before running Microsandbox".into(),
+        std::io::ErrorKind::PermissionDenied =>
+            "this process cannot read/write /dev/kvm; grant your user access to the kvm group, start a new login session, then rerun by up".into(),
+        _ => format!("cannot open /dev/kvm for read/write: {error}; fix host KVM access, then rerun by up"),
+    })
+}
+
+#[cfg(any(feature = "microsandbox", test))]
+pub(crate) fn socket_path_help(message: &str) -> Option<String> {
+    message.contains("Unix socket path is too long").then(|| format!(
+        "{message}; set MSB_HOME to a short, user-owned directory (for example /tmp/msb-<uid>), initialize the pinned msb runtime there, then rerun the command"))
+}
+
+#[cfg(test)]
+mod host_tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kvm_refusals_distinguish_a_missing_device_from_login_permissions() {
+        use std::io::{Error, ErrorKind};
+        assert!(super::kvm_access(Ok(())).is_ok());
+        let missing = super::kvm_access(Err(Error::from(ErrorKind::NotFound))).unwrap_err();
+        assert!(missing.contains("nested virtualization"));
+        let denied = super::kvm_access(Err(Error::from(ErrorKind::PermissionDenied))).unwrap_err();
+        assert!(denied.contains("kvm group"));
+        assert!(denied.contains("new login session"));
+        let other = super::kvm_access(Err(Error::from(ErrorKind::Other))).unwrap_err();
+        assert!(other.contains("read/write"));
+    }
+
+    #[test]
+    fn only_the_known_socket_path_failure_gets_msb_home_recovery() {
+        let hint = super::socket_path_help(
+            "Unix socket path is too long: 109 bytes; paths must be shorter than 107 bytes",
+        )
+        .unwrap();
+        assert!(hint.contains("MSB_HOME"));
+        assert!(hint.contains("user-owned"));
+        assert!(super::socket_path_help("runtime could not start").is_none());
+    }
+}

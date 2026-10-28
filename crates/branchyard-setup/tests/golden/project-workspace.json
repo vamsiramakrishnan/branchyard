@@ -52,15 +52,22 @@
     "isolated": false,
     "max_minutes": 30,
     "max_turns": null,
+    "microsandbox.image": null,
     "model": null,
     "models": false,
     "permissions": "ask",
-    "remote": "local",
-    "remote.ca_file": null,
-    "remote.token_file": null,
-    "remote.url": null,
+    "provider": "local",
     "scope": "project",
     "secrets": null,
+    "substrate.api_token_file": null,
+    "substrate.atespace": null,
+    "substrate.ca": null,
+    "substrate.egress": null,
+    "substrate.endpoint": null,
+    "substrate.key": null,
+    "substrate.router": null,
+    "substrate.server_name": null,
+    "substrate.template": null,
     "workspace": true
   },
   "errors": [],
@@ -245,5 +252,5 @@
       ]
     }
   ],
-  "remaining": 1
+  "remaining": 5
 }

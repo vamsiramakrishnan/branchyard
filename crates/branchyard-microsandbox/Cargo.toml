@@ -14,7 +14,7 @@ workspace = true
 # The Microsandbox SDK. Off by default: it compiles several hundred more
 # crates and links against libcap-ng (the workspace's Rust 1.94 builds it). See
 # docs/providers.md.
-microsandbox = ["dep:microsandbox", "dep:tokio"]
+microsandbox = ["dep:microsandbox", "dep:tempfile", "dep:tokio"]
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
@@ -22,6 +22,7 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 # The local runtime and the network type surface only: no cloud backend, no
 # build-time runtime download, no keyring.
 microsandbox = { version = "=0.7.3", default-features = false, features = ["local", "net"], optional = true }
+tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
 
 [dev-dependencies]

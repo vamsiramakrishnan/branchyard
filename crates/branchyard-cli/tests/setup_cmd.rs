@@ -63,6 +63,7 @@ impl Setup {
         for dir in [&home, &fakebin, &tools] {
             fs::create_dir_all(dir).unwrap();
         }
+        branchyard_testkit::system_tools(&tools).unwrap();
         for (program, _) in FAKES {
             let path = fakebin.join(program);
             fs::write(&path, format!("#!/bin/sh\necho \"{program} 9.9.9\"\n")).unwrap();
@@ -75,9 +76,10 @@ impl Setup {
         // The detection script needs the system's tools, so those stay.
         repo.set_env(
             "PATH",
-            &format!("{}:{}:/usr/bin:/bin", fakebin.display(), tools.display()),
+            &format!("{}:{}", fakebin.display(), tools.display()),
         );
         repo.remove_env("XDG_CONFIG_HOME");
+        repo.set_env("BRANCHYARD_HARNESS_DIRS", "");
         // The credential variables setup reports, by name: none of this
         // machine's, so the logins it finds are the test's choice.
         for name in branchyard_setup::probe::KNOWN_VARIABLES {
@@ -711,4 +713,36 @@ fn on_a_terminal_it_asks_once_and_leaves_untrusted_scripts_to_the_person() {
     assert!(s.file(".codex/hooks.json").exists());
     let shown = s.json(&["workspace", "show", "--json"]);
     assert_eq!(shown["trust"], "untrusted", "{shown}");
+}
+
+#[test]
+fn existing_substrate_setup_preserves_config_and_points_at_remote_readiness() {
+    let s = Setup::new();
+    let config = r#"
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+atespace = "branchyard"
+template = "agy"
+key = "/keys/bridge"
+egress = { mode = "deny" }
+"#;
+    fs::write(s.repo.root.join("branchyard.toml"), config).unwrap();
+    let report = s.json(&["setup", "--yes", "--json", "--no-hooks"]);
+    assert_eq!(report["next"], "by up");
+    let todo = report["todo"].as_array().unwrap();
+    assert!(!todo
+        .iter()
+        .any(|item| item["kind"] == "login" || item["kind"] == "install"));
+    assert!(todo.iter().any(|item| item["text"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("model access remains unverified")));
+    assert_eq!(
+        fs::read_to_string(s.repo.root.join("branchyard.toml")).unwrap(),
+        config
+    );
 }

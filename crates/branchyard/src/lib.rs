@@ -1553,9 +1553,9 @@ pub struct SubstrateOptions {
     /// The `Control` API, as `https://host:port`, or `http://host:port` on
     /// loopback or with [`SubstrateOptions::insecure`].
     pub endpoint: String,
-    /// The router URL of an actor's bridge, with `{atespace}` and `{actor}`
-    /// in place of the names: `https://` or `wss://`, or `http://` or
-    /// `ws://` on loopback or with [`SubstrateOptions::insecure`].
+    /// The router base URL. The bridge requests carry the actor routing
+    /// header. Use `https://` or `wss://`, or `http://` or `ws://` on
+    /// loopback or with [`SubstrateOptions::insecure`].
     pub router: String,
     /// The atespace actors are created in. Empty means `default`.
     #[serde(default)]
@@ -1566,6 +1566,15 @@ pub struct SubstrateOptions {
     /// The host's bridge signing key, from `branchyard-bridge keygen`. The
     /// path is stored with the branch; the key is not.
     pub key: PathBuf,
+    /// Path to a Control bearer token, reread for every RPC.
+    #[serde(default)]
+    pub api_token_file: Option<PathBuf>,
+    /// Verified TLS service name for Control, also through a port-forward.
+    #[serde(default)]
+    pub server_name: Option<String>,
+    /// Outgoing connections actors may make through Substrate.
+    #[serde(default)]
+    pub egress: config::SubstrateEgress,
     /// Where the worktree is placed in the actor. Empty means `/workspace`.
     #[serde(default)]
     pub workdir: String,

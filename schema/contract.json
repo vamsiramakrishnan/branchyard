@@ -658,6 +658,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -667,7 +721,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -681,6 +735,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -2129,6 +2206,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -2138,7 +2269,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -2152,6 +2283,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -4568,6 +4722,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -4577,7 +4785,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -4591,6 +4799,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -12941,6 +13172,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -12950,7 +13235,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -12964,6 +13249,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -14032,6 +14340,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -14041,7 +14403,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -14055,6 +14417,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -43178,6 +43563,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -43187,7 +43626,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -43201,6 +43640,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -44973,6 +45435,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -44982,7 +45498,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -44996,6 +45512,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -46787,6 +47326,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -46796,7 +47389,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -46810,6 +47403,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -48597,6 +49213,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -48606,7 +49276,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -48620,6 +49290,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",
@@ -50772,6 +51465,60 @@
           ],
           "description": "A sandboxed harness's image, limits and credentials."
         },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
         "SubstrateOptions": {
           "type": "object",
           "properties": {
@@ -50781,7 +51528,7 @@
             },
             "router": {
               "type": "string",
-              "description": "The router URL of an actor's bridge, with `{atespace}` and `{actor}`\nin place of the names: `https://` or `wss://`, or `http://` or\n`ws://` on loopback or with [`SubstrateOptions::insecure`]."
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
             },
             "atespace": {
               "type": "string",
@@ -50795,6 +51542,29 @@
             "key": {
               "type": "string",
               "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
             },
             "workdir": {
               "type": "string",

@@ -32,6 +32,7 @@ impl Repo {
         }
         fs::create_dir_all(dir.join("app")).unwrap();
         let root = fs::canonicalize(dir.join("app")).unwrap();
+        branchyard_testkit::system_tools(&root.parent().unwrap().join("tools")).unwrap();
         let repo = Repo {
             root,
             printed: Default::default(),
@@ -53,6 +54,8 @@ impl Repo {
             .current_dir(&self.root)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("NO_COLOR", "1")
+            .env("PATH", self.root.parent().unwrap().join("tools"))
+            .env("BRANCHYARD_HARNESS_DIRS", "")
             .env("HOME", self.root.parent().unwrap().join("home"))
             .env(
                 "BRANCHYARD_USER_CONFIG",
@@ -511,7 +514,14 @@ fn project_setup_records_a_login_a_fleet_and_gateway_backends_by_name() {
     let run = |args: &[&str]| {
         let out = repo
             .command()
-            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.display(),
+                    repo.root.parent().unwrap().join("tools").display()
+                ),
+            )
             .env("BRANCHYARD_HARNESS_DIRS", "$HOME/.local/bin")
             .env("GEMINI_API_KEY", "not-a-key")
             .args(args)
@@ -813,7 +823,11 @@ fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
     fs::create_dir_all(home.join(".claude")).unwrap();
     let settings = home.join(".claude/settings.json");
     fs::write(&settings, "{\n    \"model\": \"opus\"\n}\n").unwrap();
-    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        repo.root.parent().unwrap().join("tools").display()
+    );
     let by = |args: &[&str]| {
         let out = repo
             .command()
@@ -1128,7 +1142,11 @@ fn claude_codes_status_line_is_merged_when_absent_and_kept_when_present() {
     let home = base.join("home");
     fs::create_dir_all(home.join(".claude")).unwrap();
     let settings = home.join(".claude/settings.json");
-    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        repo.root.parent().unwrap().join("tools").display()
+    );
     let by = |args: &[&str]| {
         let out = repo
             .command()
@@ -1220,7 +1238,14 @@ fn the_plugin_wizard_asks_which_harnesses_and_writes_what_naming_them_would() {
         .current_dir(&repo.root)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("HOME", base.join("home"))
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                repo.root.parent().unwrap().join("tools").display()
+            ),
+        )
         .env("TERM", "xterm")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

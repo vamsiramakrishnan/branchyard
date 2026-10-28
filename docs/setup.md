@@ -319,7 +319,7 @@ max_minutes = 30
 permissions = "ask"         # or "yes"; unset: ask on a terminal, else deny
 isolated = true            # a private HOME, not a sandbox (docs/modes.md#isolated); --isolated=false for one run
 check = "cargo test"
-provider = "local"          # or "microsandbox", with [microsandbox]
+provider = "local"          # or "microsandbox" / "substrate", with the matching table
 instructions = "docs/agents.md"
 
 [secrets]                   # applied only with a private home (isolated or sandboxed)

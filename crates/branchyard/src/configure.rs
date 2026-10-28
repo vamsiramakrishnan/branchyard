@@ -40,7 +40,7 @@ use crate::services::{Query, Service, KIND_CONNECTOR_GATEWAY};
 use crate::{
     projection, Budget, DistillTrigger, Effort, Error, HarnessJudge, Judge, JudgeSpec,
     KnowledgeSettings, McpServerSpec, Policy, PolicyPreset, Provider, Provisioning, SandboxHost,
-    SandboxKeep, SandboxOptions, SecretSource, TaskOptions, Yard,
+    SandboxKeep, SandboxOptions, SecretSource, SubstrateOptions, TaskOptions, Yard,
 };
 
 /// The hint under a configuration file's error.
@@ -432,6 +432,35 @@ pub fn sandbox_options(config: &Microsandbox) -> SandboxOptions {
     }
 }
 
+/// Convert saved Substrate settings, whose file paths were resolved when loaded.
+pub fn substrate_options(section: &config::Substrate) -> SubstrateOptions {
+    SubstrateOptions {
+        endpoint: section.endpoint.clone(),
+        router: section.router.clone(),
+        atespace: section.atespace.clone(),
+        template: section.template.clone(),
+        key: PathBuf::from(&section.key),
+        api_token_file: section.api_token_file.as_ref().map(PathBuf::from),
+        server_name: section.server_name.clone(),
+        egress: section.egress.clone(),
+        workdir: section.workdir.clone(),
+        home: section.home.clone(),
+        pass_env: section.pass_env.clone(),
+        ca: section.ca.as_ref().map(PathBuf::from),
+        client_cert: section.client_cert.as_ref().map(PathBuf::from),
+        client_key: section.client_key.as_ref().map(PathBuf::from),
+        router_ca: section.router_ca.as_ref().map(PathBuf::from),
+        insecure: section.insecure,
+        keep: match section.keep.as_deref() {
+            Some("pause") => SandboxKeep::Pause,
+            _ => SandboxKeep::Destroy,
+        },
+        snapshots: section.snapshots,
+        max_paused: section.max_paused,
+        max_kept_secs: section.max_kept_minutes.map(|m| u64::from(m) * 60),
+    }
+}
+
 /// The options a new task of a yard configured with `config` starts from
 /// ([`Yard::task`]), before the caller's own: `[defaults]` (harness,
 /// check, budget, isolation, a permission preset) and `[microsandbox]`
@@ -452,6 +481,10 @@ pub fn task_options(config: &ProjectConfig) -> Result<TaskOptions, Error> {
         (Some(ProviderKind::Microsandbox), Some(sandbox)) => {
             Some(Provider::microsandbox(sandbox_options(sandbox)))
         }
+        (Some(ProviderKind::Substrate), _) => config
+            .substrate
+            .as_ref()
+            .map(|section| Provider::Substrate(substrate_options(section))),
         _ => None,
     };
     let policy = match d.permissions {
@@ -635,6 +668,47 @@ mod tests {
 
     fn parsed(text: &str) -> ProjectConfig {
         config::parse(text).unwrap()
+    }
+
+    #[test]
+    fn task_options_take_saved_substrate_connection_and_lifecycle() {
+        let mut config = parsed(
+            r#"
+[defaults]
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+atespace = "yard"
+template = "agy"
+key = "bridge.key"
+api_token_file = "control.token"
+server_name = "ate-api.ate-system.svc"
+egress = { mode = "allow_hosts", hosts = ["api.example.com"] }
+keep = "pause"
+max_kept_minutes = 3
+"#,
+        );
+        config.resolve_paths(Path::new("/repo"), None);
+        let options = task_options(&config).unwrap();
+        let Provider::Substrate(saved) = options.provider.unwrap() else {
+            panic!("saved provider was not applied");
+        };
+        assert_eq!(saved.key, Path::new("/repo/bridge.key"));
+        assert_eq!(
+            saved.api_token_file.as_deref(),
+            Some(Path::new("/repo/control.token"))
+        );
+        assert_eq!(saved.server_name.as_deref(), Some("ate-api.ate-system.svc"));
+        assert_eq!(
+            saved.egress,
+            config::SubstrateEgress::AllowHosts(vec!["api.example.com".into()])
+        );
+        assert_eq!(saved.keep, SandboxKeep::Pause);
+        assert_eq!(saved.max_kept_secs, Some(180));
+        assert_eq!(saved.atespace(), "yard");
+        assert_eq!(saved.workdir(), "/workspace");
+        assert_eq!(saved.home(), "/branchyard/home");
     }
 
     #[test]

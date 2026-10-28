@@ -428,7 +428,7 @@ pub fn kill_reaches_descendants(provider: &dyn SandboxProvider, setup: &Setup) {
 /// left running.
 pub fn teardown_names_survivors(provider: &dyn SandboxProvider, setup: &Setup) {
     let sandbox = Sandbox::ensure(provider, setup, "teardown");
-    let mut process = sandbox.spawn("sleep 300 & echo $!");
+    let mut process = sandbox.spawn("sleep 300 </dev/null >/dev/null 2>&1 & echo $!");
     let (child, _reader) = first_pid(process.as_mut());
     // Teardown names what it finds; a child it finds before the exec is
     // rightly named `sh`, so wait for the exec this check asks it to name.

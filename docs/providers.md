@@ -70,10 +70,10 @@ The SDK's packages are in `Cargo.lock` (about 360 more), so `cargo fetch` downlo
 | `stop` | `stop_with_timeout(30s)`, then `kill()` if that fails |
 | `destroy` | `Sandbox::destroy()` (stop and remove) |
 | `checkpoint` | `Snapshot::builder(label).from_sandbox(name).create()`: a live disk snapshot; with `.full()` a full one, when opted in |
-| `branch` | `Sandbox::restore(label).name(..).cpus(..).memory(..).volume(..).restore()`: a new sandbox from the checkpoint's disk (`.disk_only()`), or its memory too (`.forked()`) from a full one |
+| `branch` | `Sandbox::restore(reference).name(..).cpus(..).memory(..).volume(..).restore()`: a new sandbox from the checkpoint's immutable artifact reference, restoring a disk snapshot directly or memory too (`.forked()`) |
 | `pause`, `resume` | `Sandbox::pause()`/`resume()`; from another process `Sandbox::get(name)`, then `resume()` and `connect()` (or `start_detached()` for a stopped one). Opt-in |
-| `branch_live` | `SandboxHandle::branch(name).volume(guest, \|m\| m.bind(host)).branch()` per child, or one `branch_many(names)` when every child has the same mounts (the SDK gives a batch one set). Opt-in |
-| `release_checkpoint` | `Snapshot::remove(label, true)` |
+| `branch_live` | One full checkpoint in a temporary store, then `Sandbox::restore(reference).forked().volume(guest, \|m\| m.bind(host)).restore()` per child with strict external-file validation. The temporary checkpoint is released after all children are attempted. Opt-in |
+| `release_checkpoint` | `Snapshot::remove(reference, true)`, also succeeding when the checkpoint was already removed |
 | `SandboxSpec::persist` | `create_detached()`; the provider leaves such a sandbox running when it is dropped, and adopts one by name (`Sandbox::get`, `connect`) |
 
 Evidence from the pinned source: the guest agent (`microsandbox-agentd` 0.7.3, `lib/session.rs`) makes every exec a session leader in both pipe and PTY mode and delivers `ExecSignal` to the negative PID, so `kill` reaches the whole group. After the launched process exits the agent drops the exec's registration and ignores further signals, which is why `teardown` runs its own in-guest script against the group ID (the start PID). That script is tested here against a local process group.
@@ -81,6 +81,17 @@ Evidence from the pinned source: the guest agent (`microsandbox-agentd` 0.7.3, `
 Declared capabilities are `exec`, `checkpoint` and `branch` with one guarantee: disk scope, crash consistency, same host. The SDK also has full-memory snapshots (`SnapshotBuilder::full`), copy-on-write restores (`RestoreBuilder::forked`), pause and resume, and live branching (`Sandbox::branch`, `branch_many`); they are declared only when the branch's options opt in with `live_branch = true` (`--live-branch`, `MicrosandboxProvider::with_live_branch`), because [design §6](design.md#6-fast-sandbox-creation) enables them only after qualification: `pause`, `live_branch`, and checkpoint and branch with a full, crash-consistent, same-host guarantee as well. Branching is local only; a live-branched child keeps its source's CPUs and memory and gets no host mount or published port unless rebound, so the engine rebinds each child's worktree, home, git directory and scratch areas. `restore` is not declared because the SDK restores into a new sandbox, not in place. Checkpoints do **not** include bind-mounted host directories, so a branch's workspace is not in its checkpoint: it comes from git.
 
 It does not guarantee: qualification (see below); egress restriction (the guest gets the runtime's default network; it declares no `egress`, and a branch's [network policy](egress.md) is not applied, or refused when required); bounded buffering (the SDK's exec event channel is unbounded while a reader is slow); or who owns files the guest writes into a bound directory. Record the last during qualification.
+
+Live branching uses a full checkpoint because the SDK's direct local branch path
+requires captured host inodes to retain their identity. A child's private worktree
+has different inodes. Strict full restore permits an explicit replacement mapping
+but still rejects changed contents for captured open files. Every child comes from
+one capture, and the source keeps its running or paused state. Each restored child
+owns its disk and memory files, so releasing the temporary checkpoint does not
+remove a child's backing files. The capture uses a separate store to preserve the
+source's saved checkpoints. This path writes full execution state to disk before
+restoring the children. A failed boot's stopped sandbox is removed. A child name
+that already exists is refused without changing the existing sandbox.
 
 ### Using it from the engine
 
@@ -105,7 +116,7 @@ The same settings in `branchyard.toml` (`[defaults] provider = "microsandbox"` a
 | `--sandbox-snapshots N` | `snapshots` | `sandbox_snapshots` |
 | `--max-paused N`, `--max-kept-minutes N`, `--live-branch` | `max_paused`, `max_kept_minutes`, `live_branch` | |
 
-The flags do not take the file's spellings (`--memory-mib` is not a flag). A recipe is chosen with `--provider recipe:NAME` or, in the file, `provider = "recipe"` with `recipe = "NAME"`; the file refuses `provider = "recipe:NAME"` and says so, and Substrate has no file form. Which of these a given `by` can run depends on how it was built: [where harnesses run](modes.md#which-build-reaches-which-rung).
+The flags do not take the file's spellings (`--memory-mib` is not a flag). A recipe is chosen with `--provider recipe:NAME` or, in the file, `provider = "recipe"` with `recipe = "NAME"`; the file refuses `provider = "recipe:NAME"` and says so, and Substrate uses `[defaults] provider = "substrate"` with a saved `[substrate]` connection ([setup](substrate-setup.md)). Which of these a given `by` can run depends on how it was built: [where harnesses run](modes.md#which-build-reaches-which-rung).
 
 Each turn gets a fresh microVM, destroyed when the turn ends, unless the branch keeps it (`--keep-sandbox pause` with `--live-branch`; see [sandbox snapshots](sandbox-snapshots.md)):
 
@@ -168,7 +179,7 @@ It guarantees, beyond the contract:
 
 Pause and resume are `PauseActor` and `ResumeActor`; a checkpoint of a paused actor suspends it first (`SuspendActor` uploads its node-local snapshot) and tags it; `branch` creates a stopped actor from the tag (`CreateActor` with `source_tag`) and `resume` starts it; `release_checkpoint` deletes the tag. There is no live branch. See [sandbox snapshots](sandbox-snapshots.md).
 
-It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree, with file modes. [Scratch areas](storage.md) are not transferred either: a turn on this provider gets no `BRANCHYARD_SCRATCH_*` variable and no mount, whether or not it is authorized for one; implementing the same copy-in/copy-out treatment for them is future work. [Provisioning](provisioning.md) runs before the copy, so the harness's credential and configuration files go in with the home and come back with it. It cannot tell a harness's tool call from an idle harness, and it is tested only against an in-process fake cluster. It does not restrict egress: it declares no `egress`, so a branch's [network policy](egress.md) is not applied, or refused when required. It declares `exec` for a template that runs the bridge, `ingress`, `pause`, and checkpoint and branch with the template's commit scope, crash consistency and portability; not `live_branch`.
+It does not mount: a spec with a mount, an image or limits is refused, because the actor template fixes the image and limits and an actor sees no host paths. The engine instead copies the worktree in and out as git bundles and the private home as a directory tree, with file modes. [Scratch areas](storage.md) are not transferred either: a turn on this provider gets no `BRANCHYARD_SCRATCH_*` variable and no mount, whether or not it is authorized for one; implementing the same copy-in/copy-out treatment for them is future work. [Provisioning](provisioning.md) runs before the copy, so the harness's credential and configuration files go in with the home and come back with it. It cannot tell a harness's tool call from an idle harness. Hermetic fixtures and dated real-runtime results are separate evidence; see the [remote validation record](remote-validation-2026-10-28.md). Saved `[substrate]` egress explicitly selects deny, host allowlist or unrestricted access and is reconciled for each actor and snapshot child. Generic sandbox `egress` remains undeclared: a branch's [network policy](egress.md) and credential-injection rules are not translated into that cluster policy and are refused when confinement is required. It declares `exec` for a template that runs the bridge, `ingress`, `pause`, and checkpoint and branch with the template's commit scope, crash consistency and portability; not `live_branch`.
 
 `TaskOptions::provider` selects it with `Provider::Substrate(SubstrateOptions)`; the CLI flags are `--provider substrate --substrate-endpoint URL --substrate-router URL --substrate-template NAME --substrate-key FILE [--substrate-atespace NAME] [--substrate-workdir PATH] [--substrate-home PATH] [--substrate-ca FILE] [--substrate-client-cert FILE --substrate-client-key FILE] [--substrate-router-ca FILE] [--substrate-insecure] [--pass-env NAME,...]` on `by run`, `by fan` and `by fork`. [Agent Substrate](substrate.md) documents the bridge protocol, the credentials, the transfer, the template and what remains unqualified; [live testing](testing-live.md#6-agent-substrate-cluster) says how to run it on a kind cluster.
 
@@ -218,3 +229,8 @@ Everything a provider names is the server's:
 - `--secret` names are resolved from the server's own table (`by serve --secret NAME[=VAR|=@FILE]`), never from a source the caller names; see [provisioning](provisioning.md#through-a-server).
 
 `by --remote run --provider substrate` is tested against the fake cluster with a spawned `by serve`; the refusal without `--allow-provider` is tested too.
+
+Microsandbox removal uses forced termination before deleting the runtime state,
+including when the guest is paused. A paused guest cannot answer a graceful
+shutdown request. Checkpoints retain the immutable artifact reference returned
+by the runtime, so later captures do not change what a saved checkpoint names.

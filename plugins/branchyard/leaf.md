@@ -42,3 +42,16 @@ working around it.
 The same operations are the `branchyard` MCP server's tools, and the
 `branchyard` Python module's functions. Anything else, such as another
 branch's work, is refused with the reason.
+
+## Substrate setup and readiness
+
+`by substrate setup --image IMAGE --storage URI --plan` previews the saved
+Substrate template setup; `--yes` applies it. `by substrate check --smoke
+--harness agy` verifies bridge execution, file transfer and cleanup without a
+model call. These are operator commands, run outside a harness session.
+`by up` and `by doctor` check the saved connection and remote credential sources.
+`by run` accepts `--substrate-api-token-file PATH` for Control authentication and verified
+forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
+`--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
+`--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
+connection flags. See the Substrate setup documentation for image and pool prerequisites.

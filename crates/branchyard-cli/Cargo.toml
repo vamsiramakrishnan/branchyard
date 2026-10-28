@@ -66,6 +66,10 @@ sha2 = { workspace = true }
 # `by recipe`: environment recipes and their sandbox provider.
 branchyard-recipe = { path = "../branchyard-recipe" }
 branchyard-sandbox = { path = "../branchyard-sandbox" }
+branchyard-substrate = { path = "../branchyard-substrate" }
+branchyard-bridge = { path = "../branchyard-bridge" }
+# Scoped SIGINT/SIGTERM cleanup for the disposable Substrate smoke actor.
+signal-hook = "0.3.18"
 # `by sync`: tasks replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 

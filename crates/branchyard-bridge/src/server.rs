@@ -469,35 +469,91 @@ fn zombie_children() -> Vec<u32> {
     zombies
 }
 
-/// The file-system identity of the calling thread, switched to another
-/// user until dropped (Linux: `setfsuid`, which is per thread).
+/// A filesystem identity confined to this connection's synchronous worker.
+/// The marker prevents restoring credentials on a different thread.
 struct AsUser {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    previous: Option<(u32, u32)>,
+    #[cfg(target_os = "linux")]
+    previous: Option<PreviousIdentity>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(target_os = "linux")]
+enum PreviousIdentity {
+    Filesystem {
+        uid: u32,
+        gid: u32,
+    },
+    Effective {
+        uid: rustix::thread::Uid,
+        gid: rustix::thread::Gid,
+        groups: Vec<rustix::thread::Gid>,
+        capabilities: rustix::thread::CapabilitySets,
+    },
 }
 
 impl AsUser {
     fn enter(user: Option<(u32, u32)>) -> io::Result<AsUser> {
         let Some((uid, gid)) = user else {
-            return Ok(AsUser { previous: None });
+            return Ok(AsUser {
+                #[cfg(target_os = "linux")]
+                previous: None,
+                _thread: std::marker::PhantomData,
+            });
         };
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: plain syscalls; they return the previous value.
-            let old_gid = unsafe { libc::setfsgid(gid) } as u32;
-            let old_uid = unsafe { libc::setfsuid(uid) } as u32;
-            // Each returns the previous identity whether or not it changed;
-            // a second call reports whether the first took effect.
-            let now_uid = unsafe { libc::setfsuid(uid) } as u32;
-            let now_gid = unsafe { libc::setfsgid(gid) } as u32;
-            let guard = AsUser {
-                previous: Some((old_uid, old_gid)),
-            };
-            if now_uid != uid || now_gid != gid {
+            if uid == u32::MAX || gid == u32::MAX {
                 return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!("the bridge cannot act as {uid}:{gid}"),
+                    io::ErrorKind::InvalidInput,
+                    "UID and GID must not be -1",
                 ));
+            }
+            let old_uid = filesystem_id(libc::setfsuid)?;
+            let old_gid = filesystem_id(libc::setfsgid)?;
+            let previous = match (old_uid, old_gid) {
+                (Some(uid), Some(gid)) => PreviousIdentity::Filesystem { uid, gid },
+                _ => PreviousIdentity::Effective {
+                    uid: rustix::process::geteuid(),
+                    gid: rustix::process::getegid(),
+                    groups: rustix::process::getgroups()?,
+                    capabilities: rustix::thread::capabilities(None)?,
+                },
+            };
+            let guard = AsUser {
+                previous: Some(previous),
+                _thread: std::marker::PhantomData,
+            };
+            match guard.previous.as_ref() {
+                Some(PreviousIdentity::Filesystem { .. }) => set_filesystem_ids(uid, gid)?,
+                Some(PreviousIdentity::Effective {
+                    groups,
+                    capabilities,
+                    ..
+                }) => {
+                    // Older gVisor returns ENOSYS for fsuid/fsgid. Rustix uses
+                    // the kernel's per-thread calls, never libc's NPTL wrappers.
+                    // Keep real/saved IDs: a harness must not gain permission
+                    // to signal a bridge thread while its effective UID changes.
+                    if !groups.is_empty() {
+                        rustix::thread::set_thread_groups(&[])?;
+                    }
+                    let gid = rustix::thread::Gid::from_raw(gid);
+                    let uid = rustix::thread::Uid::from_raw(uid);
+                    rustix::thread::set_thread_res_gid(None, gid, None)?;
+                    rustix::thread::set_thread_res_uid(None, uid, None)?;
+                    // Also enforce this with SECBIT_NO_SETUID_FIXUP enabled.
+                    rustix::thread::set_capabilities(
+                        None,
+                        rustix::thread::CapabilitySets {
+                            effective: rustix::thread::CapabilitySet::empty(),
+                            ..*capabilities
+                        },
+                    )?;
+                    rustix::process::set_dumpable_behavior(
+                        rustix::process::DumpableBehavior::NotDumpable,
+                    )?;
+                }
+                None => {}
             }
             Ok(guard)
         }
@@ -510,18 +566,78 @@ impl AsUser {
             ))
         }
     }
+
+    fn run<T>(mut self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let result = operation();
+        self.restore()?;
+        result
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        match self.previous.take() {
+            Some(PreviousIdentity::Filesystem { uid, gid }) => set_filesystem_ids(uid, gid)?,
+            Some(PreviousIdentity::Effective {
+                uid,
+                gid,
+                groups,
+                capabilities,
+            }) => {
+                // Restore exactly the captured sets, not every permitted bit.
+                // This also works when securebits disables automatic UID fixups.
+                rustix::thread::set_capabilities(None, capabilities)?;
+                rustix::thread::set_thread_res_uid(None, uid, None)?;
+                // Returning to UID 0 can copy permitted bits into effective.
+                rustix::thread::set_capabilities(None, capabilities)?;
+                rustix::thread::set_thread_res_gid(None, gid, None)?;
+                if !groups.is_empty() {
+                    rustix::thread::set_thread_groups(&groups)?;
+                }
+                rustix::process::set_dumpable_behavior(
+                    rustix::process::DumpableBehavior::NotDumpable,
+                )?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_id(change: unsafe extern "C" fn(u32) -> i32) -> io::Result<Option<u32>> {
+    // SAFETY: -1 only queries the filesystem identity; it cannot change it.
+    let previous = unsafe { change(u32::MAX) };
+    if previous != -1 {
+        return Ok(Some(previous as u32));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOSYS) {
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_filesystem_ids(uid: u32, gid: u32) -> io::Result<()> {
+    // SAFETY: these calls affect only this worker. Their return value is the
+    // previous ID, even on failure, so query again to verify the transition.
+    unsafe {
+        libc::setfsgid(gid);
+        libc::setfsuid(uid);
+    }
+    if filesystem_id(libc::setfsuid)? != Some(uid) || filesystem_id(libc::setfsgid)? != Some(gid) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the bridge cannot act as {uid}:{gid}"),
+        ));
+    }
+    Ok(())
 }
 
 impl Drop for AsUser {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Some((uid, gid)) = self.previous {
-            // SAFETY: plain syscalls restoring the thread's identity.
-            unsafe {
-                libc::setfsuid(uid);
-                libc::setfsgid(gid);
-            }
-        }
+        branchyard_support::best_effort("restore the bridge worker's identity", self.restore());
     }
 }
 
@@ -717,18 +833,22 @@ fn connection(shared: &Arc<Shared>, mut stream: Stream) -> io::Result<()> {
             return exec(shared, claims.seq, reader, writer, argv, cwd, env)
         }
         Frame::PutFile { path, mode } => as_user()
-            .and_then(|_user| put_file(&path, mode, &mut reader))
+            .and_then(|user| user.run(|| put_file(&path, mode, &mut reader)))
             .map(|()| Frame::Done),
-        Frame::GetFile { path } => as_user().and_then(|_user| get_file(&path, &send)),
-        Frame::PutTree { path } => as_user().and_then(|_user| {
-            absolute(&path).and_then(|root| {
-                tree::receive(&root, &mut || next_frame(&mut reader)).map(|()| Frame::Done)
+        Frame::GetFile { path } => as_user().and_then(|user| user.run(|| get_file(&path, &send))),
+        Frame::PutTree { path } => as_user().and_then(|user| {
+            user.run(|| {
+                absolute(&path).and_then(|root| {
+                    tree::receive(&root, &mut || next_frame(&mut reader)).map(|()| Frame::Done)
+                })
             })
         }),
-        Frame::GetTree { path } => as_user().and_then(|_user| {
-            absolute(&path)
-                .and_then(|root| tree::send(&root, &mut |frame| send(frame)))
-                .map(|()| Frame::End)
+        Frame::GetTree { path } => as_user().and_then(|user| {
+            user.run(|| {
+                absolute(&path)
+                    .and_then(|root| tree::send(&root, &mut |frame| send(frame)))
+                    .map(|()| Frame::End)
+            })
         }),
         Frame::EndAttempt => shared.end(claims.seq).map(Frame::Survivors),
         Frame::Shutdown => Ok(Frame::Survivors(shared.teardown(|_| true))),
@@ -1071,6 +1191,189 @@ fn group_members(pgid: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    fn without_filesystem_ids() {
+        // Install only on this disposable worker. Other test threads keep
+        // their original seccomp policy and credentials.
+        let mut filter = [
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_setfsuid as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_setfsgid as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: filter storage remains live through prctl; it applies only
+        // to this worker, which does not outlive the test.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0
+            );
+        }
+        assert_eq!(filesystem_id(libc::setfsuid).unwrap(), None);
+        assert_eq!(filesystem_id(libc::setfsgid).unwrap(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn real_effective_saved_ids() -> ((u32, u32, u32), (u32, u32, u32)) {
+        let (mut ru, mut eu, mut su, mut rg, mut eg, mut sg) = (0, 0, 0, 0, 0, 0);
+        // SAFETY: getters write only to these valid local out-parameters.
+        unsafe {
+            assert_eq!(libc::getresuid(&mut ru, &mut eu, &mut su), 0);
+            assert_eq!(libc::getresgid(&mut rg, &mut eg, &mut sg), 0);
+        }
+        ((ru, eu, su), (rg, eg, sg))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_identity_falls_back_without_changing_other_threads() {
+        use rustix::thread::{capabilities, set_capabilities, CapabilitySet};
+        use std::os::unix::fs::MetadataExt;
+        if !rustix::process::geteuid().is_root() {
+            eprintln!("skipped: run this test binary as root to verify credential isolation");
+            return;
+        }
+        let dir = branchyard_testkit::Scratch::new("bridge-fsuid-fallback");
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let work = dir.join("work");
+        fs::create_dir(&work).unwrap();
+        fs::set_permissions(&work, fs::Permissions::from_mode(0o777)).unwrap();
+        let secret = dir.join("root-only");
+        fs::write(&secret, "protected").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        let group_secret = dir.join("root-group");
+        fs::write(&group_secret, "protected group").unwrap();
+        fs::set_permissions(&group_secret, fs::Permissions::from_mode(0o640)).unwrap();
+        let before_ids = real_effective_saved_ids();
+        let before_caps = capabilities(None).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_work = work.clone();
+        let worker_secret = secret.clone();
+        let worker = thread::spawn(move || {
+            without_filesystem_ids();
+            let ids = real_effective_saved_ids();
+            let groups = rustix::process::getgroups().unwrap();
+            let mut caps = capabilities(None).unwrap();
+            caps.effective.remove(CapabilitySet::CHOWN);
+            set_capabilities(None, caps).unwrap();
+            let user = AsUser::enter(Some((65534, 65534))).unwrap();
+            assert_eq!(
+                real_effective_saved_ids(),
+                ((ids.0 .0, 65534, ids.0 .2), (ids.1 .0, 65534, ids.1 .2))
+            );
+            assert!(capabilities(None).unwrap().effective.is_empty());
+            assert!(rustix::process::getgroups().unwrap().is_empty());
+            assert_eq!(
+                rustix::process::dumpable_behavior().unwrap(),
+                rustix::process::DumpableBehavior::NotDumpable
+            );
+            let owned = worker_work.join("owned");
+            fs::write(&owned, "unprivileged").unwrap();
+            let metadata = fs::metadata(&owned).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), (65534, 65534));
+            for path in [&worker_secret, &group_secret] {
+                assert_eq!(
+                    fs::read(path).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+                assert_eq!(
+                    fs::write(path, "overwrite").unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied
+                );
+            }
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            user.run(|| Ok(())).unwrap();
+            assert_eq!(real_effective_saved_ids(), ids);
+            assert_eq!(capabilities(None).unwrap(), caps);
+            assert_eq!(rustix::process::getgroups().unwrap(), groups);
+            assert_eq!(
+                rustix::process::dumpable_behavior().unwrap(),
+                rustix::process::DumpableBehavior::NotDumpable
+            );
+            // The next request can switch again with its original permitted set.
+            AsUser::enter(Some((65534, 65534)))
+                .unwrap()
+                .run(|| Ok(()))
+                .unwrap();
+            assert_eq!(capabilities(None).unwrap(), caps);
+        });
+        ready_rx.recv().unwrap();
+        assert_eq!(real_effective_saved_ids(), before_ids);
+        assert_eq!(capabilities(None).unwrap(), before_caps);
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "protected");
+        let sibling = thread::spawn(move || {
+            assert_eq!(real_effective_saved_ids(), before_ids);
+            fs::write(work.join("root-sibling"), "still root").unwrap();
+            assert_eq!(fs::metadata(work.join("root-sibling")).unwrap().uid(), 0);
+        });
+        sibling.join().unwrap();
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_fallback_rolls_back_a_failed_uid_change() {
+        use rustix::thread::{capabilities, set_capabilities, CapabilitySet};
+        if !rustix::process::geteuid().is_root() {
+            eprintln!("skipped: run this test binary as root to verify credential rollback");
+            return;
+        }
+        thread::spawn(|| {
+            without_filesystem_ids();
+            let ids = real_effective_saved_ids();
+            let groups = rustix::process::getgroups().unwrap();
+            let mut caps = capabilities(None).unwrap();
+            caps.effective.remove(CapabilitySet::SETUID);
+            set_capabilities(None, caps).unwrap();
+            assert!(AsUser::enter(Some((65534, 65534))).is_err());
+            assert_eq!(real_effective_saved_ids(), ids);
+            assert_eq!(capabilities(None).unwrap(), caps);
+            assert_eq!(rustix::process::getgroups().unwrap(), groups);
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn a_pump_relays_chunks_then_the_closing_frame() {

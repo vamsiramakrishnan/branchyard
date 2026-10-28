@@ -29,3 +29,56 @@ pub fn hermetic(command: &mut Command) -> &mut Command {
     let tmp = std::fs::canonicalize(&tmp).unwrap_or(tmp);
     command.env("GIT_CEILING_DIRECTORIES", OsStr::new(&tmp))
 }
+
+/// Populate a Unix test `PATH` with system utilities and no real agent harnesses.
+///
+/// Put a directory containing fake harnesses before this directory. Keeping
+/// `/usr/bin` off the resulting `PATH` prevents an installed harness from
+/// unexpectedly being detected or launched by a hermetic test.
+///
+/// # Errors
+///
+/// Returns filesystem errors while creating the directory or utility links.
+#[cfg(unix)]
+pub fn system_tools(directory: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    for tool in [
+        "sh", "git", "python3", "mktemp", "mkdir", "rm", "hostname", "uname", "sleep", "tr",
+        "grep", "head", "cut", "sed", "cat", "dirname", "readlink", "env", "id", "stat", "chmod",
+        "cp", "mv", "ln", "touch", "find", "sort",
+    ] {
+        let source = ["/usr/bin", "/bin"]
+            .into_iter()
+            .map(|dir| std::path::Path::new(dir).join(tool))
+            .find(|path| path.is_file());
+        if let Some(source) = source {
+            std::os::unix::fs::symlink(source, directory.join(tool))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn utility_path_contains_shell_tools_without_real_harnesses() {
+        let scratch = crate::Scratch::new("system-tools");
+        let tools = scratch.path().join("bin");
+        super::system_tools(&tools).unwrap();
+        assert!(tools.join("sh").is_file());
+        assert!(tools.join("git").is_file());
+        for harness in [
+            "agy",
+            "antigravity",
+            "gemini",
+            "claude",
+            "codex",
+            "opencode",
+        ] {
+            assert!(
+                !tools.join(harness).exists(),
+                "{harness} must be a fake supplied by the test"
+            );
+        }
+    }
+}

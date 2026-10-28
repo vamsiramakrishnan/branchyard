@@ -32,7 +32,7 @@ The engine chooses by capability, never by a provider's name: `Capabilities::has
 | | Microsandbox (`live_branch = true`) | Agent Substrate | Fake (tests) |
 |---|---|---|---|
 | Pause, resume | `Sandbox::pause()`/`resume()`, or through `Sandbox::get(name)` and `connect()` from another process | `PauseActor` (the attempt is ended first); `ResumeActor`, a new attempt credential and the bridge's health check | a state change; host processes are not stopped |
-| Live branch | `SandboxHandle::branch(name).volume(..).branch()` per child, or one `branch_many(names)` when every child has the same mounts (the SDK applies one set of mounts to a whole batch). Local only; a child keeps its source's CPUs and memory, so an image or limits in a child's spec are refused | not declared: Substrate has no fork of a running actor | copies the root filesystem |
+| Live branch | One temporary full checkpoint, then a strict forked restore per child with its own mounts. Local only; a child keeps its source's CPUs and memory, so an image or limits in a child's spec are refused | not declared: Substrate has no fork of a running actor | copies the root filesystem |
 | Snapshot of a kept sandbox | a live branch of the paused sandbox into a paused child named `<sandbox>-t<N>` | `SuspendActor` (a paused actor's node-local snapshot is uploaded), then `CreateTag` | a paused child |
 | New sandbox from a snapshot | `branch_live` of that paused child | `CreateActor` with `source_tag`, created stopped, then `ResumeActor`: not live | `branch_live` |
 | Full checkpoints | `Snapshot::builder(..).from_sandbox(..).full().create()`, branched with `Sandbox::restore(..).forked()` | the template's commit scope | declared |
@@ -148,7 +148,7 @@ Each branch's turn records `sandbox: branched from the fan's prepared sandbox, s
 | Where | What |
 |---|---|
 | [`branchyard-sandbox`](../crates/branchyard-sandbox/src/provider.rs) | the optional operations, `Feature`, `SandboxSpec::persist`, `SandboxState::Paused`; [`fake.rs`](../crates/branchyard-sandbox/src/fake.rs) |
-| [`branchyard-microsandbox`](../crates/branchyard-microsandbox/src/provider.rs), [`plan.rs`](../crates/branchyard-microsandbox/src/plan.rs) | the SDK mapping, `capabilities_with(live_branch)`, `live_child`, `one_batch` |
+| [`branchyard-microsandbox`](../crates/branchyard-microsandbox/src/provider.rs), [`plan.rs`](../crates/branchyard-microsandbox/src/plan.rs) | the SDK mapping, `capabilities_with(live_branch)`, `live_child`, temporary full capture and strict forked restore |
 | [`branchyard-substrate`](../crates/branchyard-substrate/src/provider.rs) | `PauseActor`, `ResumeActor`, suspend-then-tag, `DeleteTag`; `transfer::clear_for_push` |
 | [`snapshots.rs`](../crates/branchyard/src/snapshots.rs) | keep, park, evict, snapshot, prune, seeds, acquire, inheritance |
 | [`placement.rs`](../crates/branchyard/src/placement.rs), [`workspace.rs`](../crates/branchyard/src/workspace.rs), [`run.rs`](../crates/branchyard/src/run.rs) | the turn's sandbox, setup in it, the fan |
@@ -178,4 +178,4 @@ Not done:
 - A fork of a *running* sandbox. Snapshots are taken at the end of a turn, with no harness running; a fork of a branch mid-turn uses its last checkpoint's snapshot.
 - Setup outputs are copied from the source's worktree as it is when the child starts, not as of the checkpoint; ports a setup published are not rebound.
 - Substrate fans run setup per branch (no live branch), and a Substrate teardown gets a fresh actor when none is kept.
-- Microsandbox `branch_many` cannot give each child its own mounts, so children with different worktrees are branched one by one from the paused source.
+- Microsandbox captures full state once, then restores each child's private mounts with strict file validation. The temporary checkpoint is released after the batch.

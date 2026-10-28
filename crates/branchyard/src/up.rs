@@ -290,6 +290,10 @@ pub trait Machine {
     /// Start the yard's connector gateway in the background (as `by
     /// gateway start` does); the URL it listens at.
     fn start_gateway(&mut self, yard: &Yard, config: &Connectors) -> Result<String, String>;
+    /// Whether this host grants the runtime its required KVM access.
+    fn microsandbox_host(&self) -> Result<(), String> {
+        Err("this machine has not checked host KVM access".into())
+    }
     /// Whether recipe `name` may run here.
     fn recipe(&self, yard: &Yard, name: &str) -> Readiness;
     /// Whether the `[workspace]` scripts may run here.
@@ -416,6 +420,10 @@ impl Machine for LocalMachine {
         Ok(url)
     }
 
+    fn microsandbox_host(&self) -> Result<(), String> {
+        branchyard_microsandbox::host_readiness()
+    }
+
     fn recipe(&self, _yard: &Yard, _name: &str) -> Readiness {
         Readiness::Unknown
     }
@@ -528,23 +536,27 @@ fn plan(
         "store",
         format!("{}", root.join(".branchyard").display()),
     )];
-    match machine.inventory() {
-        Ok(mut inventory) => {
-            // A key `by harnesses login ID --api-key` stored counts.
-            inventory::count_stored_keys(
-                &mut inventory,
-                &inventory::stored_keys(root, &config.secrets),
-            );
-            let policy = install_policy(config, options);
-            for harness in needed_harnesses(config) {
-                steps.extend(harness_steps(&harness, &inventory, &policy, options));
+    if config.defaults.provider == Some(ProviderKind::Substrate) {
+        steps.extend(remote_harness_readiness(root, config, machine));
+    } else {
+        match machine.inventory() {
+            Ok(mut inventory) => {
+                // A key `by harnesses login ID --api-key` stored counts.
+                inventory::count_stored_keys(
+                    &mut inventory,
+                    &inventory::stored_keys(root, &config.secrets),
+                );
+                let policy = install_policy(config, options);
+                for harness in needed_harnesses(config) {
+                    steps.extend(harness_steps(&harness, &inventory, &policy, options));
+                }
             }
+            Err(why) => steps.push(Step::blocked(
+                "harnesses",
+                format!("could not detect the harnesses on this machine: {why}"),
+                "run `by harnesses --refresh` and fix what it reports",
+            )),
         }
-        Err(why) => steps.push(Step::blocked(
-            "harnesses",
-            format!("could not detect the harnesses on this machine: {why}"),
-            "run `by harnesses --refresh` and fix what it reports",
-        )),
     }
     steps.extend(secret_steps(root, config, machine));
     if let Some(step) = models_step(config) {
@@ -560,6 +572,44 @@ fn plan(
         steps.push(step);
     }
     Ok(Plan { steps })
+}
+
+/// Inspect credentials that can actually be provisioned into remote harness homes.
+///
+/// Host executable and OAuth inventory do not establish remote readiness. Secret
+/// sources are checked by name and existence only; no model request is made.
+pub fn remote_harness_readiness(
+    root: &Path,
+    config: &ProjectConfig,
+    machine: &dyn Machine,
+) -> Vec<Step> {
+    needed_harnesses(config).into_iter().map(|harness| {
+        let name = format!("login.{harness}");
+        let Some(profile) = branchyard_harness::profiles::PROFILES.iter()
+            .find(|profile| profile.harness == harness) else {
+            return Step::blocked(name, "no remote harness profile", "choose a supported harness with `by harnesses --all`");
+        };
+        let mut context = branchyard_provision::Context::new(
+            &harness, profile.protocol, "/branchyard/home", "/workspace");
+        context.private_home = true;
+        context.sandbox = true;
+        context.secrets = config.secrets.keys().filter(|secret| {
+            match configure::key_source(root, &config.secrets, secret) {
+                KeySource::Env(var) => machine.var_set(&var),
+                KeySource::File(path) => machine.file_present(&path),
+            }
+        }).map(|secret| branchyard_provision::Secret::new(secret, "readiness-placeholder")).collect();
+        match branchyard_provision::plan(&context) {
+            Ok(plan) if plan.auth.is_some() => Step::ready(name,
+                format!("{} credential source available for remote private home; model authentication unverified",
+                    plan.auth.as_deref().unwrap_or_default())),
+            Ok(_) => Step::needs_person(name,
+                "no supported credential source for the remote private home; host login does not transfer",
+                format!("configure a supported {harness} credential under [secrets] and export its variable or create its file (docs/provisioning.md)"), None),
+            Err(error) => Step::blocked(name, error.to_string(),
+                "fix the remote harness provisioning configuration (docs/provisioning.md)"),
+        }
+    }).collect()
 }
 
 /// `harness.<id>` and, when it is installed, `login.<id>`.
@@ -767,13 +817,12 @@ fn provider_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) -> 
             Some(sandbox) => {
                 let options = configure::sandbox_options(sandbox);
                 match doctor::check_microsandbox(yard, &options) {
-                    Ok(()) => Step::ready(
-                        NAME,
-                        format!(
-                            "microsandbox with image {}: this build can run it",
-                            options.image
-                        ),
-                    ),
+                    Ok(()) => match machine.microsandbox_host() {
+                        Ok(()) => Step::ready(NAME, format!(
+                            "microsandbox with image {}: build support and host KVM access checked; VM startup unverified", options.image)),
+                        Err(error) => Step::blocked(NAME, error,
+                            "fix /dev/kvm availability and permissions, then rerun `by up` (docs/providers.md)"),
+                    },
                     Err(error) => Step::blocked(
                         NAME,
                         error.to_string(),
@@ -786,6 +835,7 @@ fn provider_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) -> 
                 }
             }
         }),
+        Some(ProviderKind::Substrate) => Some(substrate_readiness(config)),
         Some(ProviderKind::Recipe) => Some(match config.defaults.recipe.as_deref() {
             None => Step::blocked(
                 NAME,
@@ -842,6 +892,29 @@ fn workspace_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) ->
     })
 }
 
+/// Authenticate to the configured Control API and inspect its bridge template.
+///
+/// This read-only check creates no actor and proves neither execution nor model access.
+pub fn substrate_readiness(config: &ProjectConfig) -> Step {
+    let Some(section) = config.substrate.as_ref() else {
+        return Step::blocked(
+            "provider",
+            "Substrate selected without [substrate] configuration",
+            "configure [substrate] endpoint, router, template and key (docs/substrate.md)",
+        );
+    };
+    let options = configure::substrate_options(section);
+    match options.connection_config().map_err(|error| error.to_string())
+        .and_then(|connection| branchyard_substrate::SubstrateProvider::connect(connection)
+            .map_err(|error| error.to_string()))
+        .and_then(|provider| provider.inspect_template().map_err(|error| error.to_string())) {
+        Ok(template) => Step::ready("provider", format!(
+            "Substrate Control authenticated; template {} inspected; actor execution and model access unverified", template.name)),
+        Err(error) => Step::blocked("provider", error,
+            "check [substrate] endpoint, api_token_file, TLS server_name/CA and template; rerun `by up --plan` (docs/substrate.md)"),
+    }
+}
+
 // Applying.
 
 fn apply(
@@ -860,6 +933,29 @@ fn apply(
         };
         match action {
             Action::Install { plan: install } => {
+                if let Ok(mut current) = machine.inventory() {
+                    inventory::count_stored_keys(
+                        &mut current,
+                        &inventory::stored_keys(yard.root(), &config.secrets),
+                    );
+                    if let Some(found) = current.get(&install.harness).filter(|found| {
+                        install
+                            .pinned
+                            .as_ref()
+                            .is_none_or(|pin| found.version.as_ref() == Some(pin))
+                    }) {
+                        *step = Step::ready(
+                            &step.name,
+                            format!(
+                                "already installed since planning: {} ({})",
+                                found.path,
+                                found.version.as_deref().unwrap_or("version unknown")
+                            ),
+                        );
+                        logins.push((index + 1, login_step(&install.harness, found)));
+                        continue;
+                    }
+                }
                 let installed = {
                     let cell = RefCell::new(&mut *machine);
                     inventory::install(
@@ -916,6 +1012,13 @@ fn apply(
                 }
             }
             Action::StartGateway => {
+                // Another invocation may have started it since this plan was printed.
+                if let Some(current) = connectors_step(yard, &config.connectors, machine)? {
+                    if current.state == State::Ready {
+                        *step = current;
+                        continue;
+                    }
+                }
                 let name = step.name.clone();
                 *step = match machine.start_gateway(yard, &config.connectors) {
                     // Started is not up: the step is ready only once
@@ -996,6 +1099,10 @@ mod tests {
     }
 
     impl Machine for Fake {
+        fn microsandbox_host(&self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn inventory(&mut self) -> Result<Inventory, String> {
             self.inventory.clone()
         }
@@ -1112,6 +1219,52 @@ mod tests {
             .iter()
             .find(|s| s.name == name)
             .unwrap_or_else(|| panic!("no step {name} in {:?}", names(plan)))
+    }
+
+    #[test]
+    fn remote_auth_requires_a_supported_provisionable_source_not_host_oauth() {
+        let mut config = ProjectConfig::default();
+        config.defaults.harness = Some("antigravity".into());
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(
+            &[harness("antigravity", "1.4.3", LoginState::LoggedIn)],
+            &[],
+        ));
+        machine.vars.insert("AGY_TOKEN".into());
+        let root = Path::new("/unused");
+        let missing = remote_harness_readiness(root, &config, &machine);
+        assert_eq!(missing[0].state, State::NeedsPerson);
+        assert!(missing[0].detail.contains("host login does not transfer"));
+        config
+            .secrets
+            .insert("GOOGLE_API_KEY".into(), "REMOTE_KEY".into());
+        machine.vars.insert("REMOTE_KEY".into());
+        let available = remote_harness_readiness(root, &config, &machine);
+        assert_eq!(available[0].state, State::Ready);
+        assert!(available[0]
+            .detail
+            .contains("model authentication unverified"));
+        assert!(!available[0].detail.contains("readiness-placeholder"));
+        machine.vars.clear();
+        config
+            .secrets
+            .insert("GOOGLE_API_KEY".into(), "@/credentials/key".into());
+        assert_eq!(
+            remote_harness_readiness(root, &config, &machine)[0].state,
+            State::NeedsPerson
+        );
+        machine.files.insert(PathBuf::from("/credentials/key"));
+        assert_eq!(
+            remote_harness_readiness(root, &config, &machine)[0].state,
+            State::Ready
+        );
+    }
+
+    #[test]
+    fn substrate_without_configuration_is_actionable() {
+        let step = substrate_readiness(&ProjectConfig::default());
+        assert_eq!(step.state, State::Blocked);
+        assert!(step.todo.unwrap().contains("[substrate]"));
     }
 
     #[test]
@@ -1370,6 +1523,53 @@ key = "ZAI_KEY"
         assert_eq!(gateway.state, State::Blocked);
         assert!(gateway.detail.contains("nothing listens"), "{gateway:?}");
         assert!(!applied.ready());
+    }
+
+    #[test]
+    fn applying_reobserves_a_harness_installed_after_the_plan() {
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed("[defaults]\nharness = \"codex\"\n[harnesses]\ninstall = \"auto\"\nallow = [\"codex\"]\n");
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(&[], &["npm"]));
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        assert_eq!(step(&plan, "harness.codex").state, State::Planned);
+        let version = match &step(&plan, "harness.codex").action {
+            Some(Action::Install { plan }) => plan.pinned.as_deref().unwrap_or("2.1.0"),
+            _ => panic!("expected install plan"),
+        };
+        machine.inventory = Ok(inventory(
+            &[harness("codex", version, LoginState::LoggedIn)],
+            &["npm"],
+        ));
+        let applied = yard.up_apply(&config, plan, &mut machine).unwrap();
+        assert!(applied.ready());
+        assert!(machine.runs.is_empty());
+        assert!(machine.events.is_empty());
+    }
+
+    #[test]
+    fn applying_reobserves_a_gateway_started_after_the_plan() {
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed("[connectors]\ngateway = \"http://127.0.0.1:7/mcp\"\n");
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(
+            &[harness("claude-code", "2.1.0", LoginState::LoggedIn)],
+            &[],
+        ));
+        machine.programs.insert("anvil".into());
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        assert_eq!(step(&plan, "connectors").state, State::Planned);
+        // A start would fail; observing the existing listener must avoid it.
+        machine.gateway = Err("must not start again".into());
+        machine.listening.insert("http://127.0.0.1:7/mcp".into());
+        let applied = yard.up_apply(&config, plan, &mut machine).unwrap();
+        assert_eq!(step(&applied, "connectors").state, State::Ready);
     }
 
     #[test]

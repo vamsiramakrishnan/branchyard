@@ -68,8 +68,8 @@ pub fn capabilities(template: &pb::ActorTemplate) -> Result<Capabilities, Templa
         share: false,
         pause: true,
         live_branch: false,
-        // Substrate's egress policy is not vendored: an actor reaches what
-        // its cluster allows (docs/egress.md).
+        // Config::egress is explicit; generic sandbox egress rules and
+        // credential injection are not mapped to Substrate policies.
         egress: false,
     })
 }

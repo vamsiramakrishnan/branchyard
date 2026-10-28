@@ -84,6 +84,7 @@ mod setup_cmd;
 mod setup_io;
 mod ssh_remote;
 mod stats_cmd;
+mod substrate_cmd;
 mod sync_cmd;
 mod task_cmd;
 mod trackers;
@@ -285,6 +286,7 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         }
         // Up acts on this machine's repository, whatever [remote] says.
         Command::Up { json, plan, yes } => return up_cmd::main(env, globals, plan, yes, json),
+        Command::Substrate { action } => return substrate_cmd::main(env, globals, &action),
         // The meters read this machine's session files; no repository needed.
         Command::Usage { json } => return usage::show(env, json),
         // The ssh connection itself, not a server's API.
@@ -820,6 +822,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Config { .. }
         | Command::Doctor { .. }
         | Command::Up { .. }
+        | Command::Substrate { .. }
         | Command::Usage { .. }
         | Command::Remote { .. }
         | Command::Catalog { .. }

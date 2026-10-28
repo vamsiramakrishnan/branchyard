@@ -228,7 +228,7 @@ fn detection_changes_questions_and_defaults() {
         .description
         .contains("installed: 2.1.283"));
 
-    // Only Codex installed: it becomes the default; no KVM, no provider question.
+    // Only Codex installed: it becomes the default; remote providers need no KVM.
     probe.harnesses.retain(|h| h.harness != "claude-code");
     let done = next(
         Topic::Project,
@@ -239,9 +239,9 @@ fn detection_changes_questions_and_defaults() {
         &BuiltinValidator,
     );
     assert_eq!(done.answers["harness"], json!("codex"));
-    assert!(!done.answers.contains_key("provider"));
+    assert_eq!(done.answers["provider"], json!("local"));
 
-    // KVM adds the provider question.
+    // KVM keeps local as the default.
     probe.platform.kvm = true;
     let done = next(
         Topic::Project,

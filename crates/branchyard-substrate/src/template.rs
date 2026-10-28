@@ -3,6 +3,7 @@
 //! verifying key and the actor's identity projected into it.
 
 use crate::pb;
+use std::collections::BTreeMap;
 
 /// Where the template projects the actor's identity.
 pub const IDENTITY_DIR: &str = "/run/branchyard/identity";
@@ -10,7 +11,16 @@ pub const IDENTITY_DIR: &str = "/run/branchyard/identity";
 /// filesystem, so a suspend keeps it.
 pub const STATE_FILE: &str = "/var/lib/branchyard-bridge/attempts";
 /// The port the bridge listens on.
-pub const BRIDGE_PORT: u16 = 8080;
+pub const BRIDGE_PORT: u16 = 80;
+
+/// Kubernetes quantities that size an actor and reserve worker capacity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TemplateResources {
+    /// CPU limit, such as `2` or `500m`.
+    pub cpu: Option<String>,
+    /// Memory limit, such as `4Gi`.
+    pub memory: Option<String>,
+}
 
 /// What a bridge template is built from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +44,10 @@ pub struct BridgeTemplate {
 /// How the bridge runs, beyond what every template needs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BridgeOptions {
+    /// Labels selecting the worker pools eligible to run this template.
+    pub worker_selector: BTreeMap<String, String>,
+    /// Actor CPU and memory limits.
+    pub resources: TemplateResources,
     /// Serve TLS with this PEM certificate chain and key, paths in the
     /// image, for a router that passes TLS through to the actor. The key
     /// is in every actor made from the image; give it to the bridge's user
@@ -41,7 +55,9 @@ pub struct BridgeOptions {
     /// The wakeup probe's plain `GET /healthz` is still answered.
     pub tls: Option<(String, String)>,
     /// Run execs, and move files and trees, as this user and group, which
-    /// the image must provide. The bridge itself must run as root.
+    /// the image must provide. The bridge itself must run as root. Grants
+    /// `SETUID`, `SETGID` and `CHOWN` for identity changes and the image's
+    /// startup preparation of the unprivileged workspace and home.
     pub run_as: Option<(u32, u32)>,
 }
 
@@ -93,6 +109,23 @@ pub fn bridge_template_with(
         path: path.into(),
     };
     pb::ActorTemplate {
+        worker_selector: (!options.worker_selector.is_empty()).then(|| pb::Selector {
+            match_labels: options.worker_selector.clone().into_iter().collect(),
+        }),
+        resources: Some(pb::Resources {
+            limits: [
+                ("cpu", &options.resources.cpu),
+                ("memory", &options.resources.memory),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| {
+                value.as_ref().map(|quantity| pb::Limits {
+                    name: name.into(),
+                    quantity: quantity.clone(),
+                })
+            })
+            .collect(),
+        }),
         metadata: Some(pb::ResourceMetadata {
             atespace: atespace.into(),
             name: spec.name.clone(),
@@ -102,6 +135,12 @@ pub fn bridge_template_with(
             name: "bridge".into(),
             image: spec.image.clone(),
             command,
+            security_context: options.run_as.map(|_| pb::SecurityContext {
+                capabilities: Some(pb::Capabilities {
+                    add: vec!["SETUID".into(), "SETGID".into(), "CHOWN".into()],
+                    drop: vec![],
+                }),
+            }),
             env: vec![pb::EnvVar {
                 name: branchyard_bridge::KEY_ENV.into(),
                 value: spec.public_key.clone(),
@@ -187,6 +226,7 @@ mod tests {
         let paths: Vec<_> = items.iter().map(|i| i.path.as_str()).collect();
         assert_eq!(paths, branchyard_bridge::server::IDENTITY_FILES);
         assert!(!container.command.iter().any(|a| a.starts_with("--tls")));
+        assert!(container.security_context.is_none());
     }
 
     #[test]
@@ -206,9 +246,19 @@ mod tests {
             &BridgeOptions {
                 tls: Some(("/etc/by/tls.crt".into(), "/etc/by/tls.key".into())),
                 run_as: Some((1000, 1000)),
+                ..Default::default()
             },
         );
         let command = template.containers[0].command.join(" ");
+        let capabilities = template.containers[0]
+            .security_context
+            .as_ref()
+            .unwrap()
+            .capabilities
+            .as_ref()
+            .unwrap();
+        assert_eq!(capabilities.add, ["SETUID", "SETGID", "CHOWN"]);
+        assert!(capabilities.drop.is_empty());
         assert!(
             command.ends_with(
                 "--tls-cert /etc/by/tls.crt --tls-key /etc/by/tls.key --run-as 1000:1000"

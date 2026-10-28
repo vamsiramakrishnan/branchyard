@@ -653,6 +653,10 @@ The keys are `[sync]`'s ([sync](sync.md#quick-start)) and `lease_seconds` (defau
 - **Service registrations** need the `admin` scope, are owned by the registering principal, and never carry anything for the server to reclaim.
 - **Policy is per request.** A `deny` default is safe; rules match tool names only, as in the SDK.
 
+## Live validation
+
+Live on 28 October 2026: a dedicated `by` 0.0.1 server on GCE, using loopback HTTP on port 8789, ran Antigravity `agy` 1.4.8 through write, check, diff and merge. The client used the server's generated token file; the server supplied `GEMINI_API_KEY` through its secret registry and fixed the harness executable with `--harness-command`. The server shut down after the run. Record: `logs/agy-backends/exec-http` in the [remote validation record](remote-validation-2026-10-28.md). Not done: TLS, multiple tenants, distributed workers, or sandbox providers through this HTTP server in this live run.
+
 ## Code
 
 | Crate | Contents |

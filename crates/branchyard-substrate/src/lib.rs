@@ -16,15 +16,20 @@
 
 mod actors;
 mod capabilities;
+mod control;
+mod egress;
 #[cfg(feature = "fake")]
 pub mod fake;
 mod provider;
+mod setup;
 pub mod template;
 pub mod transfer;
 
 pub use actors::{ActorHandle, Actors, CheckpointRef, Error};
 pub use capabilities::{capabilities, runs_bridge, state, TemplateError};
+pub use egress::EgressPolicy;
 pub use provider::{Config, Quiesce, SubstrateProvider};
+pub use setup::{SetupAction, SetupEvent, SetupPlan, SetupResult, TemplateInspection};
 
 /// Types and client generated from the vendored `ateapi.proto`.
 // The proto comments hold `<placeholders>` that rustdoc reads as HTML tags.

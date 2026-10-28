@@ -21,6 +21,9 @@ ring = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["thread"] }
+
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 rcgen = { workspace = true }

@@ -313,7 +313,17 @@ impl Report {
 /// `globals` carry `--remote` and the flags and variables beside it.
 pub fn main(env: &Env, globals: &Globals, path: Option<&str>, json: bool) -> Outcome {
     let context = Context::new(path, globals)?;
+    let progress = (env.stderr_tty && !json).then(cliclack::spinner);
+    if let Some(progress) = &progress {
+        progress.start("Checking repository, host and configured provider");
+    }
     let report = Report::run(&context);
+    if let Some(progress) = &progress {
+        match report.status() {
+            Status::Fail => progress.error("Checks found failures; follow the remedies below"),
+            _ => progress.stop("Checks complete"),
+        }
+    }
     match json {
         true => print(&crate::json::text(&report.json()))?,
         false => print(&report.text(env.style()))?,

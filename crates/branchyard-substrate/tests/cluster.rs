@@ -3,24 +3,25 @@
 //! reads its target from the environment and panics naming the first
 //! variable that is missing:
 //!
-//! - `BY_SUBSTRATE_ENDPOINT`: the `Control` API, `https://host:port` (or
-//!   `http://` on loopback, such as a port-forward).
-//! - `BY_SUBSTRATE_ROUTER`: the router URL template with `{atespace}` and
-//!   `{actor}`.
+//! - `BY_SUBSTRATE_ENDPOINT`: the TLS `Control` API, `https://host:port`.
+//! - `BY_SUBSTRATE_ROUTER`: the router base URL.
 //! - `BY_SUBSTRATE_ATESPACE`: an existing atespace.
 //! - `BY_SUBSTRATE_TEMPLATE`: the bridge template's name.
 //! - `BY_SUBSTRATE_KEY`: the signing key whose public half the template holds.
 //! - `BY_SUBSTRATE_WORKDIR`: a writable directory in the actor, for the
 //!   conformance checks and the worktree (for example `/workspace`).
 //!
-//! Optional: `BY_SUBSTRATE_CA`, `BY_SUBSTRATE_CLIENT_CERT`,
+//! Optional: `BY_SUBSTRATE_API_TOKEN_FILE`, `BY_SUBSTRATE_SERVER_NAME`,
+//! `BY_SUBSTRATE_CA`, `BY_SUBSTRATE_CLIENT_CERT`,
 //! `BY_SUBSTRATE_CLIENT_KEY` and `BY_SUBSTRATE_ROUTER_CA` (PEM files, as the
 //! `--substrate-*` flags of the same names), and `BY_SUBSTRATE_INSECURE=1`.
 //!
 //! `create_bridge_template` also reads `BY_SUBSTRATE_IMAGE` (pinned by
 //! digest), `BY_SUBSTRATE_BRIDGE` (the bridge's path in the image),
 //! `BY_SUBSTRATE_SANDBOX_CONFIG` and `BY_SUBSTRATE_STORAGE`, and optionally
-//! `BY_SUBSTRATE_RUN_AS` (`UID:GID` for execs) and
+//! `BY_SUBSTRATE_RUN_AS` (`UID:GID` for execs), `BY_SUBSTRATE_CPU`,
+//! `BY_SUBSTRATE_MEMORY`, `BY_SUBSTRATE_WORKER_LABELS` (`NAME=VALUE` pairs
+//! separated by commas), and
 //! `BY_SUBSTRATE_BRIDGE_TLS_CERT` and `BY_SUBSTRATE_BRIDGE_TLS_KEY` (paths
 //! in the image, for a router that passes TLS through).
 
@@ -32,7 +33,7 @@ use std::time::Duration;
 use branchyard_bridge::Signer;
 use branchyard_sandbox::conformance::{self, Setup};
 use branchyard_sandbox::{ExecSpec, Process, SandboxProvider, SandboxSpec};
-use branchyard_substrate::template::{bridge_template_with, BridgeOptions, BridgeTemplate};
+use branchyard_substrate::template::{BridgeOptions, BridgeTemplate};
 use branchyard_substrate::{pb, transfer, Config, SubstrateProvider};
 
 fn var(name: &str) -> String {
@@ -56,6 +57,8 @@ fn config() -> Config {
     config.client_cert = optional("BY_SUBSTRATE_CLIENT_CERT").map(PathBuf::from);
     config.client_key = optional("BY_SUBSTRATE_CLIENT_KEY").map(PathBuf::from);
     config.router_ca = optional("BY_SUBSTRATE_ROUTER_CA").map(PathBuf::from);
+    config.api_token_file = optional("BY_SUBSTRATE_API_TOKEN_FILE").map(PathBuf::from);
+    config.server_name = optional("BY_SUBSTRATE_SERVER_NAME");
     config.insecure = optional("BY_SUBSTRATE_INSECURE").as_deref() == Some("1");
     config
 }
@@ -65,7 +68,10 @@ fn provider() -> SubstrateProvider {
 }
 
 fn unique(what: &str) -> String {
-    format!("by-qual-{what}-{}", branchyard_support::time::now_ms())
+    format!(
+        "by-qual-{what}-{}",
+        branchyard_support::new_ulid().unwrap().to_ascii_lowercase()
+    )
 }
 
 #[test]
@@ -80,31 +86,47 @@ fn create_bridge_template() {
     });
     let tls = optional("BY_SUBSTRATE_BRIDGE_TLS_CERT")
         .map(|cert| (cert, var("BY_SUBSTRATE_BRIDGE_TLS_KEY")));
-    let template = bridge_template_with(
-        &var("BY_SUBSTRATE_ATESPACE"),
-        &BridgeTemplate {
-            name: var("BY_SUBSTRATE_TEMPLATE"),
-            image: var("BY_SUBSTRATE_IMAGE"),
-            bridge: var("BY_SUBSTRATE_BRIDGE"),
-            public_key: signer.public_key(),
-            sandbox_class: pb::SandboxClass::Gvisor,
-            sandbox_config: var("BY_SUBSTRATE_SANDBOX_CONFIG"),
-            storage_location: var("BY_SUBSTRATE_STORAGE"),
+    let spec = BridgeTemplate {
+        name: var("BY_SUBSTRATE_TEMPLATE")
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .into(),
+        image: var("BY_SUBSTRATE_IMAGE"),
+        bridge: var("BY_SUBSTRATE_BRIDGE"),
+        public_key: signer.public_key(),
+        sandbox_class: pb::SandboxClass::Gvisor,
+        sandbox_config: var("BY_SUBSTRATE_SANDBOX_CONFIG"),
+        storage_location: var("BY_SUBSTRATE_STORAGE"),
+    };
+    let options = BridgeOptions {
+        tls,
+        run_as,
+        resources: branchyard_substrate::template::TemplateResources {
+            cpu: optional("BY_SUBSTRATE_CPU"),
+            memory: optional("BY_SUBSTRATE_MEMORY"),
         },
-        &BridgeOptions { tls, run_as },
-    );
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let created = runtime.block_on(async {
-        let mut client = pb::control_client::ControlClient::new(config().channel()?);
-        client
-            .create_actor_template(pb::CreateActorTemplateRequest {
-                actor_template: Some(template),
+        worker_selector: optional("BY_SUBSTRATE_WORKER_LABELS")
+            .map(|labels| {
+                labels
+                    .split(',')
+                    .map(|label| {
+                        let (name, value) =
+                            label.split_once('=').expect("worker label is NAME=VALUE");
+                        (name.to_owned(), value.to_owned())
+                    })
+                    .collect()
             })
-            .await
-            .map_err(Into::into)
-    });
-    let created: Result<_, Box<dyn std::error::Error>> = created;
-    println!("{:#?}", created.unwrap().into_inner().metadata);
+            .unwrap_or_default(),
+    };
+    let provider = provider();
+    let plan = provider.plan_setup(&spec, &options).unwrap();
+    println!(
+        "{:#?}",
+        provider
+            .apply_setup(&plan, |event| println!("{event:?}"))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -184,4 +206,62 @@ fn cluster_worktree_round_trip() {
     assert!(pulled.changed);
     assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "two");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore = "creates, pauses, snapshots and branches actors on a real cluster"]
+fn cluster_pause_checkpoint_and_branch() {
+    use branchyard_sandbox::{ProviderError, SandboxState};
+
+    let provider = provider();
+    let parent = unique("snapshot-parent");
+    let child = unique("snapshot-child");
+    let path = PathBuf::from(var("BY_SUBSTRATE_WORKDIR")).join("snapshot-proof.txt");
+    let mut checkpoint = None;
+    let result = (|| -> Result<(), ProviderError> {
+        provider.ensure(&SandboxSpec::new(&parent))?;
+        provider.put_file(&parent, &path, 0o600, &mut &b"parent state\n"[..])?;
+        provider.pause(&parent)?;
+        assert_eq!(
+            provider.inspect(&parent)?.unwrap().state,
+            SandboxState::Paused
+        );
+        provider.resume(&parent)?;
+        let mut before = Vec::new();
+        provider.get_file(&parent, &path, &mut before)?;
+        assert_eq!(before, b"parent state\n");
+        provider.pause(&parent)?;
+        let captured = provider.checkpoint(&parent, &provider.capabilities().checkpoint[0])?;
+        checkpoint = Some(captured.clone());
+        assert_eq!(
+            provider.inspect(&parent)?.unwrap().state,
+            SandboxState::Stopped
+        );
+        provider.branch(&captured, &SandboxSpec::new(&child))?;
+        provider.resume(&child)?;
+        let mut inherited = Vec::new();
+        provider.get_file(&child, &path, &mut inherited)?;
+        assert_eq!(inherited, b"parent state\n");
+        provider.put_file(&child, &path, 0o600, &mut &b"child state\n"[..])?;
+        provider.resume(&parent)?;
+        let mut unchanged = Vec::new();
+        provider.get_file(&parent, &path, &mut unchanged)?;
+        assert_eq!(unchanged, b"parent state\n");
+        assert_ne!(
+            provider.handle(&parent)?.unwrap().uid,
+            provider.handle(&child)?.unwrap().uid
+        );
+        Ok(())
+    })();
+    let child_cleanup = provider.destroy(&child);
+    let parent_cleanup = provider.destroy(&parent);
+    let checkpoint_cleanup = checkpoint
+        .as_ref()
+        .map(|value| provider.release_checkpoint(value));
+    result.unwrap();
+    child_cleanup.unwrap();
+    parent_cleanup.unwrap();
+    if let Some(released) = checkpoint_cleanup {
+        released.unwrap();
+    }
 }
