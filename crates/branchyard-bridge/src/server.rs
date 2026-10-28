@@ -26,6 +26,7 @@
 //!   bridge exits with status 0. As process 1, it ignores those signals
 //!   when a process inside the sandbox sends them, so only the container
 //!   runtime can stop it.
+//!   Other Unix hosts receive termination signals through POSIX `sigwait`.
 //! - With `run_as`, execs run as that user and group with no supplementary
 //!   groups, and files and trees are read and written with that user's
 //!   file-system identity, so they belong to it and a link it planted is
@@ -414,6 +415,7 @@ pub fn block_signals() {
 }
 
 /// Receive signals and reap orphans until told to terminate.
+#[cfg(target_os = "linux")]
 fn supervise(shared: Arc<Shared>) {
     let set = termination_signals();
     let pid1 = std::process::id() == 1;
@@ -437,6 +439,38 @@ fn supervise(shared: Arc<Shared>) {
             }
             shared.terminate(TERM_GRACE);
             std::process::exit(0);
+        }
+    }
+}
+
+/// POSIX hosts without Linux's sender-aware timed wait use a blocking wait.
+#[cfg(not(target_os = "linux"))]
+fn supervise(shared: Arc<Shared>) {
+    let set = termination_signals();
+    loop {
+        let Some(signal) =
+            branchyard_support::best_effort("wait for a bridge signal", wait_signal(&set))
+        else {
+            return;
+        };
+        if signal == libc::SIGTERM || signal == libc::SIGINT {
+            shared.terminate(TERM_GRACE);
+            std::process::exit(0);
+        }
+    }
+}
+
+/// Consume a blocked signal without relying on `sigtimedwait`, absent on macOS.
+#[cfg(any(not(target_os = "linux"), test))]
+fn wait_signal(set: &libc::sigset_t) -> io::Result<i32> {
+    loop {
+        let mut signal = 0;
+        // SAFETY: the set is initialized and the signal out-parameter is valid.
+        let error = unsafe { libc::sigwait(set, &mut signal) };
+        match error {
+            0 => return Ok(signal),
+            libc::EINTR => continue,
+            error => return Err(io::Error::from_raw_os_error(error)),
         }
     }
 }
@@ -1191,6 +1225,21 @@ fn group_members(pgid: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn posix_wait_consumes_a_blocked_thread_signal() {
+        thread::spawn(|| {
+            block_signals();
+            // SAFETY: target this worker only, where SIGINT is already blocked.
+            assert_eq!(
+                unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGINT) },
+                0
+            );
+            assert_eq!(wait_signal(&termination_signals()).unwrap(), libc::SIGINT);
+        })
+        .join()
+        .unwrap();
+    }
 
     #[cfg(target_os = "linux")]
     fn without_filesystem_ids() {

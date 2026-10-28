@@ -188,6 +188,12 @@ impl Provider {
     pub fn microsandbox(options: crate::SandboxOptions) -> Provider {
         Provider::Microsandbox(options)
     }
+
+    /// A Substrate provider using a saved connection and actor lifecycle settings.
+    /// Construction stays with the provider implementations, as for Microsandbox.
+    pub fn substrate(options: crate::SubstrateOptions) -> Provider {
+        Provider::Substrate(options)
+    }
 }
 
 #[cfg(test)]

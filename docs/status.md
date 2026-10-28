@@ -97,7 +97,7 @@ A live run is protocol qualification against the real binary as a local process.
 
 ## Vendored sources
 
-All **<!-- fact:vendor.files -->259<!-- /fact --> vendored files** are pinned to upstream revisions, licenses, Git blob IDs and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). See [vendoring](vendoring.md) and [third-party notices](../THIRD_PARTY.md). Warp's AGPL sources are references only and are excluded from the Rust build.
+All **<!-- fact:vendor.files -->312<!-- /fact --> vendored files** are pinned to upstream revisions, licenses, Git blob IDs and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). See [vendoring](vendoring.md) and [third-party notices](../THIRD_PARTY.md). Warp's AGPL sources are references only and are excluded from the Rust build.
 
 ## What has not been run
 

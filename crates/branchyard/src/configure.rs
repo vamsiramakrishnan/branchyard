@@ -484,7 +484,7 @@ pub fn task_options(config: &ProjectConfig) -> Result<TaskOptions, Error> {
         (Some(ProviderKind::Substrate), _) => config
             .substrate
             .as_ref()
-            .map(|section| Provider::Substrate(substrate_options(section))),
+            .map(|section| Provider::substrate(substrate_options(section))),
         _ => None,
     };
     let policy = match d.permissions {
@@ -691,9 +691,8 @@ max_kept_minutes = 3
         );
         config.resolve_paths(Path::new("/repo"), None);
         let options = task_options(&config).unwrap();
-        let Provider::Substrate(saved) = options.provider.unwrap() else {
-            panic!("saved provider was not applied");
-        };
+        let saved = substrate_options(config.substrate.as_ref().unwrap());
+        assert_eq!(options.provider, Some(Provider::substrate(saved.clone())));
         assert_eq!(saved.key, Path::new("/repo/bridge.key"));
         assert_eq!(
             saved.api_token_file.as_deref(),

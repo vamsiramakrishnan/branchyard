@@ -24,6 +24,7 @@ members = [
     "crates/branchyard-wire",
     "crates/branchyard-workspace",
 ]
+exclude = ["vendor/msb-krun-vmm"]
 resolver = "2"
 
 [workspace.package]
@@ -95,3 +96,8 @@ dbg_macro = "deny"
 inherits = "release"
 lto = "thin"
 strip = "symbols"
+
+# The pinned Microsandbox VMM still requests vulnerable zstd 0.13.
+# Only its manifest is patched; source pins and the reason live in vendor.patches.json.
+[patch.crates-io]
+msb_krun_vmm = { path = "vendor/msb-krun-vmm" }

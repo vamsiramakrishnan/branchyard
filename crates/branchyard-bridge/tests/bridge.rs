@@ -640,6 +640,26 @@ fn sigterm_is_forwarded_to_the_execs_and_the_bridge_exits_cleanly() {
     drop(process);
 }
 
+/// Signal shutdown works without relying on Linux's `/proc` in the fixture.
+#[test]
+fn termination_signals_stop_the_bridge_and_its_exec_without_proc_dependencies() {
+    for signal in [libc::SIGTERM, libc::SIGINT] {
+        let mut bridge = Bridge::start();
+        let endpoint = bridge.endpoint(&bridge.claims(1));
+        let mut process = endpoint
+            .exec(&sh(&bridge.work(), "printf 'ready\\n'; exec cat"))
+            .unwrap();
+        let mut stdout = BufReader::new(process.take_stdout().unwrap());
+        let mut ready = String::new();
+        stdout.read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
+        // SAFETY: signal the dedicated bridge child created by this fixture.
+        assert_eq!(unsafe { libc::kill(bridge.pid() as i32, signal) }, 0);
+        assert!(!process.wait().unwrap().success());
+        assert!(bridge.child.take().unwrap().wait().unwrap().success());
+    }
+}
+
 /// What an exec writes as SIGTERM ends it reaches its client before the
 /// bridge exits, with its exit status, even when the connection is backed
 /// up: here a client slow to read the exec's stderr holds the bridge's

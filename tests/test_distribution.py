@@ -487,6 +487,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for source, packaged in [
             ("vendor/orca/LICENSE", "orca-LICENSE"),
             ("vendor/emdash/LICENSE.md", "emdash-LICENSE.md"),
+            ("vendor/msb-krun-vmm/LICENSE", "msb-krun-vmm-LICENSE"),
         ]:
             self.assertEqual((ROOT / source).read_bytes(), (ROOT / "packaging/licenses" / packaged).read_bytes())
         cli = tomllib.loads((ROOT / "crates/branchyard-cli/Cargo.toml").read_text())["package"]["metadata"]["dist"]
