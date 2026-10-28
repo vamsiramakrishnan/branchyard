@@ -128,7 +128,11 @@ pub struct AttemptView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_contract: Option<crate::ResultContract>,
     /// A schema-valid result from the current turn, never an earlier answer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::contract::present"
+    )]
     pub result: Option<serde_json::Value>,
     /// Sequence of the result in the complete event log, numbered from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1050,5 +1054,35 @@ mod tests {
     #[test]
     fn names_encode_to_one_file_name() {
         assert_eq!(encode("a/b%c"), "a%2Fb%25c");
+    }
+
+    #[test]
+    fn accepted_task_results_round_trip_null_missing_and_values() {
+        for result in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(json!({"answer":"one"})),
+        ] {
+            let view = AttemptView {
+                name: "knowledge".into(),
+                status: Some(BranchStatus::NoChanges),
+                harness: Some("fake".into()),
+                turns: 1,
+                checkpoint: Some(1),
+                candidate: None,
+                result_contract: Some(crate::ResultContract::deliverable(json!(true)).unwrap()),
+                result: result.clone(),
+                result_event: result.as_ref().map(|_| 2),
+                result_error: None,
+                worktree: Some("/knowledge".into()),
+                forked_from: None,
+                record: Some("record".into()),
+                conversation: vec!["turn-1.json".into()],
+            };
+            let wire = serde_json::to_value(&view).unwrap();
+            assert_eq!(wire.get("result"), result.as_ref());
+            let decoded: AttemptView = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded, view);
+        }
     }
 }

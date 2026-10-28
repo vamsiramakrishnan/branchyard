@@ -30,7 +30,11 @@ pub struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_contract: Option<crate::ResultContract>,
     /// A schema-valid accepted result from this attempt's latest turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::contract::present"
+    )]
     pub result: Option<Value>,
     /// Sequence of that result in the complete oldest-first log, numbered from 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,5 +432,41 @@ mod tests {
             diff_files("diff --git a/p q b/p q\n+x\ndiff --git a/r b/r\n"),
             ["p q", "r"]
         );
+    }
+
+    #[test]
+    fn accepted_attempt_results_round_trip_null_missing_and_values() {
+        for result in [
+            None,
+            Some(Value::Null),
+            Some(serde_json::json!({"answer":"one"})),
+        ] {
+            let attempt = Attempt {
+                branch: "knowledge".into(),
+                harness: "fake".into(),
+                status: BranchStatus::NoChanges,
+                turns: 1,
+                cost_usd: None,
+                tokens: None,
+                duration_ms: None,
+                check: AttemptCheck::None,
+                candidate: None,
+                result_contract: Some(
+                    crate::ResultContract::deliverable(serde_json::json!(true)).unwrap(),
+                ),
+                result: result.clone(),
+                result_event: result.as_ref().map(|_| 2),
+                result_error: None,
+                files_changed: 0,
+                insertions: 0,
+                deletions: 0,
+                files: Vec::new(),
+                unique_files: Vec::new(),
+            };
+            let wire = serde_json::to_value(&attempt).unwrap();
+            assert_eq!(wire.get("result"), result.as_ref());
+            let decoded: Attempt = serde_json::from_value(wire).unwrap();
+            assert_eq!(decoded, attempt);
+        }
     }
 }
