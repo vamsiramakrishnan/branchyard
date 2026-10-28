@@ -46,7 +46,7 @@ requirement. Schema acceptance proves structure, not truth.
 
 `by fan` accepts the same result flags for independent attempts. Knowledge
 work outside a repository can use `--no-files`; read the returned task with
-`by task show ID --json`. Its initial fan `--judge` is supported. Later
+`by task show ID --json`. `by fan --judge` supports initial selection. Later
 `by judge` and `by compare` need the owning yard context. Obtain an attempt's
 private worktree with `by task open ID --attempt BRANCH --print` and run the
 commands from that directory. Handoffs within the same private yard work there.

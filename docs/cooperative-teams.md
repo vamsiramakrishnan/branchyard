@@ -68,7 +68,7 @@ uses reported cost and duration; review the evidence before accepting an answer.
 
 `by run --no-files` and `by fan --no-files` support knowledge work outside a
 repository. Keep the returned task ID and use `by task show ID --json` to read
-its results. A fan's initial `--judge` is supported there. Post-hoc `by judge`
+its results. `by fan --judge` supports initial selection there. Post-hoc `by judge`
 and `by compare` need the owning yard context. Use
 `by task open ID --attempt BRANCH --print` to obtain an attempt's private
 worktree, then run those commands from that directory. Handoffs between

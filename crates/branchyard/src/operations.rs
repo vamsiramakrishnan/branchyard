@@ -217,6 +217,14 @@ const RESULT_REQUIRED: Param = Param {
     inside: None,
 };
 
+const RESULT_DELIVERABLE: Param = Param {
+    cli: Some("--result-deliverable"),
+    tool: Some("result.purpose"),
+    python: None,
+    why: "Python selects a required native answer with result={\"schema\": ..., \"required\": True, \"purpose\": \"deliverable\"}",
+    inside: None,
+};
+
 /// A delegation operation and its name on each surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Operation {
@@ -374,6 +382,7 @@ pub const OPERATIONS: &[Operation] = &[
             REVIEW_BUDGET,
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
+            RESULT_DELIVERABLE,
             Param::cli(
                 "--result-schema-file",
                 "a tool call and a Python dict carry a schema of any size; only a shell command \

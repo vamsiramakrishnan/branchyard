@@ -1,0 +1,144 @@
+{
+  "rig": "cooperative-research",
+  "description": "Native researchers return structured evidence; the lead reviews and relays settled findings",
+  "root": {
+    "seat": "lead",
+    "name": "cooperative-research",
+    "harness": "antigravity",
+    "profile": "antigravity-stream-json",
+    "budget": {
+      "max_usd": 6.0,
+      "max_turns": 12,
+      "max_minutes": null
+    },
+    "policy": {
+      "default": "allow",
+      "deny": [],
+      "allow": [],
+      "delegation_commands": true
+    },
+    "check": null,
+    "result": {
+      "schema": {
+        "type": "object",
+        "required": [
+          "summary",
+          "evidence"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "required": true,
+      "purpose": "deliverable"
+    },
+    "isolated": false,
+    "provision": {
+      "instructions": "# Rig cooperative-research: seat lead\n\nYou fill seat `lead` in the Branchyard rig `cooperative-research`. Your role: Choose independent research questions, review the evidence, and return a synthesis\n\nYou delegate only by seat, and only to these seats. Spawn a child with `by spawn --seat SEAT \"<task>\"` (Python: `branchyard.spawn(task, seat=SEAT)`; MCP: the spawn tool's `seat`). The seat sets the child's harness, budget, check and instructions; you may give it less budget, not more. Integrate a finished child with `by integrate <child>`.\n\n- `researcher` (antigravity, up to 2 at once, $1.50 each, 4 turns): Research the assigned question, preserve sources, and return native final JSON\n- `synthesizer` (antigravity, $1.50 each, 4 turns): Synthesize only findings explicitly handed to you; distinguish evidence from inference\n\n## From guidance/cooperative-team.md\n\n# Working with coworkers\n\nKeep your native plan, task graph, tools, and subagents. Branchyard coordinates\nwork between harness sessions. You do not need to copy your internal task\ngraph into Branchyard.\n\nAgree on the output contract and shared interfaces before parallel work.\nGive coding coworkers separate owned paths. Give researchers separate\nquestions and a result schema. Branchyard child limits apply to Branchyard\nbranches, not to the harness's native subagents. Your harness's own permissions\nand limits still apply. Dollar limits depend on reported usage and cannot\nprovide a hard spending guarantee when the harness reports no cost.\n\nKeep working while your native tasks or tools are active. A managed lead may\nend its turn to await Branchyard children when its own native work is finished.\nAn external lead keeps its existing session and uses explicit waits or status\ncommands. Operator commands do not adopt or restart that session.\n\nReview evidence before using a result. A valid JSON shape does not establish\nthat a finding is true. Handoffs carry a settled result and selected immutable\nartifacts to an existing recipient's next turn. A handoff never starts that turn.\n\n## From guidance/cooperative-research.md\n\n# Research coworkers\n\nReturn one native final JSON object with `summary` and `evidence`, matching\nyour seat's result schema. State uncertainty and cite the material you used.\nDo not invent sources. An empty evidence list states that you have no sources.\n\nAn accepted explicit report from the current turn takes precedence over the\nnative final answer. You do not need to call Branchyard tools to report a\nnative final deliverable. Do not manufacture Git changes or run a code check\nfor a task whose output is only structured findings.\n\nPublish a supporting file as an immutable artifact when the task asks for it.\nTell the lead its artifact ID. The lead selects artifacts when it hands your\nsettled finding to an existing coworker. Continue your native work until it\nfinishes, then return the final JSON. A progress report is not a final result.\n"
+    },
+    "delegation": {
+      "max_depth": 1,
+      "max_children": 3,
+      "harnesses": [
+        "antigravity"
+      ]
+    }
+  },
+  "seats": {
+    "rig": "cooperative-research",
+    "seat": "lead",
+    "delegates_to": [
+      "researcher",
+      "synthesizer"
+    ],
+    "table": {
+      "researcher": {
+        "harness": "antigravity",
+        "budget": {
+          "max_usd": 1.5,
+          "max_turns": 4,
+          "max_minutes": null
+        },
+        "result": {
+          "schema": {
+            "type": "object",
+            "required": [
+              "summary",
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": true,
+          "purpose": "deliverable"
+        },
+        "provision": {
+          "instructions": "# Rig cooperative-research: seat researcher\n\nYou fill seat `researcher` in the Branchyard rig `cooperative-research`. Your role: Research the assigned question, preserve sources, and return native final JSON\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/cooperative-team.md\n\n# Working with coworkers\n\nKeep your native plan, task graph, tools, and subagents. Branchyard coordinates\nwork between harness sessions. You do not need to copy your internal task\ngraph into Branchyard.\n\nAgree on the output contract and shared interfaces before parallel work.\nGive coding coworkers separate owned paths. Give researchers separate\nquestions and a result schema. Branchyard child limits apply to Branchyard\nbranches, not to the harness's native subagents. Your harness's own permissions\nand limits still apply. Dollar limits depend on reported usage and cannot\nprovide a hard spending guarantee when the harness reports no cost.\n\nKeep working while your native tasks or tools are active. A managed lead may\nend its turn to await Branchyard children when its own native work is finished.\nAn external lead keeps its existing session and uses explicit waits or status\ncommands. Operator commands do not adopt or restart that session.\n\nReview evidence before using a result. A valid JSON shape does not establish\nthat a finding is true. Handoffs carry a settled result and selected immutable\nartifacts to an existing recipient's next turn. A handoff never starts that turn.\n\n## From guidance/cooperative-research.md\n\n# Research coworkers\n\nReturn one native final JSON object with `summary` and `evidence`, matching\nyour seat's result schema. State uncertainty and cite the material you used.\nDo not invent sources. An empty evidence list states that you have no sources.\n\nAn accepted explicit report from the current turn takes precedence over the\nnative final answer. You do not need to call Branchyard tools to report a\nnative final deliverable. Do not manufacture Git changes or run a code check\nfor a task whose output is only structured findings.\n\nPublish a supporting file as an immutable artifact when the task asks for it.\nTell the lead its artifact ID. The lead selects artifacts when it hands your\nsettled finding to an existing coworker. Continue your native work until it\nfinishes, then return the final JSON. A progress report is not a final result.\n"
+        },
+        "instances": 2
+      },
+      "synthesizer": {
+        "harness": "antigravity",
+        "budget": {
+          "max_usd": 1.5,
+          "max_turns": 4,
+          "max_minutes": null
+        },
+        "result": {
+          "schema": {
+            "type": "object",
+            "required": [
+              "summary",
+              "evidence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": true,
+          "purpose": "deliverable"
+        },
+        "provision": {
+          "instructions": "# Rig cooperative-research: seat synthesizer\n\nYou fill seat `synthesizer` in the Branchyard rig `cooperative-research`. Your role: Synthesize only findings explicitly handed to you; distinguish evidence from inference\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/cooperative-team.md\n\n# Working with coworkers\n\nKeep your native plan, task graph, tools, and subagents. Branchyard coordinates\nwork between harness sessions. You do not need to copy your internal task\ngraph into Branchyard.\n\nAgree on the output contract and shared interfaces before parallel work.\nGive coding coworkers separate owned paths. Give researchers separate\nquestions and a result schema. Branchyard child limits apply to Branchyard\nbranches, not to the harness's native subagents. Your harness's own permissions\nand limits still apply. Dollar limits depend on reported usage and cannot\nprovide a hard spending guarantee when the harness reports no cost.\n\nKeep working while your native tasks or tools are active. A managed lead may\nend its turn to await Branchyard children when its own native work is finished.\nAn external lead keeps its existing session and uses explicit waits or status\ncommands. Operator commands do not adopt or restart that session.\n\nReview evidence before using a result. A valid JSON shape does not establish\nthat a finding is true. Handoffs carry a settled result and selected immutable\nartifacts to an existing recipient's next turn. A handoff never starts that turn.\n\n## From guidance/cooperative-research.md\n\n# Research coworkers\n\nReturn one native final JSON object with `summary` and `evidence`, matching\nyour seat's result schema. State uncertainty and cite the material you used.\nDo not invent sources. An empty evidence list states that you have no sources.\n\nAn accepted explicit report from the current turn takes precedence over the\nnative final answer. You do not need to call Branchyard tools to report a\nnative final deliverable. Do not manufacture Git changes or run a code check\nfor a task whose output is only structured findings.\n\nPublish a supporting file as an immutable artifact when the task asks for it.\nTell the lead its artifact ID. The lead selects artifacts when it hands your\nsettled finding to an existing coworker. Continue your native work until it\nfinishes, then return the final JSON. A progress report is not a final result.\n"
+        },
+        "instances": 1
+      }
+    }
+  },
+  "unapproved_tools": [
+    "lead",
+    "researcher",
+    "synthesizer"
+  ]
+}

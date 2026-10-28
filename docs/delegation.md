@@ -380,6 +380,8 @@ Not done: a result is the child's claim, like a self-reported status, and nothin
 by handoff research --to synthesis --artifact art1 --note "Preserve the uncertainty." --json
 ```
 
+MCP `handoff` and Python `handoff` expose the same frozen relay.
+
 The producer must have settled with an accepted result in its current turn.
 The recipient must already exist in the same yard. Replace `art1` with a
 published artifact ID, repeat `--artifact` for further selections, or omit it
