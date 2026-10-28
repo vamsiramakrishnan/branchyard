@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Branchyard deck v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "deck"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+    },
+    "design": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+        },
+        "width_in": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 56
+        },
+        "height_in": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 56
+        },
+        "font": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title_font_size_pt": {
+          "type": "number",
+          "minimum": 6,
+          "maximum": 96
+        },
+        "footer_font_size_pt": {
+          "type": "number",
+          "minimum": 6,
+          "maximum": 96
+        },
+        "margin_in": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "background": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{6}$"
+        },
+        "foreground": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{6}$"
+        },
+        "accent": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{6}$"
+        }
+      },
+      "required": [
+        "id",
+        "width_in",
+        "height_in",
+        "font",
+        "title_font_size_pt",
+        "footer_font_size_pt",
+        "margin_in",
+        "background",
+        "foreground",
+        "accent"
+      ],
+      "additionalProperties": false
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "slide_order": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}/[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$"
+      }
+    },
+    "template": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "id",
+    "design",
+    "sections",
+    "slide_order"
+  ],
+  "additionalProperties": false
+}

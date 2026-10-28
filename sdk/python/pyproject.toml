@@ -35,6 +35,20 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+artifacts = [
+    "python-docx==1.2.0",
+    "openpyxl==3.1.5",
+    "python-pptx==1.0.2",
+    "pypdf==6.6.0",
+    "reportlab==4.4.10",
+    "Pillow==11.3.0",
+    "jsonschema==4.25.1",
+]
+
+[project.scripts]
+branchyard-artifacts = "branchyard_artifacts.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/vamsiramakrishnan/branchyard"
 Documentation = "https://github.com/vamsiramakrishnan/branchyard/blob/main/docs/sdk.md"
@@ -43,3 +57,7 @@ Issues = "https://github.com/vamsiramakrishnan/branchyard/issues"
 
 [tool.setuptools]
 py-modules = ["branchyard", "branchyard_client"]
+packages = ["branchyard_artifacts"]
+
+[tool.setuptools.package-data]
+branchyard_artifacts = ["schemas/*.json", "examples/*.json"]

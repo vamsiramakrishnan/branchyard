@@ -1,0 +1,21 @@
+# Explicit optional runtime, including Python 3.9-compatible transitive pins.
+# Regenerate the hashed lock with pip-compile --generate-hashes.
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+pypdf==6.6.0
+reportlab==4.4.10
+Pillow==11.3.0
+jsonschema==4.25.1
+lxml==6.0.2
+XlsxWriter==3.2.9
+charset-normalizer==3.4.4
+attrs==25.3.0
+jsonschema-specifications==2025.9.1
+referencing==0.36.2
+rpds-py==0.27.1
+typing_extensions==4.15.0
+et_xmlfile==2.0.0
+setuptools==82.0.1
+wheel==0.46.1
+packaging==25.0

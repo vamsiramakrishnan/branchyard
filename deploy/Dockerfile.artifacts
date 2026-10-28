@@ -1,0 +1,17 @@
+# Optional authoring runtime. Build explicitly from the repository root:
+# docker build -f deploy/Dockerfile.artifacts -t branchyard-artifacts .
+FROM python:3.11.14-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libreoffice-writer libreoffice-calc libreoffice-impress python3-uno \
+       fonts-dejavu-core fonts-liberation fontconfig poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/artifacts-requirements.lock /opt/branchyard/artifacts-requirements.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r /opt/branchyard/artifacts-requirements.lock
+COPY sdk/python /opt/branchyard/sdk
+RUN python -m pip install --no-cache-dir --no-build-isolation --no-deps /opt/branchyard/sdk \
+    && useradd --create-home --uid 10001 artifact
+USER artifact
+WORKDIR /work
+ENTRYPOINT ["python", "-m", "branchyard_artifacts"]
+CMD ["doctor", "--require", "docx,xlsx,pdf,pptx,render,pivot,fonts"]
