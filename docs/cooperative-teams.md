@@ -182,10 +182,12 @@ python3 -m unittest tests.test_schema_validation.ExampleRigsValidateAgainstTheir
 cargo test -p branchyard --locked --offline --test deliverables --test handoffs
 ```
 
-Status: hermetic tests cover native final-answer contracts, seat constraints,
-handoff transactions, next-turn delivery, and code integration. SQLite and local
-PostgreSQL exercise the shared transaction tests. The recipes are validated
-with `by rig check`. See `crates/branchyard/tests/deliverables.rs`,
+Status, 28 October 2026: hermetic harness fixtures cover native final-answer
+contracts, seat constraints, handoff transactions, next-turn delivery, and code
+integration. Live local PostgreSQL 16.15 and SQLite exercise the shared storage
+conformance tests; the engine run is recorded in
+`/tmp/branchyard-coordination-20261028/combined-tests-v3.log`. The recipes are
+validated with `by rig check`. See `crates/branchyard/tests/deliverables.rs`,
 `crates/branchyard/tests/handoffs.rs`, and the backend conformance suite.
 Not done: live AGY cooperative team runs, live model judging for these recipes,
 or cloud provider qualification of these workflows.
