@@ -297,6 +297,51 @@ Fresh setup exposed these additional friction points:
 
 Status: live installation and cloud setup evidence is recorded above; CLI,
 transport selection, IAP ownership checks and failure handling also have hermetic
-regressions. The owned worker is retained temporarily for patch-release artifact
-verification. Not done: IAP connectivity under this managed policy, a new live
-AGY model run, and cleanup of this last worker until artifact verification ends.
+regressions. The owned worker was retained temporarily for the public verification below.
+Not done: IAP connectivity under this managed policy, a new live AGY model run,
+and the MicroVM hard memory ceiling.
+
+
+## Public 0.1.1 verification, 28 October 2026
+
+Live post-publication checks installed 0.1.1 from GitHub's public latest release,
+verified its bootstrap checksum, and probed the CLI, server and bridge versions.
+A clean-home installation with a prefix containing spaces passed guided
+headless setup, reinstall and unchanged repeat configuration. AGY readiness in
+that local fixture was hermetic. The published worker image passed an anonymous
+registry check against its immutable release digest. Evidence is
+`/tmp/branchyard-install-20261028/public-install-0.1.1-result.json` and
+`public-image-0.1.1-result.json`. Not done: a model conversation in that fixture.
+
+Live public-CLI provisioning then completed at 14:11:36 UTC in `us-central1-b`.
+The published standalone `by` executable ran `compute gce --apply` from an empty,
+non-Git directory, using its packaged helper rather than a checkout or a helper
+beside the executable. It created a fresh private `n2-standard-4` worker with no
+service account and nested virtualization. Installation and native configuration
+passed for by/server/bridge 0.1.1, AGY 1.4.9 and Microsandbox 0.7.3. KVM access,
+`serve --check`, native SSH auto-start/authentication and a real MicroVM guest
+command passed; the guest printed kernel 6.12.109 and bridge 0.1.1 (protocol 2).
+The MicroVM test sandbox was removed. No model ran or provider key was forwarded.
+Not done: the MicroVM hard memory ceiling and live model execution.
+
+The first public-CLI attempt met real zone capacity exhaustion and returned the
+shipped actionable remedy before creating a VM. The operator released the older
+owned qualification worker, then retried the same footprint in the same zone;
+initial SSH readiness completed without manual intervention. The exact source-free
+proof, command results, deployment metadata, version probes and MicroVM output are
+under `/tmp/branchyard-install-20261028/public-gce-0.1.1`, including
+`source-free-proof.json`, `retry-b-result.json`, `native-remote-ls-result.json`
+and `raw-msb-result.json`. Not done: IAP under the managed firewall policy.
+
+
+Live cleanup completed at 14:17:28 UTC. Both owned installation workers and
+their auto-delete boot disks were removed; no owned IAP firewall rule remains.
+The temporary MicroVM sandboxes and native servers were stopped, owned SSH
+aliases and local connection state were removed, and the known-host files
+matched their original baseline hashes. The original validation host remained
+running. The socket-only PostgreSQL test instance was stopped and generated test
+executables were removed while retaining the standalone binaries and evidence.
+Records are `public-proof.json` and `cleanup-proof.json` beside the public GCE
+evidence. Not done: model execution, the MicroVM hard memory ceiling, and live
+IAP under this managed policy; temporary workers are no longer available for
+interactive reuse.
