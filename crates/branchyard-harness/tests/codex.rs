@@ -75,7 +75,9 @@ fn session(id: &str) -> NativeSession {
 fn replays_a_recorded_codex_session() {
     let recorded = Transcript::load(FIXTURE);
     let (mut driver, opened) = open(SessionMode::Fresh);
+    // Branchyard's own version is not the recording's (0.0.1).
     let replayed = Replay::new(&recorded)
+        .ignore("/params/clientInfo/version")
         .prompt("Say hello.")
         .run(&mut driver, &opened);
     assert_eq!(

@@ -82,12 +82,16 @@ fn branch_info_json_without_the_fields_still_loads() {
     let f = Fixture::new();
     let branch = f.task("WRITE a.txt=1").name("json").run().unwrap();
     let mut value = serde_json::to_value(branch.info()).unwrap();
+    // Its turn recorded its file guard: none, as it ran without a preset.
+    assert_eq!(value["guard"]["kind"], "none");
     let keys = value.as_object_mut().unwrap();
     keys.remove("provider");
     keys.remove("isolated");
+    keys.remove("guard");
     let info: BranchInfo = serde_json::from_value(value).unwrap();
     assert_eq!(info.provider, "local");
     assert!(!info.isolated);
+    assert_eq!(info.guard, None);
 }
 
 #[test]

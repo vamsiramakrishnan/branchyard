@@ -159,6 +159,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
             model: new.provision.as_ref().and_then(|p| p.model.clone()),
             provider: crate::providers::label_of(new.provider.as_ref()),
             isolated: new.home.is_some() && !placement::sandboxed(new.provider.as_ref()),
+            guard: None,
         },
         created_ms,
         check: new.check,
@@ -1426,7 +1427,8 @@ pub(crate) fn fork(
         (None, Some(_), _) | (None, None, None) if fresh_session => SessionMode::Fresh,
         (None, Some(reason), _) => {
             return Err(Error::Unsupported(format!(
-                "{reason}; fork with a fresh session to start one on its candidate"
+                "{reason}; pass --fresh-session (fresh_session in the SDK and the HTTP API) \
+                 to start a new session on its candidate"
             )))
         }
         (None, None, None) => unreachable!("a missing session is a refusal"),

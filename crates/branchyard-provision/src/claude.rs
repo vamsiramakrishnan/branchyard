@@ -37,6 +37,15 @@
 //! unless `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is on, which on Linux needs
 //! bubblewrap and is not set here.
 //!
+//! A gateway's token (`ANTHROPIC_AUTH_TOKEN`, the `auth-token` method, or a
+//! [provider login](crate::logins) such as Z.ai's) takes the same helper:
+//! Claude Code sends what `apiKeyHelper` prints as both `x-api-key` and
+//! `Authorization: Bearer`, which is what the variable would send, and it
+//! stays out of the tools' environment. `ANTHROPIC_BASE_URL`, given as a
+//! secret beside any method, goes into the environment, where Claude Code
+//! reads its endpoint: an isolated run's environment has no `ANTHROPIC*`
+//! variable of yours.
+//!
 //! With the stream-json driver, MCP servers go in a 0600 file passed to
 //! `--mcp-config` by path, never on the command line.
 
@@ -52,8 +61,10 @@ use crate::{
 const CLAUDE_JSON: &str = ".claude.json";
 pub(crate) const CREDENTIALS: &str = ".claude/.credentials.json";
 const SETTINGS: &str = ".claude/settings.json";
-/// The API key `apiKeyHelper` prints.
+/// The API key or gateway token `apiKeyHelper` prints.
 pub(crate) const API_KEY_FILE: &str = ".branchyard/credentials/anthropic-api-key";
+/// The endpoint, given as a secret beside the credential.
+pub const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 /// The stream-json driver's MCP configuration, in a private home.
 pub(crate) const MCP_CONFIG: &str = ".branchyard/claude-mcp.json";
 
@@ -80,6 +91,11 @@ pub const AUTH: Spec = Spec {
     harness: "claude-code",
     methods: &[
         Method::env("api-key", &["ANTHROPIC_API_KEY"], "set ANTHROPIC_API_KEY"),
+        Method::env(
+            "auth-token",
+            &["ANTHROPIC_AUTH_TOKEN"],
+            "set ANTHROPIC_AUTH_TOKEN, with ANTHROPIC_BASE_URL for a gateway",
+        ),
         Method::env(
             "oauth-token",
             &["CLAUDE_CODE_OAUTH_TOKEN"],
@@ -269,9 +285,10 @@ impl Provisioner for Claude {
         if let Some(resolved) = resolved {
             plan.auth = Some(resolved.method.to_owned());
             match resolved.method {
-                "api-key" => {
+                "api-key" | "auth-token" => {
+                    let name = resolved.env()?;
                     needs_private_home(context, "the API key file")?;
-                    plan.edit(API_KEY_FILE, true, Edit::Put(secret("ANTHROPIC_API_KEY")));
+                    plan.edit(API_KEY_FILE, true, Edit::Put(secret(name)));
                     plan.edit(
                         SETTINGS,
                         true,
@@ -284,7 +301,7 @@ impl Provisioner for Claude {
                         },
                     );
                     plan.deliver(
-                        "ANTHROPIC_API_KEY",
+                        name,
                         Via::Helper {
                             path: API_KEY_FILE.into(),
                             setting: format!("apiKeyHelper in {SETTINGS}"),
@@ -330,9 +347,9 @@ impl Provisioner for Claude {
                 _ => unreachable!("every method of AUTH is handled"),
             }
             // Suppress model upgrade and fallback dialogs: the provider is
-            // chosen here. Not with an API key: Claude Code 2.1.283 then
+            // chosen here. Not with the helper: Claude Code 2.1.283 then
             // ignores `apiKeyHelper` and reports it is not logged in.
-            if resolved.method != "api-key" {
+            if !helped(resolved.method) {
                 plan.set_env(EnvVar::plain("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1"));
             }
             if context.private_home {
@@ -346,7 +363,7 @@ impl Provisioner for Claude {
             .credentials
             .iter()
             .any(|c| c.path() == API_KEY_FILE);
-        if had_key && plan.auth.as_deref() != Some("api-key") {
+        if had_key && !plan.auth.as_deref().is_some_and(helped) {
             plan.edit(API_KEY_FILE, true, Edit::Remove);
             plan.edit(
                 SETTINGS,
@@ -360,8 +377,14 @@ impl Provisioner for Claude {
                 },
             );
         }
+        // The endpoint, for whichever credential: a gateway's.
+        if let Some(url) = context.secret(BASE_URL) {
+            plan.secret_env(BASE_URL, BASE_URL, url, true);
+        }
         mcp_config(context, &mut plan);
-        plan.unused_secrets = unused(context, &AUTH.names());
+        let mut read = AUTH.names();
+        read.push(BASE_URL);
+        plan.unused_secrets = unused(context, &read);
         if let Some(telemetry) = &context.telemetry {
             let on = telemetry.enabled;
             let exporter = if on { "otlp" } else { "none" };
@@ -390,6 +413,11 @@ impl Provisioner for Claude {
         }
         Ok(plan)
     }
+}
+
+/// Whether `method` reaches Claude Code through `apiKeyHelper`.
+fn helped(method: &str) -> bool {
+    matches!(method, "api-key" | "auth-token")
 }
 
 /// The `apiKeyHelper` command: print the key file, as the harness sees it.

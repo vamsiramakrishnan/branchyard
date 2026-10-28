@@ -132,6 +132,44 @@ fn without_a_terminal_permissions_are_denied_and_shown() {
     assert_eq!(decision["source"]["kind"], "default");
 }
 
+/// DeepSeek Harness asks with only the call's id; the line names the tool
+/// and its command from the call's earlier update, not `acp:other` and an
+/// id, live and in `by log`.
+#[test]
+fn a_permission_asked_by_call_id_alone_shows_the_tool_and_its_command() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&["run", "PERMISSION_BY_ID", "--name", "byid", "--yes"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("asks bash: touch marker.txt"), "{text}");
+    assert!(text.contains("allowed bash"), "{text}");
+    let log = stdout(&repo.by(&["log", "byid"]));
+    assert!(log.contains("asks bash: touch marker.txt"), "{log}");
+    assert!(!log.contains("toolCallId"), "{log}");
+}
+
+/// Gemini CLI 0.65.0 answers `session/load` and streams the history it
+/// replays after the answer. A `by send` shows and logs only its own turn
+/// (round 8: the earlier turns printed as the new turn's output).
+#[test]
+fn a_send_after_a_late_history_replay_shows_only_its_own_turn() {
+    let mut repo = Repo::new();
+    repo.0.set_env("FAKE_ACP_REPLAY", "after");
+    let first = repo.by_agent(&["run", "WRITE one.txt=1", "--name", "replay"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let sent = repo.by_agent(&["send", "replay", "WHOAMI"]);
+    assert!(sent.status.success(), "{}", stderr(&sent));
+    let text = stdout(&sent);
+    // Loaded, not resumed: the fake advertises no session/resume.
+    assert!(text.contains("resumed=true"), "{text}");
+    assert!(!text.contains("replayed"), "{text}");
+    let log = stdout(&repo.by(&["log", "replay"]));
+    assert!(log.contains("resumed=true"), "{log}");
+    assert!(!log.contains("replayed"), "{log}");
+    assert!(!log.contains("an earlier prompt"), "{log}");
+    assert!(!log.contains("an earlier reply"), "{log}");
+}
+
 #[test]
 fn fan_prefixes_branches_and_compares_them() {
     let repo = Repo::new();
@@ -154,6 +192,50 @@ fn fan_prefixes_branches_and_compares_them() {
     );
     assert!(text.contains("by diff write-f-txt-x-qwen-code"), "{text}");
     assert_eq!(repo.json(&["ls", "--json"]).as_array().unwrap().len(), 2);
+}
+
+/// A long prompt's fan names keep their harness suffixes within the 40
+/// characters the comparison table shows, so its rows stay apart (round 8:
+/// two rows read `create-a-file-named-fan-txt-containing-…`).
+#[test]
+fn a_fans_rows_stay_apart_however_long_its_prompt() {
+    let repo = Repo::new();
+    let out = repo.by_agent(&[
+        "fan",
+        "WRITE fan.txt=1 then create a file named fan txt containing the word fan",
+        "--harness",
+        "gemini-cli,qwen-code",
+        "--yes",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    let list = repo.json(&["ls", "--json"]);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    let table: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("BRANCH"))
+        .collect();
+    for name in &names {
+        assert!(name.len() <= 40, "{name}");
+        // The comparison table's row shows the whole name.
+        assert!(
+            table
+                .iter()
+                .any(|line| line.starts_with(&format!("{name} "))),
+            "{name} in\n{text}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.ends_with("-gemini-cli")),
+        "{names:?}"
+    );
+    assert!(names.iter().any(|n| n.ends_with("-qwen-code")), "{names:?}");
 }
 
 #[test]
@@ -210,7 +292,8 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
         "interrupted"
     );
     let log = stdout(&repo.by(&["log", "held"]));
-    assert!(log.contains("warning: cancelled by by cancel"), "{log}");
+    // The command that asked, said once (not "cancelled by by cancel").
+    assert!(log.contains("warning: cancelled with `by cancel`"), "{log}");
     // Settled: a second cancel changes nothing and says what to use.
     let again = stdout(&repo.by(&["cancel", "held"]));
     assert!(
@@ -224,7 +307,7 @@ fn by_cancel_stops_a_turn_that_another_by_runs() {
 fn errors_exit_nonzero() {
     let repo = Repo::new();
     let missing = repo.by(&["merge", "nope"]);
-    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(missing.status.code(), Some(2));
     assert_eq!(
         stderr(&missing),
         "by: no branch named nope\n  next: by ls\n"
@@ -234,7 +317,7 @@ fn errors_exit_nonzero() {
     assert_eq!(usage.status.code(), Some(2));
 
     let unknown = repo.by(&["run", "x", "--harness", "nope"]);
-    assert_eq!(unknown.status.code(), Some(1));
+    assert_eq!(unknown.status.code(), Some(2));
     assert!(stderr(&unknown).contains("no harness or profile named nope"));
 
     let absent = repo.by(&[
@@ -245,7 +328,7 @@ fn errors_exit_nonzero() {
         "--command",
         "/nonexistent/agent",
     ]);
-    assert_eq!(absent.status.code(), Some(1));
+    assert_eq!(absent.status.code(), Some(3));
     assert!(
         stderr(&absent).contains("unavailable"),
         "{}",
@@ -265,7 +348,7 @@ fn errors_exit_nonzero() {
         )
         .output()
         .unwrap();
-    assert_eq!(outside.status.code(), Some(1));
+    assert_eq!(outside.status.code(), Some(3));
     assert!(stderr(&outside).contains("not inside a git repository"));
 }
 
@@ -285,6 +368,24 @@ fn watch_prints_the_tree_once_or_logs_changes_until_q() {
         .status
         .success());
     let agent = fake_agent!().display().to_string();
+    // ACP cannot fork a session: the refusal names the flag that starts a
+    // fresh one (round 8 said only "fork with a fresh session").
+    let refused = repo.by(&[
+        "fork",
+        "w",
+        "WRITE v.txt=2",
+        "--name",
+        "w-alt",
+        "--yes",
+        "--command",
+        &agent,
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("gemini-cli-acp cannot fork a session; pass --fresh-session"),
+        "{}",
+        stderr(&refused)
+    );
     let fork = repo.by(&[
         "fork",
         "w",
@@ -625,7 +726,7 @@ fn a_harness_delegates_with_by_in_its_shell() {
         .collect();
     assert_eq!(names, ["kid", "later"]);
     let (code, refused) = sh_json(&said, 4);
-    assert_eq!(code, 1);
+    assert_eq!(code, 4);
     assert_eq!(refused["error"]["kind"], "denied");
     assert!(refused["error"]["message"]
         .as_str()
@@ -1412,7 +1513,7 @@ fn send_steer_reaches_a_turn_another_process_runs() {
     assert!(reply(&repo, "live").contains("steered: try the other file"));
     let log = stdout(&repo.by(&["log", "live"]));
     assert!(
-        log.contains("steered by by send --steer: try the other file"),
+        log.contains("steered with `by send --steer`: try the other file"),
         "{log}"
     );
 
@@ -1474,7 +1575,7 @@ fn steering_takes_a_prompt_file_and_names_its_command() {
         assert!(reply(&repo, name).contains(&format!("steered: {text}")));
         let log = stdout(&repo.by(&["log", name]));
         assert!(
-            log.contains(&format!("steered by {sender}: {text}")),
+            log.contains(&format!("steered with `{sender}`: {text}")),
             "{log}"
         );
     }
@@ -1694,7 +1795,7 @@ fn a_child_messages_its_parent_with_the_python_module_and_is_delivered_next_turn
         "kid",
         "--json",
     ]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "denied");
 
@@ -1784,7 +1885,7 @@ fn the_same_commands_act_with_your_authority_outside_a_harness() {
 
     // The envelope binds you too, and refusals are JSON with --json.
     let refused = repo.by(&["spawn", "x", "--parent", "plain", "--json"]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "denied");
     let text = repo.by(&["integrate", "plain"]);
@@ -1950,7 +2051,7 @@ fn a_delegating_harness_gets_tools_and_skill_outside_its_worktree() {
     ]);
     assert!(bare.status.success());
     let (code, refused) = sh_json(&reply(&repo, "bare"), 0);
-    assert_eq!(code, 1);
+    assert_eq!(code, 4);
     assert!(
         refused["error"]["message"]
             .as_str()
@@ -2010,7 +2111,7 @@ fn rig_check_prints_the_plan_and_names_what_it_refuses() {
     .unwrap();
     let spec = spec.display().to_string();
     let refused = repo.by(&["rig", "check", &spec]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(2));
     assert_eq!(
         stderr(&refused),
         format!(
@@ -2019,7 +2120,7 @@ fn rig_check_prints_the_plan_and_names_what_it_refuses() {
         )
     );
     let refused = repo.by(&["rig", "run", &spec, "go", "--json"]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(2));
     let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(error["error"]["kind"], "invalid_rig");
     assert_eq!(error["error"]["field"], "seats.lead.collaborates_with");
@@ -2047,7 +2148,7 @@ fn rig_check_prints_the_plan_and_names_what_it_refuses() {
         "{check}"
     );
     let run = repo.by(&["rig", "run", &pi, "go"]);
-    assert_eq!(run.status.code(), Some(1));
+    assert_eq!(run.status.code(), Some(4));
     assert!(
         stderr(&run).contains("--allow-unapproved-tools"),
         "{}",
@@ -2138,7 +2239,7 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
     );
     assert_eq!(worker["seat"], "worker");
     let (code, free) = sh_json(&said, 2);
-    assert_eq!(code, 1);
+    assert_eq!(code, 4);
     assert!(
         free["error"]["message"]
             .as_str()
@@ -2186,7 +2287,7 @@ fn a_rig_runs_its_root_which_fills_seats_with_by_and_python() {
     let third = repo.by(&[
         "spawn", "x", "--parent", "team", "--seat", "worker", "--yes", "--json",
     ]);
-    assert_eq!(third.status.code(), Some(1));
+    assert_eq!(third.status.code(), Some(4));
     let third: Value = serde_json::from_slice(&third.stdout).unwrap();
     // The seat still bounds its workers. (The envelope's max_children
     // would not: it counts live children, and these have settled.)
@@ -2249,7 +2350,7 @@ fn artifact_and_scratch_commands_follow_the_delegation_tree() {
     let lock = repo.json(&["scratch", "lock", "cache", "--branch", "root", "--json"]);
     assert_eq!(lock["holder_branch"], "root");
     let denied = repo.by(&["scratch", "lock", "cache", "--branch", "sibling"]);
-    assert_eq!(denied.status.code(), Some(1));
+    assert_eq!(denied.status.code(), Some(4));
     assert!(stderr(&denied).contains("may not"), "{}", stderr(&denied));
     let out = repo.by(&["scratch", "unlock", "cache", "--branch", "root"]);
     assert!(out.status.success(), "{}", stderr(&out));
@@ -2444,7 +2545,7 @@ fn by_graph_apply_takes_flat_limits_as_apply_graph_does() {
         "root",
         "--json",
     ]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let error: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert!(
         error["error"]["message"]
@@ -2553,7 +2654,7 @@ fn global_options_come_from_anywhere_and_blank_variables_are_unset() {
     // server.
     for args in [&["--repo", "app", "ls"][..], &["ls", "--repo", "app"]] {
         let out = repo.by(args);
-        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
         assert!(stderr(&out).contains("apply to remote mode"), "{args:?}");
     }
     let from_env = repo
@@ -2563,7 +2664,7 @@ fn global_options_come_from_anywhere_and_blank_variables_are_unset() {
         .env_remove("BRANCHYARD_TOKEN_FILE")
         .output()
         .unwrap();
-    assert_eq!(from_env.status.code(), Some(1));
+    assert_eq!(from_env.status.code(), Some(2));
     assert!(
         stderr(&from_env).contains("remote mode needs a token"),
         "{}",
@@ -2811,7 +2912,7 @@ fn a_leaf_child_uses_its_storage_and_messages_its_parent_but_nothing_else() {
         (14, "leaf may not integrate"),
     ] {
         let (code, refused) = sh_json(&said, n);
-        assert_eq!(code, 1, "command {n}: {said}");
+        assert_eq!(code, 4, "command {n}: {said}");
         assert_eq!(refused["error"]["kind"], "denied", "command {n}: {refused}");
         let message = refused["error"]["message"].as_str().unwrap();
         assert!(message.contains(why), "command {n}: {message}");
@@ -2938,7 +3039,7 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
         assert_eq!(sh_json(&said, n).0, 0, "{said}");
     }
     let (code, full) = sh_json(&said, 8);
-    assert_eq!(code, 1, "{said}");
+    assert_eq!(code, 4, "{said}");
     let message = full["error"]["message"].as_str().unwrap();
     assert!(
         message.contains("4 live children") && message.contains("by discard"),
@@ -2975,7 +3076,7 @@ fn discard_sets_a_settled_child_aside_and_frees_its_slot() {
     assert_eq!(shown["status"]["state"], "discarded");
     // A discarded child runs no more turns.
     let again = repo.by(&["send", "a", "say more", "--yes", "--json"]);
-    assert_eq!(again.status.code(), Some(1));
+    assert_eq!(again.status.code(), Some(4));
     let again: Value = serde_json::from_slice(&again.stdout).unwrap();
     assert!(
         again["error"]["message"]
@@ -3072,7 +3173,7 @@ fn run_denies_tools_and_the_branch_keeps_the_denial() {
     ]);
     assert!(root.status.success(), "{}", stderr(&root));
     let (code, refused) = sh_json(&reply(&repo, "root"), 0);
-    assert_eq!(code, 1, "{refused}");
+    assert_eq!(code, 4, "{refused}");
     assert!(
         refused["error"]["message"]
             .as_str()
@@ -4230,7 +4331,7 @@ fn spawn_gives_a_child_its_model() {
     let refused = repo.by(&[
         "spawn", "go", "--parent", "acp", "--model", "haiku", "--yes", "--json",
     ]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "unsupported", "{refused}");
     assert!(
@@ -4363,7 +4464,7 @@ fn an_inherited_root_is_used_only_in_its_repository_or_the_turns_worktree() {
         let mut command = inner.command(inner.by_path());
         command.current_dir(cwd).args(run);
         let out = command.output().unwrap();
-        assert_eq!(out.status.code(), Some(1), "in {}", cwd.display());
+        assert_eq!(out.status.code(), Some(4), "in {}", cwd.display());
         let error = stderr(&out);
         assert!(error.contains("BRANCHYARD_ROOT is"), "{error}");
         assert!(error.contains("neither in that repository"), "{error}");
@@ -4375,7 +4476,7 @@ fn an_inherited_root_is_used_only_in_its_repository_or_the_turns_worktree() {
         .args(["inspect", "--json"])
         .env("BRANCHYARD_DELEGATION", "not-a-token");
     let out = delegated.output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         stdout(&out).contains("neither in that repository"),
         "{}",
@@ -4490,7 +4591,7 @@ fn a_harness_states_its_own_status_and_by_shows_it_beside_the_protocols() {
 
     // Outside a harness it needs --as, and bad input is refused.
     let without = repo.by(&["report-status", "working", "x", "--json"]);
-    assert_eq!(without.status.code(), Some(1));
+    assert_eq!(without.status.code(), Some(2));
     let without: Value = serde_json::from_slice(&without.stdout).unwrap();
     assert!(
         without["error"]["message"]
@@ -4507,7 +4608,7 @@ fn a_harness_states_its_own_status_and_by_shows_it_beside_the_protocols() {
         "kid",
         "--json",
     ]);
-    assert_eq!(long.status.code(), Some(1));
+    assert_eq!(long.status.code(), Some(4));
     let long: Value = serde_json::from_slice(&long.stdout).unwrap();
     assert_eq!(long["error"]["kind"], "denied", "{long}");
     assert!(
@@ -4645,7 +4746,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
         r#"{"files": 3}"#,
         "--json",
     ]);
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let refused: Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused["error"]["kind"], "denied", "{refused}");
     assert_eq!(
@@ -4678,7 +4779,7 @@ fn a_child_answers_in_the_shape_its_parent_asked_for_and_by_shows_it() {
         "--yes",
         "--json",
     ]);
-    assert_eq!(outside.status.code(), Some(1));
+    assert_eq!(outside.status.code(), Some(4));
     let outside: Value = serde_json::from_slice(&outside.stdout).unwrap();
     assert_eq!(outside["error"]["kind"], "denied", "{outside}");
     assert_eq!(

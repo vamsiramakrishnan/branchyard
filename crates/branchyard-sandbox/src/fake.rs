@@ -387,6 +387,18 @@ impl SandboxProvider for FakeProvider {
                 env.insert("PATH".into(), path);
             }
         }
+        // A write scope is the inner provider's to hold: through a mount
+        // its host path, elsewhere the sandbox's root filesystem's.
+        let writable = spec.writable.as_ref().map(|paths| {
+            paths
+                .iter()
+                .map(|path| {
+                    mapped.host_path(path).unwrap_or_else(|| {
+                        rootfs.join(path.strip_prefix("/").unwrap_or(path.as_path()))
+                    })
+                })
+                .collect()
+        });
         env.insert(ROOTFS_ENV.into(), rootfs.into());
         env.insert(SANDBOX_ENV.into(), name.into());
         self.inner.exec(
@@ -395,6 +407,7 @@ impl SandboxProvider for FakeProvider {
                 argv: spec.argv.clone(),
                 cwd,
                 env,
+                writable,
             },
         )
     }
@@ -608,10 +621,11 @@ mod tests {
         }
         fn exec(&self, _: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
             Err(ProviderError::Runtime(format!(
-                "ran {:?} in {} with {:?}",
+                "ran {:?} in {} with {:?} writing {:?}",
                 spec.argv,
                 spec.cwd.display(),
-                spec.env
+                spec.env,
+                spec.writable
             )))
         }
         fn stop(&self, _: &str) -> Result<(), ProviderError> {
@@ -663,6 +677,7 @@ mod tests {
                 argv: vec!["true".into()],
                 cwd: "/workspace".into(),
                 env: BTreeMap::new(),
+                writable: None,
             },
         );
         assert!(said.contains("Paused"), "{said}");
@@ -698,10 +713,19 @@ mod tests {
                 argv: vec!["x".into()],
                 cwd: "/workspace/src".into(),
                 env: BTreeMap::from([("HOME".into(), "/workspace/home".into())]),
+                writable: Some(vec!["/workspace/out".into(), "/var/cache".into()]),
             },
         );
         assert!(said.contains("/host/c2/src"), "{said}");
         assert!(said.contains("\"/host/c2/home\""), "{said}");
+        // A write scope reaches the inner provider as host paths: through
+        // the mount, else under the sandbox's root filesystem.
+        let rootfs = fake.rootfs("c2").unwrap();
+        assert!(said.contains("\"/host/c2/out\""), "{said}");
+        assert!(
+            said.contains(&format!("{:?}", rootfs.join("var/cache"))),
+            "{said}"
+        );
         assert!(said.contains(ROOTFS_ENV), "{said}");
         fs::remove_dir_all(root).unwrap();
     }

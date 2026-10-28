@@ -1,0 +1,32 @@
+# Gemini CLI: its key variables and OAuth file, and the note on what headless
+# runs need (GEMINI_CLI_TRUST_WORKSPACE=true, 0.63.0).
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "a key, in an untrusted workspace"
+env = { GEMINI_API_KEY = "fake-gemini" }
+lines = ["env GEMINI_API_KEY"]
+cell = "key set (GEMINI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "GEMINI_API_KEY is set (an API key; not checked); headless runs (gemini -p) refuse an untrusted workspace: set GEMINI_CLI_TRUST_WORKSPACE=true or pass --skip-trust"
+key = "GEMINI_API_KEY"
+
+[[case]]
+name = "a Google sign-in, in a trusted workspace"
+env = { GEMINI_CLI_TRUST_WORKSPACE = "true" }
+home = { ".gemini/oauth_creds.json" = "{}" }
+lines = ["file ~/.gemini/oauth_creds.json", "fact trust-workspace"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.gemini/oauth_creds.json exists; GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"
+
+[[case]]
+name = "nothing; a trust flag that is not true is not trust"
+env = { GEMINI_CLI_TRUST_WORKSPACE = "1" }
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.gemini/oauth_creds.json and no GEMINI_API_KEY or GOOGLE_API_KEY"

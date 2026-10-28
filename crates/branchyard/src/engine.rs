@@ -369,7 +369,8 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         }
         if let Some(by) = store.backend().cancel_requested(&fence)? {
             recorder.record(Activity::Warning(format!(
-                "cancelled by {by} before the turn started"
+                "cancelled {} before the turn started",
+                crate::operations::actor_text(&by)
             )))?;
             record.info.status = BranchStatus::Interrupted;
         } else if let Some(limit) = exhausted(&store, &record, &bounds.budget) {
@@ -895,6 +896,28 @@ fn run(
             },
         };
         record.cost_session = resumed;
+        store.write_fenced(record, fence)?;
+    }
+    // The turn's file guard: its preset's write scope, held below the
+    // harness by Landlock where this host can, and what the branch
+    // records of it either way. See `crate::guard`.
+    let home = placement.local_home();
+    let (writable, guard) =
+        match crate::guard::plan(turn.yard, record, bounds.policy.preset(), home.as_deref()) {
+            Ok(planned) => planned,
+            Err(reason) => {
+                driven.end = End::failed(format!(
+                    "could not work out where its harness may write: {reason}; the harness was \
+                     not started"
+                ));
+                return Ok(driven);
+            }
+        };
+    if let Some(writable) = writable {
+        placement.guard(writable);
+    }
+    if record.info.guard.as_ref() != Some(&guard) {
+        record.info.guard = Some(guard);
         store.write_fenced(record, fence)?;
     }
     let record: &Record = record;
@@ -2294,7 +2317,10 @@ pub(crate) fn conclude(
             BranchStatus::BudgetExceeded { limit }
         }
         End::Cancelled { by } => {
-            recorder.record(Activity::Warning(format!("cancelled by {by}")))?;
+            recorder.record(Activity::Warning(format!(
+                "cancelled {}",
+                crate::operations::actor_text(&by)
+            )))?;
             BranchStatus::Interrupted
         }
         End::Failed { reason } => BranchStatus::Failed { reason },

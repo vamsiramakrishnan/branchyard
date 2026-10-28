@@ -21,8 +21,8 @@ additional tools before creating resources.
 To install a particular version or prepare a headless machine:
 
 ```sh
-sh install.sh --version 0.0.1 --prefix "$HOME/.local" --no-setup
-sh install.sh --version 0.0.1 --setup --yes
+sh install.sh --version 0.1.0-rc.1 --prefix "$HOME/.local" --no-setup
+sh install.sh --version 0.1.0-rc.1 --setup --yes
 ```
 
 `--yes` follows the existing noninteractive setup defaults and readiness checks;
@@ -142,7 +142,7 @@ Produces four ZIP archives in `dist/`, each named `branchyard-<kind>-<version>.z
 | `branchyard-setup-skill-<version>.zip` | The standalone setup skill alone, `plugins/branchyard/skills/setup/` |
 | `branchyard-sdk-<version>.zip` | `sdk/python/`: the Python modules, `branchyard.py` wrapping `by --json` for code inside a harness and `branchyard_client.py` speaking to `by serve` for a service outside, and `pyproject.toml`, so `pip install ./branchyard-sdk` installs both from the extracted archive ([SDKs](sdk.md#install)) |
 
-Building refuses to proceed if either plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version`, does not match the workspace's own `Cargo.toml` version, or if `.claude-plugin/marketplace.json` does not list the plugin once, at `./plugins/branchyard`, at that version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
+Building refuses to proceed if a plugin manifest's `name` or `version`, or `sdk/python/pyproject.toml`'s `version` (in PEP 440's spelling), does not match the workspace's own `Cargo.toml` version, or any other field [`tools/release_version.py`](#the-version) checks disagrees, or if `.claude-plugin/marketplace.json` does not list the plugin once, at `./plugins/branchyard`, at that version, so a stale manifest cannot ship silently. Build leftovers in a source root (`__pycache__`, `*.pyc`, and the `build/` and `*.egg-info` that `pip install ./sdk/python` writes there) are never packaged.
 
 **Reproducible.** Every archive is deterministic: inputs are read in sorted path order, every entry gets a fixed timestamp (`1980-01-01T00:00:00`, ZIP's minimum) and mode (`0644`), and compression is deflate at a fixed level. Two builds from the same source tree are byte-for-byte identical; `tests/test_distribution.py` checks this, along with every manifest entry's digest.
 
@@ -150,7 +150,7 @@ Building refuses to proceed if either plugin manifest's `name` or `version`, or 
 
 - Runs the shipped `install_skill.py` from the extracted plugin, checking the preview/apply/no-op/refuse/`--force` behavior above and that the installed skill's bytes match the canonical source.
 - Imports the extracted SDK module and calls it against a stub `by`, checking it runs standalone (no `sys.path` trick back into the checkout) and its bytes match the canonical source.
-- Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools is not installed.
+- Builds the extracted SDK's source distribution with setuptools, as `pip install` does first, and imports both modules from it; checks `pyproject.toml` names every module at the workspace version with no dependencies. The build is skipped where setuptools 77 or later (the first to read an SPDX `license`) is not installed; the release workflow builds the sdist and the wheel on every run.
 - Compares the plugin archive's bundled skills against the standalone skill archives: each holds the same canonical bytes, `plugins/branchyard/skills/<name>/` inside one and the top level of the other; and checks the plugin ships its three commands and `hooks/hooks.json`.
 - Checks the marketplace lists the plugin directory, every command has a `description`, the manifest names no hooks file, and each hook runs `by hook` only when `by` is installed (run with an empty `PATH`, it prints nothing and exits 0).
 - Installs the setup skill with `--skill setup`.
@@ -219,7 +219,9 @@ python3 tools/release_workflow.py --check
 
 The first command regenerates dist's CI and adds the required package-smoke
 publication gate. `allow-dirty = ["ci"]` records this explicit CI customization;
-installer and binary packaging remain owned by dist. `release-smoke.yml` installs
+installer and binary packaging remain owned by dist. Native build caches are
+retained after a failed external attestation. A failed attestation gets one
+required retry; a second failure prevents publication. `release-smoke.yml` installs
 actual artifacts on matching native runners, checks reinstall, setup,
 readiness and checksum refusal, and calls no model. Publication depends on its
 successful result. The image job runs executable probes, also without a model.
@@ -230,7 +232,7 @@ successful result. The image job runs executable probes, also without a model.
 checksums. The release attaches `branchyard.rb`; a tap can install that formula.
 A tap is not created or published automatically by the binary release.
 
-### Verification status
+### Verified here
 
 Hermetic verification on 28 October 2026 runs `tests/test_distribution.py` against
 local release fixtures: binary installation, latest-release pinning, a prefix
@@ -240,3 +242,26 @@ checks packaged license freshness and Homebrew rendering. Not done: these
 fixture checks alone do not establish successful native release builds or public
 installation; the release workflow and its post-publication record provide that
 evidence.
+
+## The version
+
+`tools/release_version.py` checks workspace crate versions, plugin manifests, the
+Python SDK's PEP 440 version, and the generic native runtime package together.
+`python3 tools/release_version.py --set VERSION` updates these fields as one
+operation. `--tag vVERSION` verifies that a tag names the exact workspace version.
+The release plan runs this check before building any artifact.
+
+## First release
+
+Use the Release workflow's manual run on a branch to rehearse the complete
+build, installation and SDK packaging before tagging. A rehearsal creates a
+`release` run artifact containing the files a tag would draft. It creates no
+GitHub release, image push or provenance attestation. Pull requests changing
+release inputs run the same rehearsal.
+
+After a successful rehearsal, push a matching `vVERSION` tag. The workflow
+builds and checks the artifacts, publishes the tested worker image, and creates
+a draft GitHub release. A manual run on a tag drafts only when its `draft` input
+is enabled. Publish the reviewed draft after checking its records. A prerelease
+such as `0.1.0-rc.1` does not become GitHub's latest stable release; install that
+release with the explicit `--version` option until a stable release is published.

@@ -12,7 +12,8 @@
 //!    on `PATH` that has a manifest ([`crate::init::plugin_response`], the
 //!    path `by init plugin --all-detected` takes), one plan per harness so a
 //!    file that differs holds back that harness alone; then a model-free
-//!    check that each harness's hook command answers;
+//!    check that each harness's hook command answers, and whether the
+//!    harness itself was heard running it ([`heard`]);
 //! 4. **logins**: the command to run for each harness whose login is not
 //!    verified. Setup never starts a login flow;
 //! 5. **summary**: what was detected, written and installed, what only the
@@ -23,7 +24,8 @@
 //! with things left for the person; non-zero only on a real error.
 //!
 //! The same module draws the status card bare `by` prints ([`card`]) and
-//! `by init plugin --status` ([`plugin_status`]). See `docs/setup.md`.
+//! `by init plugin --status` ([`plugin_status`]), and knows which
+//! harnesses have hooks installed ([`installs`]). See `docs/setup.md`.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -42,6 +44,8 @@ use serde_json::{json, Value};
 
 use crate::args::SetupFlags;
 use crate::commands::{print, Env, Failure, Outcome};
+use crate::errors;
+use crate::hook_cmd::heard::{self, dialect_of, Hearing};
 use crate::render::{table, Cell, Column, Tone};
 use crate::setup_io::{self, which, CachedProbe, HostProbe, HostValidator, RandomEntropy};
 
@@ -66,8 +70,9 @@ enum State {
     Pending,
     /// Written by this run.
     Done,
-    /// Cannot be written, and why.
-    Refused(String),
+    /// Cannot be written: the kind of refusal `by init plugin` would report
+    /// (`would_overwrite`, `invalid_plan`, `incomplete`), and why.
+    Refused(&'static str, String),
 }
 
 /// What happens to `branchyard.toml`.
@@ -115,11 +120,12 @@ struct Target {
     files: usize,
 }
 
-/// A harness's hook command, run once with a canned input.
+/// A harness's hook command, run once with a canned input: proof that
+/// `by hook` answers, not that the harness runs it ([`Hearing`] is that).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HookCheck {
     /// It answered; the detail says how.
-    Verified(String),
+    Answers(String),
     /// It will not speak, and why.
     Silent(String),
 }
@@ -137,6 +143,9 @@ struct HookStep {
     /// Files this run writes (or would).
     writes: usize,
     check: Option<HookCheck>,
+    /// Whether the harness was heard running the hooks; `None` for a
+    /// harness whose install was refused.
+    heard: Option<Hearing>,
 }
 
 /// One thing only the person can do.
@@ -175,10 +184,12 @@ struct Report {
 /// `by setup`.
 pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     if let Some(branch) = crate::workspace_cmd::in_harness() {
-        return Err(Failure::Message(format!(
-            "by setup is a person's decision, made outside any branch (this is {branch}).\n\
-             Next: run it from your own terminal"
-        )));
+        return Err(errors::Report::new(
+            "denied",
+            format!("by setup is a person's decision, made outside any branch (this is {branch})"),
+        )
+        .next("run by setup from your own terminal")
+        .into());
     }
     crate::onboarding::directory(env, args)?;
     let cwd = std::env::current_dir()?;
@@ -186,13 +197,17 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     let writing = args.yes && !args.dry_run;
     let asking = !args.yes && !args.dry_run && interactive;
     let dry_run = !writing && !asking;
-    if !args.no_config && !setup_io::project_root(&cwd).join(".git").exists() {
-        return Err(Failure::Message(format!(
-            "{} is not inside a git repository, and branchyard.toml belongs to one.\n\
-             Next: cd into a repository (or git init here) and run by setup; \
-             by setup --no-config installs hooks alone",
-            cwd.display()
-        )));
+    if !args.no_config && !branchyard_config::is_repository(&setup_io::project_root(&cwd)) {
+        return Err(errors::Report::new(
+            "not_a_repository",
+            format!(
+                "{} is not inside a git repository, and branchyard.toml belongs to one",
+                cwd.display()
+            ),
+        )
+        .next("cd into a repository (or git init here), then by setup")
+        .next("by setup --no-config (installs hooks alone)")
+        .into());
     }
     if interactive {
         eprintln!("Looking at this machine and repository...");
@@ -209,12 +224,14 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
     let hooks = plan_hooks(args, &facts, &probe)?;
     if !args.harnesses.is_empty() {
         // Named on purpose: a refusal is an error, not a line to read later.
-        if let Some(step) = hooks.iter().find(|h| matches!(h.state, State::Refused(_))) {
-            if let State::Refused(why) = &step.state {
-                return Err(Failure::Message(format!(
-                    "{}: {why}\nNext: by init plugin {} --dry-run",
-                    step.label, step.id
-                )));
+        if let Some(step) = hooks.iter().find(|h| matches!(h.state, State::Refused(..))) {
+            if let State::Refused(kind, why) = &step.state {
+                return Err(errors::Report::new(*kind, format!("{}: {why}", step.label))
+                    .next(format!(
+                        "by init plugin {} --dry-run (shows each file)",
+                        step.id
+                    ))
+                    .into());
             }
         }
     }
@@ -276,6 +293,12 @@ pub fn main(env: &Env, args: &SetupFlags) -> Outcome {
             if matches!(step.state, State::Done | State::Current) {
                 step.check = Some(check_hook(&step.id, &root));
             }
+        }
+    }
+    let store = heard::store();
+    for step in &mut report.hooks {
+        if !matches!(step.state, State::Refused(..)) {
+            step.heard = Some(Hearing::of(&store, &step.id));
         }
     }
     finish(&mut report);
@@ -504,11 +527,12 @@ fn plan_config(
         &HostValidator,
     );
     let Some(plan) = response.plan else {
-        return Err(Failure::Message(
-            "the project defaults need answers setup could not default.\n\
-             Next: by init project"
-                .into(),
-        ));
+        return Err(errors::Report::new(
+            "incomplete",
+            "the project defaults need answers setup could not default; nothing was written",
+        )
+        .next("by init project (asks for them)")
+        .into());
     };
     if !plan.valid {
         let why: Vec<String> = plan
@@ -517,10 +541,15 @@ fn plan_config(
             .filter(|f| !f.validation.ok)
             .map(|f| format!("{}: {}", f.path, f.validation.messages.join("; ")))
             .collect();
-        return Err(Failure::Message(format!(
-            "branchyard.toml would not load: {}\nNext: by init project",
-            why.join("; ")
-        )));
+        return Err(errors::Report::new(
+            "invalid_plan",
+            format!(
+                "branchyard.toml would not load, so nothing was written: {}",
+                why.join("; ")
+            ),
+        )
+        .next("by init project (asks for the defaults again)")
+        .into());
     }
     let answer = |id: &str| {
         response
@@ -665,7 +694,7 @@ fn plan_hooks(
     if args.no_hooks {
         return Ok(Vec::new());
     }
-    let manifests = install::manifests().map_err(Failure::Message)?;
+    let manifests = install::manifests().map_err(broken_manifests)?;
     let ids: Vec<String> = match args.harnesses.is_empty() {
         true => facts.install_detected.clone(),
         false => args.harnesses.clone(),
@@ -674,11 +703,15 @@ fn plan_hooks(
     for id in ids {
         let Some(manifest) = manifests.iter().find(|m| m.harness == id) else {
             let known: Vec<&str> = manifests.iter().map(|m| m.harness.as_str()).collect();
-            return Err(Failure::Message(format!(
-                "no install for harness {id:?}; by setup installs for: {}\n\
-                 Next: by init plugin lists them with what each gets",
-                known.join(", ")
-            )));
+            return Err(errors::Report::new(
+                "unknown_harness",
+                format!(
+                    "no install for harness {id:?}; by setup installs for: {}",
+                    known.join(", ")
+                ),
+            )
+            .next("by init plugin (lists them with what each gets)")
+            .into());
         };
         steps.push(plan_hook(manifest, facts, probe));
     }
@@ -699,9 +732,10 @@ fn plan_hook(manifest: &Manifest, facts: &Facts, probe: &CachedProbe<HostProbe>)
         targets: Vec::new(),
         writes: 0,
         check: None,
+        heard: None,
     };
     let Some(plan) = response.plan else {
-        step.state = State::Refused("the install finished without a plan".into());
+        step.state = State::Refused("incomplete", "the install finished without a plan".into());
         return step;
     };
     if !plan.valid {
@@ -715,16 +749,22 @@ fn plan_hook(manifest: &Manifest, facts: &Facts, probe: &CachedProbe<HostProbe>)
                     .map(|why| format!("{}: {why}", f.path))
             })
             .collect();
-        step.state = State::Refused(format!("cannot be installed ({})", why.join("; ")));
+        step.state = State::Refused(
+            "invalid_plan",
+            format!("cannot be installed ({})", why.join("; ")),
+        );
         return step;
     }
     let differing = plan.overwrites();
     if !differing.is_empty() {
         let paths: Vec<&str> = differing.iter().map(|f| f.path.as_str()).collect();
-        step.state = State::Refused(format!(
-            "these files differ from the packaged copy and were not replaced: {}",
-            paths.join(", ")
-        ));
+        step.state = State::Refused(
+            "would_overwrite",
+            format!(
+                "these files differ from the packaged copy and were not replaced: {}",
+                paths.join(", ")
+            ),
+        );
         return step;
     }
     step.writes = plan.files.iter().filter(|f| f.writes()).count();
@@ -768,7 +808,8 @@ fn targets(manifest: &Manifest, plan: &Plan, facts: &Facts) -> Vec<Target> {
 }
 
 /// Write the config and each harness's files. A harness that cannot be
-/// installed is left as its plan said.
+/// installed is left as its plan said. Each harness written is stamped in
+/// [`heard`], so a call heard before is not taken for proof of these files.
 fn apply(report: &mut Report) -> Result<(), Failure> {
     let root = report.root.clone();
     let mut written = Vec::new();
@@ -791,9 +832,17 @@ fn apply(report: &mut Report) -> Result<(), Failure> {
                 written.extend(applied.written);
                 unchanged.extend(applied.unchanged);
                 step.state = State::Done;
+                branchyard_support::best_effort(
+                    "note when the hooks were installed",
+                    heard::stamp_install(
+                        &heard::store(),
+                        &step.id,
+                        branchyard_support::time::now_ms(),
+                    ),
+                );
             }
             State::Current => unchanged.extend(plan.files.iter().map(|f| f.path.clone())),
-            State::Done | State::Refused(_) => {}
+            State::Done | State::Refused(..) => {}
         }
     }
     report.written = written;
@@ -803,15 +852,29 @@ fn apply(report: &mut Report) -> Result<(), Failure> {
 
 /// One plan written under `root`, never replacing a file that differs.
 fn write_plan(plan: &Plan, root: &Path) -> Result<branchyard_setup::protocol::Applied, Failure> {
-    setup_io::apply(plan, root, false).map_err(|refusal| match refusal {
-        setup_io::Refusal::Invalid(problems) | setup_io::Refusal::WouldOverwrite(problems) => {
-            Failure::Message(format!(
-                "nothing more was written: {}\nNext: by init plugin --all-detected --dry-run",
-                problems.join("; ")
-            ))
-        }
-        setup_io::Refusal::Io(message) => Failure::Message(message),
-    })
+    let (kind, problems) = match setup_io::apply(plan, root, false) {
+        Ok(applied) => return Ok(applied),
+        Err(setup_io::Refusal::Invalid(problems)) => ("invalid_plan", problems),
+        Err(setup_io::Refusal::WouldOverwrite(problems)) => ("would_overwrite", problems),
+        Err(setup_io::Refusal::Io(message)) => ("io", vec![message]),
+    };
+    Err(errors::Report::new(
+        kind,
+        format!("nothing more was written: {}", problems.join("; ")),
+    )
+    .next("by setup --dry-run (shows what it would write)")
+    .next("by init plugin --all-detected --dry-run (each harness's files)")
+    .into())
+}
+
+/// The install manifests built into `by` did not load: a broken build.
+fn broken_manifests(why: String) -> Failure {
+    errors::Report::new(
+        "internal",
+        format!("the install manifests built into this by do not load: {why}"),
+    )
+    .next("by --version, then reinstall by (docs/distribution.md)")
+    .into()
 }
 
 /// Trust the `[workspace]` scripts setup itself just wrote: the person saw
@@ -834,20 +897,12 @@ fn trust_scripts(config: &mut ConfigStep, root: &Path) -> Result<(), Failure> {
 
 // --------------------------------------------------------------- hook check
 
-/// The hook dialect a harness's install speaks: its own, or `generic` for
-/// the plugins written in code.
-fn dialect_of(harness: &str) -> &str {
-    match harness {
-        "pi" | "oh-my-pi" | "opencode" | "amp" => "generic",
-        other => other,
-    }
-}
-
 /// Run `by hook` as the harness would, once, with a canned input and no
 /// model: `by` must be on `PATH` (the hook commands start with `command -v
 /// by`), and it must answer in the harness's dialect without complaint.
 /// Whether the harness itself runs the hook (a trust prompt, a restart) is
-/// not something this can see; the notes say it.
+/// not something this can see: [`Hearing`] says whether it was heard to.
+/// This call is not noted as heard ([`heard::CHECK_VAR`]).
 fn check_hook(harness: &str, repo: &Path) -> HookCheck {
     let dialect = dialect_of(harness);
     let Ok(known) = crate::hook_cmd::dialect(Some(dialect)) else {
@@ -898,10 +953,10 @@ fn check_hook(harness: &str, repo: &Path) -> HookCheck {
             "`by hook --harness {dialect} {event}` said: {}",
             stderr.lines().next().unwrap_or_default().trim()
         )),
-        Ok((stdout, _)) if stdout.trim().is_empty() => HookCheck::Verified(format!(
+        Ok((stdout, _)) if stdout.trim().is_empty() => HookCheck::Answers(format!(
             "answers {event} in the {dialect} dialect; nothing to report in this repository yet"
         )),
-        Ok(_) => HookCheck::Verified(format!(
+        Ok(_) => HookCheck::Answers(format!(
             "answers {event} in the {dialect} dialect, with news from this repository"
         )),
     }
@@ -920,6 +975,7 @@ fn run_hook(
         .args(["hook", "--harness", dialect, event])
         .current_dir(repo)
         .env_remove(branchyard::ENV_BRANCH)
+        .env(heard::CHECK_VAR, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1081,7 +1137,7 @@ fn finish(report: &mut Report) {
     let mut silent: Vec<(String, Vec<String>)> = Vec::new();
     for step in &report.hooks {
         match (&step.state, &step.check) {
-            (State::Refused(why), _) => todo.push(Todo {
+            (State::Refused(_, why), _) => todo.push(Todo {
                 kind: "hooks",
                 harness: Some(step.id.clone()),
                 text: format!("{}: hooks not installed: {why}", step.label),
@@ -1094,7 +1150,7 @@ fn finish(report: &mut Report) {
             },
             _ => {}
         }
-        if matches!(step.state, State::Refused(_)) {
+        if matches!(step.state, State::Refused(..)) {
             continue;
         }
         for note in &step.notes {
@@ -1234,15 +1290,38 @@ fn plural(n: usize, word: &str) -> String {
     }
 }
 
+/// The line under an installed harness: whether `by hook` answers (the
+/// canned check), and whether the harness itself was heard running it.
+/// `None` for a harness with nothing installed yet.
+fn hooks_line(step: &HookStep, now: u64) -> Option<String> {
+    if step.check.is_none() && step.state != State::Current {
+        return None;
+    }
+    let silent = matches!(step.check, Some(HookCheck::Silent(_)));
+    let check = step.check.as_ref().map(|check| match check {
+        HookCheck::Answers(_) => "by hook answers".to_owned(),
+        HookCheck::Silent(_) => "by hook is silent (see below)".to_owned(),
+    });
+    // Silent and never heard: the reason below is all there is to say.
+    let heard = step
+        .heard
+        .as_ref()
+        .filter(|h| !(silent && h.state() == heard::State::Never))
+        .map(|h| h.words(&step.label, now));
+    let parts: Vec<String> = check.into_iter().chain(heard).collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// The config and hooks steps. With `files`, each file the install touches.
 fn changes_text(report: &Report, files: bool) -> String {
     let home = report.facts.home.as_deref();
+    let now = branchyard_support::time::now_ms();
     let verb = |state: &State| match (state, report.dry_run) {
         (State::Done, _) => "installed",
         (State::Current, _) => "already current",
         (State::Pending, true) => "would install",
         (State::Pending, false) => "will install",
-        (State::Refused(_), _) => "not installed",
+        (State::Refused(..), _) => "not installed",
     };
     let mut out = String::new();
     let c = &report.config;
@@ -1296,21 +1375,19 @@ fn changes_text(report: &Report, files: bool) -> String {
             State::Pending | State::Done => {
                 format!("{} {}", verb(&step.state), plural(step.writes, "file"))
             }
-            State::Refused(_) => "not installed (see below)".to_owned(),
+            State::Refused(..) => "not installed (see below)".to_owned(),
             other => verb(other).to_owned(),
         };
         let provides = step.provides.join(", ");
-        let check = match &step.check {
-            Some(HookCheck::Verified(_)) => "  hooks: verified".to_owned(),
-            Some(HookCheck::Silent(_)) => "  hooks: silent (see below)".to_owned(),
-            None => String::new(),
-        };
         row(
             &mut out,
             label,
-            &format!("{:<12} {state} ({provides}){check}", step.label),
+            &format!("{:<12} {state} ({provides})", step.label),
         );
-        if files || matches!(step.state, State::Refused(_)) {
+        if let Some(line) = hooks_line(step, now) {
+            row(&mut out, "", &format!("{:<12} hooks: {line}", ""));
+        }
+        if files || matches!(step.state, State::Refused(..)) {
             for t in &step.targets {
                 let dir = match t.files {
                     1 => String::new(),
@@ -1419,6 +1496,7 @@ fn card_text(report: &Report) -> String {
 /// The one object `--json` prints.
 fn report_json(report: &Report) -> Value {
     let facts = &report.facts;
+    let now = branchyard_support::time::now_ms();
     let harnesses: Vec<Value> = facts
         .installed()
         .map(|h| {
@@ -1451,10 +1529,10 @@ fn report_json(report: &Report) -> Value {
                 State::Current => ("current", None),
                 State::Pending => ("would_install", None),
                 State::Done => ("installed", None),
-                State::Refused(why) => ("refused", Some(why.clone())),
+                State::Refused(_, why) => ("refused", Some(why.clone())),
             };
             let (hooks, detail) = match &step.check {
-                Some(HookCheck::Verified(d)) => (Some("verified"), Some(d.clone())),
+                Some(HookCheck::Answers(d)) => (Some("answers"), Some(d.clone())),
                 Some(HookCheck::Silent(d)) => (Some("silent"), Some(d.clone())),
                 None => (None, None),
             };
@@ -1467,6 +1545,7 @@ fn report_json(report: &Report) -> Value {
                 "files": step.writes,
                 "hooks": hooks,
                 "hooks_detail": detail,
+                "heard": step.heard.as_ref().map(|h| h.json(now)),
             })
         })
         .collect();
@@ -1534,20 +1613,31 @@ fn report_json(report: &Report) -> Value {
 // ------------------------------------------------------------------- status
 
 /// What `by init plugin --status` knows of one harness's install.
-struct Installed {
-    manifest: Manifest,
-    detected: bool,
+pub(crate) struct Installed {
+    /// What `by init plugin` installs for the harness.
+    pub manifest: Manifest,
+    /// Its program is on `PATH`.
+    pub detected: bool,
     /// `current`, `stale`, `missing` or `conflict`.
-    state: &'static str,
-    files: usize,
+    pub state: &'static str,
+    /// How many files the install writes or merges.
+    pub files: usize,
 }
 
-/// `by init plugin --status [ID...] [--json]`: per harness, whether its
-/// install is current, stale or missing, whether `by` is on `PATH` for its
-/// hooks, and the one-time steps still on the person's list. Writes nothing.
-pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
-    let cwd = std::env::current_dir()?;
-    let probe = HostProbe::without_versions(&cwd);
+impl Installed {
+    /// Some of its files are in place, or a session was heard running its
+    /// hooks (a harness's own plugin installs them where `by init plugin`
+    /// does not look): a harness whose hooks may run.
+    pub(crate) fn hooked(&self, hearing: &Hearing) -> bool {
+        self.state != "missing" || hearing.last.is_some()
+    }
+}
+
+/// Each harness's install as it stands on this machine, from `cwd`; only
+/// those whose program is on `PATH` with `detected_only`. Reads, and
+/// writes nothing.
+pub(crate) fn installs(cwd: &Path, detected_only: bool) -> Result<Vec<Installed>, String> {
+    let probe = HostProbe::without_versions(cwd);
     let facts = {
         use branchyard_setup::Probe as _;
         Facts {
@@ -1556,19 +1646,9 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
             ..Facts::default()
         }
     };
-    let manifests = install::manifests().map_err(Failure::Message)?;
-    if let Some(unknown) = only
-        .iter()
-        .find(|id| !manifests.iter().any(|m| &m.harness == *id))
-    {
-        let known: Vec<&str> = manifests.iter().map(|m| m.harness.as_str()).collect();
-        return Err(Failure::Message(format!(
-            "no install for harness {unknown:?}; by init plugin installs for: {}",
-            known.join(", ")
-        )));
-    }
-    let all: Vec<Installed> = manifests
+    Ok(install::manifests()?
         .into_iter()
+        .filter(|m| !detected_only || facts.install_detected.contains(&m.harness))
         .map(|manifest| {
             let files = install::planned_files(std::slice::from_ref(&manifest), &facts, &probe);
             let state = if files.iter().any(|f| f.refusal.is_some()) {
@@ -1587,7 +1667,34 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
                 manifest,
             }
         })
-        .collect();
+        .collect())
+}
+
+/// `by init plugin --status [ID...] [--json]`: per harness, whether its
+/// install is current, stale or missing, whether a session was heard
+/// running its hooks, whether `by` is on `PATH` for them, and the one-time
+/// steps still on the person's list. Writes nothing.
+pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
+    let cwd = std::env::current_dir()?;
+    let all = installs(&cwd, false).map_err(broken_manifests)?;
+    if let Some(unknown) = only
+        .iter()
+        .find(|id| !all.iter().any(|i| &i.manifest.harness == *id))
+    {
+        let known: Vec<&str> = all.iter().map(|i| i.manifest.harness.as_str()).collect();
+        return Err(errors::Report::new(
+            "unknown_harness",
+            format!(
+                "no install for harness {unknown:?}; by init plugin installs for: {}",
+                known.join(", ")
+            ),
+        )
+        .next("by init plugin --status (all of them)")
+        .into());
+    }
+    let store = heard::store();
+    let now = branchyard_support::time::now_ms();
+    let hearing = |i: &Installed| Hearing::of(&store, &i.manifest.harness);
     let shown: Vec<&Installed> = all
         .iter()
         .filter(|i| match only.is_empty() {
@@ -1614,6 +1721,7 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
                     "files": i.files,
                     "provides": i.manifest.provides,
                     "notes": notes(i),
+                    "heard": hearing(i).json(now),
                 })
             })
             .collect();
@@ -1658,6 +1766,11 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
             right: true,
         },
         Column {
+            header: "HEARD",
+            max: 16,
+            right: false,
+        },
+        Column {
             header: "NEXT",
             max: 60,
             right: false,
@@ -1684,6 +1797,16 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
                     ),
                 ),
             };
+            let hearing = hearing(i);
+            let (heard, heard_tone) = match (hearing.state(), &hearing.last) {
+                (heard::State::Heard, Some((_, call))) => {
+                    (heard::ago(now, call.at_ms), Tone::Green)
+                }
+                (heard::State::Stale, _) => ("before install".to_owned(), Tone::Yellow),
+                // Nothing installed, nothing to hear.
+                _ if i.state == "missing" => ("-".to_owned(), Tone::Dim),
+                _ => ("never".to_owned(), Tone::Yellow),
+            };
             vec![
                 Cell::plain(&i.manifest.harness),
                 Cell::plain(match i.detected {
@@ -1692,6 +1815,7 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
                 }),
                 Cell::toned(i.state, tone),
                 Cell::plain(i.files.to_string()),
+                Cell::toned(heard, heard_tone),
                 Cell::plain(next),
             ]
         })
@@ -1729,7 +1853,7 @@ pub fn plugin_status(env: &Env, only: &[String], as_json: bool) -> Outcome {
 pub fn card() -> Outcome {
     let cwd = std::env::current_dir()?;
     let root = setup_io::project_root(&cwd);
-    if !root.join(".git").exists() {
+    if !branchyard_config::is_repository(&root) {
         return print(&format!(
             "Branchyard: {} is not inside a git repository.\n\
              Next: cd <repo> && by setup\n\
@@ -1752,6 +1876,9 @@ pub fn card() -> Outcome {
             yes(yard)
         ),
     );
+    if let Some(hooks) = hooks_summary(&cwd) {
+        row(&mut out, "hooks", &hooks);
+    }
     let env = |name: &str| std::env::var(name).ok();
     let server = env("BRANCHYARD_REMOTE")
         .filter(|v| !v.trim().is_empty())
@@ -1836,6 +1963,44 @@ pub fn card() -> Outcome {
     };
     out.push_str(&format!("\nNext: {next}\nAll commands: by --help\n"));
     print(&format!("Branchyard\n{out}"))
+}
+
+/// The bare card's `hooks` row: for each harness on `PATH` whose hooks are
+/// installed (or were heard), whether a session of it was heard running
+/// them. `None` when there is no such harness.
+fn hooks_summary(cwd: &Path) -> Option<String> {
+    let installs = installs(cwd, true).ok()?;
+    let store = heard::store();
+    let now = branchyard_support::time::now_ms();
+    let (mut fresh, mut stale, mut never) = (Vec::new(), Vec::new(), Vec::new());
+    for install in &installs {
+        let hearing = Hearing::of(&store, &install.manifest.harness);
+        if !install.hooked(&hearing) {
+            continue;
+        }
+        let label = harness_label(&install.manifest.harness);
+        match (hearing.state(), &hearing.last) {
+            (heard::State::Heard, Some((_, call))) => {
+                fresh.push(format!("{label} {}", heard::ago(now, call.at_ms)));
+            }
+            (heard::State::Stale, _) => stale.push(label),
+            _ => never.push(label),
+        }
+    }
+    let mut parts = Vec::new();
+    if !fresh.is_empty() {
+        parts.push(format!("heard: {}", fresh.join(", ")));
+    }
+    if !stale.is_empty() {
+        parts.push(format!("not heard since by setup: {}", stale.join(", ")));
+    }
+    if !never.is_empty() {
+        parts.push(format!(
+            "never heard: {} (start a new session)",
+            never.join(", ")
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// The first branch whose status satisfies `wanted`.
@@ -1930,6 +2095,91 @@ mod tests {
         assert_eq!(
             config::split_words(&line).unwrap(),
             ["by", "run", "fix the flaky test", "--check", "sh -c 'x $Y'"]
+        );
+    }
+
+    fn step(state: State, check: Option<HookCheck>, heard: Option<Hearing>) -> HookStep {
+        HookStep {
+            id: "codex".into(),
+            label: "Codex".into(),
+            provides: vec!["hooks".into()],
+            notes: Vec::new(),
+            state,
+            plan: None,
+            targets: Vec::new(),
+            writes: 0,
+            check,
+            heard,
+        }
+    }
+
+    fn hearing(last: Option<u64>, installed_at: Option<u64>) -> Hearing {
+        Hearing {
+            harness: "codex".into(),
+            dialect: "codex".into(),
+            last: last.map(|at_ms| {
+                (
+                    "session-start".to_owned(),
+                    heard::Call {
+                        at_ms,
+                        ..heard::Call::default()
+                    },
+                )
+            }),
+            installed_at,
+        }
+    }
+
+    #[test]
+    fn the_hooks_line_says_what_answered_and_what_was_heard_apart() {
+        const NOW: u64 = 1_800_000_000_000;
+        let answers = || Some(HookCheck::Answers("answers".into()));
+        let line = |s: &HookStep| hooks_line(s, NOW);
+        assert_eq!(
+            line(&step(
+                State::Done,
+                answers(),
+                Some(hearing(None, Some(NOW)))
+            ))
+            .as_deref(),
+            Some("by hook answers · never heard: start a new Codex session")
+        );
+        assert_eq!(
+            line(&step(
+                State::Current,
+                answers(),
+                Some(hearing(Some(NOW - 180_000), None))
+            ))
+            .as_deref(),
+            Some("by hook answers · heard 3m ago (session-start)")
+        );
+        assert_eq!(
+            line(&step(
+                State::Done,
+                answers(),
+                Some(hearing(Some(NOW - 180_000), Some(NOW)))
+            ))
+            .as_deref(),
+            Some(
+                "by hook answers · last heard 3m ago (session-start), before by setup rewrote \
+                 the hooks: start a new Codex session"
+            )
+        );
+        // Silent and never heard: only the silence, whose reason is below.
+        let silent = || Some(HookCheck::Silent("not on PATH".into()));
+        assert_eq!(
+            line(&step(State::Done, silent(), Some(hearing(None, None)))).as_deref(),
+            Some("by hook is silent (see below)")
+        );
+        // A dry run: what is installed already is shown heard or not; what
+        // would be installed has no line.
+        assert_eq!(
+            line(&step(State::Current, None, Some(hearing(None, None)))).as_deref(),
+            Some("never heard: start a new Codex session")
+        );
+        assert_eq!(
+            line(&step(State::Pending, None, Some(hearing(None, None)))),
+            None
         );
     }
 

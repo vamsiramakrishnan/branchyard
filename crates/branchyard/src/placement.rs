@@ -149,6 +149,9 @@ pub(crate) struct Placement {
     /// The turn's egress proxy, kept until the harness is gone; a
     /// confined local harness is started in its own network namespace.
     egress: Option<crate::egress::Egress>,
+    /// Where a local harness may write, held by Landlock; `None`: where
+    /// its user may. See [`crate::guard`].
+    writable: Option<Vec<PathBuf>>,
     /// The sandbox's record in the repository's service registry while the
     /// turn holds it: what a reaper recovers and destroys if this process
     /// stops. Deregistered once the sandbox is released or discarded.
@@ -354,6 +357,7 @@ impl Placement {
             kind: Kind::Local(harness::environment(record.home.as_deref())),
             started: None,
             egress: None,
+            writable: None,
             service: None,
         }
     }
@@ -437,6 +441,7 @@ impl Placement {
                 origin: acquired.origin,
             }),
             egress: None,
+            writable: None,
             service,
             kind: Kind::Sandbox {
                 provider,
@@ -657,6 +662,7 @@ impl Placement {
                 origin: acquired.origin,
             }),
             egress: None,
+            writable: None,
             service,
             kind: Kind::Substrate(actor),
         })
@@ -742,25 +748,47 @@ impl Placement {
         self.egress = Some(egress);
     }
 
+    /// The `HOME` a local harness runs with, as its environment resolves
+    /// it now (empty when unset); `None` for a harness in a sandbox.
+    pub fn local_home(&self) -> Option<PathBuf> {
+        match &self.kind {
+            Kind::Local(env) => Some(
+                env.resolve()
+                    .get(std::ffi::OsStr::new("HOME"))
+                    .map(PathBuf::from)
+                    .unwrap_or_default(),
+            ),
+            Kind::Sandbox { .. } | Kind::Substrate(_) => None,
+        }
+    }
+
+    /// Hold a local harness to writing beneath `writable` when
+    /// [`Placement::start`] starts it ([`crate::guard`]). Nothing for a
+    /// harness in a sandbox.
+    pub fn guard(&mut self, writable: Vec<PathBuf>) {
+        if let Kind::Local(_) = self.kind {
+            self.writable = Some(writable);
+        }
+    }
+
     pub fn start(&self, driver: Box<dyn Driver>, open: Open) -> Result<Session, RuntimeError> {
         match &self.kind {
-            Kind::Local(env) => match self.egress.as_ref().filter(|e| e.confined()) {
-                Some(egress) => {
-                    let (session, listener) = Session::start_confined(
-                        driver,
-                        open,
-                        env,
-                        None,
-                        crate::egress::CONFINED_PORT,
-                    )?;
+            Kind::Local(env) => {
+                let egress = self.egress.as_ref().filter(|e| e.confined());
+                let confinement = branchyard_runtime::Confinement {
+                    egress_port: egress.map(|_| crate::egress::CONFINED_PORT),
+                    writable: self.writable.clone(),
+                };
+                let (session, listener) =
+                    Session::start_local(driver, open, env, None, &confinement)?;
+                if let (Some(egress), Some(listener)) = (egress, listener) {
                     egress.serve(listener).map_err(|source| RuntimeError::Io {
                         context: "the egress proxy",
                         source,
                     })?;
-                    Ok(session)
                 }
-                None => Session::start(driver, open, env, None),
-            },
+                Ok(session)
+            }
             Kind::Sandbox {
                 provider,
                 name,

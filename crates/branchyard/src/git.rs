@@ -21,6 +21,16 @@ pub(crate) fn lock() -> MutexGuard<'static, ()> {
     WRITES.lock_recovering("WRITES")
 }
 
+/// Hold this while running git commands that write a repository's shared
+/// state from outside the engine, such as a server adding and removing a
+/// worktree of its own: the engine's worktree, branch and config writes in
+/// this process wait for it, and it for them. Two `git worktree add` of one
+/// repository at once fail at random, one reading the other's half-written
+/// `.git/worktrees/<id>/` (`fatal: failed to read .../commondir`).
+pub fn hold_writes() -> MutexGuard<'static, ()> {
+    lock()
+}
+
 /// Run git in `dir` and return stdout, or the exit's stderr as an error.
 pub(crate) fn run(dir: &Path, args: &[&str]) -> Result<String, Error> {
     Git::new(dir).args(args).run().map_err(error)

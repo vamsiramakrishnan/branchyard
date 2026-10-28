@@ -14,7 +14,7 @@ by up --json     # the steps as JSON, for a script or the Python SDK
 Opening the repository can initialize `.branchyard/` and its store, including with
 `--plan`. The plan applies no install or gateway-start action.
 
-Outside a git repository it stops before any step, with the fix: ``by: not a git repository: /path. Run `git init` here, or cd into one`` (exit 1).
+Outside a git repository it stops before any step, with the fix: ``by: not a git repository: /path. Run `git init` here, or cd into one`` (exit 3, `not_a_repository`).
 
 The same operation is the engine's ([`branchyard::up`](../crates/branchyard/src/up.rs)): `Yard::up_plan`, `Yard::up_apply` and `Yard::up` over a `Machine`, and the Python SDK's `Local.up()` ([SDKs](sdk.md#local-mode)). `by up` is one caller of it.
 
@@ -69,6 +69,10 @@ Each step has a stable dotted name, a state, what was found in one line and, for
 | 0 | Every step is ready (after applying, or in the plan). |
 | 1 | At least one step is not. |
 | 2 | A usage error, as for every `by` command. |
+
+Configuration, repository and denied-command failures use the shared [CLI exit
+status contract](cli.md#exit-status); a missing repository exits 3 and an
+invocation from a harness branch exits 4.
 
 Nothing prints a secret's value: a secret is reported by its variable's name or its file's path. Installing follows the `[harnesses]` policy exactly as `by harnesses install` does ([harness lifecycle](harness-lifecycle.md#installing-and-updating)): only your user file can allow it (a repository's `install = "auto"` is a configuration error), an unset policy asks on a terminal and refuses elsewhere, and each install is recorded in the harness log as `by up`. Harnesses are detected afresh, not from the minute's cache, so a login made since the last `by harnesses` counts. A harness running on a branch cannot run `by up`, and `--remote` is refused: a server brings up its own machine ([server](server.md)).
 

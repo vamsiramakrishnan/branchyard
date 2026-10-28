@@ -179,6 +179,11 @@ pub(crate) fn check(spec: Option<&Provisioning>, private_home: bool) -> Result<(
             return refuse(format!("secret {} is given twice", secret.name));
         }
     }
+    for (harness, provider) in &spec.logins {
+        if let Err(why) = branchyard_provision::logins::check(harness, provider) {
+            return refuse(format!("logins.{harness}: {why}"));
+        }
+    }
     if let Some(telemetry) = &spec.telemetry {
         telemetry.check().or_else(refuse)?;
     }
@@ -372,6 +377,7 @@ pub(crate) fn prepare(
         sandbox: placement::sandboxed(record.provider.as_ref()),
         secrets,
         auth: spec.auth.clone(),
+        login: spec.logins.get(profile.harness).cloned(),
         mcp_servers,
         remote_mcp_servers,
         mcp_secrets,
@@ -713,6 +719,19 @@ mod tests {
             ..missing
         };
         assert!(check(Some(&given), true).is_ok());
+        // A provider login the table has, and one it does not.
+        let login = |harness: &str, provider: &str| Provisioning {
+            logins: [(harness.to_owned(), provider.to_owned())].into(),
+            ..Provisioning::default()
+        };
+        assert!(check(Some(&login("claude-code", "zai")), true).is_ok());
+        let refused = check(Some(&login("claude-code", "gemini")), true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("logins.claude-code: claude-code has no gemini login; it has zai"),
+            "{refused}"
+        );
     }
 
     #[test]

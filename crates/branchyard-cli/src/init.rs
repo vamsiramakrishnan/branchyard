@@ -8,61 +8,41 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use branchyard_setup::install::{self, HarnessList};
-use branchyard_setup::protocol::{ErrorBody, ErrorResponse, TopicList};
+use branchyard_setup::protocol::TopicList;
 use branchyard_setup::{ArtifactKind, Facts, Plan, Probe, Response, Topic};
 use serde_json::Value;
 
 use crate::args::{InitArgs, InitStep};
-use crate::commands::{print, Env, Failure, Outcome};
+use crate::commands::{print, Env, Outcome};
+use crate::errors::Report;
 use crate::setup_io::{self, HostProbe, HostValidator, RandomEntropy, Refusal};
 
-/// Print a refusal: JSON on stdout with `--json`, else a message.
+/// A refusal of the setup protocol: `{"error": {"kind", "message",
+/// "paths", "exit"}}` on stdout with `--json`, else the message with the
+/// paths under it.
 fn refuse(json: bool, kind: &str, message: String, paths: Vec<String>) -> Outcome {
-    if json {
-        let body = ErrorResponse {
-            error: ErrorBody {
-                kind: kind.into(),
-                message,
-                paths,
-            },
-        };
-        print(&format!(
-            "{}\n",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        ))?;
-        return Err(Failure::Reported);
+    let mut report = Report::new(kind, message);
+    match json {
+        true if !paths.is_empty() => report = report.field("paths", serde_json::json!(paths)),
+        true => {}
+        false => {
+            for path in paths {
+                report = report.line("", path);
+            }
+        }
     }
-    let mut text = message;
-    for path in paths {
-        text.push_str(&format!("\n  {path}"));
-    }
-    Err(Failure::Message(text))
+    Err(report.with_json(json).into())
 }
 
 /// A usage error, as clap's are: the message, exit 2. With `--json`, the
 /// refusal document on stdout.
 fn usage(json: bool, message: String) -> Outcome {
-    if json {
-        let body = ErrorResponse {
-            error: ErrorBody {
-                kind: "usage".into(),
-                message,
-                paths: Vec::new(),
-            },
-        };
-        print(&format!(
-            "{}\n",
-            serde_json::to_string_pretty(&body).unwrap_or_default()
-        ))?;
-    } else {
-        eprintln!("by: {message}");
-    }
-    std::process::exit(2);
+    Err(Report::usage(message).with_json(json).into())
 }
 
 /// Whether `cwd` is inside a repository, as setup finds the root.
 pub(crate) fn in_work_tree(cwd: &std::path::Path) -> bool {
-    setup_io::project_root(cwd).join(".git").exists()
+    branchyard_config::is_repository(&setup_io::project_root(cwd))
 }
 
 /// What `by init project` and `by up` say outside a repository.
@@ -134,7 +114,7 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
         };
         let list = match install::listing(&facts) {
             Ok(list) => list,
-            Err(e) => return Some(Err(Failure::Message(e))),
+            Err(e) => return Some(Err(Report::new("io", e).into())),
         };
         if init.json {
             return Some(print(&format!("{}\n", to_json(&list))));
@@ -150,17 +130,19 @@ fn plugin(env: &Env, init: &InitArgs) -> Option<Outcome> {
     }
     let known: Vec<String> = match install::manifests() {
         Ok(all) => all.into_iter().map(|m| m.harness).collect(),
-        Err(e) => return Some(Err(Failure::Message(e))),
+        Err(e) => return Some(Err(Report::new("io", e).into())),
     };
     let ids: Vec<String> = match init.all_detected {
         true => install::detect(&probe),
         false => init.harnesses.clone(),
     };
     if let Some(unknown) = ids.iter().find(|id| !known.contains(id)) {
-        return Some(Err(Failure::Message(format!(
+        return Some(Err(Report::usage(format!(
             "no install for harness {unknown:?}; by init plugin installs for: {}",
             known.join(", ")
-        ))));
+        ))
+        .next("by init plugin (lists them, and which are on PATH)")
+        .into()));
     }
     if ids.is_empty() {
         return Some(print(
@@ -245,9 +227,7 @@ fn listing_text(list: &HarnessList) -> String {
 /// write it.
 fn review_then_ask(env: &Env, probe: &HostProbe, init: &InitArgs, response: Response) -> Outcome {
     let Some(plan) = &response.plan else {
-        return Err(Failure::Message(
-            "the install finished without a plan".into(),
-        ));
+        return Err(Report::new("invalid_plan", "the install finished without a plan").into());
     };
     let terminal = env.stdin_tty && env.stdout_tty;
     // On a terminal it asks next, and says what follows once written;
@@ -261,9 +241,12 @@ fn review_then_ask(env: &Env, probe: &HostProbe, init: &InitArgs, response: Resp
     };
     print(&crate::wizard::review_text(&shown, env.color))?;
     if !plan.valid {
-        return Err(Failure::Message(
-            "a file cannot be installed (above); nothing was written".into(),
-        ));
+        return Err(Report::new(
+            "invalid_plan",
+            "a file cannot be installed (above); nothing was written",
+        )
+        .next("fix what the plan names, then by init plugin again")
+        .into());
     }
     let writes = plan.files.iter().filter(|f| f.writes()).count();
     if writes == 0 {
@@ -333,20 +316,22 @@ pub fn main(env: &Env, init: &InitArgs) -> Outcome {
             ));
         }
         if !(env.stdin_tty && env.stdout_tty) {
-            eprintln!(
-                "by: by init asks questions on a terminal, and none is attached.\n\
+            return Err(Report::usage(
+                "by init asks questions on a terminal, and none is attached.\n\
                  Harnesses and scripts use the JSON protocol instead:\n\
                  \x20 by init --json                              # the topics\n\
                  \x20 by init project --json --next               # the first questions\n\
                  \x20 by init project --answers FILE --dry-run    # the plan\n\
-                 See docs/setup.md, or the setup skill (by init plugin)."
-            );
-            std::process::exit(2);
+                 See docs/setup.md, or the setup skill (by init plugin).",
+            )
+            .into());
         }
         return crate::wizard::run(init.topic, init.defaults);
     };
     let Some(topic) = init.topic else {
-        return Err(Failure::Message("a step needs a topic".into()));
+        return Err(Report::usage("a step needs a topic")
+            .next("by init project --json --next (or server, rig, deploy, plugin)")
+            .into());
     };
     let raw = match &init.answers {
         Some(source) => match read_answers(source) {

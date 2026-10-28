@@ -47,6 +47,8 @@ It guarantees nothing beyond your operating-system user. The process sees the ho
 
 On Linux where unprivileged user and network namespaces are allowed, `exec_confined` and `LocalProvider::spawn_confined` start the process in a new user and network namespace whose only way out is a listener handed back to the caller; a branch's [network policy](egress.md) is then enforced. Support is detected at run time (`LocalProvider::confinement`); elsewhere, and with `BRANCHYARD_EGRESS_NETNS=off`, the policy is advisory.
 
+An exec spec may name a write scope (`ExecSpec::writable`): the process and everything it starts can then write only beneath those paths, while reads and execution stay allowed. The local provider holds it with Landlock on Linux kernels that have it (`LocalProvider::write_guard` says which ABI, or why not), after the network namespace's setup when the exec is also confined; where it cannot (no Landlock, `BRANCHYARD_GUARD=off`, not Linux) it refuses the exec as unsupported (`Operation::WriteScope`) rather than run it unguarded. Microsandbox, Substrate and a recipe's machine refuse a spec that names one; the fake provider passes it to the provider it wraps as host paths. The conformance suite's `write_scope` check accepts either answer and nothing else. The engine sets it for a local harness under `read-only` or `edit-worktree` ([file guard](modes.md#the-file-guard)).
+
 ## Microsandbox provider
 
 `MicrosandboxProvider` in [`branchyard-microsandbox`](../crates/branchyard-microsandbox/src/lib.rs), behind the cargo feature `microsandbox`, which is **off by default**.

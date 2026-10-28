@@ -54,6 +54,7 @@ conformance!(
     teardown_names_survivors,
     drop_tears_down,
     stop_ends_processes,
+    write_scope,
 );
 
 fn sh(cwd: &Path, script: &str) -> ExecSpec {
@@ -61,6 +62,7 @@ fn sh(cwd: &Path, script: &str) -> ExecSpec {
         argv: vec!["sh".into(), "-c".into(), script.into()],
         cwd: cwd.to_path_buf(),
         env: [("PATH".into(), std::env::var_os("PATH").unwrap_or_default())].into(),
+        writable: None,
     }
 }
 

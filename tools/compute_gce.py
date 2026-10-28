@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 OWNER_LABEL = "branchyard-deployment"
+# Checked and rewritten by tools/release_version.py before release packaging.
+RELEASE_VERSION = "0.1.0-rc.1"
+IMAGE_REPOSITORY = "ghcr.io/vamsiramakrishnan/branchyard-agy"
 MSB_VERSION = "0.7.3"
 MSB_ARCHIVE_SHA256 = "2d5da7de187246c804dce2a1a23f06626b6f7cb892d9a0c7c5c620784ba412ea"
 
@@ -30,10 +33,10 @@ class Config:
     zone: str
     name: str
     state_dir: Path
-    version: str = "0.0.1"
+    version: str = RELEASE_VERSION
     machine_type: str = "n2-standard-4"
     service_account: str | None = None
-    image: str = "ghcr.io/vamsiramakrishnan/branchyard-agy:0.0.1"
+    image: str = f"{IMAGE_REPOSITORY}:{RELEASE_VERSION}"
     backend: str = "local"
     repo: Path | None = None
     network: str = "default"
@@ -65,7 +68,7 @@ class Config:
         if not re.fullmatch(r"[a-z]+-[a-z]+\d-[a-z]", self.zone):
             raise SetupError("--zone must name a zone such as us-central1-a")
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?", self.version):
-            raise SetupError("--version must pin a Branchyard release, such as 0.0.1")
+            raise SetupError(f"--version must pin a Branchyard release, such as {RELEASE_VERSION}")
         if self.backend not in {"local", "microsandbox"}:
             raise SetupError("--backend must be local or microsandbox")
         if self.forward_secret not in {None, "GEMINI_API_KEY", "GOOGLE_API_KEY"}:
@@ -563,12 +566,12 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("project", "zone", "name"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--state-dir", type=Path)
-    parser.add_argument("--version", default="0.0.1")
+    parser.add_argument("--version", default=RELEASE_VERSION)
     parser.add_argument("--machine-type", default="n2-standard-4")
     parser.add_argument(
         "--service-account", help="existing account; omitted means no account, never the project default"
     )
-    parser.add_argument("--image", default="ghcr.io/vamsiramakrishnan/branchyard-agy:0.0.1")
+    parser.add_argument("--image", help="defaults to the published worker image matching --version")
     parser.add_argument("--backend", choices=("local", "microsandbox"), default="local")
     parser.add_argument("--repo", type=Path, help="copy only this repository's clean committed HEAD")
     parser.add_argument("--network", default="default")
@@ -583,6 +586,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="create/reuse the named VM and prepare its SSH remote")
     args = vars(parser.parse_args(argv))
     should_apply = args.pop("apply")
+    if args["image"] is None:
+        args["image"] = f"{IMAGE_REPOSITORY}:{args['version']}"
     if args["state_dir"] is None:
         args["state_dir"] = (
             Path.home() / ".local/state/branchyard/compute-gce" / args["project"] / args["zone"] / args["name"]

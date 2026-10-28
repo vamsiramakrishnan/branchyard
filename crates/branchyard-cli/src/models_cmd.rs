@@ -42,11 +42,12 @@ pub use branchyard::configure::key_source;
 /// over `period`.
 pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome {
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by models reads this repository's [models] and usage; a server's are in its \
-             configuration file and /metrics (docs/model-gateway.md)"
-                .into(),
-        ));
+             configuration file and /metrics (docs/model-gateway.md)",
+        )
+        .next("run by models without --remote, in the repository")
+        .into());
     }
     let yard = open()?;
     let gateway = yard.models();

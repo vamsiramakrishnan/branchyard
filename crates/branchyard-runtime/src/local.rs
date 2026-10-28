@@ -20,11 +20,19 @@
 //!   where unprivileged user and network namespaces are allowed, the
 //!   process and its descendants have no network but one listener the
 //!   caller serves ([`crate::egress`]).
+//! - With [`ExecSpec::writable`] set, on Linux with Landlock
+//!   ([`LocalProvider::write_guard`]), the process and its descendants
+//!   can write only beneath the paths it names; reads and execution stay
+//!   allowed. Where the host cannot hold it, a spec that asks for it is
+//!   refused ([`Operation::WriteScope`]), never run unguarded. It composes
+//!   with the network confinement: the namespace is set up first, then
+//!   Landlock restricts the process inside it.
 //!
 //! What it does not guarantee:
 //!
-//! - Isolation of any kind, beyond that confinement. A "sandbox" is a record; the process sees the
-//!   host filesystem, network and every file this user can read. Mounts are
+//! - Isolation of any kind, beyond those confinements. A "sandbox" is a
+//!   record; the process sees the host filesystem, network and every file
+//!   this user can read. Mounts are
 //!   identity only (host path equals sandbox path) and must be writable,
 //!   since nothing could enforce read-only access. An image or resource
 //!   limit is refused rather than ignored.
@@ -86,10 +94,11 @@ impl LocalProvider {
     }
 
     /// Start `spec` directly, outside any named sandbox: in its own process
-    /// group, without a shell, with exactly `spec.env`.
+    /// group, without a shell, with exactly `spec.env`, and held to
+    /// `spec.writable` when it names a write scope
+    /// ([`LocalProvider::write_guard`]; an error where this host cannot).
     pub fn spawn(spec: &ExecSpec) -> io::Result<LocalProcess> {
-        let mut command = LocalProvider::command(spec)?;
-        LocalProcess::new(command.spawn()?)
+        LocalProvider::launch(spec, None, false).map(|(process, _)| process)
     }
 
     /// Like [`LocalProvider::spawn`], but confined to its own network
@@ -105,9 +114,7 @@ impl LocalProvider {
     /// dies (see the module documentation): keep it on that thread. Not
     /// for a process meant to outlive its caller.
     pub fn spawn_tied(spec: &ExecSpec) -> io::Result<LocalProcess> {
-        let mut command = LocalProvider::command(spec)?;
-        tie(&mut command);
-        LocalProcess::new(command.spawn()?)
+        LocalProvider::launch(spec, None, true).map(|(process, _)| process)
     }
 
     /// [`LocalProvider::spawn_confined`], tied to the calling thread as
@@ -120,22 +127,75 @@ impl LocalProvider {
     }
 
     fn confined(spec: &ExecSpec, port: u16, tied: bool) -> io::Result<(LocalProcess, TcpListener)> {
+        match LocalProvider::launch(spec, Some(port), tied)? {
+            (process, Some(listener)) => Ok((process, listener)),
+            (_, None) => Err(io::Error::other(
+                "the confined process did not hand back its listener",
+            )),
+        }
+    }
+
+    /// Start `spec`: tied to the calling thread with `tied`, in its own
+    /// network namespace with `port`, and held to its write scope when it
+    /// names one. The write scope's hook is registered last, after the
+    /// namespace's, so it restricts the process inside the namespace.
+    fn launch(
+        spec: &ExecSpec,
+        port: Option<u16>,
+        tied: bool,
+    ) -> io::Result<(LocalProcess, Option<TcpListener>)> {
+        let mut command = LocalProvider::command(spec)?;
+        if tied {
+            tie(&mut command);
+        }
         #[cfg(target_os = "linux")]
         {
-            let mut command = LocalProvider::command(spec)?;
-            if tied {
-                tie(&mut command);
+            let pending = match port {
+                Some(port) => Some(crate::netns::prepare(&mut command, port)?),
+                None => None,
+            };
+            if let Some(paths) = &spec.writable {
+                crate::landlock::Ruleset::new(paths)?.restrict(&mut command);
             }
-            let (child, listener) = crate::netns::spawn(&mut command, port)?;
-            Ok((LocalProcess::new(child)?, listener))
+            match pending {
+                Some(pending) => {
+                    let (child, listener) = pending.spawn(&mut command)?;
+                    Ok((LocalProcess::new(child)?, Some(listener)))
+                }
+                None => Ok((LocalProcess::new(command.spawn()?)?, None)),
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (spec, port, tied);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                LocalProvider::confinement().unwrap_err(),
-            ))
+            if port.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    LocalProvider::confinement().err().unwrap_or_default(),
+                ));
+            }
+            if spec.writable.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    LocalProvider::write_guard().err().unwrap_or_default(),
+                ));
+            }
+            Ok((LocalProcess::new(command.spawn()?)?, None))
+        }
+    }
+
+    /// Whether [`ExecSpec::writable`] can be held on this host, and the
+    /// Landlock ABI that holds it; why not otherwise (not Linux, a kernel
+    /// without Landlock or with it turned off, or `BRANCHYARD_GUARD=off`).
+    /// Detected once per process, by restricting `/bin/sh` and seeing a
+    /// write refused.
+    pub fn write_guard() -> Result<u32, String> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::landlock::supported()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("holding a process's writes to a scope needs Linux Landlock".into())
         }
     }
 
@@ -208,6 +268,14 @@ impl LocalProvider {
         Ok(())
     }
 
+    /// Refuse, as unsupported, a write scope this host cannot hold.
+    fn check_write_scope(spec: &ExecSpec) -> Result<(), ProviderError> {
+        match (&spec.writable, LocalProvider::write_guard()) {
+            (Some(_), Err(_)) => Err(ProviderError::unsupported(Operation::WriteScope)),
+            _ => Ok(()),
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Local>> {
         self.sandboxes.lock_recovering("sandboxes")
     }
@@ -254,6 +322,7 @@ impl SandboxProvider for LocalProvider {
         if !local.running {
             return Err(ProviderError::Runtime(format!("sandbox {name} is stopped")));
         }
+        LocalProvider::check_write_scope(spec)?;
         let process = LocalProvider::spawn(spec)?;
         local.groups.retain(|group| group.strong_count() > 0);
         local.groups.push(Arc::downgrade(&process.group));
@@ -269,6 +338,7 @@ impl SandboxProvider for LocalProvider {
         if LocalProvider::confinement().is_err() {
             return Err(ProviderError::unsupported(Operation::Egress));
         }
+        LocalProvider::check_write_scope(spec)?;
         let mut sandboxes = self.lock();
         let local = sandboxes
             .get_mut(name)

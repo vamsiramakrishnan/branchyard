@@ -754,7 +754,7 @@ pub(crate) fn prepare(
             .cancel_requested(fence)
             .ok()
             .flatten()
-            .map(|by| format!("cancelled by {by}"))
+            .map(|by| format!("cancelled {}", crate::operations::actor_text(&by)))
     };
     // What the worktree took from its warm pool, on the setup report.
     let pool_use = state.pool.as_ref().map(|p| Box::new(p.used.clone()));
@@ -1795,6 +1795,7 @@ pub(crate) fn run_in_sandbox(report: &mut WorkspaceReport, commands: &[String], 
             argv: vec!["sh".into(), "-c".into(), command.clone()],
             cwd: PathBuf::from(cwd),
             env: env.iter().map(|(n, v)| (n.into(), v.into())).collect(),
+            writable: None,
         };
         let mut process = match provider.exec(sandbox, &spec) {
             Ok(process) => process,

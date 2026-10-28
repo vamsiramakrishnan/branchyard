@@ -72,6 +72,7 @@ conformance!(
     teardown_names_survivors,
     drop_tears_down,
     stop_ends_processes,
+    write_scope,
 );
 
 fn run(provider: &dyn SandboxProvider, sandbox: &str, script: &str) -> (Option<i32>, String) {
@@ -79,6 +80,7 @@ fn run(provider: &dyn SandboxProvider, sandbox: &str, script: &str) -> (Option<i
         argv: vec!["sh".into(), "-c".into(), script.into()],
         cwd: GUEST.into(),
         env: Default::default(),
+        writable: None,
     };
     let mut process: Box<dyn Process> = provider.exec(sandbox, &spec).unwrap();
     drop(process.take_stdin());
@@ -211,6 +213,7 @@ fn start_sleeper(provider: &dyn SandboxProvider, sandbox: &str) -> (Box<dyn Proc
         ],
         cwd: GUEST.into(),
         env: Default::default(),
+        writable: None,
     };
     let mut process = provider.exec(sandbox, &spec).unwrap();
     drop(process.take_stdin());
@@ -359,6 +362,7 @@ fn a_live_branch_rejects_changed_open_files_and_still_creates_compatible_sibling
         ],
         cwd: GUEST.into(),
         env: Default::default(),
+        writable: None,
     };
     let mut holder = provider.exec(source, &command).unwrap();
     let mut ready = String::new();

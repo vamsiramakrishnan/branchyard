@@ -11,14 +11,16 @@ use serde_json::Value;
 use crate::args::SetupFlags;
 use crate::cloud_setup::CloudKind;
 use crate::commands::{Env, Failure};
+use crate::errors::Report;
 
 /// Select the working directory and initialize a repository only with consent.
 pub(crate) fn directory(env: &Env, args: &SetupFlags) -> Result<(), Failure> {
     let interactive = env.stdin_tty && env.stdout_tty && !args.json;
     if args.guided && !interactive && !args.yes && !args.dry_run {
-        return Err(Failure::Message(
-            "guided setup needs a terminal.\nNext: run by setup --guided in your terminal, or use by setup --guided --yes --directory PATH".into(),
-        ));
+        return Err(Report::new("manual", "guided setup needs a terminal")
+            .next("run by setup --guided in your terminal")
+            .next("by setup --guided --yes --directory PATH")
+            .into());
     }
     let mut directory = args.directory.clone().unwrap_or(std::env::current_dir()?);
     if !directory.is_absolute() {
@@ -52,9 +54,12 @@ pub(crate) fn directory(env: &Env, args: &SetupFlags) -> Result<(), Failure> {
         && !args.dry_run
     {
         if args.yes && args.directory.is_none() {
-            return Err(Failure::Message(
-                "the current directory is not a git repository.\nNext: choose a project with by setup --guided --yes --directory PATH".into(),
-            ));
+            return Err(Report::new(
+                "not_a_repository",
+                "the current directory is not a git repository",
+            )
+            .next("choose a project with by setup --guided --yes --directory PATH")
+            .into());
         }
         let approved = args.yes
             || cliclack::confirm(format!(
@@ -65,9 +70,12 @@ pub(crate) fn directory(env: &Env, args: &SetupFlags) -> Result<(), Failure> {
             .interact()
             .map_err(crate::wizard::cancelled)?;
         if !approved {
-            return Err(Failure::Message(
-                "repository initialization was cancelled; nothing was written.\nNext: choose an existing repository with by setup --guided --directory PATH".into(),
-            ));
+            return Err(Report::new(
+                "manual",
+                "repository initialization was cancelled; nothing was written",
+            )
+            .next("choose an existing repository with by setup --guided --directory PATH")
+            .into());
         }
         std::fs::create_dir_all(&directory)?;
         let status = Command::new("git")
@@ -75,20 +83,32 @@ pub(crate) fn directory(env: &Env, args: &SetupFlags) -> Result<(), Failure> {
             .arg(&directory)
             .stdin(Stdio::null())
             .status()
-            .map_err(|error| Failure::Message(format!(
-                "could not initialize {}: {error}.\nNext: install git, then rerun by setup --guided --directory PATH", directory.display()
-            )))?;
+            .map_err(|error| {
+                Report::new(
+                    "tool_unavailable",
+                    format!("could not initialize {}: {error}", directory.display()),
+                )
+                .next("install git, then rerun by setup --guided --directory PATH")
+            })?;
         if !status.success() {
-            return Err(Failure::Message(format!(
-                "git could not initialize {}.\nNext: check this directory is writable, then rerun by setup --guided --directory PATH", directory.display()
-            )));
+            return Err(Report::new(
+                "git",
+                format!("git could not initialize {}", directory.display()),
+            )
+            .next("check this directory is writable, then rerun by setup --guided --directory PATH")
+            .into());
         }
     }
     std::env::set_current_dir(&directory).map_err(|error| {
-        Failure::Message(format!(
-            "could not open project directory {}: {error}.\nNext: choose an existing directory with by setup --directory PATH",
-            directory.display()
-        ))
+        Report::new(
+            "io",
+            format!(
+                "could not open project directory {}: {error}",
+                directory.display()
+            ),
+        )
+        .next("choose an existing directory with by setup --directory PATH")
+        .into()
     })
 }
 
@@ -148,9 +168,9 @@ pub(crate) fn answers(
         answers = crate::cloud_setup::guided(env, kind, &std::env::current_dir()?, args.yes)?;
     } else {
         if backend == "microsandbox" && !facts.build.microsandbox {
-            return Err(Failure::Message(
-                "this by build does not include Microsandbox.\nNext: install the Linux runtime package, or choose a GKE/GCE worker in by setup --guided".into(),
-            ));
+            return Err(Report::new("tool_unavailable", "this by build does not include Microsandbox")
+                .next("install the Linux runtime package, or choose a GKE/GCE worker in by setup --guided")
+                .into());
         }
         answers.insert("provider".into(), backend.into());
         if backend == "microsandbox" {

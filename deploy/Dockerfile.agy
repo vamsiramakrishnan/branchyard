@@ -18,6 +18,8 @@ COPY --from=build /source/target/release/by /source/target/release/branchyard-se
 COPY --from=build /source/target/release/branchyard-bridge /usr/local/libexec/branchyard-bridge
 COPY --chmod=755 deploy/substrate-entrypoint.sh /usr/local/bin/branchyard-bridge
 COPY --chmod=755 agy /usr/local/bin/agy
+COPY LICENSE THIRD_PARTY.md /usr/share/doc/branchyard/
+COPY packaging/licenses /usr/share/doc/branchyard/licenses/
 ENV BRANCHYARD_ACTOR_UID=1000 BRANCHYARD_ACTOR_GID=1000 \
     BRANCHYARD_ACTOR_WORKDIR=/workspace BRANCHYARD_ACTOR_HOME=/branchyard/home HOME=/branchyard/home
 RUN install -d -o 1000 -g 1000 -m 0700 /workspace /branchyard/home

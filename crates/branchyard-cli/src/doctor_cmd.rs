@@ -17,6 +17,7 @@
 
 mod checks;
 mod context;
+mod hooks;
 mod serve;
 
 use serde::Serialize;
@@ -146,8 +147,8 @@ pub(crate) const NOT_CHECKED: &str = "not checked: ";
 type CheckFn = fn(&Context) -> Vec<Check>;
 
 /// The checks, in the order the report lists them: the repository, the
-/// configuration, the harnesses, the provider, this host, a configured
-/// server and the model gateway.
+/// configuration, the harnesses and whether their hooks were heard, the
+/// provider, this host, a configured server and the model gateway.
 const CHECKS: &[CheckFn] = &[
     checks::repository_git,
     checks::repository_state,
@@ -160,9 +161,11 @@ const CHECKS: &[CheckFn] = &[
     checks::harnesses_installed,
     checks::harnesses_default,
     checks::harnesses_credentials,
+    hooks::heard,
     checks::provider_default,
     checks::provider_sandboxes,
     checks::host_namespaces,
+    checks::host_landlock,
     checks::host_loopback,
     checks::host_kvm,
     checks::server_reachable,
@@ -175,14 +178,18 @@ const CHECKS: &[CheckFn] = &[
 /// The version of the JSON report: 1 had `ok`, `warn` and `fail`, one
 /// `harnesses.installed` row, and no `mode`; 2 adds the `todo` status,
 /// `harnesses.summary` with one `harnesses.ID` row for each installed
-/// harness in its place, and `mode`.
-const FORMAT: u32 = 2;
+/// harness in its place, and `mode`; 3 adds `hooks`, what was heard of
+/// each harness's hooks, beside its `hooks.ID` row.
+const FORMAT: u32 = 3;
 
-/// Every check's rows, and the mode the repository runs in.
+/// Every check's rows, the mode the repository runs in, and what was heard
+/// of the harnesses' hooks.
 struct Report {
     /// The `Mode:` line's text, without the label.
     mode: Option<String>,
     checks: Vec<Check>,
+    /// The `hooks` array of `--json`.
+    hooks: Value,
 }
 
 impl Report {
@@ -190,6 +197,7 @@ impl Report {
         Report {
             mode: Some(checks::mode(context)),
             checks: CHECKS.iter().flat_map(|check| check(context)).collect(),
+            hooks: hooks::json(context),
         }
     }
 
@@ -207,12 +215,13 @@ impl Report {
     }
 
     /// `{"format", "mode", "checks": [{"name", "status", "detail", "fix"}],
-    /// "status"}`.
+    /// "hooks": [{"harness", "label", "install", "heard"}], "status"}`.
     fn json(&self) -> Value {
         json!({
             "format": FORMAT,
             "mode": self.mode,
             "checks": self.checks,
+            "hooks": self.hooks,
             "status": self.status(),
         })
     }
@@ -341,6 +350,7 @@ mod tests {
     fn report() -> Report {
         Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![
                 Check::ok("repository.git", "/src/app (on branch main)"),
                 Check::warn(
@@ -365,11 +375,21 @@ mod tests {
         assert_eq!(report().status(), Status::Fail);
         let mut checks = report().checks;
         checks.pop();
-        assert_eq!(Report { mode: None, checks }.status(), Status::Warn);
+        let hooks = Value::Array(Vec::new());
         assert_eq!(
             Report {
                 mode: None,
-                checks: Vec::new()
+                checks,
+                hooks: hooks.clone()
+            }
+            .status(),
+            Status::Warn
+        );
+        assert_eq!(
+            Report {
+                mode: None,
+                checks: Vec::new(),
+                hooks
             }
             .status(),
             Status::Ok
@@ -380,8 +400,9 @@ mod tests {
     fn the_json_has_the_documented_shape() {
         let value = report().json();
         assert_eq!(value["status"], "fail");
-        assert_eq!(value["format"], 2);
+        assert_eq!(value["format"], 3);
         assert_eq!(value["mode"], Value::Null);
+        assert_eq!(value["hooks"], json!([]));
         let rows = value["checks"].as_array().unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(
@@ -427,6 +448,7 @@ mod tests {
     fn the_mode_is_one_line_above_the_table_and_a_key_in_the_json() {
         let report = Report {
             mode: Some("local, no isolation · SQLite (.branchyard/state.db) · no server".into()),
+            hooks: Value::Array(Vec::new()),
             checks: vec![Check::ok("a.b", "x")],
         };
         let text = report.text(Style::PLAIN);
@@ -446,11 +468,13 @@ mod tests {
     fn the_summary_counts_each_status() {
         let ok = Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![Check::ok("a.b", "x"), Check::ok("a.c", "y")],
         };
         assert!(ok.text(Style::PLAIN).ends_with("ok: all 2 checks passed\n"));
         let warned = Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![
                 Check::ok("a.b", "x"),
                 Check::warn("a.c", "y", "z"),
@@ -463,6 +487,7 @@ mod tests {
         // A to-do is not a warning, and nothing broken exits 0.
         let new = Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![
                 Check::ok("a.b", "x"),
                 Check::todo("a.c", "not set up yet", "run `by setup`"),
@@ -475,6 +500,7 @@ mod tests {
         assert!(text.ends_with("todo: 1 to do, 1 ok\n"), "{text}");
         let mixed = Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![
                 Check::todo("a.c", "x", "y"),
                 Check::warn("a.d", "x", "y"),
@@ -498,6 +524,7 @@ mod tests {
         assert_eq!(check.fix.as_deref(), Some("fix the line"));
         let text = Report {
             mode: None,
+            hooks: Value::Array(Vec::new()),
             checks: vec![check],
         }
         .text(Style::PLAIN);

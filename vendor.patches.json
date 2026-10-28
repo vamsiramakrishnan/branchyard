@@ -1,11 +1,4 @@
 {
   "format": 1,
-  "patches": [
-    {
-      "path": "vendor/msb-krun-vmm/Cargo.toml",
-      "upstream_commit": "2bd0f84ad0956f3032e0490d3b8512b6851eca12",
-      "reason": "Use the crates.io-normalized manifest to resolve sibling crates from the registry, and raise zstd from 0.13 to 0.14.3 to remove RUSTSEC-2026-0391 and the vulnerable zstd-safe 7.x chain. All Rust/firmware sources match the pinned upstream commit.",
-      "published_archive_sha256": "a1e512641c4b2300886a0ee77d0d728a1080cf11a924a4c76b0c11f6817da014"
-    }
-  ]
+  "patches": []
 }

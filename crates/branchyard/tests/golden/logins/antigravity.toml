@@ -1,0 +1,59 @@
+# Antigravity: GEMINI_API_KEY counts only with "modelProvider": "gemini" in
+# its settings (agy 1.3.3), and is a key still, unused, without it.
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "a key and the gemini provider"
+env = { GEMINI_API_KEY = "fake-gemini" }
+home = { ".gemini/antigravity-cli/settings.json" = """
+{
+  "permissions": {"allow": ["command(git)"]},
+  "modelProvider": "gemini"
+}
+""" }
+lines = ["env GEMINI_API_KEY", "fact model-provider-gemini"]
+cell = "key set (GEMINI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "GEMINI_API_KEY is set and settings.json selects the gemini provider (an API key; not checked)"
+key = "GEMINI_API_KEY"
+
+[[case]]
+name = "a key and another provider"
+env = { GEMINI_API_KEY = "fake-gemini" }
+home = { ".gemini/antigravity-cli/settings.json" = '{"modelProvider": "vertex"}' }
+lines = ["env GEMINI_API_KEY"]
+cell = "key set, unused"
+state = "logged_in"
+evidence = "likely"
+detail = "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in isolated runs, and `by harnesses login antigravity` sets it for your own"
+key = "GEMINI_API_KEY"
+
+[[case]]
+name = "a Google sign-in, whatever the key and the setting"
+env = { GEMINI_API_KEY = "fake-gemini" }
+home = { ".gemini/antigravity-cli/antigravity-oauth-token" = "token" }
+lines = ["env GEMINI_API_KEY", "file ~/.gemini/antigravity-cli/antigravity-oauth-token"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.gemini/antigravity-cli/antigravity-oauth-token exists"
+
+[[case]]
+name = "AGY_TOKEN"
+env = { AGY_TOKEN = "fake-agy" }
+lines = ["env AGY_TOKEN"]
+cell = "key set (AGY_TOKEN)"
+state = "logged_in"
+evidence = "likely"
+detail = "AGY_TOKEN is set (an API key; not checked)"
+key = "AGY_TOKEN"
+
+[[case]]
+name = "GOOGLE_API_KEY has no effect on agy"
+env = { GOOGLE_API_KEY = "fake-google" }
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.gemini/antigravity-cli/antigravity-oauth-token and no GEMINI_API_KEY or AGY_TOKEN; a GEMINI_API_KEY also needs modelProvider gemini in ~/.gemini/antigravity-cli/settings.json"

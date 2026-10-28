@@ -27,6 +27,7 @@ use branchyard_client::{new_key, Client, Repo};
 use crate::args::{Globals, Permissions, RigArgs, SpawnArgs, TaskArgs};
 use crate::commands::{self, branch_outcome, print, Env, Failure, Outcome, Prompt};
 use crate::console::Console;
+use crate::errors::Report;
 use crate::render::{self, Renderer};
 use crate::rig::{Fallback, RigPlan};
 
@@ -39,19 +40,15 @@ pub struct Remote {
 }
 
 /// What a remote command with no token says, in the error style: the three
-/// places one can be given, and where `by serve` writes one. Printed here
-/// (as JSON when `--json` is on the line), since the command has not been
-/// dispatched yet.
+/// places one can be given, and where `by serve` writes one.
 fn needs_token() -> Failure {
-    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let report = crate::errors::Report::new("usage", "remote mode needs a token")
+    Report::usage("remote mode needs a token")
         .next("pass --token-file FILE, or set BRANCHYARD_TOKEN_FILE")
         .next(
             "set token_file under [remote] in branchyard.toml (`by serve` writes one at \
              .branchyard/server/token on the server's host)",
-        );
-    crate::errors::print(&report, crate::errors::wants_json(&argv));
-    Failure::Reported
+        )
+        .into()
 }
 
 /// What to do when a server does not answer; `by doctor`'s `server.reachable`
@@ -67,16 +64,20 @@ impl Remote {
         let url = globals
             .remote
             .as_deref()
-            .ok_or_else(|| Failure::Message("no server URL".into()))?;
+            .ok_or_else(|| Report::usage("no server URL").next("pass --remote URL"))?;
         // `ssh://`: a server this starts on the host, reached through a
         // forwarded Unix socket, with the token it fetched (docs/remote-ssh.md).
         let tunnel = match crate::ssh_remote::is_ssh(url) {
             true => {
                 if globals.token_file.is_some() || globals.ca_file.is_some() {
-                    return Err(Failure::Message(
-                        "an ssh:// remote fetches its own token and needs no CA; drop                          --token-file and --ca-file (or BRANCHYARD_TOKEN_FILE and                          BRANCHYARD_CA_FILE)"
-                            .into(),
-                    ));
+                    return Err(Report::usage(
+                        "an ssh:// remote fetches its own token and needs no CA file",
+                    )
+                    .next(
+                        "drop --token-file and --ca-file (or unset BRANCHYARD_TOKEN_FILE and \
+                         BRANCHYARD_CA_FILE)",
+                    )
+                    .into());
                 }
                 Some(crate::ssh_remote::connect(url)?)
             }
@@ -98,14 +99,23 @@ impl Remote {
                 let repos = client.repos()?;
                 match repos.as_slice() {
                     [only] => only.name.clone(),
-                    [] => return Err(Failure::Message("the server serves no repositories".into())),
+                    [] => {
+                        return Err(Report::new(
+                            "config",
+                            format!("the server at {url} serves no repositories"),
+                        )
+                        .next("start it with one: by serve --repo NAME=PATH (on its host)")
+                        .into())
+                    }
                     several => {
                         let names: Vec<&str> = several.iter().map(|r| r.name.as_str()).collect();
-                        return Err(Failure::Message(format!(
-                            "the server serves {}; pass --repo NAME, set BRANCHYARD_REPO, or set \
-                             repo under [remote] in branchyard.toml",
+                        return Err(Report::usage(format!(
+                            "the server serves {}: name one",
                             names.join(", ")
-                        )));
+                        ))
+                        .next(format!("pass --repo {}, or set BRANCHYARD_REPO", names[0]))
+                        .next("set repo under [remote] in branchyard.toml")
+                        .into());
                     }
                 }
             }
@@ -139,21 +149,24 @@ pub const REMOTE_DENY_NOTICE: &str = "remote mode cannot ask, so tool permission
 /// absolute here, since a relative path would name a file on this machine.
 fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
     if let Some(recipe) = &task.recipe {
-        return Err(Failure::Message(format!(
+        return Err(Report::usage(format!(
             "--provider recipe:{} runs on the machine that has the repository: a server does not \
-             run environment recipes (docs/recipes.md). Run it without --remote",
+             run environment recipes (docs/recipes.md)",
             recipe.name
-        )));
+        ))
+        .next("run it without --remote, in the repository")
+        .into());
     }
     let mut provider = commands::provider(task)?;
     if let (Some(Provider::Substrate(options)), Some(args)) = (&mut provider, &task.substrate) {
         options.key = args.key.clone().into();
         if !options.key.is_absolute() {
-            return Err(Failure::Message(format!(
-                "--substrate-key names a file on the server in remote mode; give its absolute \
-                 path there, not {}",
+            return Err(Report::usage(format!(
+                "--substrate-key names a file on the server in remote mode, not {}",
                 args.key
-            )));
+            ))
+            .next("give the key's absolute path on the server: --substrate-key /PATH")
+            .into());
         }
     }
     Ok(provider)
@@ -164,11 +177,11 @@ fn provider(task: &TaskArgs) -> Result<Option<Provider>, Failure> {
 fn permissions(task: &TaskArgs) -> Result<(PolicySpec, Option<&'static str>), Failure> {
     match task.permissions {
         Permissions::Yes => Ok((PolicySpec::allow_all(), None)),
-        Permissions::Ask => Err(Failure::Message(
-            "--ask is not available in remote mode, where the harness runs on the server; \
-             pass --yes, or leave requests denied"
-                .into(),
-        )),
+        Permissions::Ask => Err(Report::usage(
+            "--ask is not available in remote mode, where the harness runs on the server",
+        )
+        .next("pass --yes, or --permissions read-only|edit-worktree, or leave requests denied")
+        .into()),
         Permissions::Preset(preset) => Ok((PolicySpec::preset(preset), None)),
         Permissions::Unset => Ok((PolicySpec::default(), Some(REMOTE_DENY_NOTICE))),
     }
@@ -197,6 +210,80 @@ fn announce(remote: &Remote, notice: Option<&str>, provider: Option<&Provider>, 
     }
 }
 
+/// `by ls`'s line for the server's queued work whose branches do not exist
+/// yet, which the table cannot show: empty when there is none, or when
+/// the server does not say.
+pub fn queued_line(remote: &Remote, infos: &[BranchInfo]) -> String {
+    let Ok(operations) = remote.repo.operations(None) else {
+        return String::new();
+    };
+    queued_names_line(&operations, infos)
+}
+
+/// [`queued_line`] from the server's queued and running operations.
+fn queued_names_line(operations: &[Operation], infos: &[BranchInfo]) -> String {
+    let names: Vec<&str> = operations
+        .iter()
+        .filter(|op| op.state == OperationState::Queued)
+        .flat_map(|op| &op.branches)
+        .filter(|name| !infos.iter().any(|info| &info.name == *name))
+        .map(String::as_str)
+        .collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [first, ..] => format!(
+            "\nqueued on the server, not started yet: {} (by show {first} shows its operation)\n",
+            names.join(", ")
+        ),
+    }
+}
+
+/// [`announce`] for work that continues `branch` on the server: a send, a
+/// plan decision, a fork, a reincarnation or a child it delegates. Its
+/// harness runs where `branch`'s does, with a private home when `branch`
+/// has one ([`continuing_banner`]), as the local commands say
+/// (`Live::start_for`). When the branch cannot be read, the flags alone.
+fn announce_for(
+    remote: &Remote,
+    notice: Option<&str>,
+    provider: Option<&Provider>,
+    isolated: bool,
+    branch: &str,
+) {
+    match remote.repo.branch(branch) {
+        Ok(info) => {
+            eprintln!(
+                "{}",
+                continuing_banner(&remote.label(), provider, isolated, &info)
+            );
+            if let Some(notice) = notice {
+                eprintln!("by: {notice}");
+            }
+        }
+        Err(_) => announce(remote, notice, provider, isolated),
+    }
+}
+
+/// The banner of work that continues `info` on the server at `label`: the
+/// provider the flags name, else the one the branch was started with, and
+/// a private home when the flags ask for one or the branch has one.
+fn continuing_banner(
+    label: &str,
+    provider: Option<&Provider>,
+    isolated: bool,
+    info: &BranchInfo,
+) -> String {
+    let isolated = isolated || info.isolated;
+    match (provider, info.provider.as_str()) {
+        // The record names a sandbox provider, not its options: say which.
+        (None, recorded) if recorded != "local" => format!(
+            "by: remote mode on {label}: harnesses run in the {recorded} sandbox the branch \
+             was started in, on the server"
+        ),
+        (provider, _) => commands::banner(provider, isolated, Some(label)),
+    }
+}
+
 /// Activity on stdout, or on stderr with `--json` so stdout holds only the
 /// result.
 fn live_console(env: &Env, prefixed: bool, json: bool) -> Arc<Console> {
@@ -222,32 +309,28 @@ fn failed(error: ErrorBody) -> Failure {
 }
 
 /// The engine error a server error stands for, for `--json` output: its
-/// kind is the one a local `by` reports.
+/// kind is the one a local `by` reports ([`crate::errors::local_kind`]).
 pub fn sdk_error(error: branchyard_client::Error) -> branchyard::Error {
     match error {
         branchyard_client::Error::Api { error, .. } => {
-            let kind = match error.code.as_str() {
-                "git_error" => "git".to_owned(),
-                "harness_error" => "harness".to_owned(),
-                "io_error" => "io".to_owned(),
-                "state_error" => "state".to_owned(),
-                "remote_error" => error
-                    .detail
-                    .as_ref()
-                    .and_then(|d| d["kind"].as_str())
-                    .unwrap_or("remote")
-                    .to_owned(),
-                code => code.to_owned(),
-            };
+            let kind = crate::errors::local_kind(&error.code, error.detail.as_ref());
             // A failed check's siblings or the branches on whose own work
-            // it failed, and every check of the integration, as a local
-            // `by` reports them.
+            // it failed, every check of the integration, why a harness
+            // cannot start and which profile routes no approvals, as a
+            // local `by` reports them.
             let detail = error.detail.as_ref().and_then(|d| {
                 let mut local = d
                     .get("shared")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                for key in ["checks", "own_work"] {
+                for key in [
+                    "checks",
+                    "own_work",
+                    "harness",
+                    "cause",
+                    "unsupported",
+                    "profile",
+                ] {
                     if let Some(value) = d.get(key) {
                         local[key] = value.clone();
                     }
@@ -282,6 +365,11 @@ impl From<Failure> for branchyard::Error {
             Failure::Sdk(error) => error,
             Failure::Remote(error) => sdk_error(error),
             Failure::Message(message) => branchyard::Error::Usage(message),
+            Failure::Report(report) => branchyard::Error::Remote {
+                kind: report.kind.clone(),
+                message: report.said(),
+                detail: report.detail.map(Box::new),
+            },
             other => branchyard::Error::Remote {
                 kind: "io".into(),
                 message: other.to_string(),
@@ -473,12 +561,73 @@ enum Heard {
     Entry(Box<Result<FeedEntry, branchyard_client::Error>>),
     StreamEnded,
     Operation(Box<Result<Operation, branchyard_client::Error>>),
+    /// The long poll failed in a way worth retrying ([`transient`]): the
+    /// server is restarting, or briefly unreachable. Said once.
+    Lost(Box<branchyard_client::Error>),
+    /// It answers again after [`Heard::Lost`].
+    Back,
 }
 
 /// How long one long poll of a followed operation lasts: the operation
 /// finishing answers it at once; a queued one's reason for waiting
 /// (`waiting`) is shown within this.
 const FOLLOW_POLL: Duration = Duration::from_secs(5);
+
+/// Whether a failed request is worth asking again: the server could not be
+/// reached (a restart, a network blip), or it answered that it is stopping
+/// or that a proxy in front of it could not reach it. The operations it
+/// holds are in its store, and go on, or wait in its queue, regardless.
+fn transient(error: &branchyard_client::Error) -> bool {
+    match error {
+        branchyard_client::Error::Transport { .. } => true,
+        branchyard_client::Error::Api { status, .. } => matches!(status, 502..=504),
+        _ => false,
+    }
+}
+
+/// What a followed command says, once, when its server stops answering:
+/// why, that the work is the server's, and what interrupting does.
+fn lost_line(error: &branchyard_client::Error, id: &str) -> String {
+    format!(
+        "{error}; the server keeps operation {id}, and this waits for it to answer again \
+         (Ctrl-C stops watching, not the work)"
+    )
+}
+
+/// Long-poll operation `id` on `client` and pass each answer to `tx`, until
+/// it has finished or `tx`'s reader is gone. While the server does not
+/// answer ([`transient`]) it keeps asking, with the event stream's backoff,
+/// and says so once ([`Heard::Lost`]) and again when it answers
+/// ([`Heard::Back`]): a restarted server answers for the operations it held
+/// before, from its store.
+fn poll_operation(client: &Client, id: &str, tx: &mpsc::Sender<Heard>) {
+    let mut delays: Option<Box<dyn Iterator<Item = Duration>>> = None;
+    loop {
+        match client.wait_timeout(id, FOLLOW_POLL) {
+            Err(error) if transient(&error) => {
+                let delays = match &mut delays {
+                    Some(delays) => delays,
+                    None => {
+                        if tx.send(Heard::Lost(Box::new(error))).is_err() {
+                            return;
+                        }
+                        delays.insert(Box::new(branchyard_client::reconnect_backoff()))
+                    }
+                };
+                std::thread::sleep(delays.next().unwrap_or(Duration::from_secs(5)));
+            }
+            answer => {
+                if delays.take().is_some() && tx.send(Heard::Back).is_err() {
+                    return;
+                }
+                let last = answer.as_ref().map_or(true, |op| op.state.is_terminal());
+                if tx.send(Heard::Operation(Box::new(answer))).is_err() || last {
+                    return;
+                }
+            }
+        }
+    }
+}
 
 /// [`follow`], also showing every branch whose name starts with `prefix`:
 /// a map's, which its operation cannot name when it is accepted.
@@ -490,7 +639,10 @@ fn follow_prefixed(
 ) -> Result<Operation, Failure> {
     let mut branches: HashSet<String> = op.branches.iter().cloned().collect();
     let (tx, rx) = mpsc::channel();
-    let stream = remote.repo.stream(Some(op.cursor));
+    // Reconnected by cursor for as long as the operation is followed, a
+    // server restart included: the loop below ends when the operation has
+    // finished and the stream has reached its end cursor.
+    let stream = remote.repo.stream(Some(op.cursor)).max_failures(u32::MAX);
     let entries = tx.clone();
     std::thread::spawn(move || {
         for item in stream {
@@ -505,13 +657,7 @@ fn follow_prefixed(
     });
     // The operation's state by long polls, not by sleeping between reads.
     let (client, id) = (remote.client.clone(), op.id.clone());
-    std::thread::spawn(move || loop {
-        let op = client.wait_timeout(&id, FOLLOW_POLL);
-        let last = op.as_ref().map_or(true, |op| op.state.is_terminal());
-        if tx.send(Heard::Operation(Box::new(op))).is_err() || last {
-            return;
-        }
-    });
+    std::thread::spawn(move || poll_operation(&client, &id, &tx));
     let mut seen = op.cursor;
     let mut finished: Option<Operation> = None;
     let mut streaming = true;
@@ -524,10 +670,15 @@ fn follow_prefixed(
             }
         }
         let Ok(heard) = rx.recv() else {
-            return Err(Failure::Message(format!(
-                "lost track of operation {}",
+            return Err(Report::new(
+                "remote_protocol",
+                format!("lost track of operation {} on the server", op.id),
+            )
+            .next(format!(
+                "by ls (the server goes on with operation {})",
                 op.id
-            )));
+            ))
+            .into());
         };
         match heard {
             Heard::Entry(item) if streaming => match *item {
@@ -565,6 +716,11 @@ fn follow_prefixed(
             },
             Heard::Entry(_) => {}
             Heard::StreamEnded => streaming = false,
+            Heard::Lost(error) => {
+                console.finish();
+                eprintln!("by: {}", lost_line(&error, &op.id));
+            }
+            Heard::Back => eprintln!("by: {} answers again", remote.client.endpoint()),
             Heard::Operation(op) => {
                 let op = (*op)?;
                 if let (Some(waiting), false) = (&op.waiting, said_waiting) {
@@ -589,11 +745,13 @@ fn provision(task: &TaskArgs) -> Result<Option<branchyard::Provisioning>, Failur
         .flat_map(|s| &s.secrets)
         .find(|s| s.from.is_some())
     {
-        return Err(Failure::Message(format!(
+        return Err(Report::usage(format!(
             "--secret {name}=...: with --remote, secrets come from the server, whose operator \
-             decides where each is read; pass --secret {name}",
+             decides where each is read",
             name = secret.name
-        )));
+        ))
+        .next(format!("pass --secret {name}", name = secret.name))
+        .into());
     }
     Ok(spec)
 }
@@ -625,7 +783,7 @@ fn first_branch(result: OperationResult) -> Result<BranchInfo, Failure> {
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))
+        .ok_or_else(|| missing("branch"))
 }
 
 /// `by run`'s task request, with the notice and provider it announces.
@@ -689,7 +847,7 @@ pub fn plan_approve(
         send,
     };
     let op = remote.repo.approve_plan(branch, &request, &new_key())?;
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, branch);
     plan_finish(env, remote, &op, json)
 }
 
@@ -710,7 +868,7 @@ pub fn plan_reject(
         send,
     };
     let op = remote.repo.reject_plan(branch, &request, &new_key())?;
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, branch);
     plan_finish(env, remote, &op, json)
 }
 
@@ -748,7 +906,7 @@ fn finish_result(env: &Env, remote: &Remote, result: OperationResult) -> Outcome
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))?;
+        .ok_or_else(|| missing("branch"))?;
     let style = render::Style { color: env.color };
     let check = inspect(remote, &info.name).ok().and_then(|i| i.check);
     print(&format!(
@@ -953,9 +1111,7 @@ fn map_finish(
     let console = live_console(env, true, json);
     let done = follow_prefixed(remote, op, &console, Some(&format!("{name}-")));
     console.finish();
-    let report = result(done?)?
-        .map
-        .ok_or_else(|| Failure::Message("the server returned no map".into()))?;
+    let report = result(done?)?.map.ok_or_else(|| missing("map"))?;
     let out = args.out.as_ref().map(std::path::PathBuf::from);
     if let Some(out) = &out {
         crate::map_cmd::write_atomic(out, &crate::map_cmd::results_text(out, &report))?;
@@ -1013,7 +1169,7 @@ pub fn send(
     let op = remote.repo.send(branch, &request, &new_key())?;
     // A `by review --detach` launcher waits for the server to accept it.
     crate::detach::accepted(branch);
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, branch);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)
 }
@@ -1031,7 +1187,7 @@ pub fn send_feedback(
     let (mut request, notice) = send_request(task, Prompt::Text(prompt))?;
     request.feedback = Some(feedback);
     let op = remote.repo.send(branch, &request, &new_key())?;
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, branch);
     let delegating = task.delegate.is_some() || !remote.repo.branch(branch)?.children.is_empty();
     finish_one(env, remote, &op, delegating)
 }
@@ -1051,12 +1207,12 @@ pub fn send_json(
         .send(branch, &request, &new_key())
         .map_err(sdk_error)?;
     crate::detach::accepted(branch);
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, branch);
     let info = follow_result(env, remote, &op)?
         .branches
         .into_iter()
         .next()
-        .ok_or_else(|| Failure::Message("the server returned no branch".into()))?;
+        .ok_or_else(|| missing("branch"))?;
     Ok(Sent {
         name: info.name,
         status: info.status,
@@ -1086,7 +1242,13 @@ pub fn fork(
 ) -> Outcome {
     let (request, notice) = fork_request(prompt, fresh_session, None, task)?;
     let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, request.provider.as_ref(), task.isolated);
+    announce_for(
+        remote,
+        notice,
+        request.provider.as_ref(),
+        task.isolated,
+        branch,
+    );
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
@@ -1103,7 +1265,13 @@ pub fn fork_json(
 ) -> Result<BranchInfo, Failure> {
     let (request, notice) = fork_request(prompt, fresh_session, at, task)?;
     let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, request.provider.as_ref(), task.isolated);
+    announce_for(
+        remote,
+        notice,
+        request.provider.as_ref(),
+        task.isolated,
+        branch,
+    );
     let info = first_branch(follow_result(env, remote, &op)?)?;
     if at.is_some() {
         if let Ok(events) = remote.repo.events(&info.name, 0) {
@@ -1126,7 +1294,13 @@ pub fn fork_at(
 ) -> Outcome {
     let (request, notice) = fork_request(prompt, false, Some(turn), task)?;
     let op = remote.repo.fork(branch, &request, &new_key())?;
-    announce(remote, notice, request.provider.as_ref(), task.isolated);
+    announce_for(
+        remote,
+        notice,
+        request.provider.as_ref(),
+        task.isolated,
+        branch,
+    );
     let console = live_console(env, task.delegate.is_some(), false);
     let done = follow(remote, &op, &console);
     console.finish();
@@ -1190,7 +1364,7 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         priority: task.priority,
     };
     let op = remote.repo.reincarnate(branch, &request, &new_key())?;
-    announce(remote, notice, provider.as_ref(), task.isolated);
+    announce_for(remote, notice, provider.as_ref(), task.isolated, branch);
     finish_one(env, remote, &op, task.delegate.is_some())
 }
 
@@ -1239,7 +1413,7 @@ pub fn spawn(
         .repo
         .spawn(parent, &request, &new_key())
         .map_err(sdk_error)?;
-    announce(remote, notice, None, false);
+    announce_for(remote, notice, None, false, parent);
     let console = live_console(env, true, args.json);
     let done = follow(remote, &op, &console);
     console.finish();
@@ -1341,16 +1515,12 @@ pub fn merge(
     };
     let op = match remote.repo.merge(branch, &request, &new_key()) {
         Err(error) if error.code() == Some("detached_head") => {
-            return Err(Failure::Message(
-                "HEAD is detached; pass --into <branch>".into(),
-            ))
+            return Err(commands::detached_head().into())
         }
         other => other?,
     };
     let done = remote.client.wait(&op.id)?;
-    result(done)?
-        .merged
-        .ok_or_else(|| Failure::Message("the server returned no merge".into()))
+    result(done)?.merged.ok_or_else(|| missing("merge"))
 }
 
 /// `by rig run` on the server: the lowered plan as one task request, with
@@ -1429,7 +1599,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         Err(error) => return rig_failed(true, error),
     };
     let Some(info) = result.branches.first() else {
-        return Err(Failure::Message("the server returned no branch".into()));
+        return Err(missing("branch"));
     };
     // Read again, as local mode does: the root gained its children.
     let root = remote.repo.branch(&info.name)?;
@@ -1437,18 +1607,158 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
 }
 
 fn rig_failed(json: bool, error: branchyard::Error) -> Outcome {
-    if json {
-        let value =
-            serde_json::json!({"error": {"kind": error.kind(), "message": error.to_string()}});
-        print(&crate::json::text(&value))?;
-        return Err(Failure::Reported);
-    }
-    Err(Failure::Sdk(error))
+    commands::fail(json, &error)
+}
+
+/// A server's answer without what it must hold: this `by` and the server
+/// do not speak the same API.
+fn missing(what: &str) -> Failure {
+    Report::new("remote_protocol", format!("the server returned no {what}"))
+        .next("compare by --version here with the server's; they should match")
+        .into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info(name: &str, provider: &str, isolated: bool) -> BranchInfo {
+        BranchInfo {
+            name: name.into(),
+            git_branch: format!("by/{name}"),
+            worktree: format!("/srv/app/.branchyard/worktrees/{name}").into(),
+            prompt: "p".into(),
+            harness: "gemini-cli".into(),
+            profile: "gemini-cli-acp".into(),
+            session: None,
+            parent: None,
+            children: Vec::new(),
+            depth: 0,
+            base: "0123456789abcdef".into(),
+            candidate: None,
+            status: branchyard::BranchStatus::Ready,
+            turns: 1,
+            cost_usd: None,
+            created_at: 10_000,
+            stalled: false,
+            superseded_by: None,
+            model: None,
+            provider: provider.into(),
+            isolated,
+            guard: None,
+        }
+    }
+
+    /// A send (or fork, or plan decision) on a branch with a private home
+    /// says so, as `by send` does locally, though the send's own flags ask
+    /// for nothing: on 27 October 2026 a send to an isolated Gemini CLI
+    /// branch said `in the server's own HOME; no sandbox`.
+    #[test]
+    fn work_that_continues_a_branch_says_where_the_branch_runs() {
+        let label = "http://127.0.0.1:8421 (app)";
+        let isolated = continuing_banner(label, None, false, &info("b", "local", true));
+        assert_eq!(
+            isolated,
+            commands::banner(None, true, Some(label)),
+            "{isolated}"
+        );
+        assert!(isolated.contains("with a private HOME"), "{isolated}");
+        let local = continuing_banner(label, None, false, &info("b", "local", false));
+        assert!(local.contains("in the server's own HOME"), "{local}");
+        // --isolated on a fork of a local branch still asks for a home.
+        assert_eq!(
+            continuing_banner(label, None, true, &info("b", "local", false)),
+            isolated
+        );
+        // A sandboxed branch is never called "no sandbox".
+        let sandboxed = continuing_banner(label, None, false, &info("b", "microsandbox", false));
+        assert_eq!(
+            sandboxed,
+            "by: remote mode on http://127.0.0.1:8421 (app): harnesses run in the microsandbox \
+             sandbox the branch was started in, on the server"
+        );
+        // A provider the flags name wins over the record. Built from its
+        // wire form: only crates/branchyard/src/providers names a variant.
+        let flagged: Provider = serde_json::from_str(r#"{"kind": "local"}"#).unwrap();
+        assert_eq!(
+            continuing_banner(
+                label,
+                Some(&flagged),
+                false,
+                &info("b", "microsandbox", false)
+            ),
+            local
+        );
+    }
+
+    fn op(state: OperationState, branches: &[&str]) -> Operation {
+        Operation {
+            id: "op_1".into(),
+            repo: "app".into(),
+            kind: branchyard_client::api::OperationKind::Task,
+            state,
+            branches: branches.iter().map(|b| b.to_string()).collect(),
+            cursor: 0,
+            end_cursor: None,
+            created_at_ms: 0,
+            finished_at_ms: None,
+            result: None,
+            error: None,
+            requires: Vec::new(),
+            waiting: None,
+            priority: 0,
+        }
+    }
+
+    /// `by ls` against a server names the branches its queued operations
+    /// will create, which have no row yet: ten runs with eight running
+    /// read as eight on 27 October 2026.
+    #[test]
+    fn ls_names_the_branches_queued_work_will_create() {
+        let infos = [info("f1", "local", false)];
+        let operations = [
+            op(OperationState::Running, &["f1"]),
+            op(OperationState::Queued, &["f5"]),
+            op(OperationState::Queued, &["f8"]),
+            // A queued send to a branch that exists is in the table.
+            op(OperationState::Queued, &["f1"]),
+        ];
+        assert_eq!(
+            queued_names_line(&operations, &infos),
+            "\nqueued on the server, not started yet: f5, f8 (by show f5 shows its operation)\n"
+        );
+        assert_eq!(queued_names_line(&operations[..1], &infos), "");
+        assert_eq!(queued_names_line(&[], &[]), "");
+    }
+
+    /// A restarting server is asked again; a refusal is not.
+    #[test]
+    fn a_server_that_cannot_be_reached_or_is_stopping_is_asked_again() {
+        let transport = branchyard_client::Error::Transport {
+            endpoint: "http://127.0.0.1:8421".into(),
+            message: "Connection refused (os error 111)".into(),
+        };
+        assert!(transient(&transport));
+        let api = |status: u16, code: &str| branchyard_client::Error::Api {
+            status,
+            error: Box::new(ErrorBody {
+                code: code.into(),
+                message: code.into(),
+                detail: None,
+            }),
+        };
+        assert!(transient(&api(503, "shutting_down")));
+        assert!(transient(&api(502, "http_502")));
+        assert!(!transient(&api(401, "unauthorized")));
+        assert!(!transient(&api(404, "unknown_operation")));
+        assert!(!transient(&api(500, "internal")));
+        assert_eq!(
+            lost_line(&transport, "op_7"),
+            "cannot reach http://127.0.0.1:8421: Connection refused (os error 111); the server \
+             keeps operation op_7, and this waits for it to answer again (Ctrl-C stops \
+             watching, not the work)"
+        );
+    }
 
     /// Stream events already read after the stream opened are dropped,
     /// in order; the first one not among them ends the matching, so a later

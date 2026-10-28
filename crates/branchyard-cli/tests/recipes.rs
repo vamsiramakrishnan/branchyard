@@ -149,7 +149,7 @@ fn recipes_run_only_once_trusted_and_check_runs_the_whole_lifecycle() {
 
     // Without a terminal an untrusted recipe is refused, and nothing ran.
     let out = repo.by(&["recipe", "check", "devbox"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         text(&out.stderr).contains("by recipe trust devbox"),
         "{}",
@@ -395,7 +395,7 @@ fn by_run_on_a_recipe_machine_brings_the_work_back_and_rm_destroys_a_kept_one() 
 
     // Untrusted: refused before anything is created.
     let out = repo.run_on_recipe(&agent, "WRITE hello.txt=hi", "hello", &[]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stdout));
     let said = text(&out.stderr);
     assert!(said.contains("has commands you have not trusted"), "{said}");
     assert!(said.contains("by recipe trust devbox"), "{said}");
@@ -545,7 +545,7 @@ fn defaults_can_choose_a_recipe_and_a_changed_recipe_is_refused_again() {
     )
     .unwrap();
     let out = repo.run_on_recipe(&agent, "WRITE x=1", "changed", &[]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(4));
     assert!(
         text(&out.stderr).contains("changed since you trusted it"),
         "{}",

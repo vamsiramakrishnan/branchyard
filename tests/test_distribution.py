@@ -4,6 +4,7 @@ run with the shipped launcher / imported as the shipped module. See
 `docs/distribution.md`.
 """
 
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -27,6 +28,7 @@ spec = importlib.util.spec_from_file_location("package", ROOT / "tools/package.p
 assert spec is not None and spec.loader is not None
 package = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(package)
+release_version = package.release_version
 
 
 class ArchiveTests(unittest.TestCase):
@@ -160,8 +162,11 @@ class SdkProjectTests(unittest.TestCase):
         workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]
         project = self.project["project"]
         self.assertEqual(project["name"], "branchyard")
-        self.assertEqual(project["version"], workspace["version"])
-        self.assertEqual(project["license"], {"text": workspace["license"]})
+        # The workspace version, as Python spells it (0.1.0-rc.1 is 0.1.0rc1).
+        self.assertEqual(project["version"], release_version.pep440(workspace["version"]))
+        # An SPDX expression: setuptools 77 reads it, and deprecates the table form.
+        self.assertEqual(project["license"], workspace["license"])
+        self.assertEqual(self.project["build-system"]["requires"], ["setuptools>=77"])
         self.assertEqual(project["dependencies"], [])
         # ruff.toml holds the modules to 3.9's syntax; the floor says the same.
         self.assertEqual(project["requires-python"], ">=3.9")
@@ -190,6 +195,9 @@ class SdkProjectTests(unittest.TestCase):
     def test_setuptools_builds_it_from_the_extracted_archive(self):
         if importlib.util.find_spec("setuptools") is None:
             self.skipTest("setuptools is not installed; pip install ./sdk/python needs it, or network to fetch it")
+        installed = importlib.metadata.version("setuptools")
+        if int(installed.split(".")[0]) < 77:
+            self.skipTest(f"setuptools {installed} cannot read an SPDX license; pip fetches 77 or later to build it")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             *_archives, sdk = package.build(root / "dist")
@@ -431,6 +439,129 @@ class SdkArchiveRuntimeTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "demo True")
 
 
+class ReleaseVersionTests(unittest.TestCase):
+    """`tools/release_version.py`: one version, everywhere it is written."""
+
+    def run_tool(self, *args, root=ROOT):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools/release_version.py"), "--root", str(root), *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_every_field_carries_the_workspace_version(self):
+        version = release_version.workspace_version()
+        self.assertEqual(release_version.disagreements(), [])
+        fields = release_version.fields()
+        # Every kind of field is read: crate path dependencies, Cargo.lock, each manifest, the SDK.
+        files = {relative for relative, _field, _value in fields}
+        for needed in ["Cargo.lock", "crates/branchyard-cli/Cargo.toml", "sdk/python/pyproject.toml"]:
+            self.assertIn(needed, files)
+        self.assertLessEqual(
+            set(release_version.JSON_FIELDS) | set(release_version.TOML_FIELDS) | set(release_version.TEXT_FIELDS),
+            files,
+        )
+        workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["members"]
+        locked = [field for relative, field, _value in fields if relative == "Cargo.lock"]
+        self.assertEqual(len(locked), len(workspace))
+        out = self.run_tool()
+        self.assertEqual((out.returncode, out.stdout), (0, version + "\n"), out.stderr)
+        out = self.run_tool("--pep440")
+        self.assertEqual(out.stdout, release_version.pep440(version) + "\n")
+
+    def test_python_spells_a_pre_release_the_pep_440_way(self):
+        for version, python in [
+            ("0.1.0", "0.1.0"),
+            ("0.1.0-rc.1", "0.1.0rc1"),
+            ("1.2.3-alpha.4", "1.2.3a4"),
+            ("10.0.0-beta.12", "10.0.0b12"),
+        ]:
+            self.assertEqual(release_version.pep440(version), python)
+        for unusable in ["0.1", "v0.1.0", "0.1.0-rc1", "0.1.0-dev.1", "0.1.0+build.5", "0.1.0-rc.1.2"]:
+            with self.assertRaises(ValueError, msg=unusable):
+                release_version.pep440(unusable)
+
+    def test_a_tag_must_be_v_and_the_workspace_version(self):
+        version = release_version.workspace_version()
+        self.assertEqual(self.run_tool("--tag", f"v{version}").stdout, version + "\n")
+        for wrong in [version, "v9.9.9", f"v{version}.1", f"release-{version}"]:
+            out = self.run_tool("--tag", wrong)
+            self.assertEqual(out.returncode, 1, wrong)
+            self.assertIn("does not name the workspace version", out.stderr)
+            self.assertEqual(out.stdout, "")
+
+    def copy_tree(self, destination):
+        """The files the tool reads or writes, copied out of the checkout."""
+        names = {
+            "Cargo.toml",
+            "Cargo.lock",
+            *release_version.JSON_FIELDS,
+            *release_version.TOML_FIELDS,
+            *release_version.TEXT_FIELDS,
+        }
+        names |= {path.relative_to(ROOT).as_posix() for path in release_version.members().values()}
+        for name in names:
+            (destination / name).parent.mkdir(parents=True, exist_ok=True)
+            (destination / name).write_bytes((ROOT / name).read_bytes())
+        return names
+
+    def test_set_rewrites_every_field_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = self.copy_tree(root)
+            old = release_version.workspace_version(root)
+            out = self.run_tool("--set", "v2.0.0-beta.3", root=root)
+            self.assertEqual((out.returncode, out.stdout), (0, "2.0.0-beta.3\n"), out.stderr)
+            self.assertEqual(release_version.disagreements(root), [])
+            self.assertEqual(release_version.workspace_version(root), "2.0.0-beta.3")
+            self.assertIn('version = "2.0.0b3"', (root / "sdk/python/pyproject.toml").read_text())
+            # Only version lines changed; every other byte of every file is as it was.
+            for name in sorted(names):
+                before = (ROOT / name).read_text().splitlines()
+                after = (root / name).read_text().splitlines()
+                self.assertEqual(len(before), len(after), name)
+                for was, now in zip(before, after, strict=True):
+                    if was != now:
+                        self.assertTrue(old in was or release_version.pep440(old) in was, name)
+                        self.assertEqual(
+                            now, was.replace(old, "2.0.0-beta.3").replace(release_version.pep440(old), "2.0.0b3")
+                        )
+            # The registry crates in Cargo.lock keep their versions.
+            lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
+            registry = [p for p in lock if "source" in p]
+            self.assertTrue(registry)
+            original = {(p["name"], p["version"]) for p in tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]}
+            self.assertLessEqual({(p["name"], p["version"]) for p in registry}, original)
+            # A field left behind is named, with the command that fixes it.
+            herdr = root / "plugins/herdr/herdr-plugin.toml"
+            herdr.write_text(herdr.read_text().replace('version = "2.0.0-beta.3"', 'version = "1.0.0"'))
+            out = self.run_tool(root=root)
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("plugins/herdr/herdr-plugin.toml version is '1.0.0', not '2.0.0-beta.3'", out.stderr)
+            self.assertIn("next: python3 tools/release_version.py --set 2.0.0-beta.3", out.stderr)
+            # A version neither Cargo nor Python can say is refused before anything is written.
+            out = self.run_tool("--set", "2.0", root=root)
+            self.assertEqual(out.returncode, 1)
+            self.assertIn("is not a release version", out.stderr)
+            self.assertEqual(release_version.workspace_version(root), "2.0.0-beta.3")
+
+    def test_the_docs_name_the_workspace_version(self):
+        version = release_version.workspace_version()
+        python = release_version.pep440(version)
+        patterns = [
+            (r"\bv(\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?)\b", version),  # a tag, or its download URL
+            (r"--version (\d+\.\d+\.\d+\S*)", version),  # install.sh and the formula
+            (r"\bby (\d+\.\d+\.\d+[A-Za-z0-9.+-]*)", version),  # what by --version prints
+            (r"branchyard-(?:[a-z-]+-)?(\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?)(?:-|\.zip)", version),  # archives
+            (r"branchyard-(\d+\.\d+\.\d+(?:[a-z]+\d+)?)(?:-py3|\.tar\.gz)", python),  # the wheel and sdist
+        ]
+        for page in ["README.md", "docs/distribution.md", "docs/getting-started.md", "docs/upgrade.md", "docs/sdk.md"]:
+            text = (ROOT / page).read_text()
+            for pattern, wanted in patterns:
+                for found in re.findall(pattern, text):
+                    self.assertEqual(found, wanted, f"{page} names {found} ({pattern})")
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
     """Dist owns packaging; the generated workflow gates publication on native smoke."""
 
@@ -440,23 +571,43 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_releases_are_tagged_and_smoke_tests_gate_publication(self):
         self.assertIn("  push:\n    tags:", self.text)
-        self.assertNotIn("  pull_request:", self.text)
+        self.assertIn("  pull_request:\n    paths:", self.text)
+        self.assertIn("  workflow_dispatch:", self.text)
+        self.assertIn("--draft --verify-tag", self.text)
         host = self.text.split("\n  host:\n", 1)[1].split("\n  custom-release-smoke:\n", 1)[0]
         self.assertIn("      - custom-release-smoke", host)
         self.assertIn("needs.custom-release-smoke.result == 'success'", host)
         self.assertIn("uses: ./.github/workflows/release-smoke.yml", self.text)
         self.assertIn("uses: ./.github/workflows/agy-image.yml", self.text)
 
+    def test_rehearsals_do_not_mutate_a_release_or_push_an_image(self):
+        plan = self.text.split("\n  plan:\n", 1)[1].split("\n  build-local-artifacts:\n", 1)[0]
+        self.assertNotIn("dist host", plan)
+        self.assertIn("python3 tools/release_version.py", plan)
+        self.assertIn("github.ref_type == 'tag' && (github.event_name == 'push' || inputs.draft == true)", plan)
+        self.assertIn("if: needs.plan.outputs.publishing != 'true'", self.text)
+        self.assertIn("name: release\n", self.text)
+        image = (ROOT / ".github/workflows/agy-image.yml").read_text()
+        self.assertIn("Publish immutable image metadata\n        if: inputs.publish", image)
+        self.assertIn('"mode":"dry-run"', image)
+        self.assertIn("if: needs.plan.outputs.publishing == 'true'", self.text)
+        extras = (ROOT / ".github/workflows/release-extras.yml").read_text()
+        self.assertIn("python3 tools/package.py --output artifacts", extras)
+        self.assertIn("-m build sdk/python --outdir artifacts", extras)
+
     def test_actions_are_pinned_and_generated_configuration_is_reproducible(self):
         for path in ["release.yml", "release-smoke.yml", "release-extras.yml"]:
             text = (ROOT / ".github/workflows" / path).read_text()
             for use in re.findall(r"uses:\s*(\S+)", text):
+                use = use.strip("\"'")
                 if not use.startswith("./"):
                     self.assertRegex(use, r"^[\w.-]+/[\w.-]+@[0-9a-f]{40}$")
         spec = importlib.util.spec_from_file_location("release_workflow", ROOT / "tools/release_workflow.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self.assertEqual(module.require_smoke(self.text), self.text)
+        self.assertEqual(module.rehearsals(self.text), self.text)
+        self.assertEqual(module.python_runtime(self.text), self.text)
         checked = subprocess.run(
             [sys.executable, str(ROOT / "tools/release_workflow.py"), "--check"], capture_output=True, text=True
         )
@@ -465,6 +616,35 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(module.require_smoke(unguarded), self.text)
         with self.assertRaises(ValueError):
             module.require_smoke("no generated host job")
+
+    def test_python_is_selected_before_the_plan_reads_toml(self):
+        python_setup = "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+        plan = self.text.split("\n  plan:\n", 1)[1].split("\n  build-local-artifacts:\n", 1)[0]
+        self.assertLess(plan.index(python_setup), plan.index("python3 tools/release_version.py"))
+        self.assertIn('python-version: "3.12"', plan)
+        for job_name in ["build-global-artifacts", "host", "announce"]:
+            job = re.split(r"\n  [\w-]+:\n", self.text.split(f"\n  {job_name}:\n", 1)[1], maxsplit=1)[0]
+            self.assertIn(python_setup, job, job_name)
+            self.assertIn('python-version: "3.12"', job, job_name)
+        spec = importlib.util.spec_from_file_location("release_python", ROOT / "tools/release_workflow.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        downgraded = self.text.replace('python-version: "3.12"', 'python-version: "3.10"', 1)
+        with self.assertRaisesRegex(ValueError, "require Python 3.12"):
+            module.python_runtime(downgraded)
+
+    def test_attestation_retry_is_bounded_and_keeps_the_second_failure_required(self):
+        local = self.text.split("\n  build-local-artifacts:\n", 1)[1].split("\n  custom-agy-image:\n", 1)[0]
+        first = local.split("      - name: Attest\n", 1)[1].split("      - name: Retry attestation\n", 1)[0]
+        retry = local.split("      - name: Retry attestation\n", 1)[1].split("      - id: cargo-dist\n", 1)[0]
+        self.assertIn("id: attest", first)
+        self.assertIn("continue-on-error: true", first)
+        self.assertIn("steps.attest.outcome == 'failure'", retry)
+        self.assertNotIn("continue-on-error", retry)
+        self.assertEqual(local.count("uses: actions/attest@"), 2)
+        setup = (ROOT / ".github/dist-build-setup.yml").read_text()
+        self.assertIn("Swatinem/rust-cache@", setup)
+        self.assertIn("cache-on-failure: true", setup)
 
     def test_portable_and_native_artifacts_have_dist_owned_targets_and_resources(self):
         self.assertEqual(self.config["dist"]["cargo-dist-version"], "0.33.1")
@@ -487,9 +667,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for source, packaged in [
             ("vendor/orca/LICENSE", "orca-LICENSE"),
             ("vendor/emdash/LICENSE.md", "emdash-LICENSE.md"),
-            ("vendor/msb-krun-vmm/LICENSE", "msb-krun-vmm-LICENSE"),
         ]:
             self.assertEqual((ROOT / source).read_bytes(), (ROOT / "packaging/licenses" / packaged).read_bytes())
+        import hashlib
+
+        self.assertEqual(
+            hashlib.sha256((ROOT / "packaging/licenses/msb-krun-vmm-LICENSE").read_bytes()).hexdigest(),
+            "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        )
+        self.assertEqual(
+            hashlib.sha256((ROOT / "packaging/licenses/msb-krun-vmm-THIRD-PARTY").read_bytes()).hexdigest(),
+            "27d2a3f846e1ca85546c85117757b8a2d3f951b28cc69554e2d5ae3d9a32635c",
+        )
+        image = (ROOT / "deploy/Dockerfile.agy").read_text()
+        self.assertIn("COPY LICENSE THIRD_PARTY.md /usr/share/doc/branchyard/", image)
+        self.assertIn("COPY packaging/licenses /usr/share/doc/branchyard/licenses/", image)
         cli = tomllib.loads((ROOT / "crates/branchyard-cli/Cargo.toml").read_text())["package"]["metadata"]["dist"]
         for name in [
             "cloud_setup.py",

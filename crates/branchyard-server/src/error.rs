@@ -87,7 +87,7 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::InvalidName { .. } => (S::BAD_REQUEST, "invalid_name"),
         E::UnknownHarness(_) => (S::BAD_REQUEST, "unknown_harness"),
         E::HarnessUnavailable { .. } => (S::UNPROCESSABLE_ENTITY, "harness_unavailable"),
-        E::Unsupported(_) => (S::UNPROCESSABLE_ENTITY, "unsupported"),
+        E::Unsupported(_) | E::UnroutedApprovals { .. } => (S::UNPROCESSABLE_ENTITY, "unsupported"),
         E::Config(_) => (S::UNPROCESSABLE_ENTITY, "config_error"),
         E::NoCandidate(_) => (S::CONFLICT, "no_candidate"),
         E::TargetMoved { .. } => (S::CONFLICT, "target_moved"),
@@ -170,6 +170,12 @@ pub fn sdk(error: &branchyard::Error) -> ApiError {
         E::CheckNotStarted { checks, .. } if !checks.is_empty() => {
             error_out.detail(json!({ "checks": checks }))
         }
+        // What the engine says beyond its message: the harness and why it
+        // cannot start, the profile that routes no approvals.
+        E::HarnessUnavailable { .. } | E::UnroutedApprovals { .. } => match error.detail() {
+            Some(detail) => error_out.detail(detail),
+            None => error_out,
+        },
         _ => error_out,
     }
 }
@@ -189,6 +195,41 @@ mod tests {
             files: vec!["a.txt".into()],
         });
         assert_eq!(e.body.detail, Some(json!({ "files": ["a.txt"] })));
+    }
+
+    /// Why a harness cannot start, and which profile routes no approvals,
+    /// reach a client as data, so `by --remote` needs no message to parse.
+    #[test]
+    fn a_refused_harness_says_why_as_data() {
+        let e = sdk(&branchyard::Error::HarnessUnavailable {
+            harness: "claude-code".into(),
+            reason: "claude was not found on PATH".into(),
+            cause: branchyard::Unavailable::NotOnPath,
+        });
+        assert_eq!(e.body.code, "harness_unavailable");
+        assert_eq!(
+            e.body.message,
+            "claude-code is not installed: claude was not found on PATH"
+        );
+        assert_eq!(
+            e.body.detail,
+            Some(json!({ "harness": "claude-code", "cause": "not_on_path" }))
+        );
+        let e = sdk(&branchyard::Error::UnroutedApprovals {
+            profile: "pi-rpc".into(),
+        });
+        assert_eq!(
+            (e.status, e.body.code.as_str()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "unsupported")
+        );
+        assert!(e
+            .body
+            .message
+            .starts_with("unsupported: pi-rpc does not route"));
+        assert_eq!(
+            e.body.detail,
+            Some(json!({ "unsupported": "unrouted_approvals", "profile": "pi-rpc" }))
+        );
     }
 
     /// A failed integration check names every check, its branches and its

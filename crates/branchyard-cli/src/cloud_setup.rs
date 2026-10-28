@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 
 use crate::commands::{Env, Failure};
+use crate::errors::Report;
 
 /// Cloud destination offered by the setup interview.
 #[derive(Clone, Copy)]
@@ -42,11 +43,18 @@ fn resources() -> Result<PathBuf, Failure> {
         std::time::Duration::from_secs(5),
     );
     if version.as_deref() != Some("ok") {
-        return Err(Failure::Message("cloud setup needs Python 3.10 or newer.\nNext: install Python 3.10+ as python3, then rerun by setup --guided".into()));
+        return Err(
+            Report::new("tool_unavailable", "cloud setup needs Python 3.10 or newer")
+                .next("install Python 3.10+ as python3, then rerun by setup --guided")
+                .into(),
+        );
     }
     let cache = dirs::state_dir()
         .or_else(dirs::data_local_dir)
-        .ok_or_else(|| Failure::Message("cannot locate your private state directory".into()))?
+        .ok_or_else(|| {
+            Report::new("config", "cannot locate your private state directory")
+                .next("set HOME, then rerun by setup --guided")
+        })?
         .join("branchyard/onboarding")
         .join(env!("CARGO_PKG_VERSION"));
     fs::create_dir_all(&cache)?;
@@ -65,8 +73,9 @@ fn resources() -> Result<PathBuf, Failure> {
         ),
     ];
     for (name, contents) in resources {
-        let id =
-            branchyard_support::new_ulid().map_err(|error| Failure::Message(error.to_string()))?;
+        let id = branchyard_support::new_ulid().map_err(|error| {
+            Report::new("io", error.to_string()).next("rerun by setup --guided")
+        })?;
         let staged = cache.join(format!(".{name}-{id}.tmp"));
         fs::write(&staged, contents)?;
         fs::rename(staged, cache.join(name))?;
@@ -91,7 +100,12 @@ fn managed_state(token: Option<&str>, prefix: &Path) -> Result<Option<PathBuf>, 
     let uid = rustix::process::getuid().as_raw();
     let metadata = fs::metadata(&state)?;
     if metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-        return Err(Failure::Message("saved cloud connection state is not private and owned by you; inspect its permissions before running by setup --guided".into()));
+        return Err(Report::new(
+            "config",
+            "saved cloud connection state is not private and owned by you",
+        )
+        .next("inspect its ownership and permissions, then rerun by setup --guided")
+        .into());
     }
     for name in ["deployment.json", "project-answers.json"] {
         let path = state.join(name);
@@ -100,7 +114,12 @@ fn managed_state(token: Option<&str>, prefix: &Path) -> Result<Option<PathBuf>, 
         }
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-            return Err(Failure::Message("saved cloud deployment records are not private regular files; inspect the deployment before running by setup --guided".into()));
+            return Err(Report::new(
+                "config",
+                "saved cloud deployment records are not private regular files",
+            )
+            .next("inspect the deployment ownership and permissions, then rerun by setup --guided")
+            .into());
         }
     }
     Ok(Some(state))
@@ -115,7 +134,10 @@ pub(crate) fn refresh_saved(directory: &Path) -> Result<(), Failure> {
         return Ok(());
     };
     let prefix = dirs::home_dir()
-        .ok_or_else(|| Failure::Message("cannot locate your home directory".into()))?
+        .ok_or_else(|| {
+            Report::new("config", "cannot locate your home directory")
+                .next("set HOME, then rerun by setup --guided")
+        })?
         .join(".local/state/branchyard/cloud");
     let Some(state) = managed_state(saved.api_token_file.as_deref(), &prefix)? else {
         return Ok(());
@@ -131,11 +153,20 @@ pub(crate) fn refresh_saved(directory: &Path) -> Result<(), Failure> {
         .stderr(Stdio::inherit())
         .output()?;
     if !result.status.success() {
-        return Err(Failure::Message("could not refresh the saved GKE connection; follow the reported remedy and rerun by setup --guided".into()));
+        return Err(Report::new(
+            "command_failed",
+            "could not refresh the saved GKE connection",
+        )
+        .next("follow the reported remedy and rerun by setup --guided")
+        .into());
     }
     let answers: BTreeMap<String, Value> =
         serde_json::from_slice(&result.stdout).map_err(|error| {
-            Failure::Message(format!("could not read the refreshed connection: {error}"))
+            Report::new(
+                "remote_protocol",
+                format!("could not read the refreshed connection: {error}"),
+            )
+            .next("rerun by setup --guided")
         })?;
     let source = effective.sources.get("substrate.endpoint");
     let path = match source {
@@ -144,16 +175,21 @@ pub(crate) fn refresh_saved(directory: &Path) -> Result<(), Failure> {
             | branchyard_setup::config::Source::User { path },
         ) => PathBuf::from(path),
         _ => {
-            return Err(Failure::Message(
-                "saved Substrate connection has no editable source file; run by config path".into(),
-            ))
+            return Err(Report::new(
+                "config",
+                "saved Substrate connection has no editable source file",
+            )
+            .next("by config path")
+            .into())
         }
     };
     let previous = fs::read_to_string(&path)?;
     if let Some(updated) = updated_connection(&previous, &answers)? {
         use std::os::unix::fs::PermissionsExt;
         if fs::symlink_metadata(&path)?.file_type().is_symlink() {
-            return Err(Failure::Message("saved connection uses a symlink; update its endpoint/router in the source file shown by by config path".into()));
+            return Err(Report::new("config", "saved connection uses a symlink")
+                .next("update its endpoint/router in the source file shown by by config path")
+                .into());
         }
         let mode = fs::metadata(&path)?.permissions().mode() & 0o777;
         crate::setup_io::write_file(&path, &updated, mode)?;
@@ -167,9 +203,11 @@ fn updated_connection(
     answers: &BTreeMap<String, Value>,
 ) -> Result<Option<String>, Failure> {
     let mut document: toml_edit::DocumentMut = previous.parse().map_err(|error| {
-        Failure::Message(format!(
-            "could not read saved Substrate configuration: {error}"
-        ))
+        Report::new(
+            "config",
+            format!("could not read saved Substrate configuration: {error}"),
+        )
+        .next("by config path")
     })?;
     let mut changed = false;
     for key in ["endpoint", "router"] {
@@ -177,9 +215,12 @@ fn updated_connection(
             .get(&format!("substrate.{key}"))
             .and_then(Value::as_str)
         else {
-            return Err(Failure::Message(
-                "refreshed cloud connection omitted its endpoint or router".into(),
-            ));
+            return Err(Report::new(
+                "remote_protocol",
+                "refreshed cloud connection omitted its endpoint or router",
+            )
+            .next("rerun by setup --guided")
+            .into());
         };
         if document["substrate"][key].as_str() != Some(value) {
             document["substrate"][key] = toml_edit::value(value);
@@ -188,9 +229,11 @@ fn updated_connection(
     }
     let updated = document.to_string();
     branchyard_setup::config::parse(&updated).map_err(|error| {
-        Failure::Message(format!(
-            "refreshed Substrate configuration would not load: {error}"
-        ))
+        Report::new(
+            "config",
+            format!("refreshed Substrate configuration would not load: {error}"),
+        )
+        .next("by config path")
     })?;
     Ok(changed.then_some(updated))
 }
@@ -203,9 +246,12 @@ pub(crate) fn guided(
     yes: bool,
 ) -> Result<BTreeMap<String, Value>, Failure> {
     if yes || !env.stdin_tty || !env.stdout_tty {
-        return Err(Failure::Message(
-            "cloud setup needs a terminal to review the project and resources; run by setup --guided".into(),
-        ));
+        return Err(Report::new(
+            "manual",
+            "cloud setup needs a terminal to review the project and resources",
+        )
+        .next("by setup --guided")
+        .into());
     }
     let project = input("Google Cloud project", "")?;
     let zone = input("Zone", "us-central1-a")?;
@@ -286,27 +332,47 @@ pub(crate) fn guided(
     }
     let planned = command.output()?;
     if !planned.status.success() {
-        return Err(Failure::Message("cloud prerequisites are not ready; follow the remedy above, then rerun by setup --guided".into()));
+        return Err(Report::new("manual", "cloud prerequisites are not ready")
+            .next("follow the remedy above, then rerun by setup --guided")
+            .into());
     }
-    let plan: Value = serde_json::from_slice(&planned.stdout)
-        .map_err(|error| Failure::Message(format!("could not read the cloud plan: {error}")))?;
+    let plan: Value = serde_json::from_slice(&planned.stdout).map_err(|error| {
+        Report::new(
+            "remote_protocol",
+            format!("could not read the cloud plan: {error}"),
+        )
+        .next("rerun by setup --guided")
+    })?;
     cliclack::note("Cloud resources", crate::json::text(&plan))?;
     let approved = cliclack::confirm("Create or resume these billable cloud resources?")
         .initial_value(false)
         .interact()
         .map_err(crate::wizard::cancelled)?;
     if !approved {
-        return Err(Failure::Message(
-            "cloud setup cancelled; no cloud resources were changed".into(),
-        ));
+        return Err(Report::new(
+            "manual",
+            "cloud setup cancelled; no cloud resources were changed",
+        )
+        .next("by setup --guided")
+        .into());
     }
     command.arg("--apply");
     let applied = command.output()?;
     if !applied.status.success() {
-        return Err(Failure::Message("cloud setup stopped; the private deployment record names completed steps. Rerun by setup --guided with the same deployment name to resume".into()));
+        return Err(Report::new(
+            "command_failed",
+            "cloud setup stopped; the private deployment record names completed steps",
+        )
+        .next("rerun by setup --guided with the same deployment name to resume")
+        .into());
     }
     serde_json::from_slice(&applied.stdout).map_err(|error| {
-        Failure::Message(format!("could not read the cloud configuration: {error}"))
+        Report::new(
+            "remote_protocol",
+            format!("could not read the cloud configuration: {error}"),
+        )
+        .next("rerun by setup --guided")
+        .into()
     })
 }
 
@@ -326,7 +392,7 @@ mod tests {
         };
         for kind in [CloudKind::Gce, CloudKind::Gke] {
             assert!(
-                matches!(guided(&env, kind, Path::new("."), true), Err(Failure::Message(message)) if message.contains("needs a terminal"))
+                matches!(guided(&env, kind, Path::new("."), true), Err(Failure::Report(report)) if report.kind == "manual" && report.message.contains("needs a terminal") && report.exit() == crate::errors::Exit::Environment)
             );
         }
     }

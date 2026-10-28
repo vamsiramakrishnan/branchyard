@@ -800,6 +800,127 @@ fn mistakes_are_refused_before_any_branch_runs() {
     );
 }
 
+/// Each way a map's inputs or outputs can be wrong says what to fix, with
+/// its kind's exit status: a file that is not there or not JSON and a
+/// command that prints no text are the command line's (2); `--from-command`
+/// inside a harness is refused (4); results that cannot be written fail
+/// the map (1) after its items ran, as does resuming a map whose directory
+/// is gone.
+#[test]
+fn a_map_s_unreadable_inputs_and_unwritable_outputs_name_the_fix() {
+    let repo = Repo::new();
+    let items = repo.file("items.jsonl", "{\"id\": \"a\", \"x\": 1}\n");
+    let missing = repo.dir.join("missing.txt").display().to_string();
+    let not_json = repo.file("not-json.json", "{");
+    let cases: Vec<(Vec<&str>, i32, &str)> = vec![
+        (
+            vec!["{{item}}", "--items", &missing],
+            2,
+            "missing.txt: no such file or directory",
+        ),
+        (
+            vec!["{{item.x}}", "--items", &items, "--schema", &missing],
+            2,
+            "next: give the file that holds the JSON Schema",
+        ),
+        (
+            vec!["{{item.x}}", "--items", &items, "--schema", &not_json],
+            2,
+            "is not JSON",
+        ),
+        (
+            vec!["{{item}}", "--from-command", "printf '\\377'"],
+            2,
+            "--from-command printed text that is not UTF-8",
+        ),
+        (
+            vec!["{{item}}", "--from-command", "echo oops >&2; exit 3"],
+            2,
+            "output: oops",
+        ),
+    ];
+    for (args, code, expected) in cases {
+        let out = repo.map(&args);
+        assert_eq!(out.status.code(), Some(code), "{args:?}\n{}", stderr(&out));
+        assert!(
+            stderr(&out).contains(expected),
+            "{expected}\n{}",
+            stderr(&out)
+        );
+    }
+
+    // Inside a harness, `by map` runs no command of its own.
+    let agent = fake_agent!().display().to_string();
+    let out = repo
+        .command(BY)
+        .args(["map", "{{item}}", "--from-command", "echo a"])
+        .args(["--harness", "gemini-cli", "--command", &agent, "--yes"])
+        .env("BRANCHYARD_BRANCH", "outer")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("by map does not run --from-command")
+            && stderr(&out).contains("next: pass the items with --items FILE"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(repo.branches().is_empty());
+
+    // Results bound for a directory that is not there: the item runs, then
+    // the map fails on the write.
+    let alpha = repo.file("alpha.json", r#"{"name": "alpha", "ok": true}"#);
+    let one = repo.file("one.txt", &format!("REPLY_FILE {alpha}\n"));
+    let nowhere = repo.dir.join("no-such-dir/results.jsonl");
+    let out = repo.map(&[
+        "{{item}}",
+        "--items",
+        &one,
+        "-n",
+        "nowhere",
+        "--out",
+        nowhere.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("could not write") && stderr(&out).contains("results.jsonl"),
+        "{}",
+        stderr(&out)
+    );
+    // A path with no file name is the command line's mistake.
+    let out = repo.map(&["{{item}}", "--items", &one, "-n", "rooted", "--out", "/"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("/ is not a file name"),
+        "{}",
+        stderr(&out)
+    );
+
+    // A resume runs from where the map ran; a directory since removed
+    // says so.
+    let sub = repo.root.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let out = repo
+        .command(BY)
+        .current_dir(&sub)
+        .args(["map", "{{item}}", "--items", &one, "-n", "moved"])
+        .args(["--harness", "gemini-cli", "--command", &agent, "--yes"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    fs::remove_dir_all(&sub).unwrap();
+    let out = repo.by(&["map", "resume", "moved"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains(&format!(
+            "map moved ran in {}: no such file or directory",
+            sub.display()
+        )),
+        "{}",
+        stderr(&out)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Through a server
 
@@ -957,6 +1078,16 @@ fn a_map_runs_as_a_server_operation_with_remote() {
     let remote_show = stdout(&server.by(&repo, &["map", "show", "far"]));
     let local_show = stdout(&repo.ok(&["map", "show", "far"]));
     assert_eq!(remote_show, local_show);
+    // The server recorded its request, not a command line: a resume here
+    // points at the server, which resumes it, instead of starting over.
+    let out = repo.by(&["map", "resume", "far"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("map far has no recorded command line to resume")
+            && stderr(&out).contains("next: by --remote URL map resume far"),
+        "{}",
+        stderr(&out)
+    );
     let shown = stdout(&server.by(&repo, &["show", "far"]));
     assert!(shown.contains("progress  1 of 2 done, 1 failed"), "{shown}");
     let ls = stdout(&server.by(&repo, &["ls"]));

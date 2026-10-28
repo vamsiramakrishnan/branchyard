@@ -958,6 +958,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -2505,6 +2512,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -6030,6 +6044,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -6904,6 +6925,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -12168,6 +12196,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -13472,6 +13507,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -14639,6 +14681,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -17491,6 +17540,18 @@
               "description": "It runs on this host with a private `HOME` of its own, not in a\nsandbox; the branch's `isolated`.",
               "default": false
             },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness's writes on its last turn; the branch's\n`guard`.",
+              "default": null
+            },
             "parent": {
               "type": [
                 "string",
@@ -17936,6 +17997,82 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "CandidateInfo": {
           "type": "object",
@@ -18674,6 +18811,18 @@
               "type": "boolean",
               "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+              "default": null
             }
           },
           "required": [
@@ -18900,6 +19049,82 @@
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
         },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
+        },
         "Merged": {
           "type": "object",
           "properties": {
@@ -19073,6 +19298,18 @@
               "type": "boolean",
               "description": "It runs on this host with a private `HOME` of its own, not in a\nsandbox; the branch's `isolated`.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness's writes on its last turn; the branch's\n`guard`.",
+              "default": null
             },
             "parent": {
               "type": [
@@ -20349,6 +20586,18 @@
               "type": "boolean",
               "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+              "default": null
             }
           },
           "required": [
@@ -20575,6 +20824,82 @@
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
         },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
+        },
         "Merged": {
           "type": "object",
           "properties": {
@@ -20748,6 +21073,18 @@
               "type": "boolean",
               "description": "It runs on this host with a private `HOME` of its own, not in a\nsandbox; the branch's `isolated`.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness's writes on its last turn; the branch's\n`guard`.",
+              "default": null
             },
             "parent": {
               "type": [
@@ -32355,6 +32692,18 @@
               "type": "boolean",
               "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+              "default": null
             }
           },
           "required": [
@@ -32580,6 +32929,82 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         }
       }
     },
@@ -32961,6 +33386,18 @@
               "type": "boolean",
               "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+              "default": null
             }
           },
           "required": [
@@ -33187,6 +33624,82 @@
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
         },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
+        },
         "Merged": {
           "type": "object",
           "properties": {
@@ -33360,6 +33873,18 @@
               "type": "boolean",
               "description": "It runs on this host with a private `HOME` of its own, not in a\nsandbox; the branch's `isolated`.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness's writes on its last turn; the branch's\n`guard`.",
+              "default": null
             },
             "parent": {
               "type": [
@@ -35132,6 +35657,18 @@
           "type": "boolean",
           "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
           "default": false
+        },
+        "guard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Guard"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+          "default": null
         }
       },
       "required": [
@@ -35359,6 +35896,82 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         }
       }
     },
@@ -35393,6 +36006,18 @@
           "type": "boolean",
           "description": "It runs on this host with a private `HOME` of its own, not in a\nsandbox; the branch's `isolated`.",
           "default": false
+        },
+        "guard": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Guard"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What held its harness's writes on its last turn; the branch's\n`guard`.",
+          "default": null
         },
         "parent": {
           "type": [
@@ -35841,6 +36466,82 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         },
         "CandidateInfo": {
           "type": "object",
@@ -36373,6 +37074,18 @@
               "type": "boolean",
               "description": "Its harness runs on this host with a private `HOME` of its own\n(`--isolated`, or inherited from the branch it was forked or\ndelegated from). Not a sandbox: it still runs as your user and can\nread your files and reach your network. `false` for a sandbox\nprovider, whose private home is the sandbox's.",
               "default": false
+            },
+            "guard": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Guard"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What held its harness to its permission preset's file scope on its\nlast turn: Landlock and where it could write, or nothing and why\n(`docs/modes.md#the-file-guard`). `None` until a turn has started\nits harness, and for a record from before it was kept.",
+              "default": null
             }
           },
           "required": [
@@ -36598,6 +37311,82 @@
             }
           ],
           "description": "Serialized as an object tagged by `state`, such as\n`{\"state\": \"failed\", \"reason\": \"...\"}`."
+        },
+        "Guard": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "preset": {
+                  "$ref": "#/$defs/PolicyPreset",
+                  "description": "The preset whose scope it is."
+                },
+                "abi": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "description": "The kernel's Landlock ABI version."
+                },
+                "writable": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Where it could write, and everything beneath."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "landlock"
+                }
+              },
+              "required": [
+                "kind",
+                "preset",
+                "abi",
+                "writable"
+              ],
+              "description": "Landlock held the harness, and every process it started, to writing\nbeneath `writable` only."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "Why: no preset with a file scope, a sandbox, or a host without\nLandlock (and what it said)."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "kind",
+                "reason"
+              ],
+              "description": "Nothing below the harness held its writes, for this reason."
+            }
+          ],
+          "description": "What held a branch's harness to its permission preset's file scope on\nits last turn: `by show`'s `guard` line and the `guard` field of `by\nls --json`, `by show --json` and `by inspect --json`. Serialized as an\nobject tagged by `kind`: `{\"kind\": \"landlock\", \"preset\", \"abi\",\n\"writable\"}` or `{\"kind\": \"none\", \"reason\"}`."
+        },
+        "PolicyPreset": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "read-only",
+              "description": "Read and search; edits, commands and the web denied. The policy a\nplanning turn runs under ([`crate::read_only_policy`])."
+            },
+            {
+              "type": "string",
+              "const": "edit-worktree",
+              "description": "Read, search and edit files; commands and the web denied."
+            },
+            {
+              "type": "string",
+              "const": "full",
+              "description": "Everything allowed, as `--yes`."
+            }
+          ],
+          "description": "A named permission policy that stands for explicit rules: usable\nwherever explicit rules are (`by run --permissions`, a rig seat's\n`permission_policy`, a server request's `policy.preset`,\n`[defaults] permissions`). See `docs/egress.md#permission-presets`.\n\nRules match tool names only: a preset says which tools may run, not\nwhat they touch."
         }
       }
     },
@@ -43863,6 +44652,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -45734,6 +46530,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -47626,6 +48429,13 @@
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
             },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
+            },
             "mcp_servers": {
               "type": "array",
               "items": {
@@ -49512,6 +50322,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",
@@ -51764,6 +52581,13 @@
                 "null"
               ],
               "description": "The authentication method to use when the secrets allow several,\nsuch as `api-key` or `oauth-token`. Unset: the harness's order."
+            },
+            "logins": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Provider logins by harness ID, such as `claude-code = \"zai\"`\n(`[logins]`, written by `by harnesses login ID --provider NAME`):\nthe harness reaches its model through that provider, with the\nprovider's key from the secrets ([`logins`]). A harness not named\nhere logs in from the secrets as usual."
             },
             "mcp_servers": {
               "type": "array",

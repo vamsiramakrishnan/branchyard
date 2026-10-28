@@ -1,0 +1,4 @@
+{
+  "apiKeyHelper": "cat '/branchyard/home/.branchyard/credentials/anthropic-api-key'",
+  "theme": "dark"
+}

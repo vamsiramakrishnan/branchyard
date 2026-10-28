@@ -152,6 +152,7 @@ fn cluster_credentials_are_per_attempt() {
         argv: vec!["true".into()],
         cwd: "/".into(),
         env: Default::default(),
+        writable: None,
     };
     let first = provider.endpoint(&name).unwrap();
     first.exec(&spec).unwrap().wait().unwrap();
@@ -198,6 +199,7 @@ fn cluster_worktree_round_trip() {
             argv: vec!["sh".into(), "-c".into(), "printf two > a.txt".into()],
             cwd: guest.clone(),
             env: Default::default(),
+            writable: None,
         })
         .unwrap();
     assert!(edit.wait().unwrap().success());

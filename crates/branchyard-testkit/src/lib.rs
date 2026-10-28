@@ -11,7 +11,8 @@
 //!   directory.
 //! - [`Repo`]: a throwaway git repository driven through the built `by`
 //!   binary, with the command's output shown when it fails.
-//! - [`Scratch`]: a temporary directory that is removed on drop.
+//! - [`Scratch`]: a temporary directory that is removed on drop, after
+//!   stopping whatever a test left running in it.
 //! - [`hermetic()`]: a command's environment without the Branchyard turn
 //!   the tests run in, for every test that starts `by` or a server.
 //! - [`MockHttp`]: a mock HTTP server that fails the owning test on any
@@ -36,7 +37,7 @@ pub use env::hermetic;
 pub use env::system_tools;
 pub use mock::{Banner, MockHttp, Request, Response};
 pub use repo::Repo;
-pub use scratch::Scratch;
+pub use scratch::{processes_in, Scratch};
 
 /// A [`Repo`] driven through the `by` binary of the crate this expands in
 /// (only the `branchyard-cli` tests have one): `repo!()` holds `a.txt`;

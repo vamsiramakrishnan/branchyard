@@ -781,6 +781,8 @@ impl SandboxProvider for SubstrateProvider {
     }
 
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+        // The bridge in the actor has no way to hold a write scope.
+        spec.refuse_write_scope()?;
         let process = self.endpoint(name)?.exec(spec)?;
         Ok(Box::new(process))
     }

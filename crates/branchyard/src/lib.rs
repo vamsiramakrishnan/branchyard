@@ -120,6 +120,7 @@ mod git;
 pub mod glance;
 mod goal;
 mod graph;
+pub mod guard;
 mod harness;
 mod inbox;
 mod integrate;
@@ -185,7 +186,11 @@ pub use branchyard_config as config;
 /// builds one that does.
 pub use branchyard_microsandbox::{ENABLED as MICROSANDBOX_BUILT, REBUILD as MICROSANDBOX_REBUILD};
 pub use git::current_branch;
+pub use git::hold_writes as hold_git_writes;
+pub use guard::Guard;
 pub use lock::DirLock;
+#[cfg(feature = "postgres")]
+pub use pg::postgres_config;
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 
 pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
@@ -198,8 +203,8 @@ pub use branchyard_provision::network::{
     narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
 };
 pub use branchyard_provision::{
-    Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport, SecretFrom,
-    SecretSource, Telemetry, Via,
+    logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport,
+    SecretFrom, SecretSource, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
@@ -1308,6 +1313,15 @@ pub fn harness_profile(id: &str) -> Result<HarnessProfile, Error> {
     })
 }
 
+/// [`harness_profile`], refused as a run refuses it before it creates
+/// anything: no harness or profile of that name, or one whose tools would
+/// run without the policy when `unapproved_tools` is not set. A caller can
+/// ask before it opens a [`Yard`], which creates `.branchyard/`.
+pub fn admit_harness(id: &str, unapproved_tools: bool) -> Result<HarnessProfile, Error> {
+    harness::check_approvals(harness::select(Some(id))?, unapproved_tools)?;
+    harness_profile(id)
+}
+
 /// A harness profile as [`harness_profile`] resolves it.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2169,6 +2183,12 @@ pub struct BranchInfo {
     /// provider, whose private home is the sandbox's.
     #[serde(default)]
     pub isolated: bool,
+    /// What held its harness to its permission preset's file scope on its
+    /// last turn: Landlock and where it could write, or nothing and why
+    /// (`docs/modes.md#the-file-guard`). `None` until a turn has started
+    /// its harness, and for a record from before it was kept.
+    #[serde(default)]
+    pub guard: Option<Guard>,
 }
 
 /// The `provider` of a record that predates the field.
@@ -3175,13 +3195,27 @@ pub enum Error {
         reason: String,
     },
     UnknownHarness(String),
-    /// The harness executable could not be found or started.
+    /// The harness executable could not be found or started: `reason`
+    /// says so in words, `cause` as data a caller can act on (install it,
+    /// fix the command, pick another).
     HarnessUnavailable {
         harness: String,
         reason: String,
+        /// Why it cannot start.
+        cause: Unavailable,
     },
     /// The requested operation needs a capability the harness lacks.
     Unsupported(String),
+    /// A profile whose driver does not route tool permission requests to
+    /// Branchyard, run without allowing that
+    /// ([`TaskOptions::unapproved_tools`]): its tools would run under the
+    /// harness's own configuration, not the task's policy. Its kind is
+    /// `unsupported`, like [`Error::Unsupported`]; its detail says
+    /// `unrouted_approvals` and the profile.
+    UnroutedApprovals {
+        /// The profile refused, as `--harness` names it (`pi-rpc`).
+        profile: String,
+    },
     /// A configuration file, or a section of one, that describes nothing
     /// usable: its message names the file and line, or the section
     /// (`[models]`) or key (`defaults.check`).
@@ -3316,15 +3350,22 @@ impl fmt::Display for Error {
                 write!(f, "{name:?} is not a usable branch name: {reason}")
             }
             Error::UnknownHarness(name) => f.write_str(&harness::unknown_message(name)),
-            Error::HarnessUnavailable { harness, reason }
-                if reason.ends_with("was not found on PATH") =>
-            {
-                write!(f, "{harness} is not installed: {reason}")
-            }
-            Error::HarnessUnavailable { harness, reason } => {
-                write!(f, "{harness} is unavailable: {reason}")
-            }
+            Error::HarnessUnavailable {
+                harness,
+                reason,
+                cause: Unavailable::NotOnPath,
+            } => write!(f, "{harness} is not installed: {reason}"),
+            Error::HarnessUnavailable {
+                harness, reason, ..
+            } => write!(f, "{harness} is unavailable: {reason}"),
             Error::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Error::UnroutedApprovals { profile } => write!(
+                f,
+                "unsupported: {profile} does not route tool permission requests to Branchyard, \
+                 so its tools would run without your policy; allow that explicitly \
+                 (--allow-unapproved-tools, TaskOptions::unapproved_tools) or choose another \
+                 profile"
+            ),
             Error::Config(what) => f.write_str(what),
             Error::NoCandidate(name) => write!(f, "branch {name} has no candidate"),
             Error::TargetMoved {
@@ -3457,7 +3498,7 @@ impl Error {
             Error::InvalidName { .. } => "invalid_name",
             Error::UnknownHarness(_) => "unknown_harness",
             Error::HarnessUnavailable { .. } => "harness_unavailable",
-            Error::Unsupported(_) => "unsupported",
+            Error::Unsupported(_) | Error::UnroutedApprovals { .. } => "unsupported",
             Error::Config(_) => "config",
             Error::NoCandidate(_) => "no_candidate",
             Error::TargetMoved { .. } => "target_moved",
@@ -3532,8 +3573,59 @@ impl Error {
                 Some(serde_json::json!({ "checks": checks }))
             }
             Error::Remote { detail, .. } => detail.as_deref().cloned(),
+            Error::HarnessUnavailable { harness, cause, .. } => Some(serde_json::json!({
+                "harness": harness,
+                "cause": cause.as_str(),
+            })),
+            Error::UnroutedApprovals { profile } => Some(serde_json::json!({
+                "unsupported": "unrouted_approvals",
+                "profile": profile,
+            })),
             _ => None,
         }
+    }
+}
+
+/// Why a harness cannot be started ([`Error::HarnessUnavailable`]); in an
+/// error's detail as `cause`, by [`Unavailable::as_str`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// Its executable was not found on `PATH`: it is not installed here.
+    NotOnPath,
+    /// The command names a file that is not an executable file.
+    NotExecutable,
+    /// The command to start it is empty.
+    NoCommand,
+    /// A fleet entry none of whose candidates can run (each one's reason
+    /// is in the message).
+    NoCandidate,
+}
+
+impl Unavailable {
+    /// Every cause, for a caller that maps each one.
+    pub const ALL: [Unavailable; 4] = [
+        Unavailable::NotOnPath,
+        Unavailable::NotExecutable,
+        Unavailable::NoCommand,
+        Unavailable::NoCandidate,
+    ];
+
+    /// Its stable name in an error's detail: `not_on_path`,
+    /// `not_executable`, `no_command` or `no_candidate`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unavailable::NotOnPath => "not_on_path",
+            Unavailable::NotExecutable => "not_executable",
+            Unavailable::NoCommand => "no_command",
+            Unavailable::NoCandidate => "no_candidate",
+        }
+    }
+
+    /// The cause named `name`, as [`Unavailable::as_str`] gives it.
+    pub fn from_name(name: &str) -> Option<Unavailable> {
+        Unavailable::ALL
+            .into_iter()
+            .find(|cause| cause.as_str() == name)
     }
 }
 

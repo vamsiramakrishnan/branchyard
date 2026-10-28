@@ -103,7 +103,12 @@ fn label(value: &str) -> Result<(String, String), String> {
 }
 
 fn failure(error: impl std::fmt::Display) -> Failure {
-    Failure::Message(error.to_string())
+    crate::errors::Report::new(
+        "command_failed",
+        format!("Substrate operation failed: {error}"),
+    )
+    .next("by substrate check")
+    .into()
 }
 
 fn report(value: &impl Serialize, as_json: bool, text: &str) -> Outcome {
@@ -116,18 +121,28 @@ fn report(value: &impl Serialize, as_json: bool, text: &str) -> Outcome {
 
 /// Run Substrate setup or inspection from the saved repository configuration.
 pub fn main(env: &Env, globals: &Globals, action: &Action) -> Outcome {
-    if globals.remote.is_some() || crate::workspace_cmd::in_harness().is_some() {
-        return Err(failure(
-            "run by substrate in the configured repository, outside a harness or --remote session",
-        ));
+    if globals.remote.is_some() {
+        return Err(crate::errors::Report::usage(
+            "by substrate uses the saved connection in this repository; it takes no --remote",
+        )
+        .next("run by substrate without --remote (unset BRANCHYARD_REMOTE)")
+        .into());
     }
-    let config = branchyard::configure::configuration(&std::env::current_dir()?)?
-        .ok_or_else(|| failure("save [substrate] in branchyard.toml first; run by init project"))?;
+    if let Some(branch) = crate::workspace_cmd::in_harness() {
+        return Err(crate::errors::Report::new("denied", format!("a harness running on branch {branch} cannot prepare or inspect the shared Substrate connection"))
+            .next("run by substrate in your own terminal, outside any branch")
+            .into());
+    }
+    let config =
+        branchyard::configure::configuration(&std::env::current_dir()?)?.ok_or_else(|| {
+            crate::errors::Report::new("config", "no project configuration was found")
+                .next("by init project")
+        })?;
     let config = &config.config;
-    let saved = config
-        .substrate
-        .as_ref()
-        .ok_or_else(|| failure("missing [substrate] configuration; run by init project"))?;
+    let saved = config.substrate.as_ref().ok_or_else(|| {
+        crate::errors::Report::new("config", "missing [substrate] configuration")
+            .next("by init project")
+    })?;
     let options = branchyard::configure::substrate_options(saved);
     match action {
         Action::Setup(args) => setup(env, &options, args),
@@ -190,15 +205,21 @@ pub fn main(env: &Env, globals: &Globals, action: &Action) -> Outcome {
 fn setup(env: &Env, options: &branchyard::SubstrateOptions, args: &Setup) -> Outcome {
     for (flag, value) in [("--cpu", &args.cpu), ("--memory", &args.memory)] {
         if value.trim().is_empty() {
-            return Err(failure(format!("{flag} must not be empty")));
+            return Err(
+                crate::errors::Report::usage(format!("{flag} must not be empty"))
+                    .next("by substrate setup --help")
+                    .into(),
+            );
         }
     }
     let mut labels = BTreeMap::new();
     for (key, value) in &args.worker_label {
         if labels.insert(key.clone(), value.clone()).is_some() {
-            return Err(failure(format!(
+            return Err(crate::errors::Report::usage(format!(
                 "worker label {key:?} was provided more than once"
-            )));
+            ))
+            .next("give each --worker-label key only once")
+            .into());
         }
     }
     let may_apply = !args.plan && (args.yes || (env.stdin_tty && env.stderr_tty && !args.json));
@@ -443,6 +464,7 @@ fn probe(
                     argv,
                     cwd: workdir.into(),
                     env: Default::default(),
+                    writable: None,
                 },
             )
             .map_err(|error| failure(format!("execute {command} in the actor: {error}")))?;

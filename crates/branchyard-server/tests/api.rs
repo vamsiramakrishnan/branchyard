@@ -803,9 +803,11 @@ fn operations_survive_a_restart() {
     wait::until("the hanging turn to start", || {
         client.operation(&hanging.id).unwrap().state == OperationState::Running
     });
-    // A graceful shutdown lets running turns finish.
+    // A graceful shutdown lets running turns finish, and says so.
     let stopped = server.stop();
     assert_eq!(stopped.interrupted, 0);
+    assert_eq!(stopped.finished, 1);
+    assert_eq!(stopped.queued, Some(0));
 
     let mut config = f.config();
     config.shutdown_grace = Duration::ZERO;
@@ -902,7 +904,9 @@ fn a_client_disconnect_does_not_stop_a_turn() {
     });
 
     // A client that hangs up before any response, then retries with the
-    // same key, gets one run.
+    // same key, gets one run: whether the server admitted the abandoned
+    // request before the retry arrived, admits it beside the retry, or
+    // dropped it with the connection, the key names one operation.
     let body = serde_json::to_string(&task("WRITE r.txt=1", "retried")).unwrap();
     let request = post(
         "/v1/repos/app/tasks",
@@ -913,10 +917,6 @@ fn a_client_disconnect_does_not_stop_a_turn() {
     let mut abandoned = TcpStream::connect(server.addr).unwrap();
     abandoned.write_all(request.as_bytes()).unwrap();
     drop(abandoned);
-    wait::settle(
-        "the server to see the abandoned request",
-        Duration::from_millis(100),
-    );
     let op = repo
         .submit_task(&task("WRITE r.txt=1", "retried"), "retry-1")
         .unwrap();

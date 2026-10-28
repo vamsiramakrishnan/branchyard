@@ -190,6 +190,7 @@ impl<'a> Exec<'a> {
                 .collect(),
             cwd: PathBuf::from("/"),
             env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
+            writable: None,
         };
         self.provider
             .exec(self.sandbox, &spec)
@@ -538,6 +539,7 @@ fn guest(
             .collect(),
         cwd: cwd.to_path_buf(),
         env: vars,
+        writable: None,
     };
     let mut process = endpoint
         .exec(&spec)
@@ -1005,6 +1007,7 @@ fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Resu
         ],
         cwd: PathBuf::from("/"),
         env: BTreeMap::from([("LC_ALL".into(), "C".into())]),
+        writable: None,
     };
     let mut process = endpoint
         .exec(&spec)

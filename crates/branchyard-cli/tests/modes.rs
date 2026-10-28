@@ -105,6 +105,58 @@ fn each_way_of_running_says_so_and_the_record_agrees() {
     );
 }
 
+/// A run refused before it starts leaves the repository as it found it:
+/// no `.branchyard/` (round 8: a refused run left `state.db`,
+/// `worktrees/` and `gateway/`). And the local-mode note, said until a run
+/// it was printed for has started its harness, is not spent by a command
+/// that failed first (round 8: a `--harness` typo printed it, and the first
+/// real run said nothing).
+#[test]
+fn a_refused_run_leaves_no_yard_and_keeps_the_local_note_for_a_real_one() {
+    let repo = repo();
+    let yard = repo.root.join(".branchyard");
+    let typo = repo.by_agent(&["run", "WRITE a.txt=1", "--harness", "nonesuch"]);
+    assert!(!typo.status.success());
+    assert!(
+        stderr(&typo).contains("no harness or profile named nonesuch"),
+        "{}",
+        stderr(&typo)
+    );
+    assert!(!yard.exists(), "an unknown harness created .branchyard/");
+    let unapproved = repo.by_agent(&["run", "WRITE a.txt=1", "--harness", "pi"]);
+    assert!(!unapproved.status.success());
+    assert!(
+        stderr(&unapproved).contains("does not route tool permission requests"),
+        "{}",
+        stderr(&unapproved)
+    );
+    let fan = repo.by_agent(&["fan", "WRITE a.txt=1", "--harness", "gemini-cli,nonesuch"]);
+    assert!(!fan.status.success());
+    assert!(!yard.exists(), "a refused run or fan created .branchyard/");
+
+    // Past those, a base that does not exist fails before the harness
+    // starts: the note is printed, and not spent.
+    let based = repo.by_agent(&["run", "WRITE a.txt=1", "--base", "nonesuch"]);
+    assert!(!based.status.success());
+    assert!(
+        banner(&based).starts_with("by: local mode:"),
+        "{}",
+        stderr(&based)
+    );
+    assert!(!yard.join("local-mode-noted").exists());
+    let first = repo.by_agent(&["run", "WRITE a.txt=1", "--name", "first"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(
+        banner(&first).starts_with("by: local mode:"),
+        "{}",
+        stderr(&first)
+    );
+    assert!(yard.join("local-mode-noted").is_file());
+    let second = repo.by_agent(&["run", "WRITE b.txt=1", "--name", "second"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(banner(&second).is_empty(), "{}", stderr(&second));
+}
+
 #[test]
 fn isolated_false_turns_off_what_the_project_file_turned_on() {
     let repo = repo();
@@ -188,7 +240,7 @@ fn a_build_without_microsandbox_names_the_command_that_adds_it() {
         "--image",
         "alpine:3.20",
     ]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     let text = stderr(&out);
     assert!(text.contains("no Microsandbox support"), "{text}");
     assert!(
@@ -363,7 +415,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
 
     // No token anywhere: the flag, the variable and the file key.
     let out = repo.by(&["--remote", "http://127.0.0.1:9", "ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let text = stderr(&out);
     assert!(
         text.starts_with("by: remote mode needs a token\n  next: "),
@@ -373,7 +425,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     assert!(text.contains("BRANCHYARD_TOKEN_FILE"), "{text}");
     assert!(text.contains("token_file under [remote]"), "{text}");
     let json = repo.by(&["--remote", "http://127.0.0.1:9", "ls", "--json"]);
-    assert_eq!(json.status.code(), Some(1));
+    assert_eq!(json.status.code(), Some(2));
     let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(envelope["error"]["kind"], "usage", "{envelope}");
     assert_eq!(
@@ -395,7 +447,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
         "app",
         "ls",
     ]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     let text = stderr(&out);
     assert!(
         text.starts_with("by: cannot reach http://127.0.0.1:9"),
@@ -415,7 +467,7 @@ fn a_remote_dead_end_ends_with_the_fix() {
     )
     .unwrap();
     let out = repo.by(&["ls"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(3));
     assert!(
         stderr(&out).contains("next: start a server with `by serve`"),
         "{}",
@@ -464,8 +516,26 @@ fn the_project_file_points_from_the_flags_spelling_to_its_own() {
     )
     .unwrap();
     let out = repo.by(&["config", "validate"]);
+    assert_eq!(out.status.code(), Some(1));
     let text = format!("{}{}", stdout(&out), stderr(&out));
-    assert!(text.contains("--provider substrate"), "{text}");
+    assert!(
+        text.contains("substrate needs a [substrate] table"),
+        "{text}"
+    );
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        "version = 1\n[defaults]\nprovider = \"substrate\"\n[substrate]\n\
+         endpoint = \"https://control.example\"\nrouter = \"https://router.example\"\n\
+         template = \"agy\"\nkey = \"/keys/bridge.key\"\negress = { mode = \"deny\" }\n",
+    )
+    .unwrap();
+    let valid = repo.by(&["config", "validate"]);
+    assert!(
+        valid.status.success(),
+        "{}{}",
+        stdout(&valid),
+        stderr(&valid)
+    );
 
     // The flags' names work as keys, and mean the same.
     fs::write(

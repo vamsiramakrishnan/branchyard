@@ -17,42 +17,37 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use branchyard_support::time::{now_ms, rfc3339};
 
 use branchyard_testkit::fake_agent;
 use branchyard_testkit::wait;
-use branchyard_testkit::{MockHttp, Request, Response};
+use branchyard_testkit::{MockHttp, Request, Response, Scratch};
 use serde_json::{json, Value};
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
+/// A repository and a home in a scratch directory. Dropped, the directory
+/// goes, and so does whatever a test left running in it (a detached
+/// workspace script, a server started by hand), passed or failed.
 struct Repo {
     dir: PathBuf,
     root: PathBuf,
     home: PathBuf,
     env: BTreeMap<String, String>,
+    _scratch: Scratch,
 }
 
 impl Repo {
     fn new(project: &str) -> Repo {
-        let dir = std::env::temp_dir().join(format!(
-            "branchyard-cli-devex-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
+        let scratch = Scratch::new("cli-devex");
+        let dir = scratch.path().to_path_buf();
         fs::create_dir_all(dir.join("repo")).unwrap();
         fs::create_dir_all(dir.join("home")).unwrap();
-        let dir = fs::canonicalize(dir).unwrap();
         let repo = Repo {
             root: dir.join("repo"),
             home: dir.join("home"),
             dir,
             env: BTreeMap::new(),
+            _scratch: scratch,
         };
         repo.git(&["init", "-q", "-b", "main"]);
         repo.git(&["config", "user.name", "Test"]);
@@ -127,12 +122,6 @@ impl Repo {
         let mut all: Vec<&str> = args.to_vec();
         all.extend(["--command", &agent, "--yes", "--harness", "gemini-cli"]);
         self.by(&all)
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        branchyard_support::cleanup_dir(&self.dir);
     }
 }
 
@@ -268,7 +257,7 @@ fn usage_reads_both_logins_and_the_guard_warns_or_refuses() {
     )
     .unwrap();
     let refused = run("refused");
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     assert!(
         stderr(&refused).contains("guard = \"refuse\""),
         "{}",
@@ -818,7 +807,7 @@ fn listening_ports_belong_to_their_branch_and_can_be_browsed_and_stopped() {
 
     // Kill: refused without a terminal or --yes, then every listener stops.
     let out = repo.by(&["workspace", "kill", "srv"]);
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("pass --yes"), "{}", stderr(&out));
     let killed = repo.json(&["workspace", "kill", "srv", "--yes", "--json"]);
     assert_eq!(killed["stopped"].as_array().unwrap().len(), 3);
@@ -1122,7 +1111,7 @@ fn detach_refuses_to_ask() {
     let out = repo.by(&["run", "go", "--detach", "--ask"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     let out = repo.by(&["run", "go", "--detach"]);
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(
         stderr(&out).contains("a detached turn has none"),
         "{}",

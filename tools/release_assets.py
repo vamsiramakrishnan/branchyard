@@ -20,7 +20,7 @@ def build_assets(artifacts: Path, output: Path) -> list[Path]:
     inputs = {
         path.name: path
         for path in artifacts.iterdir()
-        if path.is_file() and path.name.endswith((".tar.gz", "-installer.sh", ".json"))
+        if path.is_file() and path.name.endswith((".tar.gz", "-installer.sh", ".json", ".zip", ".whl"))
     }
     inputs[bootstrap.name] = bootstrap
     sums = output / "SHA256SUMS"
@@ -38,7 +38,14 @@ def build_assets(artifacts: Path, output: Path) -> list[Path]:
             stdout=stream,
             check=True,
         )
-    return [bootstrap, sums, formula]
+    python_version = tomllib.loads((ROOT / "sdk/python/pyproject.toml").read_text())["project"]["version"]
+    sdk_assets = []
+    for name, source in inputs.items():
+        if name.endswith((".zip", ".whl")) or name == f"branchyard-{python_version}.tar.gz":
+            destination = output / name
+            shutil.copyfile(source, destination)
+            sdk_assets.append(destination)
+    return [bootstrap, sums, formula, *sdk_assets]
 
 
 def main() -> None:

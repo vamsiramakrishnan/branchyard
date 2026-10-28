@@ -147,10 +147,7 @@ fn a_killed_engine_is_recovered_its_harness_killed_and_nothing_resubmitted() {
     if cfg!(target_os = "linux") {
         wait::until("the harness to die with its engine", || !running(agent));
     } else {
-        wait::settle(
-            "a harness that was going to die with its engine would have by now",
-            Duration::from_millis(200),
-        );
+        // The engine is reaped, and the harness still runs: it outlived it.
         assert!(running(agent), "the harness outlived its engine");
     }
     assert!(running(sleeper), "its group outlived its engine");

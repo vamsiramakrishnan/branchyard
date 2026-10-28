@@ -541,11 +541,10 @@ fn plan(
     } else {
         match machine.inventory() {
             Ok(mut inventory) => {
-                // A key `by harnesses login ID --api-key` stored counts.
-                inventory::count_stored_keys(
-                    &mut inventory,
-                    &inventory::stored_keys(root, &config.secrets),
-                );
+                // Stored API keys include provider-specific logins.
+                let stored = inventory::stored_keys(root, &config.secrets);
+                inventory::count_stored_keys(&mut inventory, &stored);
+                crate::configure::count_provider_logins(&mut inventory, &config.logins, &stored);
                 let policy = install_policy(config, options);
                 for harness in needed_harnesses(config) {
                     steps.extend(harness_steps(&harness, &inventory, &policy, options));
@@ -593,6 +592,8 @@ pub fn remote_harness_readiness(
             &harness, profile.protocol, "/branchyard/home", "/workspace");
         context.private_home = true;
         context.sandbox = true;
+        context.login = config.logins.get(&harness).cloned();
+        context.auth = config.defaults.auth.clone();
         context.secrets = config.secrets.keys().filter(|secret| {
             match configure::key_source(root, &config.secrets, secret) {
                 KeySource::Env(var) => machine.var_set(&var),
@@ -1257,6 +1258,32 @@ mod tests {
         assert_eq!(
             remote_harness_readiness(root, &config, &machine)[0].state,
             State::Ready
+        );
+    }
+
+    #[test]
+    fn remote_readiness_honors_declarative_provider_login() {
+        let mut config = ProjectConfig::default();
+        config.defaults.harness = Some("claude-code".into());
+        config.logins.insert("claude-code".into(), "zai".into());
+        config
+            .secrets
+            .insert("ZAI_API_KEY".into(), "REMOTE_ZAI_KEY".into());
+        let mut machine = Fake::new();
+        let root = Path::new("/unused");
+        assert_eq!(
+            remote_harness_readiness(root, &config, &machine)[0].state,
+            State::Blocked
+        );
+        machine.vars.insert("REMOTE_ZAI_KEY".into());
+        assert_eq!(
+            remote_harness_readiness(root, &config, &machine)[0].state,
+            State::Ready
+        );
+        config.logins.clear();
+        assert_eq!(
+            remote_harness_readiness(root, &config, &machine)[0].state,
+            State::NeedsPerson
         );
     }
 

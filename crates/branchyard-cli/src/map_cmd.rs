@@ -83,18 +83,21 @@ pub fn read_items(args: &MapArgs, dir: &Path) -> Result<Vec<MapItem>, Failure> {
     let (text, hint) = match (&args.items, &args.from_command) {
         (Some(path), _) if path == "-" => (stdin()?, None),
         (Some(path), _) => (
-            std::fs::read_to_string(path)
-                .map_err(|e| Failure::Message(format!("--items {path}: {e}")))?,
+            std::fs::read_to_string(path).map_err(|e| {
+                crate::errors::Report::usage(format!(
+                    "--items {path}: {}",
+                    crate::errors::plain_io(&e)
+                ))
+                .next("give the file that holds the items, one per line or as JSON")
+            })?,
             ItemFormat::for_path(path),
         ),
         (None, Some(command)) => (from_command(command, dir)?, None),
         (None, None) if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => (stdin()?, None),
         (None, None) => {
-            return Err(Failure::Message(
-                "give the map its items with --items FILE, --from-command CMD, or on standard \
-                 input"
-                    .into(),
-            ))
+            return Err(crate::errors::Report::usage("the map has no items to read")
+                .next("pass --items FILE or --from-command CMD, or pipe them on standard input")
+                .into())
         }
     };
     let format = args
@@ -103,19 +106,23 @@ pub fn read_items(args: &MapArgs, dir: &Path) -> Result<Vec<MapItem>, Failure> {
         .unwrap_or_else(|| ItemFormat::detect(&text));
     let items = branchyard::parse_map_items(&text, format)?;
     if items.is_empty() {
-        return Err(Failure::Message(format!(
+        return Err(crate::errors::Report::usage(format!(
             "the map has no items (read as {format}); nothing to run"
-        )));
+        ))
+        .next("check the items' file or command; --input-format names how to read them")
+        .into());
     }
     Ok(items)
 }
 
 fn from_command(command: &str, dir: &Path) -> Result<String, Failure> {
     if std::env::var_os(branchyard::ENV_BRANCH).is_some_and(|v| !v.is_empty()) {
-        return Err(Failure::Message(
-            "inside a harness, by map does not run --from-command; pass the items with --items"
-                .into(),
-        ));
+        return Err(crate::errors::Report::new(
+            "denied",
+            "inside a harness, by map does not run --from-command",
+        )
+        .next("pass the items with --items FILE")
+        .into());
     }
     let out = std::process::Command::new("sh")
         .arg("-c")
@@ -124,18 +131,32 @@ fn from_command(command: &str, dir: &Path) -> Result<String, Failure> {
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|e| Failure::Message(format!("--from-command: could not run sh: {e}")))?;
+        .map_err(|e| {
+            crate::errors::Report::new(
+                "io",
+                format!(
+                    "--from-command: could not run sh: {}",
+                    crate::errors::plain_io(&e)
+                ),
+            )
+        })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let tail: Vec<&str> = stderr.trim_end().lines().rev().take(5).collect();
-        return Err(Failure::Message(format!(
-            "--from-command {command:?} {}: {}",
-            out.status,
-            tail.into_iter().rev().collect::<Vec<_>>().join(" / ")
-        )));
+        return Err(crate::errors::Report::usage(format!(
+            "--from-command {command:?} failed ({})",
+            out.status
+        ))
+        .line(
+            "output",
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+        )
+        .next("run the command yourself to see why, then by map again")
+        .into());
     }
-    String::from_utf8(out.stdout)
-        .map_err(|_| Failure::Message("--from-command printed text that is not UTF-8".into()))
+    String::from_utf8(out.stdout).map_err(|_| {
+        crate::errors::Report::usage("--from-command printed text that is not UTF-8").into()
+    })
 }
 
 /// `--schema`'s JSON.
@@ -143,12 +164,14 @@ pub fn read_schema(args: &MapArgs) -> Result<Option<Value>, Failure> {
     let Some(path) = &args.schema else {
         return Ok(None);
     };
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Failure::Message(format!("--schema {path}: {e}")))?;
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        crate::errors::Report::usage(format!("--schema {path}: {}", crate::errors::plain_io(&e)))
+            .next("give the file that holds the JSON Schema")
+    })?;
     let schema: Value = serde_json::from_str(&text)
-        .map_err(|e| Failure::Message(format!("--schema {path} is not JSON: {e}")))?;
+        .map_err(|e| crate::errors::Report::usage(format!("--schema {path} is not JSON: {e}")))?;
     branchyard::JsonSchema::new(schema.clone())
-        .map_err(|e| Failure::Message(format!("--schema {path}: {e}")))?;
+        .map_err(|e| crate::errors::Report::usage(format!("--schema {path}: {e}")))?;
     Ok(Some(schema))
 }
 
@@ -188,9 +211,9 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), Failure> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let file = path
-        .file_name()
-        .ok_or_else(|| Failure::Message(format!("{} is not a file name", path.display())))?;
+    let file = path.file_name().ok_or_else(|| {
+        crate::errors::Report::usage(format!("{} is not a file name", path.display()))
+    })?;
     let temporary = dir.join(format!(
         ".{}.tmp.{}",
         file.to_string_lossy(),
@@ -198,7 +221,17 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<(), Failure> {
     ));
     std::fs::write(&temporary, text)
         .and_then(|()| std::fs::rename(&temporary, path))
-        .map_err(|e| Failure::Message(format!("write {}: {e}", path.display())))
+        .map_err(|e| {
+            crate::errors::Report::new(
+                "io",
+                format!(
+                    "could not write {}: {}",
+                    path.display(),
+                    crate::errors::plain_io(&e)
+                ),
+            )
+            .into()
+        })
 }
 
 /// The results file's text: CSV for a `.csv` path, else JSON lines.
@@ -340,25 +373,50 @@ fn resume(env: &Env, name: &str, retry_failed: bool, json: bool) -> Outcome {
     let cwd = stored.launch["cwd"]
         .as_str()
         .map_or_else(|| yard.root().to_path_buf(), PathBuf::from);
-    let cli = crate::args::parse_from(std::iter::once("by".to_owned()).chain(argv))
-        .map_err(|e| Failure::Message(format!("map {name}'s recorded command line: {e}")))?;
+    let cli =
+        crate::args::parse_from(std::iter::once("by".to_owned()).chain(argv)).map_err(|e| {
+            crate::errors::Report::new("state", format!("map {name}'s recorded command line: {e}"))
+                .next("run it again with by map")
+        })?;
     let Some(command) = cli.command else {
-        return Err(Failure::Message(format!(
-            "map {name} has no recorded command line to resume; run it again with by map"
-        )));
+        // A server records its request, not a command line: the server
+        // resumes it, and running it again here would start over.
+        let next = match stored.launch.get("argv") {
+            None if stored.launch.is_object() => {
+                format!("by --remote URL map resume {name} (the server it ran on resumes it)")
+            }
+            _ => "run it again with by map".to_owned(),
+        };
+        return Err(crate::errors::Report::new(
+            "state",
+            format!("map {name} has no recorded command line to resume"),
+        )
+        .next(next)
+        .into());
     };
-    std::env::set_current_dir(&cwd)
-        .map_err(|e| Failure::Message(format!("map {name} ran in {}: {e}", cwd.display())))?;
+    std::env::set_current_dir(&cwd).map_err(|e| {
+        crate::errors::Report::new(
+            "io",
+            format!(
+                "map {name} ran in {}: {}",
+                cwd.display(),
+                crate::errors::plain_io(&e)
+            ),
+        )
+    })?;
     let vars = |var: &str| std::env::var(var).ok();
-    let (_, command) =
-        crate::defaults::apply(&cwd, &vars, cli.globals, command).map_err(Failure::Message)?;
+    let (_, command) = crate::defaults::apply(&cwd, &vars, cli.globals, command)
+        .map_err(|why| crate::errors::config(&why))?;
     let crate::args::Command::Map {
         action: None, map, ..
     } = command
     else {
-        return Err(Failure::Message(format!(
-            "map {name}'s recorded command line is not a by map run"
-        )));
+        return Err(crate::errors::Report::new(
+            "state",
+            format!("map {name}'s recorded command line is not a by map run"),
+        )
+        .next("run it again with by map")
+        .into());
     };
     run_local(
         env,

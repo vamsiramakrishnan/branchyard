@@ -5,6 +5,9 @@ on:
       plan:
         required: true
         type: string
+      publish:
+        type: boolean
+        default: false
 permissions:
   contents: read
   packages: write
@@ -25,6 +28,7 @@ jobs:
           docker run --rm --entrypoint branchyard-server branchyard-agy:release --version
           docker run --rm --entrypoint /usr/local/libexec/branchyard-bridge branchyard-agy:release --version
       - name: Publish immutable image metadata
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -41,6 +45,16 @@ jobs:
           release = json.loads(pathlib.Path("deploy/agy-release.json").read_text())
           pathlib.Path("target/distrib/runtime-images.json").write_text(json.dumps({"branchyard_version":sys.argv[2],"agy_image":sys.argv[1],"agy_version":release["version"]},indent=2)+"\n")
           PY
+      - name: Record the local image in a rehearsal
+        if: ${{ !inputs.publish }}
+        run: |
+          mkdir -p target/distrib
+          docker inspect --format='{{.Id}}' branchyard-agy:release > target/distrib/image-id
+          python3 - <<'PYCODE'
+          import json, pathlib
+          release = json.loads(pathlib.Path("deploy/agy-release.json").read_text())
+          pathlib.Path("target/distrib/runtime-images.json").write_text(json.dumps({"mode":"dry-run","local_image_id":pathlib.Path("target/distrib/image-id").read_text().strip(),"agy_version":release["version"]},indent=2)+"\n")
+          PYCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: artifacts-runtime-images

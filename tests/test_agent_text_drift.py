@@ -25,7 +25,8 @@ PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate" / "SKILL.md"
 JSON_SCHEMA = ROOT / "crates" / "branchyard" / "src" / "json_schema.rs"
 MCP = ROOT / "crates" / "branchyard-mcp" / "src" / "lib.rs"
-ARGS = ROOT / "crates" / "branchyard-cli" / "src" / "args.rs"
+# The command line: `crates/branchyard-cli/src/args/`, one module per part.
+ARGS = ROOT / "crates" / "branchyard-cli" / "src" / "args"
 
 # Annotations that the keyword sentences use as examples, not as keywords.
 ANNOTATION_EXAMPLES = {"title", "description"}
@@ -74,7 +75,7 @@ def mcp_keywords():
 
 
 def cli_keywords():
-    text = ARGS.read_text()
+    text = "\n".join(path.read_text() for path in sorted(ARGS.glob("*.rs")))
     found = re.search(r"/// using only (.*?) and annotations such as", text, re.S)
     assert found, "`by spawn --result-schema` no longer lists the keywords"
     flat = re.sub(r"\s*///\s*", " ", found.group(1))

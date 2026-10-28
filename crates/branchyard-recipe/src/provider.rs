@@ -326,6 +326,8 @@ impl SandboxProvider for RecipeProvider {
     }
 
     fn exec(&self, name: &str, spec: &ExecSpec) -> Result<Box<dyn Process>, ProviderError> {
+        // A recipe's machine has no way to hold a process to a write scope.
+        spec.refuse_write_scope()?;
         let machine = self
             .machine(name)
             .ok_or_else(|| ProviderError::NotFound(name.to_owned()))?;

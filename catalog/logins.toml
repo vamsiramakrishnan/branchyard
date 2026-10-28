@@ -1,0 +1,223 @@
+# How `by harnesses` reads each harness's login, by name only. Written by
+# hand (unlike harnesses.toml beside it, which is generated), keyed by the
+# catalog ID, embedded by crates/branchyard-controls/src/catalog.rs and read
+# by crates/branchyard/src/inventory/logins.rs: it makes the detection
+# script's lines for a harness from its table and turns what they print into
+# the LOGIN cell. No value is ever printed: a variable is tested with
+# `[ -n ]`, a file with `[ -e ]` or `grep -q`, and the most a line of the
+# script prints is a name.
+#
+# A harness with no table is read by the catalog's `auth_env` alone: a key
+# variable set is `key set (NAME)`, and nothing set is `unknown`.
+#
+# The fields (docs/harness-lifecycle.md#where-the-rules-live gives the order
+# the interpreter consults them in; docs/adding-a-harness.md says how to add a
+# table and its golden test in crates/branchyard/tests/golden/logins/ID.toml):
+#
+#   status        its own status command: `args`, then `logged_out` and
+#                 `logged_in` phrases (checked in that order, ignoring case;
+#                 the detail is the line that decided), or `json`, a boolean
+#                 field read line by line, with `method`, a string field shown
+#                 in brackets. `overridden_by`: variables the harness sends
+#                 instead of the login when they are set.
+#   env           key variables besides the catalog's `auth_env`; like it,
+#                 they are offered as the key to set.
+#   quiet_env     variables that count as a key when set but are not offered
+#                 as the one to set.
+#   files         credential files whose existence is a login (`path` is an
+#                 sh word, `shown` is for people). With none of them and no
+#                 key variable the login is a likely logout, except on macOS
+#                 when `keychain_on_macos`.
+#   [[probe]]     a look inside a configuration, in order. `kind`:
+#                   grep       a pattern (ERE) in a file is `fact`
+#                   flag       a variable equal to `value` is `fact`
+#                   provider   the model provider a TOML file selects and the
+#                              variable its table's `env_key` names
+#                   providers  YAML files' providers and the variables their
+#                              `key_env` lines name
+#                   env-file   `NAME_API_KEY=value` lines of .env files the
+#                              harness loads (the name, never the value)
+#                   sqlite     provider names from a login database
+#                 A grep or flag fact can be a login (`login`) or add a note
+#                 to a logged-in detail (`note_found`, `note_missing`).
+#   [[gate]]      a key variable that counts only beside a fact (`used`),
+#                 is still a key but unused without it (`unused`), and adds
+#                 `absent` to the detail of a likely logout.
+#   runtime       the interpreter its executable is a script for, named in
+#                 the version note when the version command fails.
+#   logged_out    the detail when nothing is found, instead of "no FILES and
+#                 no VARIABLES" or unknown: a likely logout. `{vars}` is the
+#                 key variables joined with commas, `{vars_or}` with "or".
+#   unknown_also  what else would tell, added to the detail of a login that
+#                 cannot be read.
+#
+# Sources: emdash's agent plugins (`checkStatus`: `codex login status` and its
+# phrases), Scion's harness configurations (`auth.types.*.required_files`,
+# `autodetect.env`), and the CLIs themselves where they were run (each table
+# says which version).
+
+# `claude auth status` (2.1.310) prints JSON with `loggedIn` and `authMethod`.
+# It sees a login the credential file does not, such as a token the host
+# provides. On macOS the login is in the keychain.
+[claude-code]
+env = ["CLAUDE_CODE_OAUTH_TOKEN"]
+files = [{ path = "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json", shown = "~/.claude/.credentials.json" }]
+keychain_on_macos = true
+
+[claude-code.status]
+args = ["auth", "status"]
+json = "loggedIn"
+method = "authMethod"
+
+# emdash's `checkStatus` runs `codex login status` and reads it with these
+# phrases. Codex sends its requests with CODEX_API_KEY when it is set,
+# whatever the login says. Codex 0.164.0 sends them to the `model_provider`
+# its config.toml selects, with the variable that provider's `env_key` names,
+# and `codex login status` speaks only of the OpenAI login.
+[codex]
+env = ["CODEX_API_KEY"]
+files = [{ path = "${CODEX_HOME:-$HOME/.codex}/auth.json", shown = "~/.codex/auth.json" }]
+
+[codex.status]
+args = ["login", "status"]
+logged_out = ["not authenticated", "not logged in", "not signed in", "login required"]
+logged_in = ["authenticated", "logged in", "signed in"]
+overridden_by = ["CODEX_API_KEY"]
+
+[[codex.probe]]
+kind = "provider"
+file = "${CODEX_HOME:-$HOME/.codex}/config.toml"
+shown = "~/.codex/config.toml"
+key = "model_provider"
+default = "openai"
+table = "model_providers"
+env_key = "env_key"
+status_covers = "the OpenAI login"
+
+# Gemini CLI 0.63.0's headless `gemini -p` refuses an untrusted directory
+# unless GEMINI_CLI_TRUST_WORKSPACE is `true`, whatever the login.
+[gemini-cli]
+files = [{ path = "$HOME/.gemini/oauth_creds.json", shown = "~/.gemini/oauth_creds.json" }]
+
+[[gemini-cli.probe]]
+kind = "flag"
+var = "GEMINI_CLI_TRUST_WORKSPACE"
+value = "true"
+fact = "trust-workspace"
+note_found = "GEMINI_CLI_TRUST_WORKSPACE=true is set, so headless runs trust the workspace"
+note_missing = "headless runs (gemini -p) refuse an untrusted workspace: set GEMINI_CLI_TRUST_WORKSPACE=true or pass --skip-trust"
+
+[opencode]
+files = [{ path = "$HOME/.local/share/opencode/auth.json", shown = "~/.local/share/opencode/auth.json" }]
+
+# Antigravity 1.3.3 reads a key from GEMINI_API_KEY alone (the catalog's
+# `auth_env`; GOOGLE_API_KEY has no effect), and only when its settings.json
+# has "modelProvider": "gemini"; without it agy asks for a Google sign-in.
+# Isolated runs set the provider, so the key still counts, as unused.
+[antigravity]
+env = ["AGY_TOKEN"]
+files = [{ path = "$HOME/.gemini/antigravity-cli/antigravity-oauth-token", shown = "~/.gemini/antigravity-cli/antigravity-oauth-token" }]
+
+[[antigravity.probe]]
+kind = "grep"
+file = "$HOME/.gemini/antigravity-cli/settings.json"
+pattern = '"modelProvider"[[:space:]]*:[[:space:]]*"gemini"'
+fact = "model-provider-gemini"
+
+[[antigravity.gate]]
+var = "GEMINI_API_KEY"
+fact = "model-provider-gemini"
+used = "GEMINI_API_KEY is set and settings.json selects the gemini provider (an API key; not checked)"
+unused = "GEMINI_API_KEY is set but ~/.gemini/antigravity-cli/settings.json does not set modelProvider gemini: agy will ask for a Google sign-in; Branchyard sets it in isolated runs, and `by harnesses login antigravity` sets it for your own"
+absent = "a GEMINI_API_KEY also needs modelProvider gemini in ~/.gemini/antigravity-cli/settings.json"
+
+# DeepSeek Harness 0.2.0-rc.2 has no login command: DEEPSEEK_API_KEY (the
+# catalog's `auth_env`) feeds its shipped provider, and it composes its
+# `llm-pi-ai` providers from cordis.patch.yml under $DSH_HOME and its ACP
+# profile. A provider whose apiKeyEnv variable is unset is not a login: dsh
+# 0.2.1-rc.2 stops with MISSING_CREDENTIAL (25 October 2026).
+[deepseek-harness]
+logged_out = "no provider in ~/.dsh/cordis.patch.yml or ~/.dsh/profiles/acp/cordis.patch.yml and no {vars_or}; set {vars_or} (the shipped provider deepseek-official reads it) or configure a provider under the llm-pi-ai plugin in cordis.patch.yml (`dsh --profile acp --dump-config` shows the composed configuration)"
+
+[[deepseek-harness.probe]]
+kind = "providers"
+dir = "${DSH_HOME:-$HOME/.dsh}"
+shown = "~/.dsh"
+files = ["cordis.patch.yml", "profiles/acp/cordis.patch.yml"]
+section = "providers"
+inline_key = "apiKey"
+key_env = "apiKeyEnv"
+configured = "{file} configures a provider (its key variable is not checked)"
+unset = "{file} configures a provider, but the variable its apiKeyEnv names ({vars}) is not set, and dsh stops with MISSING_CREDENTIAL; export it"
+
+# Oh My Pi 18.10.3 reads provider keys from its environment (the catalog's
+# `auth_env`) and from the .env files it loads, and keeps `omp login` logins
+# as rows of agent.db (the provider's name is read, never the credential).
+# `omp` is a Bun script that needs Bun 1.3.14 or newer.
+[oh-my-pi]
+logged_out = "no login stored in ~/.omp/agent/agent.db and none of {vars} is set; set one, or run omp login"
+
+[oh-my-pi.runtime]
+program = "bun"
+name = "Bun"
+min = "1.3.14"
+install = "curl -fsSL https://omp.sh/install | sh"
+
+[[oh-my-pi.probe]]
+kind = "sqlite"
+file = "$HOME/.omp/agent/agent.db"
+query = "select distinct provider from auth_credentials where disabled_cause is null"
+login = "omp login stored for {names} in ~/.omp/agent/agent.db (not checked)"
+unread = "~/.omp/agent/agent.db may hold a login, which needs sqlite3 or python3 on the machine to read, and none of {vars} is set"
+
+[[oh-my-pi.probe]]
+kind = "env-file"
+files = ["$HOME/.omp/agent/.env", "$HOME/.omp/.env"]
+login = "{var} is set in {file}, which omp loads (an API key; not checked)"
+
+[github-copilot]
+env = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+files = [{ path = "$HOME/.copilot/config.json", shown = "~/.copilot/config.json" }]
+
+[grok-build]
+env = ["XAI_API_KEY"]
+files = [{ path = "$HOME/.grok/auth.json", shown = "~/.grok/auth.json" }]
+
+# Hermes Agent 0.19.0 loads $HERMES_HOME/.env (default ~/.hermes/.env) for
+# its providers' keys. Its auth.json exists before any login, so it counts
+# for nothing.
+[hermes]
+env = ["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+unknown_also = "and so would a NAME_API_KEY= line in ~/.hermes/.env; `hermes status` shows what Hermes itself sees"
+
+[[hermes.probe]]
+kind = "env-file"
+files = ["${HERMES_HOME:-$HOME/.hermes}/.env"]
+login = "{var} is set in {file}, which Hermes loads (an API key; not checked)"
+
+[muse-code]
+env = ["META_API_KEY"]
+
+# Qwen Code 0.26.0 has no login command or credential file (`qwen auth` is
+# removed): it runs on OPENAI_API_KEY alone, or on a provider connected
+# inside it, which is `security.auth.selectedType` in its settings. The key
+# to set is not offered: the provider may read another.
+[qwen-code]
+quiet_env = ["OPENAI_API_KEY"]
+
+[[qwen-code.probe]]
+kind = "grep"
+file = "$HOME/.qwen/settings.json"
+pattern = '"selectedType"[[:space:]]*:'
+fact = "auth-selected"
+login = "~/.qwen/settings.json selects an auth type (security.auth.selectedType; its key is not checked)"
+
+# Pi keeps what `/login` stored in $PI_CODING_AGENT_DIR or ~/.pi/agent
+# auth.json, and creates the file as `{}` on its first start, so the file
+# existing says nothing: an entry (`"type":`) does.
+[[pi.probe]]
+kind = "grep"
+file = "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"
+pattern = '"type"[[:space:]]*:'
+fact = "login-stored"
+login = "~/.pi/agent/auth.json holds a login (not checked)"

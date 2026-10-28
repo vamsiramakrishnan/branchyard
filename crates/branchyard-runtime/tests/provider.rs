@@ -53,6 +53,7 @@ conformance!(
     drop_tears_down,
     stop_ends_processes,
     egress_confinement,
+    write_scope,
 );
 
 /// The local provider, except that the background child of
@@ -80,11 +81,11 @@ impl SandboxProvider for ExecLate {
         if spec
             .argv
             .last()
-            .is_some_and(|script| script == "sleep 300 & echo $!")
+            .is_some_and(|script| script == "sleep 300 </dev/null >/dev/null 2>&1 & echo $!")
         {
             // Builtins only, so the child stays `sh` and alone in the group.
             let script = format!(
-                "{{ while [ ! -e '{}' ]; do :; done; exec sleep 300; }} & echo $!",
+                "{{ while [ ! -e '{}' ]; do :; done; exec sleep 300; }} </dev/null >/dev/null 2>&1 & echo $!",
                 self.flag.display()
             );
             *spec.argv.last_mut().unwrap() = script;
@@ -182,6 +183,7 @@ fn stop_kills_background_children_and_blocks_exec() {
         argv: vec!["sh".into(), "-c".into(), "sleep 300 & echo $!; wait".into()],
         cwd: setup.workspace.clone(),
         env,
+        writable: None,
     };
     let mut process = provider.exec(&spec.name, &exec).unwrap();
     let mut line = String::new();

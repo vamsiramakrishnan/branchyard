@@ -26,6 +26,10 @@ webpki-roots = { workspace = true }
 [target."cfg(unix)".dependencies]
 rustix = { workspace = true, features = ["thread", "net", "fs"] }
 
+# Landlock's three system calls, which rustix does not wrap.
+[target."cfg(target_os = \"linux\")".dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 tempfile = { workspace = true }

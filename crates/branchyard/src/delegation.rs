@@ -748,6 +748,10 @@ pub struct Inspection {
     /// sandbox; the branch's `isolated`.
     #[serde(default)]
     pub isolated: bool,
+    /// What held its harness's writes on its last turn; the branch's
+    /// `guard`.
+    #[serde(default)]
+    pub guard: Option<crate::Guard>,
     pub parent: Option<String>,
     pub children: Vec<String>,
     pub depth: u32,
@@ -3935,6 +3939,7 @@ impl Local {
             model: record.provision.as_ref().and_then(|p| p.model.clone()),
             provider: info.provider,
             isolated: info.isolated,
+            guard: info.guard,
             parent: info.parent,
             children: info.children,
             depth: info.depth,
@@ -5538,6 +5543,7 @@ Checks on the merged result: \
                 model: None,
                 provider: "local".into(),
                 isolated: false,
+                guard: None,
             },
             created_ms: 0,
             check: None,

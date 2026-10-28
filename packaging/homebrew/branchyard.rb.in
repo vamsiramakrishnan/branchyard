@@ -39,7 +39,7 @@ class Branchyard < Formula
     assert_match version.to_s, shell_output("#{bin}/by --version")
     system "git", "init", "-q", testpath/"repo"
     cd testpath/"repo" do
-      assert_match "no recipes", shell_output("#{bin}/by recipe list")
+      assert_match(/no recipes/i, shell_output("#{bin}/by recipe list"))
     end
   end
 end

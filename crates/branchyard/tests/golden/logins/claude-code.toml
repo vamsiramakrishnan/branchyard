@@ -1,0 +1,62 @@
+# Claude Code: `claude auth status` (JSON with loggedIn and authMethod, as
+# 2.1.310 prints it), the credential file, the keychain on macOS.
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "its own status says logged in"
+status = ['{', '  "loggedIn": true,', '  "authMethod": "oauth_token",', '  "apiProvider": "firstParty"', '}']
+lines = []
+cell = "logged in"
+state = "logged_in"
+evidence = "verified"
+detail = "claude auth status: logged in (oauth_token)"
+
+[[case]]
+name = "its own status says logged out, beside a credential file"
+status = ['{"loggedIn":false,"authMethod":"none"}']
+status_exit = 1
+home = { ".claude/.credentials.json" = "{}" }
+lines = ["file ~/.claude/.credentials.json"]
+cell = "logged out"
+state = "logged_out"
+evidence = "verified"
+detail = "claude auth status: not logged in (none)"
+
+[[case]]
+name = "a Claude Code too old for auth status, with a key"
+status = ["error: unknown command 'auth'"]
+status_exit = 1
+env = { ANTHROPIC_API_KEY = "fake-anthropic" }
+lines = ["env ANTHROPIC_API_KEY"]
+cell = "key set (ANTHROPIC_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "ANTHROPIC_API_KEY is set (an API key; not checked)"
+key = "ANTHROPIC_API_KEY"
+
+[[case]]
+name = "CLAUDE_CONFIG_DIR moves the credential file"
+env = { CLAUDE_CONFIG_DIR = "{home}/config" }
+home = { "config/.credentials.json" = "{}" }
+lines = ["file ~/.claude/.credentials.json"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.claude/.credentials.json exists"
+
+[[case]]
+name = "nothing on Linux"
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN"
+
+[[case]]
+name = "nothing on macOS, where the login is in the keychain"
+programs = { uname = "echo Darwin" }
+lines = []
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "Branchyard cannot read claude's login; a key in ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN would tell"

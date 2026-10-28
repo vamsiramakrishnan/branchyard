@@ -1,0 +1,30 @@
+# Qwen Code (0.26.0): OPENAI_API_KEY alone, or a provider connected inside it
+# (security.auth.selectedType in its settings); neither is a key it is
+# offered. Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "an OpenAI key"
+env = { OPENAI_API_KEY = "fake-openai" }
+lines = ["env OPENAI_API_KEY"]
+cell = "key set (OPENAI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "OPENAI_API_KEY is set (an API key; not checked)"
+key = "OPENAI_API_KEY"
+
+[[case]]
+name = "a provider connected inside it"
+home = { ".qwen/settings.json" = '{"security": {"auth": {"selectedType": "openai"}}}' }
+lines = ["fact auth-selected"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.qwen/settings.json selects an auth type (security.auth.selectedType; its key is not checked)"
+
+[[case]]
+name = "nothing"
+lines = []
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "Branchyard cannot read qwen's login: the catalog records no status command, credential file or key variable for it; sign in inside qwen itself"

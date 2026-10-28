@@ -119,6 +119,63 @@ fn a_server_keeps_branches_and_operations_in_postgres_across_a_restart() {
     assert_eq!(common::git(&f.root, &["show", "main:hello.txt"]), "hi\n");
 }
 
+/// The server binary on `url`, started and stopped twice, logs no
+/// PostgreSQL notice above debug: on 27 October 2026 every start after the
+/// first logged one `INFO NOTICE: relation "…" already exists, skipping`
+/// per table (31 lines), and the first one about `decided_by`.
+#[cfg(unix)]
+#[test]
+fn a_restarted_server_logs_no_notices_from_postgres() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let Some(url) = database() else { return };
+    let f = Fixture::new();
+    let token = f.dir.join("token");
+    std::fs::write(&token, format!("{}\n", common::TOKEN)).unwrap();
+    for start in ["first", "second"] {
+        let log_path = f.dir.join(format!("{start}.log"));
+        let mut child = branchyard_testkit::hermetic(&mut Command::new(env!(
+            "CARGO_BIN_EXE_branchyard-server"
+        )))
+        .args([
+            "--listen",
+            "127.0.0.1:0",
+            "--no-inventory",
+            "--database",
+            &url,
+        ])
+        .arg("--repo")
+        .arg(format!("app={}", f.root.display()))
+        .arg("--data-dir")
+        .arg(&f.data)
+        .arg("--token-file")
+        .arg(&token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(&log_path).unwrap())
+        .spawn()
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.starts_with("listening on "), "{start}: {line:?}");
+        let killed = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(killed.success());
+        let status = wait::until(&format!("the {start} server to exit"), || {
+            child.try_wait().unwrap()
+        });
+        assert!(status.success());
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("serving;"), "{start}: {log}");
+        assert!(!log.contains("NOTICE"), "{start}: {log}");
+        assert!(!log.contains("already exists"), "{start}: {log}");
+    }
+}
+
 #[test]
 fn a_server_marks_operations_interrupted_in_postgres() {
     let Some(url) = database() else { return };

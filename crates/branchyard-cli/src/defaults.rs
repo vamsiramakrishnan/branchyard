@@ -57,7 +57,7 @@ pub fn apply(
             | Command::Up { .. }
             | Command::Mcp { .. }
             | Command::Completions { .. }
-            | Command::Man
+            | Command::Man { .. }
     ) {
         return Ok((globals, command));
     }

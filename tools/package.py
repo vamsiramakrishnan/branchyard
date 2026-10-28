@@ -14,12 +14,19 @@ checks this).
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import tomllib
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# tools/release_version.py, which says where the workspace version must
+# appear; loaded by path, so this file runs as a script or a module.
+_spec = importlib.util.spec_from_file_location("release_version", Path(__file__).with_name("release_version.py"))
+assert _spec is not None and _spec.loader is not None
+release_version = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(release_version)
 PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate"
 SETUP_SKILL = PLUGIN / "skills" / "setup"
@@ -133,9 +140,15 @@ def build(destination: Path) -> list[Path]:
         manifest = json.loads((PLUGIN / host).read_text())
         if manifest["name"] != "branchyard" or manifest["version"] != version:
             raise ValueError(f"{host}'s name and version must be 'branchyard' and {version!r}, the workspace version")
-    if sdk_version() != version:
-        raise ValueError(f"sdk/python/pyproject.toml's version must be {version!r}, the workspace version")
+    if sdk_version() != release_version.pep440(version):
+        raise ValueError(
+            f"sdk/python/pyproject.toml's version must be {release_version.pep440(version)!r}, "
+            f"the workspace version {version!r} in PEP 440's spelling"
+        )
     check_marketplace(version)
+    problems = release_version.disagreements(ROOT)
+    if problems:
+        raise ValueError("the workspace version is not everywhere it must be: " + "; ".join(problems))
     destination.mkdir(parents=True, exist_ok=True)
     license_bytes = (ROOT / "LICENSE").read_bytes()
     paths = []

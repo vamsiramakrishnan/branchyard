@@ -235,12 +235,15 @@ fn git(root: &Path, args: &[&str]) -> Result<(), String> {
 
 impl Worktree {
     /// `git worktree add --detach PATH BASE` in the repository at `root`;
-    /// `base` defaults to its `HEAD`.
+    /// `base` defaults to its `HEAD`. Never beside another worktree write
+    /// in this process (another precheck's, or the engine's for a branch):
+    /// git fails one of two at random.
     pub fn add(root: &Path, path: &Path, base: Option<&str>) -> Result<Worktree, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
         let target = path.to_string_lossy().into_owned();
+        let _writes = branchyard::hold_git_writes();
         git(
             root,
             &[
@@ -262,6 +265,7 @@ impl Worktree {
 impl Drop for Worktree {
     fn drop(&mut self) {
         let target = self.path.to_string_lossy().into_owned();
+        let _writes = branchyard::hold_git_writes();
         if git(&self.root, &["worktree", "remove", "--force", &target]).is_err() {
             branchyard_support::cleanup_dir(&self.path);
             branchyard_support::best_effort(
@@ -276,8 +280,9 @@ impl Drop for Worktree {
 mod tests {
     use super::*;
 
-    fn dir() -> PathBuf {
-        std::env::temp_dir()
+    /// A scratch directory to run a command in, removed when dropped.
+    fn dir() -> branchyard_testkit::Scratch {
+        branchyard_testkit::Scratch::new("precheck")
     }
 
     #[test]
@@ -285,20 +290,20 @@ mod tests {
         let ok = run(
             "echo hello; echo oops >&2",
             Duration::from_secs(30),
-            &dir(),
+            dir().path(),
             &[],
         );
         assert!(ok.passed(), "{ok:?}");
         assert_eq!(ok.stdout, "hello\n");
         assert_eq!(ok.stderr, "oops\n");
-        let skip = run("exit 3", Duration::from_secs(30), &dir(), &[]);
+        let skip = run("exit 3", Duration::from_secs(30), dir().path(), &[]);
         assert!(!skip.passed());
         assert_eq!(skip.exit_code, Some(3));
         assert_eq!(failure(&skip), "Precheck exited with code 3.");
         let env = run(
             "test \"$BRANCHYARD_TRIGGER\" = nightly",
             Duration::from_secs(30),
-            &dir(),
+            dir().path(),
             &[("BRANCHYARD_TRIGGER".into(), "nightly".into())],
         );
         assert!(env.passed(), "{env:?}");
@@ -309,7 +314,7 @@ mod tests {
         let long = run(
             "i=0; while [ $i -lt 1000 ]; do echo 0123456789; i=$((i+1)); done",
             Duration::from_secs(30),
-            &dir(),
+            dir().path(),
             &[],
         );
         assert!(long.stdout_truncated);
@@ -324,7 +329,7 @@ mod tests {
         let slow = run(
             "sleep 30 & sleep 30; wait",
             Duration::from_secs(1),
-            &dir(),
+            dir().path(),
             &[],
         );
         assert!(slow.timed_out, "{slow:?}");

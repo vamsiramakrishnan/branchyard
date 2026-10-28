@@ -960,7 +960,8 @@ pub(crate) fn cancel_unstarted(store: &Store, record: &Record, by: &str) -> Resu
             best_effort(
                 "record the activity",
                 recorder.record(Activity::Warning(format!(
-                    "cancelled by {by} before its prerequisites settled; it never ran"
+                    "cancelled {} before its prerequisites settled; it never ran",
+                    crate::operations::actor_text(by)
                 ))),
             );
         }

@@ -14,6 +14,13 @@
 //! [`branchyard::glance::Glance`]. They give up after [`DEADLINE`] and
 //! never fail: any problem prints nothing on stdout, at most a note on
 //! stderr, and exits 0.
+//!
+//! Each call a harness makes (a JSON object on stdin, not `by setup`'s
+//! canned one) is noted in [`heard`], so `by setup`, bare `by` and `by
+//! doctor` can say a harness's hooks were heard, not only that `by hook`
+//! answers.
+
+pub(crate) mod heard;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -48,6 +55,9 @@ pub fn hook(harness: Option<&str>, event: &str) -> ExitCode {
             let input = stdin_text();
             let dialect = dialect(harness.as_deref())?;
             let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            if Event::parse(&event).is_ok() {
+                note_call(dialect, &event, &input, &env, &cwd());
+            }
             hook_output_as(dialect, &event, &input, &env, &cwd())
         }),
     )
@@ -62,6 +72,7 @@ pub fn statusline(harness: Option<&str>) -> ExitCode {
             let input = stdin_text();
             let dialect = dialect(harness.as_deref())?;
             let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+            note_call(dialect, heard::STATUSLINE, &input, &env, &cwd());
             status_line_as(dialect, &input, &env, &cwd())
         }),
     )
@@ -363,6 +374,45 @@ fn cwd() -> PathBuf {
 /// The JSON Claude Code passes, or `null` when it is not JSON.
 fn parse(input: &str) -> Value {
     serde_json::from_str(input).unwrap_or(Value::Null)
+}
+
+/// Note a call of `kind` (an event, or [`heard::STATUSLINE`]) as the
+/// harness's: its session, its event name and the repository its directory
+/// is in, beside the user configuration. Not for `by setup`'s canned call
+/// ([`heard::CHECK_VAR`]), nor for input that is not a JSON object (a
+/// person at a terminal sends none). A note that cannot be written is
+/// dropped: the call goes on as if it were.
+fn note_call(
+    dialect: &Dialect,
+    kind: &str,
+    input: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    cwd: &Path,
+) {
+    if env(heard::CHECK_VAR).is_some() {
+        return;
+    }
+    let input = parse(input);
+    if !input.is_object() {
+        return;
+    }
+    let paths = match kind {
+        heard::STATUSLINE => dialect.status_cwd,
+        _ => dialect.cwd,
+    };
+    let dir = first_str(&input, paths).map_or_else(|| cwd.to_path_buf(), PathBuf::from);
+    branchyard_support::best_effort(
+        "note the hook call as heard",
+        heard::note(
+            &heard::store(),
+            dialect.id,
+            kind,
+            first_str(&input, dialect.session),
+            heard::harness_event(&input),
+            &dir,
+            branchyard_support::time::now_ms(),
+        ),
+    );
 }
 
 /// The local yard for `dir`: the one `BRANCHYARD_ROOT` names when it has
@@ -1030,6 +1080,7 @@ mod tests {
             parent: parent.map(str::to_owned),
             provider: "local".into(),
             isolated: false,
+            guard: None,
             children: Vec::new(),
             depth: u32::from(parent.is_some()),
             base: "0123456789abcdef".into(),

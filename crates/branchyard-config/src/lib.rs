@@ -56,6 +56,14 @@ pub struct ProjectConfig {
     /// to isolated or sandboxed branches, which have a private home.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, String>,
+    /// Provider logins by harness ID, such as `claude-code = "zai"`: the
+    /// harness reaches its model through that provider, with the
+    /// provider's key from `[secrets]` (`ZAI_API_KEY`, `GEMINI_API_KEY`).
+    /// Written by `by harnesses login ID --provider NAME`. Applied, like
+    /// `[secrets]`, only to isolated or sandboxed branches, and not to a
+    /// branch on the model gateway. See docs/harness-lifecycle.md.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub logins: BTreeMap<String, String>,
     /// Stdio MCP servers for a new branch's harness: `NAME = "/absolute/command args"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, String>,
@@ -2075,6 +2083,10 @@ impl ProjectConfig {
         for (name, source) in &self.secrets {
             secret_source(name, source).map_err(|e| ConfigError(format!("secrets.{name}: {e}")))?;
         }
+        for (harness, provider) in &self.logins {
+            branchyard_provision::logins::check(harness, provider)
+                .map_err(|e| ConfigError(format!("logins.{harness}: {e}")))?;
+        }
         for (name, command) in &self.mcp {
             branchyard_provision::McpServerSpec::parse(&format!("{name}={command}"))
                 .map_err(|e| ConfigError(format!("mcp.{name}: {e}")))?;
@@ -2538,7 +2550,13 @@ pub fn merge(
 }
 
 /// The methods `--auth` takes.
-pub const AUTH_METHODS: &[&str] = &["api-key", "oauth-token", "auth-file", "vertex-ai"];
+pub const AUTH_METHODS: &[&str] = &[
+    "api-key",
+    "auth-token",
+    "oauth-token",
+    "auth-file",
+    "vertex-ai",
+];
 
 /// `NAME` with its `VAR` or `@FILE` source, parsed as `--secret` does,
 /// after [`check_secret_reference`]. No error quotes the source.
@@ -2940,12 +2958,43 @@ fn render_workspace(out: &mut String, table: &str, workspace: &WorkspaceConfig) 
 
 // Where the files are, and reading them.
 
-/// The directory holding `.git` at or above `cwd`, else `cwd`.
+/// The top of the git working tree at or above `cwd` (see
+/// [`is_repository`]), else `cwd`.
 pub fn project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
-        .find(|dir| dir.join(".git").exists())
+        .find(|dir| is_repository(dir))
         .unwrap_or(cwd)
         .to_path_buf()
+}
+
+/// Whether `dir` is the top of a git working tree: its `.git` is a git
+/// directory, or a file naming one (`gitdir: <path>`, as a linked worktree
+/// or a submodule has). A git directory is one holding a `HEAD` file, as git
+/// itself requires: a stray empty `.git` directory (a harness run with no
+/// `HOME` left one in `/tmp`) does not make its parent a repository.
+pub fn is_repository(dir: &Path) -> bool {
+    git_dir(dir).is_some()
+}
+
+/// The git directory of the working tree whose top is `dir`: its `.git`
+/// directory, or the one its `.git` file names; `None` when that is not a
+/// git directory (see [`is_repository`]).
+pub fn git_dir(dir: &Path) -> Option<PathBuf> {
+    let dot_git = dir.join(".git");
+    let git_dir = match dot_git.is_dir() {
+        true => dot_git,
+        false => {
+            let text = match std::fs::read_to_string(&dot_git) {
+                Ok(text) => text,
+                // No `.git` here, or a file git could not read either: the
+                // answer to "is this a work tree's top" is no, not an error.
+                Err(_) => return None,
+            };
+            let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+            dir.join(named)
+        }
+    };
+    git_dir.join("HEAD").is_file().then_some(git_dir)
 }
 
 /// `branchyard.toml` at or above `cwd`, up to the repository root.
@@ -2955,7 +3004,7 @@ pub fn project_file(cwd: &Path) -> Option<PathBuf> {
         if candidate.is_file() {
             return Some(candidate);
         }
-        if dir.join(".git").exists() {
+        if is_repository(dir) {
             break;
         }
     }

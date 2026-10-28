@@ -28,6 +28,7 @@
 //! harness is its profile's business (`branchyard_harness::profiles`), and a
 //! connector is used only once Anvil compiles it (`docs/connectors.md`).
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,218 @@ pub struct HarnessEntry {
     /// Where the entry came from: `emdash:<plugin id>`, `orca:<agent key>`.
     #[serde(default)]
     pub sources: Vec<String>,
+}
+
+/// How `by harnesses` reads one harness's login, by name only: a table of
+/// `catalog/logins.toml`, which is written by hand. The file's header
+/// explains each field; `branchyard::inventory` makes the detection
+/// script's lines from it and turns what they print into a login.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginEntry {
+    /// Its own status command, when it has one Branchyard reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<StatusCheck>,
+    /// Key variables besides the catalog's `auth_env`, offered like it as
+    /// the key to set.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Variables that count as a key when set but are not offered as the
+    /// one to set (Qwen Code's `OPENAI_API_KEY`).
+    #[serde(default)]
+    pub quiet_env: Vec<String>,
+    /// Credential files whose existence is a login.
+    #[serde(default)]
+    pub files: Vec<CredentialFile>,
+    /// On macOS the login is in the keychain, so no credential file there
+    /// proves nothing.
+    #[serde(default)]
+    pub keychain_on_macos: bool,
+    /// Looks inside its configuration, in the order they are consulted.
+    #[serde(default, rename = "probe")]
+    pub probes: Vec<Probe>,
+    /// Key variables that count only beside a fact a probe printed.
+    #[serde(default, rename = "gate")]
+    pub gates: Vec<Gate>,
+    /// The interpreter its executable is a script for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Runtime>,
+    /// The detail when nothing is found, a likely logout; `{vars}` and
+    /// `{vars_or}` are its key variables joined with commas and with "or".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logged_out: Option<String>,
+    /// What else would tell, added to the detail of a login that cannot be
+    /// read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_also: Option<String>,
+}
+
+/// A harness's own login status command, and how its output is read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusCheck {
+    /// The arguments after the executable: `["login", "status"]`.
+    pub args: Vec<String>,
+    /// Phrases that mean logged out, checked first, ignoring case.
+    #[serde(default)]
+    pub logged_out: Vec<String>,
+    /// Phrases that mean logged in, ignoring case.
+    #[serde(default)]
+    pub logged_in: Vec<String>,
+    /// A JSON boolean field that says whether it is logged in, read line by
+    /// line, in place of the phrases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json: Option<String>,
+    /// A JSON string field shown in brackets after the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Variables the harness sends instead of the login when they are set.
+    #[serde(default)]
+    pub overridden_by: Vec<String>,
+}
+
+/// A credential file: its path as an `sh` word expanded on the machine,
+/// and how it is shown to people.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialFile {
+    /// `${CODEX_HOME:-$HOME/.codex}/auth.json`.
+    pub path: String,
+    /// `~/.codex/auth.json`.
+    pub shown: String,
+}
+
+/// A look inside a harness's configuration, by name only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum Probe {
+    /// An extended regular expression found in a file is a fact.
+    Grep {
+        /// The file, as an `sh` word.
+        file: String,
+        /// The pattern, for `grep -E`.
+        pattern: String,
+        /// The fact's name.
+        fact: String,
+        /// The detail when the fact alone is a likely login.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<String>,
+        /// Added to a logged-in detail when the fact was found.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_found: Option<String>,
+        /// Added to a logged-in detail when it was not.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_missing: Option<String>,
+    },
+    /// A variable equal to a value is a fact.
+    Flag {
+        /// The variable.
+        var: String,
+        /// The value it must have.
+        value: String,
+        /// The fact's name.
+        fact: String,
+        /// The detail when the fact alone is a likely login.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<String>,
+        /// Added to a logged-in detail when the fact was found.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_found: Option<String>,
+        /// Added to a logged-in detail when it was not.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note_missing: Option<String>,
+    },
+    /// The model provider a TOML file selects at its top level, and the
+    /// variable its table's key names (Codex's `config.toml`).
+    Provider {
+        /// The file, as an `sh` word.
+        file: String,
+        /// The file, for people.
+        shown: String,
+        /// The top-level key that selects the provider: `model_provider`.
+        key: String,
+        /// The provider the status command already speaks of: `openai`.
+        default: String,
+        /// The table providers are defined under: `model_providers`.
+        table: String,
+        /// The key in a provider's table naming its variable: `env_key`.
+        env_key: String,
+        /// What the status command speaks of: `the OpenAI login`.
+        status_covers: String,
+    },
+    /// YAML files whose `section` key configures providers, a provider's
+    /// key written inline (`inline_key`), and the variables `key_env`
+    /// lines name.
+    Providers {
+        /// The directory, as an `sh` word.
+        dir: String,
+        /// The directory, for people.
+        shown: String,
+        /// The files under it.
+        files: Vec<String>,
+        /// The key that configures providers: `providers`.
+        section: String,
+        /// The key that holds a key inline: `apiKey`.
+        inline_key: String,
+        /// The key that names a key variable: `apiKeyEnv`.
+        key_env: String,
+        /// The detail of a configured provider; `{file}` is the file.
+        configured: String,
+        /// The detail of a provider whose variable is unset; `{vars}` are
+        /// the unset variables.
+        unset: String,
+    },
+    /// The `NAME_API_KEY=value` lines of `.env` files the harness loads, by
+    /// name.
+    EnvFile {
+        /// The files, as `sh` words.
+        files: Vec<String>,
+        /// The detail; `{var}` and `{file}` are the first line's.
+        login: String,
+    },
+    /// Provider names from a login database, read with `sqlite3` or
+    /// `python3`.
+    Sqlite {
+        /// The database, as an `sh` word.
+        file: String,
+        /// The query that lists the providers with a login.
+        query: String,
+        /// The detail when there are some; `{names}` lists them.
+        login: String,
+        /// The detail when neither reader is on the machine; `{vars}` are
+        /// the key variables.
+        unread: String,
+    },
+}
+
+/// A key variable that counts only beside a fact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gate {
+    /// The variable: `GEMINI_API_KEY`.
+    pub var: String,
+    /// The fact it needs.
+    pub fact: String,
+    /// The detail when it is set and the fact found.
+    pub used: String,
+    /// The detail when it is set and the fact is not found.
+    pub unused: String,
+    /// Added to the detail of a likely logout.
+    pub absent: String,
+}
+
+/// The interpreter a harness's executable is a script for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    /// Its executable: `bun`.
+    pub program: String,
+    /// Its name: `Bun`.
+    pub name: String,
+    /// The oldest release that runs the harness.
+    pub min: String,
+    /// The command that installs or upgrades it.
+    pub install: String,
 }
 
 /// A credential a connector's upstream takes.
@@ -147,6 +360,23 @@ pub fn harnesses() -> &'static [HarnessEntry] {
 /// The harness CLI with this registry ID.
 pub fn harness(id: &str) -> Option<&'static HarnessEntry> {
     harnesses().iter().find(|h| h.id == id)
+}
+
+const LOGINS_TOML: &str = include_str!("../../../catalog/logins.toml");
+
+/// How each harness's login is read, from `catalog/logins.toml`, by
+/// catalog ID. The file is embedded and its tests parse it, so it cannot
+/// fail here; if it ever did, every harness would be read by its
+/// `auth_env` alone.
+pub fn logins() -> &'static BTreeMap<String, LoginEntry> {
+    static PARSED: OnceLock<BTreeMap<String, LoginEntry>> = OnceLock::new();
+    PARSED.get_or_init(|| toml::from_str(LOGINS_TOML).unwrap_or_default())
+}
+
+/// How the harness with this catalog ID's login is read, when
+/// `catalog/logins.toml` has a table for it.
+pub fn login(id: &str) -> Option<&'static LoginEntry> {
+    logins().get(id)
 }
 
 /// Every connector in `catalog/connectors.toml`, by ID.
@@ -261,6 +491,13 @@ pub(crate) mod tests {
                 e.homepage = Some("https://github.com/deepseek-ai/deepseek-harness".into());
                 e.install = strings(&["npm install -g @deepseek-ai/dsh"]);
                 e.auth_env = strings(&["DEEPSEEK_API_KEY"]);
+            }
+            // Claude Code 2.1.310 reads a gateway's token from
+            // ANTHROPIC_AUTH_TOKEN (with ANTHROPIC_BASE_URL), as Z.ai's
+            // Anthropic-compatible endpoint asks; the vendored sources
+            // record only ANTHROPIC_API_KEY.
+            "claude-code" => {
+                e.auth_env = strings(&["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
             }
             // Gemini CLI 0.63.0: no emdash plugin describes it. `gemini`
             // signs in on its first interactive run.
@@ -807,7 +1044,10 @@ pub(crate) mod tests {
         let claude = harness("claude-code").unwrap();
         assert_eq!(claude.binaries, ["claude"]);
         assert_eq!(claude.login.as_deref(), Some("claude auth login"));
-        assert_eq!(claude.auth_env, ["ANTHROPIC_API_KEY"]);
+        assert_eq!(
+            claude.auth_env,
+            ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        );
         assert_eq!(
             claude.install[0],
             "curl -fsSL https://claude.ai/install.sh | bash"
@@ -908,5 +1148,42 @@ pub(crate) mod tests {
                 _ => assert!(entry.command.is_some()),
             }
         }
+    }
+
+    /// `catalog/logins.toml` parses (the runtime falls back to nothing if it
+    /// did not), and names only harnesses detection looks for.
+    #[test]
+    fn login_catalog_parses_and_names_detectable_harnesses() {
+        let parsed: BTreeMap<String, LoginEntry> = toml::from_str(LOGINS_TOML).unwrap();
+        assert_eq!(&parsed, logins());
+        for (id, entry) in &parsed {
+            let harness = harness(id).unwrap_or_else(|| panic!("{id} is not in the catalog"));
+            assert!(
+                !harness.binaries.is_empty(),
+                "{id} has no executable, so detection never reads its login"
+            );
+            for var in entry.env.iter().chain(&entry.quiet_env) {
+                assert!(
+                    !harness.auth_env.contains(var),
+                    "{id}: {var} is already the catalog's auth_env"
+                );
+            }
+        }
+        // What the file says it covers.
+        let codex = login("codex").unwrap();
+        assert_eq!(
+            codex.status.as_ref().unwrap().args,
+            ["login", "status"],
+            "emdash's checkStatus"
+        );
+        assert!(matches!(codex.probes[0], Probe::Provider { .. }));
+        assert_eq!(login("pi").unwrap().probes.len(), 1);
+        assert!(login("goose").is_none(), "read by its auth_env alone");
+        // An unknown field is refused, so a typo cannot silently drop a rule.
+        assert!(toml::from_str::<BTreeMap<String, LoginEntry>>("[x]\nenv_vars = []\n").is_err());
+        assert!(toml::from_str::<BTreeMap<String, LoginEntry>>(
+            "[[x.probe]]\nkind = \"grep\"\nfile = \"f\"\npattern = \"p\"\nfact = \"f\"\nlogn = \"\"\n"
+        )
+        .is_err());
     }
 }

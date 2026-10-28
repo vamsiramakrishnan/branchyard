@@ -36,8 +36,8 @@ python3 tools/compute_gce.py \
   --zone=us-central1-a \
   --name=branchyard-worker \
   --repo="$PWD" \
-  --version=0.0.1 \
-  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.0.1
+  --version=0.1.0-rc.1 \
+  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.1.0-rc.1
 ```
 
 This prints the plan without running subprocesses, contacting Google Cloud or

@@ -1,0 +1,41 @@
+# Pi: provider keys in the environment, and auth.json, which counts only with
+# an entry (Pi creates it as {} on its first start).
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "a provider key"
+env = { ZAI_API_KEY = "fake-zai" }
+lines = ["env ZAI_API_KEY"]
+cell = "key set (ZAI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "ZAI_API_KEY is set (an API key; not checked)"
+key = "ZAI_API_KEY"
+
+[[case]]
+name = "the empty auth.json Pi creates is no login"
+home = { ".pi/agent/auth.json" = "{}" }
+lines = []
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "Branchyard cannot read pi's login; a key in ANTHROPIC_API_KEY or OPENAI_API_KEY or GEMINI_API_KEY or OPENROUTER_API_KEY or ZAI_API_KEY would tell"
+
+[[case]]
+name = "an entry /login stored"
+home = { ".pi/agent/auth.json" = '{"zai": {"type": "api_key", "key": "fake-stored"}}' }
+lines = ["fact login-stored"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.pi/agent/auth.json holds a login (not checked)"
+
+[[case]]
+name = "PI_CODING_AGENT_DIR moves it"
+env = { PI_CODING_AGENT_DIR = "{home}/pi-agent" }
+home = { "pi-agent/auth.json" = '{"anthropic": {"type": "oauth"}}' }
+lines = ["fact login-stored"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.pi/agent/auth.json holds a login (not checked)"

@@ -82,6 +82,8 @@ pub const MODEL_CALLS: &str = "branchyard_model_calls_total";
 pub const MODEL_TOKENS: &str = "branchyard_model_tokens_total";
 pub const MODEL_COST: &str = "branchyard_model_cost_usd_total";
 pub const WEBHOOKS: &str = "branchyard_webhook_deliveries_total";
+/// Looks the trigger dispatcher finished; see `triggers::dispatch::spawn`.
+pub const TRIGGER_LOOKS: &str = "branchyard_trigger_looks_total";
 pub const WORKERS: &str = "branchyard_workers_live";
 pub const WORKER_SEEN: &str = "branchyard_worker_last_seen_seconds";
 pub const BUILD: &str = "branchyard_build_info";
@@ -207,6 +209,11 @@ pub const FAMILIES: &[Family] = &[
         WEBHOOKS,
         Kind::Counter,
         "Webhook deliveries by this process, by result (delivered, retried, dead_lettered).",
+    ),
+    family(
+        TRIGGER_LOOKS,
+        Kind::Counter,
+        "Times this process's trigger dispatcher looked for schedules due and runs waiting to fire.",
     ),
     family(
         WORKERS,

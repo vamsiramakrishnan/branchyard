@@ -184,6 +184,29 @@ fn a_turn_on_a_recipe_machine_produces_a_candidate_that_merges() {
     assert_eq!(git(&f.root, &["show", "main:a.txt"]), "rewritten\n");
 }
 
+/// A preset's file guard is for a harness on this host: a machine is its
+/// own boundary, and the branch records that it got no guard and why.
+#[test]
+fn a_recipe_machine_gets_no_file_guard_and_the_record_says_why() {
+    let f = Fixture::new();
+    let recipe = recipe(&f);
+    let branch = f
+        .task("WRITE hello.txt=from-the-machine")
+        .options(options(&f, &recipe))
+        .name("unguarded")
+        .policy(branchyard::PolicyPreset::EditWorktree.policy())
+        .run()
+        .unwrap();
+    let info = branch.info();
+    assert_eq!(info.status, BranchStatus::Ready, "{:?}", branch.events());
+    assert_eq!(
+        info.guard,
+        Some(branchyard::Guard::Unguarded {
+            reason: "the harness runs in a sandbox (recipe:devbox), which is its boundary".into()
+        })
+    );
+}
+
 #[test]
 fn the_harness_gets_the_machine_home_the_result_env_and_passed_variables() {
     let f = Fixture::new();

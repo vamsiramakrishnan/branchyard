@@ -1,0 +1,7 @@
+{
+  "_about": "What tools/check_failure_messages.py still tolerates: places in crates/branchyard-cli/src that build a Failure::Message (a bare sentence, reported as kind unclassified, exit 1) instead of a Report with a kind and a next command. A count may only fall: convert a site to Report::new(kind, what).next(..).into() and lower the count with python3 tools/check_failure_messages.py --update; never raise one or add a file. See crates/branchyard-cli/src/errors.rs.",
+  "files": {
+    "crates/branchyard-cli/src/attempts.rs": 1,
+    "crates/branchyard-cli/src/pr.rs": 1
+  }
+}

@@ -50,7 +50,9 @@ impl Repo {
         let (bin, home) = (repo.dir.join("bin"), repo.dir.join("home"));
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(home.join(".local/bin")).unwrap();
-        repo.set_env("PATH", &format!("{}:/usr/bin:/bin", bin.display()));
+        let tools = repo.dir.join("tools");
+        branchyard_testkit::system_tools(&tools).unwrap();
+        repo.set_env("PATH", &format!("{}:{}", bin.display(), tools.display()));
         repo.set_env("HOME", &home.display().to_string());
         repo.set_env("BRANCHYARD_HARNESS_DIRS", "$HOME/.local/bin");
         repo.set_env("BRANCHYARD_HARNESS_TIMEOUT", "2");
@@ -296,7 +298,7 @@ fn routing_is_refused_with_reasons() {
     // fan with neither --harness nor a [fleet].
     let out = repo.by(&["fan", "x", "--yes"]);
     assert!(
-        stderr(&out).contains("fan needs --harness"),
+        stderr(&out).contains("fan needs the harnesses to run"),
         "{}",
         stderr(&out)
     );

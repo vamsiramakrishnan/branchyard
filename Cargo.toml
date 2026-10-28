@@ -24,11 +24,12 @@ members = [
     "crates/branchyard-wire",
     "crates/branchyard-workspace",
 ]
-exclude = ["vendor/msb-krun-vmm"]
+# A [patch.crates-io] crate, not a member (see the patch at the end).
+exclude = ["patches/zstd-0.13"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0-rc.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/vamsiramakrishnan/branchyard"
@@ -48,6 +49,7 @@ glob = "0.3"
 hex = "0.4.3"
 httparse = "1"
 jiff = { version = "0.2.37", default-features = false }
+libc = "0.2"
 percent-encoding = "2"
 postgres = "0.19"
 prost = "0.14"
@@ -91,13 +93,14 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 
+# Microsandbox's msb_krun_vmm asks for zstd 0.13, whose zstd-safe 7 has
+# RustSec advisories and no fixed 0.13 release; this zstd 0.13 re-exports
+# zstd 0.14 on the fixed zstd-safe 8.2. See patches/zstd-0.13/src/lib.rs.
+[patch.crates-io]
+zstd = { path = "patches/zstd-0.13" }
+
 # Optimized portable release artifacts built by dist.
 [profile.dist]
 inherits = "release"
 lto = "thin"
 strip = "symbols"
-
-# The pinned Microsandbox VMM still requests vulnerable zstd 0.13.
-# Only its manifest is patched; source pins and the reason live in vendor.patches.json.
-[patch.crates-io]
-msb_krun_vmm = { path = "vendor/msb-krun-vmm" }

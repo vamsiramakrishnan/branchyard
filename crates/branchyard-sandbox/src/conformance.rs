@@ -10,7 +10,9 @@
 //!
 //! [`egress_confinement`] runs `python3` in the sandbox when the provider
 //! declares [`crate::Capabilities::egress`]; a provider that does not must
-//! refuse [`SandboxProvider::exec_confined`] instead.
+//! refuse [`SandboxProvider::exec_confined`] instead. [`write_scope`] runs
+//! a write under [`ExecSpec::writable`], which a provider must hold or
+//! refuse as unsupported.
 //!
 //! A provider that cannot show host directories to a sandbox at all, such
 //! as one whose sandboxes run on another machine, is checked with
@@ -119,6 +121,7 @@ impl Setup {
             argv: vec!["sh".into(), "-c".into(), script.into()],
             cwd: self.guest_workspace.clone(),
             env,
+            writable: None,
         }
     }
 }
@@ -137,6 +140,7 @@ pub fn run_all(provider: &dyn SandboxProvider, setup: &Setup) {
     drop_tears_down(provider, setup);
     stop_ends_processes(provider, setup);
     egress_confinement(provider, setup);
+    write_scope(provider, setup);
 }
 
 /// Destroys its sandbox when dropped.
@@ -172,13 +176,7 @@ impl<'a> Sandbox<'a> {
 
     /// Run `script` to completion, returning its code, stdout and stderr.
     fn run(&self, script: &str) -> (Option<i32>, String, String) {
-        let mut process = self.spawn(script);
-        drop(process.take_stdin());
-        let out = drain(process.take_stdout().expect("stdout is piped"));
-        let err = drain(process.take_stderr().expect("stderr is piped"));
-        let status = process.wait().expect("wait");
-        let (out, err) = (out.join().unwrap(), err.join().unwrap());
-        (status.code, out, err)
+        complete(self.spawn(script))
     }
 
     /// Whether `pid` is a live, non-zombie process in the sandbox.
@@ -243,6 +241,17 @@ fn drain(mut pipe: Box<dyn Read + Send>) -> thread::JoinHandle<String> {
         );
         text
     })
+}
+
+/// Run a started process to completion, returning its code, stdout and
+/// stderr.
+fn complete(mut process: Box<dyn Process>) -> (Option<i32>, String, String) {
+    drop(process.take_stdin());
+    let out = drain(process.take_stdout().expect("stdout is piped"));
+    let err = drain(process.take_stderr().expect("stderr is piped"));
+    let status = process.wait().expect("wait");
+    let (out, err) = (out.join().unwrap(), err.join().unwrap());
+    (status.code, out, err)
 }
 
 /// The first line a process prints, parsed as a PID.
@@ -549,4 +558,50 @@ pub fn egress_confinement(provider: &dyn SandboxProvider, setup: &Setup) {
         outside.accept().is_err(),
         "a confined process reached this host's loopback"
     );
+}
+
+/// A provider either holds a process to [`ExecSpec::writable`] or refuses
+/// the exec as unsupported ([`crate::Operation::WriteScope`]), never
+/// running it with its writes unconfined. Held: with an empty scope a
+/// write into the workspace fails and leaves nothing, and with the
+/// workspace in scope the same write lands; reading stays allowed.
+pub fn write_scope(provider: &dyn SandboxProvider, setup: &Setup) {
+    let sandbox = Sandbox::ensure(provider, setup, "write-scope");
+    let script = "if read -r stat < /proc/self/stat; then echo read; else echo unread; fi; \
+                  if printf held > write-scope.txt; then echo wrote; else echo refused; fi";
+    let mut nowhere = setup.exec(script);
+    // Its output goes to pipes, which no scope covers.
+    nowhere.writable = Some(Vec::new());
+    let process = match provider.exec(&sandbox.name, &nowhere) {
+        Err(ProviderError::Unsupported(unsupported)) => {
+            assert_eq!(unsupported.operation, crate::Operation::WriteScope);
+            return;
+        }
+        Err(other) => panic!("exec with a write scope: expected it held or refused, got {other}"),
+        Ok(process) => process,
+    };
+    let (code, out, err) = complete(process);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["read", "refused"],
+        "a write outside the scope landed, or a read failed; stderr: {err}"
+    );
+    let (_, left, _) = sandbox.run("cat write-scope.txt 2>/dev/null || echo absent");
+    assert_eq!(left.trim(), "absent", "a refused write left a file");
+
+    let mut workspace = setup.exec(script);
+    workspace.writable = Some(vec![setup.guest_workspace.clone()]);
+    let process = provider
+        .exec(&sandbox.name, &workspace)
+        .unwrap_or_else(|e| panic!("exec with the workspace in scope: {e}"));
+    let (code, out, err) = complete(process);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["read", "wrote"],
+        "stderr: {err}"
+    );
+    let (_, landed, _) = sandbox.run("cat write-scope.txt; rm -f write-scope.txt");
+    assert_eq!(landed, "held");
 }

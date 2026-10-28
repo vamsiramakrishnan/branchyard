@@ -7,7 +7,7 @@ Decide first what the harness gets. **Drive** means `by run --harness ID` starts
 | # | Surface | The files | What fails when it is missing |
 |---|---|---|---|
 | 1 | [Identity](#1-identity) | `crates/branchyard-controls/src/harness.rs` | the controls tests; every other surface names an ID that is not registered |
-| 2 | [Catalog entry](#2-catalog-entry) | `catalog/harnesses.toml` (generated), `curated` in `crates/branchyard-controls/src/catalog.rs` | `by harnesses` does not see the CLI; the controls catalog test |
+| 2 | [Catalog entry](#2-catalog-entry) | `catalog/harnesses.toml` (generated), `curated` in `crates/branchyard-controls/src/catalog.rs`; how its login is read: `catalog/logins.toml` and `crates/branchyard/tests/golden/logins/ID.toml` | `by harnesses` does not see the CLI; the controls catalog test; without a login table, the LOGIN cell knows only its key variables, and a table without a golden file fails `cargo test -p branchyard --test logins` |
 | 3 | [Driver profile and fixtures](#3-driver-profile-and-fixtures) | `crates/branchyard-harness/src/profiles.rs`, `crates/branchyard-harness/tests/` | `by run --harness ID` says the harness is not drivable |
 | 4 | [The integration matrix](#4-the-integration-matrix) | `HARNESSES` `.target()`, `docs/harness-integration.md`, the count in `every_integration_target_is_registered_once` | the controls and profile tests |
 | 5 | [Install manifest and plugin files](#5-install-manifest-and-plugin-files) | `plugins/branchyard/install/ID.toml`, `plugins/branchyard/harnesses/ID/` | `by init plugin` does not offer it; the cross-check test |
@@ -27,7 +27,37 @@ Every other list names a harness by one ID, registered once in `HARNESSES` in `c
 BRANCHYARD_BLESS=1 cargo test -p branchyard-controls catalog
 ```
 
-and review the diff. Where the upstream sources are wrong or silent (a different executable, no login command, a key variable that is not listed), correct the entry in `curated` in `crates/branchyard-controls/src/catalog.rs`, which replaces the field after generation. That is the only hand edit. `binaries` matter most: `by harnesses` finds the CLI by them, and the driver profile's executable must be one of them. Cursor's `agent` is there because its profile runs `agent`, and the vendored sources knew only `cursor-agent`.
+and review the diff. Where the upstream sources are wrong or silent (a different executable, no login command, a key variable that is not listed), correct the entry in `curated` in `crates/branchyard-controls/src/catalog.rs`, which replaces the field after generation. That is the only hand edit to the generated file. `binaries` matter most: `by harnesses` finds the CLI by them, and the driver profile's executable must be one of them. Cursor's `agent` is there because its profile runs `agent`, and the vendored sources knew only `cursor-agent`.
+
+### How its login is read
+
+`by harnesses`, `by doctor`, `by setup` and the check before a run read a harness's login from a table in [`catalog/logins.toml`](../catalog/logins.toml), written by hand and keyed by the catalog ID. Without one, the catalog's `auth_env` alone decides: a key variable set is `key set (NAME)`, and nothing is `unknown`. Add what the CLI itself shows you, by name only, never a value:
+
+```toml
+[my-harness]
+env = ["MY_TOKEN"]                       # key variables besides auth_env
+files = [{ path = "$HOME/.my/auth.json", shown = "~/.my/auth.json" }]
+
+[my-harness.status]                      # its own status command, if it has one
+args = ["auth", "status"]
+logged_out = ["not logged in"]           # phrases, checked first, ignoring case
+logged_in = ["logged in"]
+
+[[my-harness.probe]]                     # a look inside its configuration
+kind = "grep"
+file = "$HOME/.my/settings.json"
+pattern = '"provider"[[:space:]]*:'
+fact = "provider-set"
+login = "~/.my/settings.json selects a provider (its key is not checked)"
+```
+
+The file's header lists every field and probe kind (`grep`, `flag`, `provider`, `providers`, `env-file`, `sqlite`), and [the login rules](harness-lifecycle.md#where-the-rules-live) give the order they are consulted in. Then add `crates/branchyard/tests/golden/logins/ID.toml`, one `[[case]]` per state you checked against the CLI: the fake home's files, the variables (made-up values), the status command's output, and the exact lines and LOGIN cell detection must give. Copy a neighbour (`pi.toml` is the shortest) and run:
+
+```sh
+cargo test -p branchyard --test logins
+```
+
+It runs the real detection script against each case and prints every line that differs. Write in the table's comment which version of the CLI you checked, as the other tables do. A login the probe kinds cannot express is a new kind in `crates/branchyard/src/inventory/logins.rs`, with cases of its own, not a branch for one harness.
 
 ## 3. Driver profile and fixtures
 

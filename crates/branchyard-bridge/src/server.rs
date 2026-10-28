@@ -414,46 +414,50 @@ pub fn block_signals() {
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
 }
 
-/// Receive signals and reap orphans until told to terminate.
+/// The next signal of `set` and the process that sent it (0 when unknown).
+/// On Linux it returns at least once a second, with no signal (-1), so
+/// orphans are reaped even when no SIGCHLD reaches this thread.
 #[cfg(target_os = "linux")]
-fn supervise(shared: Arc<Shared>) {
-    let set = termination_signals();
-    let pid1 = std::process::id() == 1;
+fn next_signal(set: &libc::sigset_t) -> (i32, i32) {
     let tick = libc::timespec {
         tv_sec: 1,
         tv_nsec: 0,
     };
+    // SAFETY: sigtimedwait with a valid set and out-parameter.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let signal = unsafe { libc::sigtimedwait(set, &mut info, &tick) };
+    match signal {
+        // SAFETY: si_pid is valid for signals sent with kill.
+        libc::SIGTERM | libc::SIGINT => (signal, unsafe { info.si_pid() }),
+        _ => (signal, 0),
+    }
+}
+
+/// The next signal of `set`; the sender is not known. Unix systems other than
+/// Linux have no `sigtimedwait`, and no `/proc` to find orphans in, so this
+/// blocks until a signal arrives.
+#[cfg(not(target_os = "linux"))]
+fn next_signal(set: &libc::sigset_t) -> (i32, i32) {
+    match branchyard_support::best_effort("wait for a bridge signal", wait_signal(set)) {
+        Some(signal) => (signal, 0),
+        None => (-1, 0),
+    }
+}
+
+/// Receive signals and reap orphans until told to terminate.
+fn supervise(shared: Arc<Shared>) {
+    let set = termination_signals();
+    let pid1 = std::process::id() == 1;
     loop {
-        // SAFETY: sigtimedwait with a valid set and out-parameter.
-        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let signal = unsafe { libc::sigtimedwait(&set, &mut info, &tick) };
+        let (signal, sender) = next_signal(&set);
         shared.reap_orphans();
         if signal == libc::SIGTERM || signal == libc::SIGINT {
-            // SAFETY: si_pid is valid for signals sent with kill.
-            let sender = unsafe { info.si_pid() };
             if pid1 && sender != 0 {
                 eprintln!(
                     "branchyard-bridge: ignoring signal {signal} from process {sender} in the sandbox"
                 );
                 continue;
             }
-            shared.terminate(TERM_GRACE);
-            std::process::exit(0);
-        }
-    }
-}
-
-/// POSIX hosts without Linux's sender-aware timed wait use a blocking wait.
-#[cfg(not(target_os = "linux"))]
-fn supervise(shared: Arc<Shared>) {
-    let set = termination_signals();
-    loop {
-        let Some(signal) =
-            branchyard_support::best_effort("wait for a bridge signal", wait_signal(&set))
-        else {
-            return;
-        };
-        if signal == libc::SIGTERM || signal == libc::SIGINT {
             shared.terminate(TERM_GRACE);
             std::process::exit(0);
         }
@@ -1241,6 +1245,96 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_wait_identifies_termination_senders() {
+        thread::spawn(|| {
+            block_signals();
+            for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGCHLD] {
+                // SAFETY: target only this worker, where these signals are blocked.
+                assert_eq!(
+                    unsafe { libc::pthread_kill(libc::pthread_self(), signal) },
+                    0
+                );
+                let sender = if signal == libc::SIGCHLD {
+                    0
+                } else {
+                    std::process::id() as i32
+                };
+                assert_eq!(next_signal(&termination_signals()), (signal, sender));
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_identity_preserves_operation_errors_and_current_ids() {
+        thread::spawn(|| {
+            let uid = rustix::process::geteuid().as_raw();
+            let gid = rustix::process::getegid().as_raw();
+            let before = (filesystem_id(libc::setfsuid), filesystem_id(libc::setfsgid));
+            let user = AsUser::enter(Some((uid, gid))).unwrap();
+            assert_eq!(filesystem_id(libc::setfsuid).unwrap(), Some(uid));
+            assert_eq!(filesystem_id(libc::setfsgid).unwrap(), Some(gid));
+            let error = user
+                .run::<()>(|| {
+                    Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "keep this error",
+                    ))
+                })
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(error.to_string(), "keep this error");
+            assert_eq!(filesystem_id(libc::setfsuid).unwrap(), before.0.unwrap());
+            assert_eq!(filesystem_id(libc::setfsgid).unwrap(), before.1.unwrap());
+            drop(AsUser::enter(Some((uid, gid))).unwrap());
+            assert_eq!(filesystem_id(libc::setfsuid).unwrap(), Some(uid));
+            assert_eq!(filesystem_id(libc::setfsgid).unwrap(), Some(gid));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_identity_rejects_the_query_sentinel_as_a_target() {
+        let uid = rustix::process::geteuid().as_raw();
+        let gid = rustix::process::getegid().as_raw();
+        for target in [(u32::MAX, gid), (uid, u32::MAX)] {
+            assert_eq!(
+                AsUser::enter(Some(target)).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(rustix::process::geteuid().as_raw(), uid);
+        assert_eq!(rustix::process::getegid().as_raw(), gid);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_query_distinguishes_missing_syscalls_from_denials() {
+        unsafe extern "C" fn unavailable(query: u32) -> i32 {
+            assert_eq!(query, u32::MAX);
+            // SAFETY: errno is thread-local and this pointer belongs to this thread.
+            unsafe { *libc::__errno_location() = libc::ENOSYS };
+            -1
+        }
+        unsafe extern "C" fn denied(query: u32) -> i32 {
+            assert_eq!(query, u32::MAX);
+            // SAFETY: errno is thread-local and this pointer belongs to this thread.
+            unsafe { *libc::__errno_location() = libc::EPERM };
+            -1
+        }
+        assert_eq!(filesystem_id(unavailable).unwrap(), None);
+        assert_eq!(
+            filesystem_id(denied).unwrap_err().raw_os_error(),
+            Some(libc::EPERM)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     fn without_filesystem_ids() {
         // Install only on this disposable worker. Other test threads keep
@@ -1309,6 +1403,28 @@ mod tests {
             assert_eq!(libc::getresgid(&mut rg, &mut eg, &mut sg), 0);
         }
         ((ru, eu, su), (rg, eg, sg))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn filesystem_fallback_fails_closed_without_privilege() {
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        thread::spawn(|| {
+            without_filesystem_ids();
+            let ids = real_effective_saved_ids();
+            let groups = rustix::process::getgroups().unwrap();
+            let capabilities = rustix::thread::capabilities(None).unwrap();
+            let uid = if ids.0 .1 == 65534 { 65533 } else { 65534 };
+            let error = AsUser::enter(Some((uid, ids.1 .1))).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(real_effective_saved_ids(), ids);
+            assert_eq!(rustix::process::getgroups().unwrap(), groups);
+            assert_eq!(rustix::thread::capabilities(None).unwrap(), capabilities);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

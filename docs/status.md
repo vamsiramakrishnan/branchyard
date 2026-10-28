@@ -1,6 +1,6 @@
 # Status
 
-Written 25 October 2026. This is the one page that says what is built, what has run and what has not. Other pages link here instead of restating it. The harness tables below are generated (`python3 tools/docs_facts.py --write`); the rest is written by hand and dated, so a line older than the code it describes is a bug to fix here.
+Written 27 October 2026. This is the one page that says what is built, what has run and what has not. Other pages link here instead of restating it. The harness tables below are generated (`python3 tools/docs_facts.py --write`); the rest is written by hand and dated, so a line older than the code it describes is a bug to fix here.
 
 ## The words
 
@@ -16,7 +16,7 @@ Written 25 October 2026. This is the one page that says what is built, what has 
 
 ## How it runs today
 
-- **Local.** `by` runs the engine in its own process. Each harness is a local process in its own git worktree under `.branchyard/`, as your operating-system user. State is SQLite in `.branchyard/state.db`.
+- **Local.** `by` runs the engine in its own process. Each harness is a local process in its own git worktree under `.branchyard/`, as your operating-system user. Under `--permissions read-only` or `edit-worktree` on Linux, Landlock holds its writes to the preset's scope ([file guard](modes.md#the-file-guard)). State is SQLite in `.branchyard/state.db`.
 - **Server.** `by serve` and `by worker` run the same engine behind an authenticated HTTP API, with SQLite per data directory or, in a build with the `postgres` feature, PostgreSQL shared by several servers and workers. By default the server uses the local process provider, so harnesses run as the server's user with no isolation.
 - **Sandbox.** The Microsandbox and Agent Substrate providers are built and unqualified. A server runs them only when its operator allows them.
 - **Not built.** The execution-node service of [the architecture](design.md), where all managed execution happens on separate nodes, is design only.
@@ -28,16 +28,17 @@ See [modes](modes.md) for how to choose between these.
 | Subsystem | State | Last evidence | Read |
 |---|---|---|---|
 | Local engine and `by` (run, fan, send, fork, merge, checkpoints, delegation, graphs, rigs) | built; hermetic; a few real runs | 27 September 2026: `by run`, `by diff`, `by merge` with Claude Code 2.1.283. 8 and 9 October 2026: a twelve-scenario delegation battery with real Claude Code children passed 12 of 12. 25 October 2026: `by setup`, `by run`, `show`, `diff`, `log`, `merge`, `rm` and `send` in ten harnesses on GLM (Z.ai) and Gemini models, and the `testing-live.md` checks on Gemini CLI ([qualification](qualification/README.md#results-25-october-2026), [roadmap](roadmap.md)) | [validation](validation.md), [dogfood](dogfood/round5/README.md), [delegation](delegation.md) |
-| `by serve` and `by worker` | built; hermetic over HTTP on loopback | None recorded through a real harness; not load-tested; not deployed (the status note in [server](server.md)) | [server](server.md), [surfaces](surfaces.md) |
-| PostgreSQL store | built behind the `postgres` feature (`cargo install --features postgres`) | 29 September 2026: the suites against a throwaway PostgreSQL 16. 11 October 2026: a real PostgreSQL 16.13 run for the feed-lock fix. Not run: servers on more than one host | [durability](durability.md), [deploy](deploy.md) |
+| `by serve` and `by worker` | built; hermetic over HTTP on loopback; run live on one host | 27 October 2026: Gemini CLI 0.65.0 and codex-cli 0.164.0 (GLM-4.6 through Z.ai) through `by --remote`: `run`, `show`, `diff`, `log`, `send`, `cancel`, `merge`, `rm`, and ten runs at once on SQLite through a SIGTERM restart and on PostgreSQL with a `by worker` through a `kill -9` of the server ([server](server.md#run-live-on-27-october-2026)). Not load-tested; not deployed; not across hosts | [server](server.md), [surfaces](surfaces.md) |
+| PostgreSQL store | built behind the `postgres` feature (`cargo install --features postgres`) | 29 September 2026: the suites against a throwaway PostgreSQL 16. 11 October 2026: a real PostgreSQL 16.13 run for the feed-lock fix. 27 October 2026: a server and a `by worker` on PostgreSQL 16.15 ran ten real turns, the server killed and recovered midway ([server](server.md#run-live-on-27-october-2026)). Not run: servers on more than one host | [durability](durability.md), [deploy](deploy.md) |
 | Sandbox providers: Microsandbox (`microsandbox` feature), Agent Substrate | built; unqualified | None against a real runtime: Microsandbox's KVM tests and a Substrate cluster have not been run. Pause, snapshot and live branching are tested against fakes | [providers](providers.md), [substrate](substrate.md), [live testing](testing-live.md) |
+| File guard for permission presets (Landlock, Linux) | built; hermetic; run live once | 27 October 2026: Pi 1.4.0 on `zai/glm-5.3-flash`: under `read-only` its write of `hello.txt` failed `EACCES` and the branch ended `no changes`; under `edit-worktree` `hello.txt` landed and `../outside.txt` failed `EACCES`; with `BRANCHYARD_GUARD=off` the `read-only` write landed. Not run: the other harnesses, a kernel below Landlock ABI 7 | [modes](modes.md#the-file-guard) |
 | Model gateway | built; hermetic; used live | 16 October 2026: DeepSeek Harness (Gemini and Z.ai backends), Claude Code 2.1.301 and codex-cli 0.157.1 (Z.ai) ran turns through it | [model gateway](model-gateway.md), [qualification](qualification/README.md) |
 | Fleet routing and judge | built; hermetic; run on real harnesses | 16 October 2026: routed fans on Codex, Oh My Pi and DeepSeek Harness, and a model's verdict (Oh My Pi on GLM-5.3) was used. A failover has not fired in a live run | [fleet](fleet.md) |
 | Connectors, triggers, effects and the web companion | built; hermetic | Connectors and effects: tested against a mock gateway and Anvil's own test gateway, not yet used by a real harness (3 October 2026). Triggers: no delivery from a real GitHub, Slack, Linear or mail provider. Companion: no real push service | [connectors](connectors.md), [triggers](triggers.md), [effects](effects.md), [companion](companion.md) |
 | Sync and task repositories | built; hermetic | 3 October 2026: directory and git backends, in-process stand-ins for S3, Cloud Storage and Azure | [sync](sync.md), [task repositories](task-repos.md) |
 | Hooks and status lines | built for every harness with an install manifest | 24 and 25 October 2026: see the table below; on 25 October the reworded lines were repeated by real models in ten harnesses ([harness hooks](harness-hooks.md)) | [harness hooks](harness-hooks.md) |
 | SDKs | Python `branchyard.py` and `branchyard_client.py`, Rust `branchyard` and `branchyard-client`: built; hermetic. TypeScript client: not built | 24 October 2026: one script run both inside and outside a harness turn. 25 October 2026: the two Python examples ran as written against Gemini CLI. Installed from a checkout or the SDK archive; the Rust crates are not published | [SDKs](sdk.md) |
-| Distribution | `cargo install` from a clone works. Prebuilt binaries, `install.sh` and a Homebrew formula: written; the release workflow has never run | No GitHub release or tag exists | [distribution](distribution.md) |
+| Distribution | `cargo install` from a clone works. Prebuilt binaries for four targets, the Python SDK's wheel and sdist, the plugin archives, `install.sh` and a Homebrew formula: built by the release workflow, which a pull request or Run workflow rehearses as a dry run. The workspace is `0.1.0-rc.1`, the first tag's version | 27 October 2026, on this machine with no model: the x86_64 musl release build (`static-pie linked`, `by 0.1.0-rc.1`), then the workflow's own step scripts packing it, installing it with `install.sh`, building and importing the wheel, and assembling `SHA256SUMS` and the formula. Not done: the workflow on GitHub, the aarch64 and macOS builds, attestations; no tag or release exists | [distribution](distribution.md#verified-here) |
 
 ## Harness drivers
 
@@ -87,7 +88,7 @@ A live run is protocol qualification against the real binary as a local process.
 | `branchyard-workspace` | Git worktrees, candidates and validated merges: compare-and-swap on the target, checks in a temporary worktree | built; hermetic |
 | `branchyard-server`, `branchyard-client` | The HTTP and SSE server with tenants, quotas, a durable queue and metrics; the typed blocking client | built; hermetic |
 | `branchyard-config`, `branchyard-setup` | `branchyard.toml` and the setup interview | built; hermetic |
-| `branchyard-provision` | Harness home provisioning, translated from Scion's provisioners | built; Claude Code's key and MCP delivery checked against its binary offline, the rest unqualified |
+| `branchyard-provision` | Harness home provisioning, translated from Scion's provisioners, and provider logins (`--provider zai`, `gemini`) | built; Claude Code's key and MCP delivery checked against its binary offline; provider logins run live for Claude Code 2.1.311 and Qwen Code 0.26.0 on GLM through Z.ai, 27 October 2026 ([record](harness-lifecycle.md#through-a-gateway-provider)); the rest unqualified. Not done: the other provider logins live |
 | `branchyard-sandbox`, `branchyard-microsandbox`, `branchyard-substrate`, `branchyard-bridge`, `branchyard-recipe` | The provider contract and admission; the Microsandbox and Agent Substrate providers; the in-sandbox exec bridge; environment recipes over ssh | built; unqualified |
 | `branchyard-sync` | Replication of task repositories to object storage | built; hermetic |
 | `branchyard-mcp`, `branchyard-herdr` | Delegation tools over MCP; the Herdr plugin's binary | built; hermetic. Not run against a real Herdr |
@@ -97,7 +98,7 @@ A live run is protocol qualification against the real binary as a local process.
 
 ## Vendored sources
 
-All **<!-- fact:vendor.files -->312<!-- /fact --> vendored files** are pinned to upstream revisions, licenses, Git blob IDs and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). See [vendoring](vendoring.md) and [third-party notices](../THIRD_PARTY.md). Warp's AGPL sources are references only and are excluded from the Rust build.
+All **<!-- fact:vendor.files -->259<!-- /fact --> vendored files** are pinned to upstream revisions, licenses, Git blob IDs and SHA-256 hashes. `vendor/` is a pinned reference snapshot: a file may carry a local patch only when `vendor.patches.json` records it with its reason and upstream commit (none does today), and `tools/verify_vendor.py` checks every other file against its pin. Adaptations built into Branchyard are recorded outside `vendor/` (`patches/`). See [vendoring](vendoring.md) and [third-party notices](../THIRD_PARTY.md). Warp's AGPL sources are references only and are excluded from the Rust build.
 
 ## What has not been run
 

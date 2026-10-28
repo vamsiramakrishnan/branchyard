@@ -1133,6 +1133,7 @@ pub(crate) fn plan(
                 true => "it lists no candidates".into(),
                 false => format!("no candidate can run: {}", why.join("; ")),
             },
+            cause: crate::Unavailable::NoCandidate,
         });
     }
     let exploration = entry.exploration.clamp(0.0, 1.0);
@@ -1878,6 +1879,7 @@ pub fn harness_fault(status: &BranchStatus) -> Option<String> {
         "lease to another",
         "denied:",
         "cancelled by",
+        "cancelled with",
         "its turn did not start",
         "snapshot failed",
         "could not create the worktree",

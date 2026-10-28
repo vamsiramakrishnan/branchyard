@@ -21,6 +21,8 @@ by --version
 
 `--force` replaces a source installation even when its version number is unchanged. For a binary installation, rerun the single-command installer with `--no-setup` to update the binaries and retain project configuration. Add `--version X.Y.Z` to pin a release and `--runtime` to retain Microsandbox build support. See [distribution](distribution.md#install-by) for the installer and platform requirements.
 
+Between source releases, `by --version` keeps the workspace version, so `git log -1` in the clone identifies the exact source revision.
+
 ## The store
 
 The first `by` command that opens a repository after an upgrade migrates `.branchyard/state.db` to the schema the new binary reads, in one step. Nothing asks. `by doctor` warns before that happens, in the `repository.schema` row:

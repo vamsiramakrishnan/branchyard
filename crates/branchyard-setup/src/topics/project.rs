@@ -240,11 +240,16 @@ pub fn questions(facts: &Facts, answers: &Answers) -> Vec<Question> {
             || d.provider == Some(ProviderKind::Microsandbox)
             || text(answers, "remote").as_deref() == Some("server")
         {
-            providers.push(Choice::new(
-                "microsandbox",
-                "Microsandbox",
-                "a microVM per turn from an OCI image",
-            ));
+            let description = if text(answers, "remote").as_deref() == Some("server") {
+                "microVMs on the server; the server needs Microsandbox and KVM"
+            } else if !facts.build.microsandbox {
+                "needs the Linux runtime package (install.sh --runtime; docs/distribution.md)"
+            } else if !facts.platform.kvm {
+                "needs a Linux host with KVM"
+            } else {
+                "a microVM per turn from an OCI image"
+            };
+            providers.push(Choice::new("microsandbox", "Microsandbox", description));
         }
         qs.push(Question::new("provider", Kind::Select, "Provider",
             "Where should harnesses run?",
@@ -1283,10 +1288,15 @@ pub fn plan(facts: &Facts, answers: &Answers, probe: &dyn Probe) -> Plan {
                 .into(),
         );
     }
-    if facts.platform.kvm && !facts.build.microsandbox {
+    if !facts.build.microsandbox
+        && text(answers, "remote").as_deref() != Some("server")
+        && (facts.platform.kvm || text(answers, "provider").as_deref() == Some("microsandbox"))
+    {
         plan.notes.push(format!(
-            "This host has KVM, but this build has no Microsandbox support, so harnesses run \
-             locally. For a microVM per turn, rebuild with `{}` (needs libcap-ng; docs/modes.md#sandbox).",
+            "This build has no Microsandbox support, so local microVMs cannot run here. \
+             Install the Linux runtime package with `{}` (docs/distribution.md). \
+             From a source checkout, alternatively run `{}` (needs libcap-ng; docs/modes.md#sandbox).",
+            crate::probe::INSTALL_RUNTIME,
             crate::probe::REBUILD_MICROSANDBOX
         ));
     }

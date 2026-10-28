@@ -44,6 +44,12 @@ use branchyard_recipe::quote;
 use serde_json::json;
 
 use crate::commands::{print, Failure, Outcome};
+use crate::errors::Report;
+
+/// An `ssh://` URL `by` cannot use, with the shape it takes.
+fn bad_url(why: String) -> Report {
+    Report::usage(why).next("by remote ssh status ssh://[user@]host[:port]/path/to/repo")
+}
 
 /// How long the control master stays up after its last use.
 const PERSIST_SECONDS: u32 = 600;
@@ -157,7 +163,13 @@ impl Local {
             None => match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
                 Some(dir) => PathBuf::from(dir).join("branchyard-ssh"),
                 None => dirs::home_dir()
-                    .ok_or_else(|| Failure::Message("no home directory for ssh state".into()))?
+                    .ok_or_else(|| {
+                        Report::new(
+                            "io",
+                            "no home directory to keep the ssh connection's state in",
+                        )
+                        .next("set BRANCHYARD_SSH_DIR to a directory, or set HOME")
+                    })?
                     .join(".branchyard")
                     .join("ssh"),
             },
@@ -166,11 +178,15 @@ impl Local {
         let local = Local { dir };
         let longest = local.socket().display().to_string().len();
         if longest > MAX_SOCKET_PATH {
-            return Err(Failure::Message(format!(
-                "{} is too long for a Unix socket path; set BRANCHYARD_SSH_DIR to a shorter \
-                 directory",
-                local.socket().display()
-            )));
+            return Err(Report::new(
+                "config",
+                format!(
+                    "{} is too long for a Unix socket path",
+                    local.socket().display()
+                ),
+            )
+            .next("set BRANCHYARD_SSH_DIR to a shorter directory")
+            .into());
         }
         Ok(local)
     }
@@ -181,9 +197,9 @@ impl Local {
             .recursive(true)
             .mode(0o700)
             .create(&self.dir)
-            .map_err(|e| Failure::Message(format!("create {}: {e}", self.dir.display())))?;
+            .map_err(|e| unwritable("create", &self.dir, &e))?;
         fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))
-            .map_err(|e| Failure::Message(format!("{}: {e}", self.dir.display())))
+            .map_err(|e| unwritable("make private", &self.dir, &e).into())
     }
 
     pub fn control(&self) -> PathBuf {
@@ -214,7 +230,7 @@ impl Local {
             .open(&temporary)
             .and_then(|mut file| writeln!(file, "{token}"))
             .and_then(|()| fs::rename(&temporary, self.token()));
-        written.map_err(|e| Failure::Message(format!("write {}: {e}", self.token().display())))
+        written.map_err(|e| unwritable("write", &self.token(), &e).into())
     }
 }
 
@@ -256,10 +272,9 @@ impl<'a> Ssh<'a> {
     fn run(&self, mut command: Command, what: &str) -> Result<Output, Failure> {
         command.stdin(Stdio::null());
         command.output().map_err(|e| {
-            Failure::Message(format!(
-                "{what}: cannot run {} ({e}); install OpenSSH's client or set BRANCHYARD_SSH",
-                self.program
-            ))
+            no_ssh(&self.program, &e)
+                .line("while", what.to_owned())
+                .into()
         })
     }
 
@@ -276,7 +291,7 @@ impl<'a> Ssh<'a> {
             return Ok(());
         }
         let log = fs::File::create(self.local.log())
-            .map_err(|e| Failure::Message(format!("{}: {e}", self.local.log().display())))?;
+            .map_err(|e| unwritable("create", &self.local.log(), &e))?;
         let persist = format!("ControlPersist={PERSIST_SECONDS}");
         let mut command = self.command(&[
             "-M",
@@ -293,19 +308,19 @@ impl<'a> Ssh<'a> {
         // goes to a file, never a pipe someone waits on; prompts use the
         // terminal.
         command.stdout(Stdio::null()).stderr(log);
-        let status = command.status().map_err(|e| {
-            Failure::Message(format!(
-                "cannot run {} ({e}); install OpenSSH's client or set BRANCHYARD_SSH",
-                self.program
-            ))
-        })?;
+        let status = command.status().map_err(|e| no_ssh(&self.program, &e))?;
         if !status.success() {
             let log = fs::read_to_string(self.local.log()).unwrap_or_default();
-            return Err(Failure::Message(format!(
-                "ssh to {} failed ({status}): {}",
-                self.url.host,
-                log.trim()
-            )));
+            return Err(Report::new(
+                "remote_unreachable",
+                format!("ssh to {} failed ({status})", self.url.host),
+            )
+            .line("ssh", log.trim().to_owned())
+            .next(format!(
+                "ssh {} true (checks the host, the key and known_hosts)",
+                self.url.host
+            ))
+            .into());
         }
         Ok(())
     }
@@ -323,12 +338,7 @@ impl<'a> Ssh<'a> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|e| {
-            Failure::Message(format!(
-                "cannot run {} ({e}); install OpenSSH's client or set BRANCHYARD_SSH",
-                self.program
-            ))
-        })?;
+        let mut child = command.spawn().map_err(|e| no_ssh(&self.program, &e))?;
         if let Some(mut stdin) = child.stdin.take() {
             branchyard_support::best_effort(
                 "send the remote script",
@@ -345,11 +355,19 @@ impl<'a> Ssh<'a> {
             "ssh -O forward",
         )?;
         if !out.status.success() {
-            return Err(Failure::Message(format!(
-                "could not forward {remote_socket} from {}: {}",
-                self.url.host,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
+            return Err(Report::new(
+                "remote_unreachable",
+                format!("could not forward {remote_socket} from {}", self.url.host),
+            )
+            .line(
+                "ssh",
+                String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+            )
+            .next(format!(
+                "by remote ssh stop {}, then connect again",
+                self.url.canonical()
+            ))
+            .into());
         }
         Ok(())
     }
@@ -473,12 +491,39 @@ fn serve_args(text: &str) -> Vec<String> {
 
 fn remote_failure(what: &str, url: &SshUrl, out: &Output) -> Failure {
     let stderr = String::from_utf8_lossy(&out.stderr);
-    Failure::Message(format!(
-        "{what} on {} failed ({}): {}",
-        url.host,
-        out.status,
-        stderr.trim()
+    Report::new(
+        "remote_unreachable",
+        format!("{what} on {} failed ({})", url.host, out.status),
+    )
+    .line("output", stderr.trim().to_owned())
+    .next(format!(
+        "ssh {} by --version (by must be on the host's PATH)",
+        url.host
     ))
+    .into()
+}
+
+/// `ssh` itself could not be run here.
+fn no_ssh(program: &str, error: &std::io::Error) -> Report {
+    Report::new(
+        "tool_unavailable",
+        format!("cannot run {program}: {}", crate::errors::plain_io(error)),
+    )
+    .next("install OpenSSH's client, or set BRANCHYARD_SSH to the ssh to run")
+}
+
+/// A file or directory of the ssh connection's state that could not be
+/// written.
+fn unwritable(doing: &str, path: &std::path::Path, error: &std::io::Error) -> Report {
+    Report::new(
+        "io",
+        format!(
+            "could not {doing} {}: {}",
+            path.display(),
+            crate::errors::plain_io(error)
+        ),
+    )
+    .next("set BRANCHYARD_SSH_DIR to a directory you can write")
 }
 
 /// A server reached over ssh: the local URL and token file the ordinary
@@ -491,7 +536,7 @@ pub struct Tunnel {
 /// Start or reuse the remote server and the forward; see the module
 /// documentation.
 pub fn connect(url: &str) -> Result<Tunnel, Failure> {
-    let url = SshUrl::parse(url).map_err(Failure::Message)?;
+    let url = SshUrl::parse(url).map_err(bad_url)?;
     let local = Local::for_url(&url)?;
     local.create()?;
     let ssh = Ssh::new(&url, &local);
@@ -503,13 +548,18 @@ pub fn connect(url: &str) -> Result<Tunnel, Failure> {
     let fields = fields(&out.stdout);
     let socket = field(&fields, "socket")
         .ok_or_else(|| remote_failure("starting by serve (no socket reported)", &url, &out))?;
-    check_remote_path(socket).map_err(Failure::Message)?;
+    check_remote_path(socket).map_err(|why| Report::new("remote_protocol", why))?;
     let token = field(&fields, "token").unwrap_or("").trim();
     if token.len() < 16 || token.contains(char::is_whitespace) {
-        return Err(Failure::Message(format!(
-            "the remote token on {} is missing or too short",
-            url.host
-        )));
+        return Err(Report::new(
+            "remote_protocol",
+            format!("the remote token on {} is missing or too short", url.host),
+        )
+        .next(format!(
+            "by remote ssh stop {}, then connect again",
+            url.canonical()
+        ))
+        .into());
     }
     local.write_token(token)?;
     ssh.forward(socket)?;
@@ -521,7 +571,7 @@ pub fn connect(url: &str) -> Result<Tunnel, Failure> {
 
 /// `by remote ssh status|stop [URL]`.
 pub fn main(stop: bool, url: &str, json: bool) -> Outcome {
-    let url = SshUrl::parse(url).map_err(Failure::Message)?;
+    let url = SshUrl::parse(url).map_err(bad_url)?;
     let local = Local::for_url(&url)?;
     let ssh = Ssh::new(&url, &local);
     let master = local.dir.is_dir() && ssh.master_running()?;
@@ -591,10 +641,18 @@ pub fn main(stop: bool, url: &str, json: bool) -> Outcome {
         branchyard_support::cleanup_file(path);
     }
     if server != "stopped" {
-        return Err(Failure::Message(format!(
-            "by serve on {} did not stop within 90 seconds; the connection was closed",
+        return Err(Report::new(
+            "remote_unreachable",
+            format!(
+                "by serve on {} did not stop within 90 seconds; the connection was closed",
+                url.host
+            ),
+        )
+        .next(format!(
+            "ssh {} and stop it there (its pid is in .branchyard/server/)",
             url.host
-        )));
+        ))
+        .into());
     }
     match json {
         true => print(&format!(
@@ -647,14 +705,16 @@ pub fn command(globals: &crate::args::Globals, action: &RemoteAction, json: bool
     let url = match url.as_deref().or(globals.remote.as_deref()) {
         Some(url) if is_ssh(url) => url.to_owned(),
         Some(url) => {
-            return Err(Failure::Message(format!(
+            return Err(Report::usage(format!(
                 "{url} is not an ssh:// remote; by remote ssh manages those only"
-            )))
+            ))
+            .next("by remote ssh status ssh://host/path")
+            .into())
         }
         None => {
-            return Err(Failure::Message(
-                "name the remote: by remote ssh status ssh://host/path, or pass --remote".into(),
-            ))
+            return Err(Report::usage("by remote ssh needs the remote it manages")
+                .next("by remote ssh status ssh://host/path, or pass --remote ssh://host/path")
+                .into())
         }
     };
     main(stop, &url, json)

@@ -20,6 +20,7 @@ A counted file records what is still wrong. A count may fall and may not rise, a
 - `tools/missing_docs_ratchet.json`: undocumented public items. `python3 tools/check_missing_docs.py --write` lowers it.
 - `tools/test_hygiene_ratchet.json`: fixed waits, hand-made temp directories, hand-made servers. `python3 tools/check_test_hygiene.py --lower`.
 - `tools/wire_ratchet.json` and `tools/handrolled_banlist.toml`: hand-written HTTP and codecs. Migrate a site; lower its count.
+- `tools/failure_message_ratchet.json`: CLI failures still built as a bare `Failure::Message`; a new one is a `Report` with a kind and a `next:` (`crates/branchyard-cli/src/errors.rs`). `python3 tools/check_failure_messages.py --update`.
 - `tools/coverage_floor.json` only goes up: `python3 tools/check_coverage.py lcov.info --unit unit.lcov --update`.
 
 ## Facts in docs come from code
@@ -46,6 +47,7 @@ Cargo keys artifacts by package, features and profile, not by worktree, so workt
 
 - Use one `CARGO_TARGET_DIR` per worktree when the disk allows it.
 - When it does not, share one and `touch` the `.rs` files you changed in the same command as the build, so cargo rebuilds them from your tree; take a lock (`flock`) around the touch and the build so two worktrees do not interleave.
+- Take it with `flock -o LOCKFILE sh -c '…'`: without `-o` the lock's file descriptor passes to cargo, the tests and every process a test starts, and one that outlives its test (a detached workspace script, a server) holds the lock for every worktree until it dies.
 - `crates/branchyard-setup/build.rs` embeds `plugins/branchyard` by absolute path and reruns only when that path changes, so after another worktree built the crate, its install tests read that tree's manifests (`unknown field` on a manifest you did not touch). `touch` the build script with your sources. The same goes for every `include_str!`: `crates/branchyard-controls/src/catalog.rs` embeds `catalog/harnesses.toml` and `crates/branchyard/src/harness.rs` embeds `docs/qualification/*.json`, so touch those sources too when you change what they embed, or a test binary carries another worktree's copy.
 - Build the crates you need (`-p branchyard-cli`), not the workspace. Set `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_PROFILE_TEST_DEBUG=0` to keep the cache small, and delete the test executables you made when you finish.
 - "Blocking waiting for file lock" means another build is using the directory. Wait; do not kill it.

@@ -1,0 +1,12 @@
+# Goose: no table in catalog/logins.toml and no auth_env, so nothing tells;
+# the shape every harness without a table has. A key another harness reads
+# is not its login. Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "nothing to go on"
+env = { ANTHROPIC_API_KEY = "fake-anthropic" }
+lines = []
+cell = "unknown"
+state = "unknown"
+evidence = "none"
+detail = "Branchyard cannot read goose's login: the catalog records no status command, credential file or key variable for it; sign in inside goose itself"

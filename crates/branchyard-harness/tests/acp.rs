@@ -8,7 +8,7 @@ use agent_client_protocol_schema::v1::{
     McpServer as AcpMcpServer, NewSessionRequest, PromptRequest, RequestPermissionResponse,
     ResumeSessionRequest,
 };
-use branchyard_harness::acp::Acp;
+use branchyard_harness::acp::{Acp, REPLAY_FENCE};
 use branchyard_harness::conformance::{
     assert_conforms, decode, decode_all, feed, handshake, Replay, Transcript,
 };
@@ -37,9 +37,9 @@ fn fresh() -> Open {
 }
 
 fn open_with(mode: SessionMode) -> (Acp, Opened) {
-    let mut driver = Acp::new(vec!["gemini".into(), "--experimental-acp".into()]);
+    let mut driver = Acp::new(vec!["gemini".into(), "--acp".into()]);
     let opened = driver.open(Open { mode, ..fresh() }).unwrap();
-    assert_eq!(opened.launch.argv, ["gemini", "--experimental-acp"]);
+    assert_eq!(opened.launch.argv, ["gemini", "--acp"]);
     (driver, opened)
 }
 
@@ -92,9 +92,11 @@ fn initialize_matches_a_recorded_handshake_and_opens_a_session() {
     let (mut driver, opened) = open_with(SessionMode::Fresh);
     let initialize = decode(&opened.frames[0]);
     assert_conforms::<InitializeRequest>(&initialize, "/params");
-    // The adapter accepted exactly this frame, apart from the request ID.
+    // The adapter accepted exactly this frame, apart from the request ID and
+    // Branchyard's own version (the recording says 0.0.1).
     let replayed = Replay::new(&recorded)
         .alias("/id")
+        .ignore("/params/clientInfo/version")
         .run(&mut driver, &opened);
     assert_eq!(replayed.sent, 1);
     assert!(replayed.events.is_empty());
@@ -137,10 +139,14 @@ fn resume_prefers_session_resume_then_load_and_never_starts_fresh() {
     let replay = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old",
         "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "earlier"}}}});
     assert_eq!(feed(&mut driver, &replay).0, vec![]);
-    let (events, _) = feed(
+    let (events, frames) = feed(
         &mut driver,
         &json!({"jsonrpc": "2.0", "id": request["id"], "result": {}}),
     );
+    // The load's answer is fenced before the session opens.
+    assert_eq!(events, vec![]);
+    assert_eq!(frames[0]["method"], REPLAY_FENCE);
+    let (events, _) = feed(&mut driver, &method_not_found(&frames[0]));
     assert_eq!(
         events[1],
         Event::SessionStarted {
@@ -152,6 +158,129 @@ fn resume_prefers_session_resume_then_load_and_never_starts_fresh() {
     let (_, events, request) = initialized(SessionMode::Resume(session("old")), json!({}));
     assert_eq!(request, Value::Null);
     assert!(matches!(&events[0], Event::OpenFailed { reason } if reason.contains("neither")));
+}
+
+/// What every agent answers a request it does not know.
+fn method_not_found(request: &Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32601,
+        "message": format!("\"Method not found\": {}", request["method"])}})
+}
+
+/// A `session/update` of the session `old`.
+fn old_update(update: Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "old", "update": update}})
+}
+
+/// Gemini CLI 0.65.0 answers `session/load` after the first update of the
+/// history it replays and streams the rest after the answer
+/// (`streamHistory` is not awaited). Everything until the fence's answer is
+/// history, so the next turn reports only what it does itself.
+#[test]
+fn history_replayed_after_the_load_answer_is_not_the_next_turns_output() {
+    let (mut driver, _, load) = initialized(
+        SessionMode::Resume(session("old")),
+        json!({"loadSession": true}),
+    );
+    let history = [
+        json!({"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "Create a.txt"}}),
+        json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "**Planning**"}}),
+        json!({"sessionUpdate": "agent_message_chunk",
+               "content": {"type": "text", "text": "[Thought: true][Function Call: write_file]"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "write_file-1", "status": "completed",
+               "title": "WriteFile", "content": [], "kind": "edit"}),
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Created a.txt."}}),
+    ];
+    let (events, frames) = feed(&mut driver, &old_update(history[0].clone()));
+    assert_eq!((events, frames), (vec![], vec![]));
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": load["id"], "result": {"modes": {}}}),
+    );
+    assert_eq!(events, vec![]);
+    assert_eq!(frames.len(), 1);
+    let fence = frames[0].clone();
+    assert_eq!(fence["method"], REPLAY_FENCE);
+    assert_ne!(fence["id"], load["id"]);
+    // Not ready yet: the history is still coming.
+    assert!(matches!(driver.submit("next"), Err(Rejected::NotReady)));
+    for update in &history[1..] {
+        let (events, frames) = feed(&mut driver, &old_update(update.clone()));
+        assert_eq!((events, frames), (vec![], vec![]), "{update}");
+    }
+    let (events, frames) = feed(&mut driver, &method_not_found(&fence));
+    assert!(frames.is_empty());
+    assert_eq!(
+        events,
+        vec![
+            Event::Ready,
+            Event::SessionStarted {
+                session: session("old"),
+                forked_from: None
+            }
+        ]
+    );
+    let submitted = driver.submit("Now create b.txt.").unwrap();
+    let live = [
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Creating b.txt."}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "write_file-2", "status": "in_progress",
+               "title": "WriteFile", "kind": "edit"}),
+    ];
+    let events: Vec<Event> = live
+        .into_iter()
+        .flat_map(|update| feed(&mut driver, &old_update(update)).0)
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            Event::MessageDelta {
+                turn: submitted.turn,
+                text: "Creating b.txt.".into()
+            },
+            Event::ToolStarted {
+                turn: submitted.turn,
+                call_id: "write_file-2".into(),
+                name: "WriteFile".into()
+            }
+        ]
+    );
+}
+
+/// An agent that answers the fence with a result, not an error, is fenced
+/// all the same; a fresh session and a `session/resume` need no fence.
+#[test]
+fn only_a_load_is_fenced_and_any_answer_ends_the_fence() {
+    let (mut driver, _, load) = initialized(
+        SessionMode::Resume(session("old")),
+        json!({"loadSession": true}),
+    );
+    let (_, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": load["id"], "result": {}}),
+    );
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {}}),
+    );
+    assert_eq!(events[0], Event::Ready);
+
+    let (mut driver, _, resume) = initialized(
+        SessionMode::Resume(session("old")),
+        json!({"loadSession": true, "sessionCapabilities": {"resume": {}}}),
+    );
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": resume["id"], "result": {}}),
+    );
+    assert!(frames.is_empty());
+    assert_eq!(events[0], Event::Ready);
+
+    let (mut driver, _, new) = initialized(SessionMode::Fresh, json!({"loadSession": true}));
+    let (events, frames) = feed(
+        &mut driver,
+        &json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s1"}}),
+    );
+    assert!(frames.is_empty());
+    assert_eq!(events[0], Event::Ready);
 }
 
 #[test]
@@ -760,6 +889,137 @@ fn permission_requests_name_the_tool_by_name_kind_or_title() {
     assert_eq!(tool_of(&mut driver, &only_title), "Edit src/lib.rs");
 }
 
+fn update_s1(update: Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": update}})
+}
+
+fn ask(id: u64, tool_call: Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": {
+        "sessionId": "s1", "toolCall": tool_call,
+        "options": [{"optionId": "once", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}})
+}
+
+/// The permission request `message` raises; the test fails without one.
+fn asked(driver: &mut Acp, message: &Value) -> branchyard_harness::PermissionRequest {
+    let (events, _) = feed(driver, message);
+    events
+        .into_iter()
+        .find_map(|event| match event {
+            Event::PermissionRequested { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// DeepSeek Harness asks with `toolCall: {toolCallId}` alone, after a
+/// `tool_call` update that described the call (title `bash`, kind
+/// `other`, its input): the request is read with what the update said, so
+/// the policy, `--ask` and the log see `bash` and its command, not
+/// `acp:other` and an id.
+#[test]
+fn a_permission_request_naming_only_its_call_is_joined_to_the_calls_update() {
+    let mut driver = ready();
+    driver.submit("touch a file").unwrap();
+    feed(
+        &mut driver,
+        &update_s1(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "call_943d", "title": "bash",
+            "kind": "other", "status": "in_progress", "rawInput": {"command": "touch marker.txt"}}),
+        ),
+    );
+    let request = asked(&mut driver, &ask(60, json!({"toolCallId": "call_943d"})));
+    assert_eq!(request.tool, "bash");
+    assert_eq!(request.input, json!({"command": "touch marker.txt"}));
+
+    // A later `tool_call_update` adds to what the call's update said.
+    feed(
+        &mut driver,
+        &update_s1(json!({"sessionUpdate": "tool_call", "toolCallId": "c-2",
+            "title": "Writing to notes/x.md", "kind": "edit", "status": "pending"})),
+    );
+    feed(
+        &mut driver,
+        &update_s1(
+            json!({"sessionUpdate": "tool_call_update", "toolCallId": "c-2",
+            "rawInput": {"file_path": "notes/x.md", "content": "x"}}),
+        ),
+    );
+    let request = asked(&mut driver, &ask(61, json!({"toolCallId": "c-2"})));
+    assert_eq!(request.tool, "acp:edit");
+    assert_eq!(
+        request.input,
+        json!({"file_path": "notes/x.md", "content": "x"})
+    );
+
+    // The request's own fields win over the update's.
+    feed(
+        &mut driver,
+        &update_s1(
+            json!({"sessionUpdate": "tool_call", "toolCallId": "c-3", "title": "bash",
+            "kind": "other", "rawInput": {"command": "ls"}}),
+        ),
+    );
+    let request = asked(
+        &mut driver,
+        &ask(
+            62,
+            json!({"toolCallId": "c-3", "rawInput": {"command": "ls -la"}}),
+        ),
+    );
+    assert_eq!(request.input, json!({"command": "ls -la"}));
+
+    // With no input anywhere, the input is the call as described: its
+    // title and the paths it touches (Gemini CLI asks so).
+    let gemini = json!({"toolCallId": "write_file-9", "status": "pending",
+        "title": "Writing to notes/y.md", "kind": "edit",
+        "locations": [{"path": "/workspace/notes/y.md"}],
+        "content": [{"type": "diff", "path": "/workspace/notes/y.md", "oldText": null, "newText": "y\n"}]});
+    let request = asked(&mut driver, &ask(63, gemini.clone()));
+    assert_eq!(request.tool, "acp:edit");
+    assert_eq!(request.input, gemini);
+
+    // An id the turn never described stays an id.
+    let request = asked(&mut driver, &ask(64, json!({"toolCallId": "unknown-1"})));
+    assert_eq!(request.tool, "unknown-1");
+    assert_eq!(request.input, json!({"toolCallId": "unknown-1"}));
+}
+
+/// A call of kind `other` (or none) whose title is one word is named by
+/// it: that title is the tool's name. A title with spaces is a description,
+/// so the kind's `acp:other` stands.
+#[test]
+fn a_one_word_title_names_a_call_of_kind_other() {
+    let mut driver = ready();
+    driver.submit("go").unwrap();
+    let cases = [
+        (
+            json!({"toolCallId": "a", "title": "write", "kind": "other"}),
+            "write",
+        ),
+        (
+            json!({"toolCallId": "b", "title": "run_shell_command"}),
+            "run_shell_command",
+        ),
+        (
+            json!({"toolCallId": "c", "title": "Run the tests", "kind": "other"}),
+            "acp:other",
+        ),
+        (
+            json!({"toolCallId": "d", "title": "notes/x.md", "kind": "other"}),
+            "acp:other",
+        ),
+        (
+            json!({"toolCallId": "e", "title": "bash", "kind": "execute"}),
+            "acp:execute",
+        ),
+    ];
+    for (n, (tool_call, tool)) in cases.into_iter().enumerate() {
+        let request = asked(&mut driver, &ask(70 + n as u64, tool_call.clone()));
+        assert_eq!(request.tool, tool, "{tool_call}");
+    }
+}
+
 /// A resume of Gemini CLI's profile, up to the agent's `initialize` answer
 /// with `auth_methods`; returns the driver and the `session/load` it sends.
 fn gemini_resume(mode: SessionMode, auth_methods: Value) -> (Box<dyn Driver>, Value) {
@@ -808,10 +1068,13 @@ fn a_resume_refused_for_authentication_authenticates_once_and_asks_again() {
     assert_eq!(frames[0]["params"], load["params"]);
     assert_ne!(frames[0]["id"], load["id"]);
 
-    let (events, _) = feed(
+    let (events, frames) = feed(
         driver.as_mut(),
         &json!({"jsonrpc": "2.0", "id": frames[0]["id"], "result": {}}),
     );
+    assert_eq!(events, vec![]);
+    assert_eq!(frames[0]["method"], REPLAY_FENCE);
+    let (events, _) = feed(driver.as_mut(), &method_not_found(&frames[0]));
     assert_eq!(events[0], Event::Ready);
     assert_eq!(
         events[1],
@@ -820,6 +1083,15 @@ fn a_resume_refused_for_authentication_authenticates_once_and_asks_again() {
             forked_from: None
         }
     );
+}
+
+/// Gemini CLI's profile launches `gemini --acp`: 0.65.0's `--help` calls
+/// `--experimental-acp` deprecated.
+#[test]
+fn gemini_cli_starts_with_the_acp_flag() {
+    use branchyard_harness::profiles;
+    let profile = profiles::by_id("gemini-cli-acp").unwrap();
+    assert_eq!(profile.command, ["gemini", "--acp"]);
 }
 
 #[test]

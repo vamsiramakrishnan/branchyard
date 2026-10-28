@@ -386,6 +386,25 @@ class ComputeGceTests(unittest.TestCase):
         self.assertIn("pin a Branchyard release", invalid.stderr)
         self.assertNotIn(self.env["GEMINI_API_KEY"], invalid.stdout + invalid.stderr)
 
+    def test_default_release_and_custom_version_select_matching_worker_images(self):
+        args = [
+            sys.executable,
+            str(ROOT / "tools/compute_gce.py"),
+            "--project=test-project",
+            "--zone=us-central1-a",
+            "--name=branchyard-test",
+            f"--state-dir={self.config.state_dir}",
+        ]
+        for flags, version in (([], gce.RELEASE_VERSION), (["--version=2.3.4"], "2.3.4")):
+            out = subprocess.run([*args, *flags], env=self.env, text=True, capture_output=True, check=False)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            target = json.loads(out.stdout)["target"]
+            self.assertEqual(target["version"], version)
+            self.assertEqual(target["image"], f"{gce.IMAGE_REPOSITORY}:{version}")
+        self.assertEqual(self.config.version, gce.RELEASE_VERSION)
+        self.assertEqual(self.config.image, f"{gce.IMAGE_REPOSITORY}:{gce.RELEASE_VERSION}")
+        self.assertFalse(self.log.exists())
+
     def test_gcloud_response_shape_is_checked(self):
         runner = gce.Runner(self.config)
         for response in ("not-json", "[]"):

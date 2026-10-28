@@ -96,6 +96,13 @@ impl Caller {
         &self.0.tenant
     }
 
+    /// Who a branch's log names for what this caller did there, such as a
+    /// cancel: `<name> through the server`, with the token a server makes
+    /// for itself named `the default token`.
+    pub fn acting(&self) -> String {
+        through_the_server(self.name())
+    }
+
     /// What this principal's idempotency keys are scoped to: its subject
     /// name in the default tenant (as before tenants existed), else
     /// `tenant/subject`, so two tenants' principals of one name never
@@ -105,6 +112,18 @@ impl Caller {
             true => self.name().to_owned(),
             false => format!("{}/{}", self.tenant(), self.name()),
         }
+    }
+}
+
+/// `<name> through the server`, the actor a branch's log names for a
+/// principal's cancel, steer, discard or plan decision. The token a server
+/// makes when none is configured, and the first `--token-file`, are named
+/// `default`, which reads as an adverb there (`cancelled by default through
+/// the server`): that one is `the default token`.
+pub(crate) fn through_the_server(name: &str) -> String {
+    match name {
+        "default" => "the default token through the server".to_owned(),
+        name => format!("{name} through the server"),
     }
 }
 
@@ -1891,7 +1910,7 @@ async fn post_cancel(
     JsonBody(CancelRequest {}, _): JsonBody<CancelRequest>,
 ) -> Result<Json<CancelResult>, ApiError> {
     let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
-    let by = format!("{} through the server", caller.name());
+    let by = caller.acting();
     let cancelled = blocking(move || yard.cancel_as(&branch, &by))
         .await?
         .map_err(|e| error::sdk(&e))?;
@@ -1914,7 +1933,7 @@ async fn post_discard(
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .map_or_else(
-            || format!("discarded by {} through the server", caller.name()),
+            || format!("discarded by {}", caller.acting()),
             str::to_owned,
         );
     let registry = app.registry.clone();
@@ -1997,7 +2016,7 @@ async fn post_steer(
     JsonBody(SteerRequest { text }, _): JsonBody<SteerRequest>,
 ) -> Result<Json<branchyard::Steer>, ApiError> {
     let yard = app.authorized_repo(&caller, &repo, "run")?.yard.clone();
-    let by = format!("{} through the server", caller.name());
+    let by = caller.acting();
     let steer = blocking(move || {
         let steer = yard.steer_as(&branch, &text, &by)?;
         yard.wait_steer(&branch, steer.id, STEER_WAIT)
@@ -2616,6 +2635,18 @@ async fn stream_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The token a server makes for itself is named `default`; a branch's
+    /// log said `cancelled by default through the server` on 27 October
+    /// 2026, as though nobody had.
+    #[test]
+    fn the_default_token_reads_as_a_token_in_a_branchs_log() {
+        assert_eq!(
+            through_the_server("default"),
+            "the default token through the server"
+        );
+        assert_eq!(through_the_server("alice"), "alice through the server");
+    }
 
     #[test]
     fn fingerprints_are_stable() {

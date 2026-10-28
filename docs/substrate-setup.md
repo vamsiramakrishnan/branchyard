@@ -137,6 +137,12 @@ The smoke creates a disposable actor, writes and reads a file through the
 bridge, executes `agy --version`, and deletes the actor. It calls no model.
 Failures name the file-transfer or executable step that stopped, followed by
 the actor cleanup result.
+
+Interrupting the smoke with Ctrl-C or SIGTERM removes its disposable actor before
+reporting cancellation with exit status 1. If cleanup fails, the error names the
+actor to remove before retrying. Ctrl-C therefore reports 1 instead of the
+shell's usual interrupt status 130.
+
 Without `--smoke`, `by substrate check` authenticates and verifies the template
 listener, health probe, identity projection and signing-key match. If execution fails, cleanup is still attempted and a cleanup
 failure names the actor to inspect. SIGINT and SIGTERM request cleanup after

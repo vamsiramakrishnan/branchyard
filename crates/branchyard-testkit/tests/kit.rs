@@ -212,6 +212,51 @@ fn a_scratch_directory_is_removed_on_drop_and_close() {
     assert!(!path.exists());
 }
 
+/// What a test started in its scratch directory and left running is
+/// stopped when the directory goes, whether its own child or detached into
+/// a session of its own; a process in another directory is left alone.
+#[test]
+fn processes_left_running_in_a_scratch_directory_are_stopped_with_it() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
+    if !std::path::Path::new("/proc/self/cwd").exists() {
+        eprintln!("skipped: no /proc to find processes by their working directory");
+        return;
+    }
+    let scratch = Scratch::new("kit-left");
+    let elsewhere = Scratch::new("kit-elsewhere");
+    let mut child = Command::new("sleep")
+        .arg("300")
+        .current_dir(scratch.path())
+        .spawn()
+        .unwrap();
+    let started = Command::new("sh")
+        .args(["-c", "setsid sleep 300 > /dev/null 2>&1 &"])
+        .current_dir(scratch.path())
+        .status()
+        .unwrap();
+    assert!(started.success());
+    let mut other = Command::new("sleep")
+        .arg("300")
+        .current_dir(elsewhere.path())
+        .spawn()
+        .unwrap();
+    let left = wait::until_value(
+        "the two sleeps in the directory",
+        || branchyard_testkit::processes_in(scratch.path()),
+        |pids| pids.len() == 2,
+    );
+    assert!(left.contains(&child.id()), "{left:?}");
+    drop(scratch);
+    assert_eq!(child.wait().unwrap().signal(), Some(9));
+    for pid in left {
+        wait::gone(pid);
+    }
+    assert!(wait::alive(other.id()), "a process elsewhere is left alone");
+    drop(elsewhere);
+    assert_eq!(other.wait().unwrap().signal(), Some(9));
+}
+
 #[test]
 fn a_hanging_response_holds_the_connection_open_until_the_server_is_finished() {
     let mock = MockHttp::start(|_| Response::hang());

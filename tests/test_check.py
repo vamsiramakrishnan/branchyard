@@ -2,7 +2,9 @@
 """tools/check.py: step selection, --fast and --fix, the verdict and exit code, and the
 step table against .github/workflows/check.yml (and what that workflow promises: one run per
 change, no job that repeats another, a cache on every job that compiles, actions pinned to a
-commit). A fake step table runs the runner; no cargo."""
+commit, and the cargo gates in parallel jobs that test every crate once, still run every step
+the single `controls` job ran, and leave `controls` green only when all of them pass). A fake
+step table runs the runner; no cargo."""
 
 import ast
 import contextlib
@@ -155,10 +157,20 @@ class RealTable(unittest.TestCase):
     def test_names_are_unique_and_every_job_is_known(self):
         names = [step.name for step in check.STEPS]
         self.assertEqual(len(names), len(set(names)))
-        self.assertTrue({step.job for step in check.STEPS} <= {"fast", "docs", "controls"})
+        known = {"fast", "docs", "controls", "lint", "schemas", "test-engine", "test-cli", "test-server", "walkthrough"}
+        self.assertTrue({step.job for step in check.STEPS} <= known)
         self.assertTrue(
             {step.job for step in check.STEPS} <= set(controls_jobs()), "a step names a job check.yml lacks"
         )
+
+    def test_each_cargo_step_is_labelled_with_the_job_that_runs_it(self):
+        # Not the schema steps: each runs one test file here, where CI runs the crate's whole suite
+        # with the feature (and branchyard-setup's schema test is part of test-engine's run).
+        for step in check.STEPS:
+            if not step.cargo or step.fix or step.name.startswith("schema_"):
+                continue
+            command = " ".join(step.argv[1:] if step.argv[0] == check.PY else step.argv)
+            self.assertIn(command, job_text(step.job), f"{step.name} is labelled {step.job}")
 
     def test_rewriting_steps_are_the_fix_steps(self):
         for step in check.STEPS:
@@ -190,7 +202,9 @@ class RealTable(unittest.TestCase):
         scripts = set()
         # The jobs whose gates tools/check.py also runs; coverage, deny and unused-deps run
         # tools only CI uses (check_coverage.py, install_ci_tool.py).
-        for job in ("fast", "docs", "controls"):
+        for job in controls_jobs():
+            if job in ("coverage", "deny", "unused-deps"):
+                continue
             scripts |= set(re.findall(r"\bpython3?\s+((?:tools|tests)/[\w./-]+\.py)", job_text(job)))
         steps = {arg for step in check.STEPS for arg in step.argv if isinstance(arg, str)}
         self.assertEqual(sorted(scripts - steps - {"tools/check.py"}), [])
@@ -210,10 +224,63 @@ class Workflow(unittest.TestCase):
         self.assertEqual(jobs[0], "fast")
 
     def test_no_job_reruns_a_filtered_part_of_the_workspace_tests(self):
+        self.assertEqual(len(re.findall(r"- run: cargo test --workspace", WORKFLOW)), 1)
+        self.assertIn("- run: cargo test --workspace", job_text("test-engine"))
+        self.assertNotIn("branchyard-controls --locked --offline catalog", WORKFLOW)
+        self.assertNotIn("--test compatibility", WORKFLOW)
+
+    def test_every_crate_of_the_workspace_is_tested_by_exactly_one_job(self):
+        # test-engine takes the workspace less what it excludes; the excluded crates are exactly the
+        # ones test-cli and test-server name, and no crate is in both.
+        excluded = set(re.findall(r"--exclude ([\w-]+)", job_text("test-engine")))
+        named = {job: set(re.findall(r"-p ([\w-]+)", test_command(job))) for job in ("test-cli", "test-server")}
+        self.assertEqual(named["test-cli"] & named["test-server"], set())
+        self.assertEqual(excluded, named["test-cli"] | named["test-server"])
+        self.assertTrue(excluded < workspace_members(), excluded - workspace_members())
+
+    def test_every_step_the_single_cargo_job_ran_still_runs(self):
+        # What `controls` ran until October 2026, one step at a time, besides `cargo test --workspace`
+        # (the test above holds that one).
+        for command in (
+            'test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"',
+            "cargo build --locked --offline -p branchyard-cli -p branchyard-runtime --bin by --bin fake-acp-agent",
+            "REQUIRE_BINARIES=1 python3 tests/test_getting_started.py",
+            "python tools/check_missing_docs.py",
+            "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+            "cargo test -p branchyard-client --locked --offline --features schema",
+            "cargo clippy -p branchyard-client --all-targets --locked --offline --features schema -- -D warnings",
+            "cargo test -p branchyard-server --locked --offline --features schema",
+            "cargo clippy -p branchyard-server --all-targets --locked --offline --features schema -- -D warnings",
+            "cargo test -p branchyard-cli --locked --offline --features schema rig",
+            "cargo clippy -p branchyard-cli --all-targets --locked --offline --features schema -- -D warnings",
+        ):
+            self.assertIn(command, WORKFLOW)
+
+    def test_controls_is_green_only_when_every_cargo_gate_is(self):
         text = job_text("controls")
-        self.assertEqual(len(re.findall(r"- run: cargo test --workspace", text)), 1)
-        self.assertNotIn("branchyard-controls --locked --offline catalog", text)
-        self.assertNotIn("--test compatibility", text)
+        # Every job split from it, which is every job but the ones that ran beside it before.
+        beside = {
+            "fast",
+            "controls",
+            "postgres",
+            "microsandbox",
+            "docs",
+            "all-features",
+            "unused-deps",
+            "deny",
+            "coverage",
+        }
+        needs = re.search(r"(?m)^    needs: \[([^\]]*)\]$", text)
+        assert needs is not None, text
+        self.assertEqual({name.strip() for name in needs.group(1).split(",")}, set(controls_jobs()) - beside)
+        # Run after a needed job failed (skipped, it would count as passed), and fail unless all passed.
+        self.assertIn("if: ${{ !cancelled() }}", text)
+        self.assertIn("RESULTS: ${{ join(needs.*.result, ' ') }}", text)
+        self.assertIn('test "$result" = success || exit 1', text)
+
+    def test_every_job_has_a_timeout(self):
+        for name in controls_jobs():
+            self.assertIn("timeout-minutes:", job_text(name), name)
 
     def test_every_job_that_compiles_restores_a_cache(self):
         compiling = re.compile(r"cargo (?:test|clippy|doc|check|build|llvm-cov)\b")
@@ -255,6 +322,21 @@ class Workflow(unittest.TestCase):
 def job_text(name):
     """The text of one job in check.yml."""
     return "\n".join(controls_jobs()[name])
+
+
+def test_command(job):
+    """The one `cargo test` line of a job in check.yml."""
+    found = [line for line in controls_jobs()[job] if line.lstrip().startswith("- run: cargo test")]
+    assert len(found) == 1, (job, found)
+    return found[0]
+
+
+def workspace_members():
+    """The package names of the workspace's members (each member's directory is its name)."""
+    manifest = (ROOT / "Cargo.toml").read_text()
+    members = re.search(r"(?ms)^members = \[(.*?)^\]", manifest)
+    assert members is not None
+    return {path.rsplit("/", 1)[-1] for path in re.findall(r'"([^"]+)"', members.group(1))}
 
 
 def controls_jobs():

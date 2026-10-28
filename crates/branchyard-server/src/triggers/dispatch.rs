@@ -3,7 +3,7 @@
 //! server's own admission path, and the loop that ticks the [`Engine`].
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -454,6 +454,7 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
             }),
             worker: hub.worker.clone(),
             rested_at: AtomicU64::new(0),
+            resting: AtomicBool::new(false),
         });
         loop {
             tokio::select! {
@@ -484,6 +485,14 @@ pub fn spawn(app: Arc<App>, mut shutdown: watch::Receiver<bool>) -> tokio::task:
                 }
                 Err(_) => return,
             };
+            // A look done: what it claimed is recorded in the store. An
+            // operator sees the dispatcher alive by this count rising, and
+            // a test knows a whole look began after a change it made once
+            // the count has risen by two.
+            app.registry
+                .observability()
+                .metrics
+                .inc(crate::metrics::TRIGGER_LOOKS, &[]);
             // The lifecycles of branches triggers keep alive, at their own
             // pace and on a thread of their own: a removal takes git.
             let resting = engine.clone();

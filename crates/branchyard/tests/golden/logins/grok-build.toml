@@ -1,0 +1,29 @@
+# Grok Build: XAI_API_KEY and its auth file (Scion's harness configuration).
+# Run by crates/branchyard/tests/logins.rs.
+
+[[case]]
+name = "an xAI key"
+env = { XAI_API_KEY = "fake-xai" }
+lines = ["env XAI_API_KEY"]
+cell = "key set (XAI_API_KEY)"
+state = "logged_in"
+evidence = "likely"
+detail = "XAI_API_KEY is set (an API key; not checked)"
+key = "XAI_API_KEY"
+
+[[case]]
+name = "its auth file"
+home = { ".grok/auth.json" = "{}" }
+lines = ["file ~/.grok/auth.json"]
+cell = "credentials found"
+state = "logged_in"
+evidence = "likely"
+detail = "~/.grok/auth.json exists"
+
+[[case]]
+name = "nothing"
+lines = []
+cell = "login not verified"
+state = "logged_out"
+evidence = "likely"
+detail = "no ~/.grok/auth.json and no XAI_API_KEY"

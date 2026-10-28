@@ -16,6 +16,42 @@ use branchyard_substrate::template::{bridge_template, BridgeTemplate};
 
 const BY: &str = env!("CARGO_BIN_EXE_by");
 
+/// Setup failures use the same typed JSON and exit contract as other commands.
+#[test]
+fn substrate_setup_requires_saved_configuration_with_a_typed_remedy() {
+    let repo = branchyard_testkit::repo!();
+    let output = repo.by(&["substrate", "check", "--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["error"]["kind"], "config");
+    assert_eq!(report["error"]["exit"], 3);
+    assert_eq!(
+        report["error"]["next"],
+        serde_json::json!(["by init project"])
+    );
+}
+
+/// A caller's mode refusal happens before looking up credentials or resources.
+#[test]
+fn substrate_refuses_remote_flags_and_harness_calls_with_their_typed_statuses() {
+    let mut repo = branchyard_testkit::repo!();
+    let remote = repo.by(&[
+        "substrate",
+        "check",
+        "--json",
+        "--remote",
+        "https://unused.example",
+    ]);
+    assert_eq!(remote.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&remote.stdout).unwrap();
+    assert_eq!(report["error"]["kind"], "usage");
+    repo.set_env("BRANCHYARD_BRANCH", "nested");
+    let harness = repo.by(&["substrate", "check", "--json"]);
+    assert_eq!(harness.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&harness.stdout).unwrap();
+    assert_eq!(report["error"]["kind"], "denied");
+}
+
 /// Build `bin` of `package` next to `by`; cargo exposes a binary's path
 /// only to its own package's tests.
 fn built(package: &str, bin: &str) -> PathBuf {
@@ -746,7 +782,7 @@ fn substrate_smoke_cancellation_removes_the_actor() {
         .unwrap();
         branchyard_testkit::wait::until("cancelled smoke to exit", || child.try_wait().unwrap());
         let output = child.wait_with_output().unwrap();
-        assert!(!output.status.success());
+        assert_eq!(output.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&output.stderr).contains("smoke cancelled"));
         assert!(String::from_utf8_lossy(&output.stderr).contains("removed"));
         assert!(
@@ -899,7 +935,7 @@ fn by_remote_run_in_a_substrate_actor_on_the_server() {
     // Refused by a server whose operator did not allow the provider.
     let plain = Served::start(dir, "plain", &setup.root, &["--harness-command", &harness]);
     let refused = plain.by(dir, &run_args("refused", key.to_str().unwrap()));
-    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(refused.status.code(), Some(4));
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(stderr.contains("--allow-provider substrate"), "{stderr}");
     drop(plain);
@@ -940,7 +976,7 @@ fn by_remote_run_in_a_substrate_actor_on_the_server() {
 
     // A relative key would name a file on this machine, not the server.
     let relative = server.by(dir, &run_args("relative", "bridge.key"));
-    assert_eq!(relative.status.code(), Some(1));
+    assert_eq!(relative.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&relative.stderr).contains("names a file on the server"),
         "{}",

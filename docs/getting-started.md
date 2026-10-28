@@ -19,7 +19,7 @@ cargo install --locked --path crates/branchyard-cli
 by --version
 ```
 
-`by --version` prints `by 0.0.1`. If the shell cannot find `by`, add `~/.cargo/bin` to your `PATH`.
+`by --version` prints `by 0.1.0-rc.1`. If the shell cannot find `by`, add `~/.cargo/bin` to your `PATH`.
 
 ## 2. See what you have
 
@@ -54,6 +54,8 @@ by setup
 It ends with a short card: what was detected, written and installed, the `Only you can do:` lines (trusting the hooks in Codex with `/hooks`, then `t`, for example), and `Next:` with a command to try. A second run writes nothing and says so. Without a terminal and without `--yes` it only shows the plan, as `--dry-run` does on a terminal. It exits 0 when it is done, even with things left for you. Other flags: `--json`, `--harness ID,ID`, `--no-hooks`, `--no-config`. Afterwards `by` on its own prints where the repository stands and the next step.
 
 The same work, one piece at a time: `by init project`, `by init plugin --all-detected`, `by harnesses login ID`. The settings are in [setup](setup.md).
+
+With a Z.ai or Gemini key instead of the harness's own login, `printf %s "$KEY" | by harnesses login claude-code --provider zai` (or `--provider gemini` for Gemini CLI, Antigravity or OpenCode) stores it for isolated runs and prints the `export` line for your own ([gateway providers](harness-lifecycle.md#through-a-gateway-provider)).
 
 `--dry-run` shows the plan and writes nothing. In a throwaway repository with no harness on `PATH`, followed by the bare `by`:
 

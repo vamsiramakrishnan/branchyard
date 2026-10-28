@@ -138,16 +138,7 @@ fn main() -> ExitCode {
     // No command: where this repository stands and the one next step, not
     // the sixty commands (`by --help` lists them).
     let Some(command) = cli.command else {
-        return match setup_cmd::card() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
-                ExitCode::SUCCESS
-            }
-            Err(failure) => {
-                eprintln!("by: {failure}");
-                ExitCode::FAILURE
-            }
-        };
+        return errors::finish(setup_cmd::card(), errors::wants_json(&argv));
     };
     // Run by a Claude Code session on every prompt and redraw: the
     // configuration only to find the yard, no logging, and never a failure, whatever the
@@ -163,11 +154,8 @@ fn main() -> ExitCode {
     let (globals, command) = match defaults::apply(&cwd, &env, cli.globals, command) {
         Ok(applied) => applied,
         Err(error) => {
-            errors::print(
-                &errors::config(&error.to_string()),
-                errors::wants_json(&argv),
-            );
-            return ExitCode::FAILURE;
+            let failure = errors::config(&error.to_string()).into();
+            return errors::finish(Err(failure), errors::wants_json(&argv));
         }
     };
     // Warnings from best-effort steps (a cleanup that failed, a lock whose
@@ -180,25 +168,9 @@ fn main() -> ExitCode {
     env_now.notify = notify::Settings::resolve(globals.no_notify, &globals.notify, &env);
     let outcome = run(&env_now, &globals, command);
     detach::finish(&outcome);
-    match outcome {
-        Ok(()) => ExitCode::SUCCESS,
-        // A closed pipe, as in `by ls | head`, is the reader's choice.
-        Err(Failure::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-        Err(Failure::Reported) => ExitCode::FAILURE,
-        // Something only the person can do remains: not a failure, not done.
-        Err(Failure::Manual(message)) => {
-            if !message.is_empty() {
-                eprintln!("by: {message}");
-            }
-            ExitCode::from(2)
-        }
-        Err(failure) => {
-            if let Some(report) = errors::failure(&failure, None) {
-                errors::print(&report, errors::wants_json(&argv));
-            }
-            ExitCode::FAILURE
-        }
-    }
+    // The one place a failure is printed, and its kind's exit status
+    // (docs/cli.md, "Exit status").
+    errors::finish(outcome, errors::wants_json(&argv))
 }
 
 /// Print what `by` was asked to print (help, a usage error) and, when that
@@ -233,18 +205,22 @@ fn serve(prefix: &[OsString], call: args::ServerCall) -> ExitCode {
         };
     }
     if globals.remote.is_some() {
-        eprintln!("by: serve runs a server here; it does not take --remote or BRANCHYARD_REMOTE");
-        return ExitCode::from(2);
+        let refused = errors::Report::usage(format!(
+            "{} runs a server here; it does not take --remote or BRANCHYARD_REMOTE",
+            call.program
+        ))
+        .next(format!(
+            "run {} on the server's host, without --remote (unset BRANCHYARD_REMOTE)",
+            call.program
+        ));
+        return errors::finish(Err(refused.into()), false);
     }
     // `[serve] config` from branchyard.toml, unless the arguments name one.
     let cwd = std::env::current_dir().unwrap_or_default();
     let env = |name: &str| std::env::var(name).ok();
     let args = match defaults::apply_serve(&cwd, &env, call.args) {
         Ok(args) => args,
-        Err(error) => {
-            eprintln!("by: {error}");
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return errors::finish(Err(errors::config(&error).into()), false),
     };
     // A worker here advertises its harnesses with the usage meters `by
     // usage` reads (docs/harness-lifecycle.md).
@@ -272,19 +248,33 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
             clap_complete::generate(shell, &mut args::command(), "by", &mut out);
             return commands::print(&String::from_utf8_lossy(&out));
         }
-        Command::Man => {
+        Command::Man { markdown: true } => return commands::print(&args::reference_markdown()),
+        Command::Man { markdown: false } => {
             let mut out = Vec::new();
             clap_mangen::Man::new(args::command_with_hidden()).render(&mut out)?;
             return commands::print(&String::from_utf8_lossy(&out));
         }
         // Setup needs no repository or server: it may be what creates them.
         Command::Init { init } => return init::main(env, &init),
-        Command::Setup { setup } => return setup_cmd::main(env, &setup),
+        Command::Setup { setup } => {
+            // `--refresh`: the harnesses are asked again, not the cache.
+            if setup.refresh {
+                harness_cmd::forget_inventory();
+            }
+            return setup_cmd::main(env, &setup);
+        }
         Command::Config { json, action } => return config_cmd::main(&action, json),
         // Doctor reports a broken configuration, a missing store or an
         // unreachable server rather than stopping at it.
-        Command::Doctor { json, path } => {
-            return doctor_cmd::main(env, globals, path.as_deref(), json)
+        Command::Doctor {
+            json,
+            path,
+            refresh,
+        } => {
+            if refresh {
+                harness_cmd::forget_inventory();
+            }
+            return doctor_cmd::main(env, globals, path.as_deref(), json);
         }
         // Up acts on this machine's repository, whatever [remote] says.
         Command::Up { json, plan, yes } => return up_cmd::main(env, globals, plan, yes, json),
@@ -312,17 +302,21 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
         _ => {}
     }
     if let (Some(_), Some(recipe)) = (&globals.remote, command.recipe()) {
-        return Err(Failure::Message(format!(
+        return Err(errors::Report::usage(format!(
             "--provider recipe:{recipe} runs on the machine that has the repository: a server \
-             does not run environment recipes (docs/recipes.md). Run it without --remote"
-        )));
+             does not run environment recipes (docs/recipes.md)"
+        ))
+        .next("run it without --remote, in the repository")
+        .into());
     }
     let target = match &globals.remote {
         Some(_) => Target::Remote(Box::new(remote::Remote::connect(globals)?)),
         None if globals.token_file.is_some() || globals.repo.is_some() => {
-            return Err(Failure::Message(
-                "--token-file and --repo apply to remote mode; pass --remote URL too".into(),
-            ))
+            return Err(errors::Report::usage(
+                "--token-file and --repo apply to remote mode; pass --remote URL too",
+            )
+            .next("add --remote URL (or set BRANCHYARD_REMOTE), or drop --token-file and --repo")
+            .into())
         }
         None => Target::Local,
     };
@@ -330,7 +324,7 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
 }
 
 /// One arm per command that runs against a repository or a server; see
-/// "Adding a command" in `args.rs`.
+/// "Adding a command" in `args/mod.rs`.
 fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
     // `--auto` with no [fleet] routes among what is logged in here
     // (docs/fleet.md#the-inventory-default); a server refuses routing.
@@ -818,7 +812,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         | Command::Worker { .. }
         | Command::Mcp { .. }
         | Command::Completions { .. }
-        | Command::Man
+        | Command::Man { .. }
         | Command::Init { .. }
         | Command::Setup { .. }
         | Command::Config { .. }
@@ -839,5 +833,6 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
 /// commands that take no task options.
 fn fleet_table() -> Result<Option<branchyard::Fleet>, Failure> {
     let cwd = std::env::current_dir()?;
-    defaults::fleet_at(&cwd, &|name| std::env::var(name).ok()).map_err(Failure::Message)
+    defaults::fleet_at(&cwd, &|name| std::env::var(name).ok())
+        .map_err(|why| errors::config(&why).into())
 }

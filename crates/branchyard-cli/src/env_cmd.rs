@@ -25,11 +25,12 @@ use crate::workspace_cmd;
 /// `by env ACTION`.
 pub fn main(env: &Env, target: &Target, action: &EnvAction, json: bool) -> Outcome {
     if let Target::Remote(_) = target {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::usage(
             "by env acts on a local repository's .branchyard/environments; a server's are on \
-             its host"
-                .into(),
-        ));
+             its host",
+        )
+        .next("run by env without --remote, on the server's host")
+        .into());
     }
     let yard = commands::open()?;
     match action {
@@ -50,10 +51,11 @@ fn pool_spec(yard: &Yard) -> Result<(WorkspaceSpec, workspace_cmd::Resolved), Fa
     let resolved = workspace_cmd::resolve(yard.root())?;
     match resolved {
         Some(resolved) if resolved.workspace.pool.is_some() => Ok((resolved.spec(), resolved)),
-        _ => Err(Failure::Message(
-            "[workspace] has no pool here: add [workspace.pool] with a size (see docs/pools.md)"
+        _ => Err(
+            crate::errors::Report::new("config", "[workspace] has no pool here")
+                .next("add [workspace.pool] with a size to branchyard.toml (docs/pools.md)")
                 .into(),
-        )),
+        ),
     }
 }
 
@@ -119,11 +121,13 @@ fn pool(env: &Env, yard: &Yard, action: &PoolAction, json: bool) -> Outcome {
         }
         PoolAction::Fill => {
             if workspace_cmd::in_harness().is_some() {
-                return Err(Failure::Message(
+                return Err(crate::errors::Report::new(
+                    "denied",
                     "a harness running on a branch cannot fill the pool: it may run the \
-                     repository's setup, which is a person's decision"
-                        .into(),
-                ));
+                     repository's setup, which is a person's decision",
+                )
+                .next("run by env pool fill in your own terminal, outside any branch")
+                .into());
             }
             let (spec, resolved) = pool_spec(yard)?;
             workspace_cmd::require_trust(env, &resolved)?;
@@ -259,18 +263,20 @@ fn find(yard: &Yard, key: &str) -> Option<EnvironmentInfo> {
 }
 
 fn show(yard: &Yard, key: Option<&str>, json: bool) -> Outcome {
-    let key =
-        match key {
-            Some(key) => key.to_owned(),
-            None => match spec(yard)? {
-                Some((spec, _)) => yard.environment_key(&spec),
-                None => return Err(Failure::Message(
-                    "[workspace] does not prepare environments here (prepare = true); name a key \
-                     from `by env list`"
-                        .into(),
-                )),
-            },
-        };
+    let key = match key {
+        Some(key) => key.to_owned(),
+        None => match spec(yard)? {
+            Some((spec, _)) => yard.environment_key(&spec),
+            None => {
+                return Err(crate::errors::Report::usage(
+                    "[workspace] does not prepare environments here (prepare = true), so name \
+                         an environment's key",
+                )
+                .next("by env list (lists the keys)")
+                .into())
+            }
+        },
+    };
     let Some(info) = find(yard, &key) else {
         if json {
             return print(&to_json(&json!({ "key": key, "environment": null })));
@@ -328,18 +334,21 @@ fn show(yard: &Yard, key: Option<&str>, json: bool) -> Outcome {
 
 fn rebuild(env: &Env, yard: &Yard, json: bool) -> Outcome {
     if workspace_cmd::in_harness().is_some() {
-        return Err(Failure::Message(
+        return Err(crate::errors::Report::new(
+            "denied",
             "a harness running on a branch cannot rebuild an environment: it runs the \
-             repository's setup, which is a person's decision"
-                .into(),
-        ));
+             repository's setup, which is a person's decision",
+        )
+        .next("run by env rebuild in your own terminal, outside any branch")
+        .into());
     }
     let Some((spec, resolved)) = spec(yard)? else {
-        return Err(Failure::Message(
-            "[workspace] does not prepare environments here: set prepare = true (see \
-             docs/environments.md)"
-                .into(),
-        ));
+        return Err(crate::errors::Report::new(
+            "config",
+            "[workspace] does not prepare environments here",
+        )
+        .next("set prepare = true under [workspace] in branchyard.toml (docs/environments.md)")
+        .into());
     };
     workspace_cmd::require_trust(env, &resolved)?;
     let built = yard.rebuild_environment(&spec)?;
