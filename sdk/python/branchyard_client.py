@@ -1516,8 +1516,10 @@ def _cannot_run(program: str, error: OSError) -> str:
     said = f"could not run {program}: {error}"
     if isinstance(error, FileNotFoundError) and os.sep not in program:
         return (
-            f"{said}. `by` is not on PATH (or set BRANCHYARD_BY). to fix: install it with "
-            "`cargo install --locked --path crates/branchyard-cli` from a checkout (no release is published yet)"
+            f"{said}. `by` is not on PATH (or set BRANCHYARD_BY). to fix: install released binaries with "
+            "`curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh "
+            "| sh -s -- --no-setup`, or build from a checkout with "
+            "`cargo install --locked --path crates/branchyard-cli`"
         )
     if isinstance(error, FileNotFoundError):
         return f"{said}. to fix: point BRANCHYARD_BY (or `by=`) at the `by` executable, or put `by` on PATH"

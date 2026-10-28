@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "branchyard"
-version = "0.1.0"
+version = "0.1.1"
 description = "Branchyard from Python: branchyard inside a harness (by --json), branchyard_client over by serve's HTTP API"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -2668,6 +2668,41 @@ by doctor [OPTIONS]
 | `--path <PATH>` | Check the repository at PATH instead of the one around the current directory |
 | `--refresh` | Ask the harnesses again instead of reading the inventory `by harnesses` cached |
 
+## `by compute`
+
+Plan or provision dedicated cloud workers from this machine; operator only
+
+```text
+by compute [OPTIONS] <COMMAND>
+```
+
+### `by compute gce`
+
+Prepare a dedicated GCE worker for native SSH; prints an offline JSON plan by default
+
+```text
+by compute gce [OPTIONS] --project <PROJECT> --zone <ZONE> --name <NAME>
+```
+
+| Option | What it does |
+|---|---|
+| `--project <PROJECT>` | Google Cloud project with billing and the Compute Engine API enabled |
+| `--zone <ZONE>` | Zone for the dedicated worker, such as us-central1-a |
+| `--name <NAME>` | Dedicated VM name; reuse the same options to resume, never adopts a foreign VM |
+| `--directory <PATH>` | Copy this repository's clean committed HEAD; omitted creates an empty repository |
+| `--image <PIN>` | Published worker image pinned by release tag or @sha256 digest; defaults to --version |
+| `--backend <BACKEND>` | Worker execution: local processes or Microsandbox KVM guests (one of `local`, `microsandbox`) (default `local`) |
+| `--machine-type <MACHINE_TYPE>` | VM machine type; Microsandbox needs n2-standard or c3-standard (default `n2-standard-4`) |
+| `--service-account <EMAIL>` | Existing service account in this project; omitted attaches no account |
+| `--network <NETWORK>` | Existing VPC network; creates no network or NAT (default `default`) |
+| `--subnet <SUBNET>` | Existing subnet for the VM (default `default`) |
+| `--disk-size <DISK_SIZE>` | Balanced persistent disk size in GB (default `100`) |
+| `--internal-ip` | Omit the external IP; needs an existing private route or --tunnel-through-iap, plus outbound access |
+| `--tunnel-through-iap` | SSH through Google Cloud IAP; allow TCP 22 from 35.235.240.0/20 only to this VM's dedicated tag |
+| `--forward-secret <ENV_NAME>` | Read this environment variable into the worker's private keystore over SSH stdin; never pass a key value (one of `GEMINI_API_KEY`, `GOOGLE_API_KEY`) |
+| `--state-dir <PATH>` | Private deployment records; default is ~/.local/state/branchyard/compute-gce/PROJECT/ZONE/NAME |
+| `--apply` | Create or resume the reviewed billable VM, firewall when using IAP, and owned SSH configuration |
+
 ## `by substrate`
 
 Prepare or check the saved Agent Substrate connection

@@ -63,6 +63,10 @@ model call. These are operator commands, run outside a harness session.
 `by up` and `by doctor` check the saved connection and remote credential sources.
 An operator runs `by setup --guided` to choose a repository and compute backend.
 `by setup --up --json` includes readiness; `--directory PATH` selects a repository.
+An operator can plan a dedicated worker with `by compute gce --project PROJECT
+--zone ZONE --name NAME --tunnel-through-iap`; `--apply` provisions the reviewed
+VM and its dedicated IAP TCP 22 firewall rule. `--internal-ip` also omits the
+external address. This command refuses harness sessions and `--remote`.
 `by run` accepts `--substrate-api-token-file PATH` for Control authentication and verified
 forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable

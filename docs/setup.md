@@ -39,6 +39,17 @@ when `agy` is detected; remote setup defaults to its packaged image. Cloud setup
 reviews the named resources and asks before creating them. The cloud helpers are
 packaged with the CLI, so a Branchyard source checkout is unnecessary.
 
+For GCE, setup asks how SSH should connect. External IP needs your existing SSH
+ingress rule. Private IP omits an external address and requires your VPC route
+and outbound access for package downloads. IAP is an explicit optional choice.
+It requires IAP tunnel IAM access and permitted ingress, with a proposed rule
+shown in the review: TCP 22 from `35.235.240.0/20`, scoped to the worker's VM tag.
+These choices grant no IAM permissions. IAP is not live qualified in the tested
+project because managed firewall enforcement removes its allow rule. For
+a private-only VM or scripted provisioning,
+use [`by compute gce`](compute-gce.md) with `--tunnel-through-iap` and optionally
+`--internal-ip`. Its default is an offline JSON plan; `--apply` changes resources.
+
 Guided setup reuses the project interview and hook installers above. An existing
 `branchyard.toml` is preserved and its compute resources are checked again. Use
 `by init project` to change an existing connection. A local microVM requires a

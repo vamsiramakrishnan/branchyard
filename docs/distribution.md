@@ -21,8 +21,8 @@ additional tools before creating resources.
 To install a particular version or prepare a headless machine:
 
 ```sh
-sh install.sh --version 0.1.0 --prefix "$HOME/.local" --no-setup
-sh install.sh --version 0.1.0 --setup --yes
+sh install.sh --version 0.1.1 --prefix "$HOME/.local" --no-setup
+sh install.sh --version 0.1.1 --setup --yes
 ```
 
 `--yes` follows the existing noninteractive setup defaults and readiness checks;

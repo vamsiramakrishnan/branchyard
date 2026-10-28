@@ -198,7 +198,12 @@ class Examples(unittest.TestCase):
         )
         self.assertEqual(missing.returncode, 1, missing.stdout)
         self.assertIn("`by` is not on PATH (or set BRANCHYARD_BY)", missing.stderr)
-        self.assertIn("to fix: install it with `cargo install --locked --path crates/branchyard-cli`", missing.stderr)
+        self.assertIn("to fix: install released binaries with `curl -fsSL", missing.stderr)
+        self.assertIn("releases/latest/download/install.sh | sh -s -- --no-setup", missing.stderr)
+        self.assertIn(
+            "build from a checkout with `cargo install --locked --path crates/branchyard-cli`", missing.stderr
+        )
+        self.assertNotIn("no release is published yet", missing.stderr)
         self.assertNotIn("Traceback", missing.stderr)
 
     # -- stream_events.py --------------------------------------------------

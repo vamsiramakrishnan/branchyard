@@ -11,20 +11,27 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 OWNER_LABEL = "branchyard-deployment"
 # Checked and rewritten by tools/release_version.py before release packaging.
-RELEASE_VERSION = "0.1.0"
+RELEASE_VERSION = "0.1.1"
 IMAGE_REPOSITORY = "ghcr.io/vamsiramakrishnan/branchyard-agy"
 MSB_VERSION = "0.7.3"
 MSB_ARCHIVE_SHA256 = "2d5da7de187246c804dce2a1a23f06626b6f7cb892d9a0c7c5c620784ba412ea"
+IAP_SOURCE_RANGE = "35.235.240.0/20"
 
 
 class SetupError(Exception):
     """An actionable failure that never includes captured command output."""
+
+
+class SshNotReady(SetupError):
+    """A bounded SSH connection or guest-login failure that can be retried."""
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,7 @@ class Config:
     subnet: str = "default"
     disk_size: int = 100
     internal_ip: bool = False
+    tunnel_through_iap: bool = False
     forward_secret: str | None = None
 
     @property
@@ -59,7 +67,27 @@ class Config:
         target = asdict(self)
         for key in ("state_dir", "repo", "forward_secret"):
             target.pop(key)
+        if self.tunnel_through_iap:
+            target["iap_firewall"] = self.iap_firewall
+        else:
+            target.pop("tunnel_through_iap")
         return hashlib.sha256(json.dumps(target, sort_keys=True).encode()).hexdigest()
+
+    @property
+    def iap_firewall(self) -> dict[str, Any]:
+        return {
+            "name": f"{self.alias}-iap",
+            "network": self.network,
+            "direction": "INGRESS",
+            "priority": 1000,
+            "sourceRanges": [IAP_SOURCE_RANGE],
+            "targetTags": [f"{self.alias}-iap"],
+            "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}],
+        }
+
+    @property
+    def iap_description(self) -> str:
+        return f"Branchyard GCE {self.project}/{self.zone}/{self.name} configuration {self.fingerprint}"
 
     def validate(self) -> None:
         for key in ("project", "name", "network", "subnet"):
@@ -91,6 +119,9 @@ class Config:
 def plan(config: Config) -> dict[str, Any]:
     """Describe work without running commands, writing files or contacting services."""
     config.validate()
+    network = "private address; requires an existing route" if config.internal_ip else "external SSH address"
+    if config.tunnel_through_iap:
+        network = f"{'private' if config.internal_ip else 'external'} address; SSH through IAP"
     return {
         "mode": "plan",
         "target": {key: str(value) if isinstance(value, Path) else value for key, value in asdict(config).items()},
@@ -108,7 +139,9 @@ def plan(config: Config) -> dict[str, Any]:
             "Verify binary versions, SSH configuration and KVM access before recording deployment.json",
         ],
         "service_account": config.service_account or "none; no default Compute Engine account selected",
-        "network": "private address; requires an existing route" if config.internal_ip else "external SSH address",
+        "network": network,
+        "ssh_transport": "iap" if config.tunnel_through_iap else "internal" if config.internal_ip else "external",
+        "iap_firewall": firewall_plan(config),
         "qualification": {"model": "not_checked", "microsandbox_hard_memory_ceiling": "not_qualified"},
         "credential_delivery": {
             "source_variable": config.forward_secret,
@@ -132,6 +165,7 @@ class Runner:
         optional: bool = False,
         script: str | None = None,
         secret_input: str | None = None,
+        timeout: float | None = None,
     ) -> str | None:
         try:
             if script is not None:
@@ -145,22 +179,56 @@ class Runner:
                         env=self.env,
                         stdout=output,
                         stderr=subprocess.STDOUT,
-                        timeout=1800,
+                        timeout=1800 if timeout is None else timeout,
                         check=False,
                     )
                 stdout, stderr = "", ""
             else:
                 result = subprocess.run(
-                    args, input=secret_input, text=True, env=self.env, capture_output=True, timeout=300, check=False
+                    args,
+                    input=secret_input,
+                    text=True,
+                    env=self.env,
+                    capture_output=True,
+                    timeout=300 if timeout is None else timeout,
+                    check=False,
                 )
                 stdout, stderr = result.stdout, result.stderr
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except subprocess.TimeoutExpired:
+            failure = SshNotReady if args[:3] == ["gcloud", "compute", "ssh"] and script is None else SetupError
+            raise failure(f"Could not finish {args[0]}: TimeoutExpired; check the tool and retry") from None
+        except OSError as error:
             raise SetupError(f"Could not finish {args[0]}: {type(error).__name__}; check the tool and retry") from None
         if result.returncode:
-            if optional and re.search(r"\b(?:NOT_FOUND|NotFound|404)\b", stderr):
+            denied = re.search(r"\b(?:PERMISSION_DENIED|UNAUTHENTICATED|FORBIDDEN|permissions?)\b", stderr, re.I)
+            missing = re.search(r"\b(?:NOT_FOUND|NotFound|404)\b|The resource '[^'\n]+' was not found\b", stderr)
+            if optional and missing and not denied:
                 return None
+            if (
+                args[:4] == ["gcloud", "compute", "instances", "create"]
+                and not denied
+                and re.search(r"ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources", stderr)
+            ):
+                raise SetupError(
+                    "GCE has no capacity for the selected machine in this zone; "
+                    "retry later or review another --zone or --machine-type"
+                )
             detail = f" Inspect {self.config.state_dir / 'install.log'} privately." if script is not None else ""
-            raise SetupError(f"{args[0]} failed (exit {result.returncode}).{detail} Check access and rerun to resume.")
+            if script is None and args[:3] in (["gcloud", "compute", "ssh"], ["gcloud", "compute", "scp"]):
+                detail += (
+                    " Check IAP tunnel IAM and whether managed network policy permits the owned TCP 22 rule."
+                    if self.config.tunnel_through_iap
+                    else " Check TCP 22 ingress and the SSH route; --internal-ip requires a private VPC route."
+                )
+            authorization_denied = re.search(
+                r"\b(?:PERMISSION_DENIED|UNAUTHENTICATED|FORBIDDEN)\b|Required '[^']+' permission", stderr, re.I
+            )
+            failure = (
+                SshNotReady
+                if args[:3] == ["gcloud", "compute", "ssh"] and result.returncode == 255 and not authorization_denied
+                else SetupError
+            )
+            raise failure(f"{args[0]} failed (exit {result.returncode}).{detail} Check access and rerun to resume.")
         return "" if secret_input is not None else stdout.strip()
 
     def json(self, args: list[str], *, optional: bool = False) -> dict[str, Any] | None:
@@ -181,6 +249,54 @@ def gcloud(config: Config, *args: str) -> list[str]:
     return ["gcloud", *args, f"--project={config.project}", "--quiet"]
 
 
+def firewall_plan(config: Config) -> dict[str, Any] | None:
+    """Describe the dedicated IAP ingress rule and its explicit teardown."""
+    if not config.tunnel_through_iap:
+        return None
+    return {
+        **config.iap_firewall,
+        "description": config.iap_description,
+        "required_permissions": [
+            "compute.firewalls.get",
+            "compute.firewalls.create",
+            "compute.firewalls.delete",
+            "iap.tunnelInstances.accessViaIAP",
+        ],
+        "cleanup_command": shlex.join(
+            gcloud(config, "compute", "firewall-rules", "delete", config.iap_firewall["name"])
+        ),
+        "qualification": "not_live_qualified; organization policy must permit this ingress rule",
+    }
+
+
+def transport(config: Config) -> list[str]:
+    """Let gcloud select IAP or the requested private address, never both."""
+    return ["--tunnel-through-iap"] if config.tunnel_through_iap else ["--internal-ip"] if config.internal_ip else []
+
+
+def inspect_iap_firewall(config: Config, run: Runner) -> dict[str, Any] | None:
+    """Refuse foreign, disabled, widened or differently configured IAP ingress."""
+    if not config.tunnel_through_iap:
+        return None
+    desired = config.iap_firewall
+    rule = run.json(
+        gcloud(config, "compute", "firewall-rules", "describe", desired["name"], "--format=json"), optional=True
+    )
+    if rule is None:
+        return None
+    normalized = dict(rule, network=rule.get("network", "").rsplit("/", 1)[-1])
+    if (
+        any(normalized.get(key) != value for key, value in desired.items())
+        or rule.get("description") != config.iap_description
+        or rule.get("disabled", False)
+        or any(rule.get(key) for key in ("denied", "sourceTags", "sourceServiceAccounts", "targetServiceAccounts"))
+    ):
+        raise SetupError(
+            "existing IAP firewall rule is foreign or differs from the reviewed policy; choose another --name"
+        )
+    return rule
+
+
 def ssh(config: Config, command: str) -> list[str]:
     """Use gcloud's existing SSH authentication and host-key handling."""
     args = gcloud(
@@ -191,11 +307,31 @@ def ssh(config: Config, command: str) -> list[str]:
         f"--zone={config.zone}",
         f"--command={command}",
         "--ssh-flag=-oConnectionAttempts=12",
-        "--ssh-flag=-oConnectTimeout=10",
+        f"--ssh-flag=-oConnectTimeout={30 if config.tunnel_through_iap else 10}",
     )
-    if config.internal_ip:
-        args.append("--internal-ip")
-    return args
+    return args + transport(config)
+
+
+def wait_for_ssh(
+    config: Config,
+    run: Runner,
+    *,
+    now: Callable[[], float] | None = None,
+    pause: Callable[[float], None] | None = None,
+) -> None:
+    """Wait up to three minutes for guest SSH/OS Login, failing fast on cloud authorization errors."""
+    clock, delay = now or time.monotonic, pause or time.sleep
+    deadline = clock() + 180
+    args = [arg.replace("ConnectionAttempts=12", "ConnectionAttempts=1") for arg in ssh(config, "true")]
+    failure = "Check the SSH route and guest OS Login configuration."
+    while (remaining := deadline - clock()) > 0:
+        try:
+            run.run(args, timeout=min(30, remaining))
+            return
+        except SshNotReady as error:
+            failure = str(error)
+            delay(min(5, max(0, deadline - clock())))
+    raise SetupError(f"SSH was not ready within 180 seconds. {failure}")
 
 
 def inspect_instance(config: Config, run: Runner) -> dict[str, Any] | None:
@@ -222,6 +358,7 @@ def inspect_instance(config: Config, run: Runner) -> dict[str, Any] | None:
         network.get("network", "").rsplit("/", 1)[-1] == config.network,
         network.get("subnetwork", "").rsplit("/", 1)[-1] == config.subnet,
         bool(network.get("accessConfigs")) != config.internal_ip,
+        not config.tunnel_through_iap or config.iap_firewall["name"] in instance.get("tags", {}).get("items", []),
     )
     if not all(checks):
         raise SetupError("existing VM is foreign or differs from the reviewed configuration; choose another --name")
@@ -314,9 +451,16 @@ install -m 0644 "$stage/libkrunfw.so.5.6.1" /var/lib/by-msb/lib/libkrunfw.so.5.6
 MSB_HOME=/var/lib/by-msb /var/lib/by-msb/bin/msb context --format json
 sudo docker save {image} | MSB_HOME=/var/lib/by-msb /var/lib/by-msb/bin/msb image load --tag {image}
 """
-    script += worker_configuration(config)
     script += "/usr/local/bin/by --version\n/usr/local/bin/agy --version\n"
     return script
+
+
+def configure_worker(config: Config) -> str:
+    """Configure through a new SSH login after installation updates the user's KVM groups."""
+    return (
+        "set -eu\numask 077\nstage=$(mktemp -d)\ntrap 'rm -rf \"$stage\"' EXIT\n"
+        f"cd {shlex.quote(config.remote_path)}\n" + worker_configuration(config)
+    )
 
 
 def worker_configuration(config: Config) -> str:
@@ -397,12 +541,19 @@ def managed_ssh(config: Config, dry_run: str, run: Runner) -> Path:
     for index, word in enumerate(words[:-1]):
         if word == "-i":
             options["IdentityFile"] = words[index + 1]
-        elif word == "-o" and "=" in words[index + 1]:
-            key, value = words[index + 1].split("=", 1)
-            if key in {"HostKeyAlias", "UserKnownHostsFile", "CheckHostIP", "IdentityFile"}:
-                options[key] = value
+        elif word == "-o":
+            option = re.split(r"[=\s]", words[index + 1], maxsplit=1)
+            if len(option) == 2:
+                key, value = option
+                permitted = {"HostKeyAlias", "UserKnownHostsFile", "CheckHostIP", "IdentityFile"}
+                if config.tunnel_through_iap:
+                    permitted.update({"ProxyCommand", "ProxyUseFdpass"})
+                if key in permitted:
+                    options[key] = value.lstrip()
     if "IdentityFile" not in options or "UserKnownHostsFile" not in options:
         raise SetupError("gcloud did not report its identity and known-hosts files; refusing an incomplete SSH entry")
+    if config.tunnel_through_iap and not options.get("ProxyCommand"):
+        raise SetupError("gcloud did not report its IAP ProxyCommand; refusing an SSH entry that would bypass IAP")
     if any("\n" in value or "\r" in value for value in options.values()):
         raise SetupError("gcloud returned an unusable SSH configuration value")
     directory = Path.home() / ".ssh"
@@ -419,7 +570,9 @@ def managed_ssh(config: Config, dry_run: str, run: Runner) -> Path:
         if hostname and hostname != config.alias:
             raise SetupError("SSH alias already resolves through another configuration; choose another --name")
     body = marker + f"Host {config.alias}\n"
-    body += "".join(f"  {key} {json.dumps(value)}\n" for key, value in options.items())
+    body += "".join(
+        f"  {key} {value if key == 'ProxyCommand' else json.dumps(value)}\n" for key, value in options.items()
+    )
     default = directory / "config"
     previous = default.read_text() if default.exists() else ""
     include = f"Include {json.dumps(str(owned / '*.conf'))}\n"
@@ -466,6 +619,7 @@ def apply(config: Config) -> dict[str, Any]:
         if not account or account.get("email") != config.service_account:
             raise SetupError("could not verify the selected existing service account")
     instance = inspect_instance(config, run)
+    firewall = inspect_iap_firewall(config, run)
     if instance is None:
         args = gcloud(
             config,
@@ -490,11 +644,38 @@ def apply(config: Config) -> dict[str, Any]:
             args.extend(["--enable-nested-virtualization", "--min-cpu-platform=Intel Cascade Lake"])
         if config.internal_ip:
             args.append("--no-address")
+        if config.tunnel_through_iap:
+            args.append(f"--tags={config.iap_firewall['name']}")
         run.run(args)
         instance = inspect_instance(config, run)
         if instance is None:
             raise SetupError("VM create returned without a verifiable machine; inspect the named VM and rerun")
-    run.run(ssh(config, "true"))
+    if config.tunnel_through_iap and firewall is None:
+        desired = config.iap_firewall
+        run.run(
+            gcloud(
+                config,
+                "compute",
+                "firewall-rules",
+                "create",
+                desired["name"],
+                f"--network={config.network}",
+                f"--description={config.iap_description}",
+                "--direction=INGRESS",
+                "--priority=1000",
+                "--action=ALLOW",
+                "--rules=tcp:22",
+                f"--source-ranges={IAP_SOURCE_RANGE}",
+                f"--target-tags={desired['name']}",
+            )
+        )
+        firewall = inspect_iap_firewall(config, run)
+        if firewall is None:
+            raise SetupError(
+                "IAP firewall rule disappeared after creation; "
+                "check organization-managed network enforcement before retrying"
+            )
+    wait_for_ssh(config, run)
     if config.repo:
         with tempfile.TemporaryDirectory(prefix="branchyard-gce-", dir=config.state_dir) as temporary:
             bundle = Path(temporary) / "source.bundle"
@@ -508,10 +689,9 @@ def apply(config: Config) -> dict[str, Any]:
                 f"{config.name}:/tmp/branchyard-{config.name}.bundle",
                 f"--zone={config.zone}",
             )
-            if config.internal_ip:
-                args.append("--internal-ip")
-            run.run(args)
+            run.run(args + transport(config))
     run.run(ssh(config, "bash -se"), script=bootstrap(config, head))
+    run.run(ssh(config, "bash -se"), script=configure_worker(config))
     if secret is not None:
         run.run(
             ssh(config, "/usr/local/bin/by harnesses login antigravity --api-key --json"),
@@ -522,9 +702,7 @@ def apply(config: Config) -> dict[str, Any]:
         check += " && test -r /dev/kvm && test -w /dev/kvm"
     run.run(ssh(config, check))
     args = gcloud(config, "compute", "ssh", config.name, f"--zone={config.zone}", "--dry-run")
-    if config.internal_ip:
-        args.append("--internal-ip")
-    path = managed_ssh(config, run.run(args) or "", run)
+    path = managed_ssh(config, run.run(args + transport(config)) or "", run)
     run.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", config.alias, "/usr/local/bin/by --version"])
     result = {
         "mode": "applied",
@@ -538,6 +716,8 @@ def apply(config: Config) -> dict[str, Any]:
         "source_head": head,
         "image": config.image,
         "version": config.version,
+        "ssh_transport": "iap" if config.tunnel_through_iap else "internal" if config.internal_ip else "external",
+        "iap_firewall": {**(firewall_plan(config) or {}), "id": firewall.get("id")} if firewall else None,
         "qualification": {"model": "not_checked", "microsandbox_hard_memory_ceiling": "not_qualified"},
         "credential_source": config.forward_secret,
         "credential_destination": "native by keystore; GEMINI_API_KEY",
@@ -578,6 +758,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--subnet", default="default")
     parser.add_argument("--disk-size", type=int, default=100)
     parser.add_argument("--internal-ip", action="store_true", help="private VM; requires an existing operator route")
+    parser.add_argument(
+        "--tunnel-through-iap",
+        action="store_true",
+        help="SSH through gcloud IAP; creates owned TCP 22 ingress from 35.235.240.0/20; "
+        "requires IAM and network-policy approval",
+    )
     parser.add_argument(
         "--forward-secret",
         choices=("GEMINI_API_KEY", "GOOGLE_API_KEY"),

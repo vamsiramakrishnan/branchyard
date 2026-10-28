@@ -233,3 +233,70 @@ Redacted evidence remains under `/tmp/branchyard-remote-20261028`, including
 this run were removed; the current CLI build remains in `target/debug/by`.
 Not done: the removed test environments are no longer available for interactive
 reuse; recreate dedicated resources with the documented helper and image recipe.
+
+
+## Published installation and fresh GCE setup, 28 October 2026
+
+Live installation checks downloaded the public `v0.1.0` installer and checksums
+from GitHub's latest release. In a clean home with no Rust toolchain on `PATH`,
+it installed and version-probed `by`, the server and bridge, including a prefix
+with spaces. Hermetic AGY readiness fixtures then exercised guided headless setup,
+repeat installation and unchanged project configuration on repeat setup.
+The published AGY 1.4.9 worker image also passed an anonymous registry pull check
+against its release-pinned digest. Evidence is under
+`/tmp/branchyard-install-20261028/public-install-3yjvz0gu`,
+`public-install-result.json` and `public-image-result.json`.
+Not done: those readiness fixtures do not establish a live model conversation.
+
+A live run of the patched GCE helper finished at 12:56:28 UTC against a fresh,
+owned `n2-standard-4` worker in `us-central1-b`. The worker had no service account,
+used its private address, and enabled nested virtualization. It installed the
+published 0.1.0 native binaries, extracted AGY 1.4.9 from the immutable release
+image, verified Microsandbox 0.7.3, and imported that worker image. Native project
+and server configuration, config validation, `serve --check` and the managed SSH
+alias probe passed. No provider credentials were forwarded and no model ran.
+The exact command, timestamps and exit status are in
+`/tmp/branchyard-install-20261028/gce-qual-published/private-b-final-apply-result.json`;
+`private-b-state/deployment.json` and `private-b-state/install.log` hold the setup
+record. The new native CLI forwarding is also tested hermetically.
+Not done: this run used the patched source helper with published 0.1.0 binaries;
+it does not qualify a 0.1.1 binary, a model conversation or the MicroVM hard
+memory ceiling.
+
+Live follow-up probes also passed: `by --remote ssh://… ls --json` connected
+through the managed alias, started the server and authenticated, returning an
+empty branch list. Microsandbox 0.7.3 ran a real guest command that printed
+`microsandbox-exec-ready`, kernel 6.12.109 and bridge 0.1.0 (protocol 2);
+the unique test sandbox was removed afterwards. The dated records are
+`native-remote-ls-result.json` and `private-b-raw-msb-result.json` beside the
+setup evidence. Not done: model execution and the MicroVM hard memory ceiling.
+
+Fresh setup exposed these additional friction points:
+
+- Cloud SDK 590.0.1 reports an absent VM as `The resource ... was not found`.
+  The helper now recognizes that form while refusing permission failures,
+  including diagnostics that also mention a missing resource.
+- Direct external SSH is blocked in this environment. The helper's private
+  route worked. Guided setup now explains transport prerequisites, and
+  `by compute gce` exposes planning and explicit application without a checkout.
+- The managed `gceenforcer-enforcer@system.gserviceaccount.com` deleted the
+  owned IAP SSH allow rule. Cloud Audit Logs show successful deletions at
+  12:31:15–20 UTC. The remaining ingress policy blocks IAP. The helper exposes
+  IAP explicitly and checks owned rule configuration; the guide does not claim
+  it was qualified here. No managed policy was bypassed.
+- `us-central1-a` returned `ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS` before
+  creating a VM. The helper now gives a capacity remedy. The operator explicitly
+  selected `us-central1-b`; the helper did not silently change the footprint.
+- A new VM briefly refused SSH public-key authentication before OS Login was
+  ready. Initial connection readiness now retries within a deadline while
+  authorization failures remain actionable.
+- Adding the user to `kvm` does not refresh the current SSH process's groups.
+  The installation and native configuration now run in separate SSH sessions.
+  A fresh session accepted Microsandbox and generated its native project config;
+  the wizard's capability checks remain unchanged.
+
+Status: live installation and cloud setup evidence is recorded above; CLI,
+transport selection, IAP ownership checks and failure handling also have hermetic
+regressions. The owned worker is retained temporarily for patch-release artifact
+verification. Not done: IAP connectivity under this managed policy, a new live
+AGY model run, and cleanup of this last worker until artifact verification ends.

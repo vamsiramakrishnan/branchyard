@@ -935,6 +935,11 @@ model call. These are operator commands, run outside a harness session.
 `by setup --guided` selects a repository and compute backend, then checks readiness.
 `by setup --up --json` includes readiness in one setup report; `--directory PATH`
 selects the repository. Cloud creation is reviewed before resources change.
+`by compute gce --project PROJECT --zone ZONE --name NAME --tunnel-through-iap`
+prints an offline JSON plan using the packaged helper; `--apply` provisions it.
+This operator-only command uses `--directory PATH` for a clean source repository.
+IAP allows TCP 22 from `35.235.240.0/20` only to the dedicated VM tag.
+`--internal-ip` can be combined with IAP to omit an external address.
 `by run` accepts `--substrate-api-token-file PATH` for Control authentication and verified
 forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable

@@ -12,16 +12,26 @@ Not on PyPI yet, so there is no `pip install branchyard` to run today. Both modu
 
 ## Install
 
-From a checkout of the repository:
+Install the released CLI without a Rust toolchain or source checkout:
 
 ```sh
-cargo install --locked --path crates/branchyard-cli     # puts `by` on PATH; no release is published yet
-pip install ./sdk/python                                # branchyard and branchyard_client
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --no-setup
 by --version
 ```
 
-`by` is found from `BRANCHYARD_BY`, else `PATH`. The release archive `branchyard-sdk-<version>.zip` installs the same
-way (`unzip` it, then `pip install ./branchyard-sdk`).
+Download `branchyard-sdk-<version>.zip` from the [latest release](https://github.com/vamsiramakrishnan/branchyard/releases/latest)
+and extract it, then install both Python modules:
+
+```sh
+python3 -m pip install ./branchyard-sdk
+```
+
+From an existing checkout, use `python3 -m pip install ./sdk/python`. To build the CLI from that checkout instead,
+run `cargo install --locked --path crates/branchyard-cli` with the repository's pinned Rust toolchain.
+
+`by` is found from `BRANCHYARD_BY`, else `PATH`. The installer uses `~/.local/bin` by default; open a new terminal
+or add that directory to `PATH` if needed. See [distribution](https://github.com/vamsiramakrishnan/branchyard/blob/main/docs/distribution.md#install-by)
+for platform requirements and the `--runtime` build.
 
 ## Run something
 

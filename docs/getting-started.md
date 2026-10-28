@@ -1,16 +1,25 @@
 # Getting started
 
-By the end of this page you have run a task on a branch, read what it did, and merged it. The first build is the slow part. The commands in steps 5 to 8 run against a fake agent, with no model and no cost, and are run again on every change (`tests/test_getting_started.py`), so the output shown there is what they print. The last line of the page says what was not run.
+By the end of this page you have run a task on a branch, read what it did, and merged it. Install a released binary to start without building from source. The commands in steps 5 to 8 run against a fake agent, with no model and no cost, and are run again on every change (`tests/test_getting_started.py`), so the output shown there is what they print. The last line of the page says what was not run.
 
 ## What you need
 
 - **git**, with `user.name` and `user.email` set, and a repository that has at least one commit.
 - **A harness CLI, installed and logged in**: Claude Code, Codex or Gemini CLI are the usual first picks. `by harnesses` (step 2) says what it finds. With none, [step 5](#5-try-it-without-a-model) runs the whole loop against a fake agent.
-- **Rust**, to build `by` on Linux or macOS: install [rustup](https://rustup.rs); the repository pins toolchain 1.94.0 and rustup fetches it on the first build. After that `cargo` matters only if your check command uses it. A check is any command that exits 0 when the work is good (`npm test`, `pytest`, `make test`).
+- **curl and a shell**, to install the released binaries on Linux or macOS. Rust is needed only for source builds and the fake-agent walkthrough below.
 
 ## 1. Install
 
-No release is published yet, so build from source:
+Install the released binaries in one command:
+
+```sh
+curl -fsSL https://github.com/vamsiramakrishnan/branchyard/releases/latest/download/install.sh | sh -s -- --no-setup
+by --version
+```
+
+The installer downloads verified prebuilt binaries into `~/.local/bin` by default. Open a new terminal or add that directory to `PATH` if the shell cannot find `by`. Use `--setup` instead of `--no-setup` to open the guided setup immediately from your repository; step 3 runs setup separately. See [distribution](distribution.md#install-by) for supported platforms, version pinning and the `--runtime` build.
+
+To build from source, install [rustup](https://rustup.rs). The repository pins toolchain 1.94.0; rustup fetches it on the first build:
 
 ```sh
 git clone https://github.com/vamsiramakrishnan/branchyard
@@ -19,7 +28,7 @@ cargo install --locked --path crates/branchyard-cli
 by --version
 ```
 
-`by --version` prints `by 0.1.0`. If the shell cannot find `by`, add `~/.cargo/bin` to your `PATH`.
+`by --version` prints the installed version. Source installations use `~/.cargo/bin`; add that directory to `PATH` if needed. A check can be any command that exits 0 when the work is good, such as `cargo test`, `npm test`, `pytest` or `make test`.
 
 ## 2. See what you have
 
@@ -230,4 +239,4 @@ After a run, send or fork, `next` lists the commands that fit the branch's state
 - [`docs/adding-a-harness.md`](adding-a-harness.md): a driver for a CLI Branchyard does not know yet.
 - [Troubleshooting](troubleshooting.md) and [upgrading](upgrade.md).
 
-Not done: step 3's `by setup --dry-run` and the bare `by` run in CI in a repository with no harness on `PATH`; `by setup` writing a configuration and installing hooks into a real harness was not run here. The real-harness command in step 4 and the `by harnesses` rows were not run against a model here. The install command was run in debug mode, offline, into a scratch directory. Everything was run on Linux; macOS and Windows were not.
+Not done: step 3's `by setup --dry-run` and the bare `by` run in CI in a repository with no harness on `PATH`; `by setup` writing a configuration and installing hooks into a real harness was not run here. The real-harness command in step 4 and the `by harnesses` rows were not run against a model here. The source install command was run in debug mode, offline, into a scratch directory. Everything was run on Linux; macOS and Windows were not.

@@ -156,6 +156,43 @@ class CloudSetupTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--forward-secret") + 1], "GEMINI_API_KEY")
         self.assertNotIn("--service-account", argv)
 
+    def test_gce_iap_transport_is_explicit_in_the_plan_and_helper_arguments(self):
+        with patch.object(cloud, "command", side_effect=AssertionError("offline subprocess")):
+            code, out, err = self.main([*self.base, "--tunnel-through-iap"])
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertEqual(plan["ssh_transport"], "iap")
+        self.assertEqual(plan["iap_firewall"]["source_range"], "35.235.240.0/20")
+        self.assertEqual(plan["iap_firewall"]["allow"], "tcp:22")
+        self.assertFalse((self.root / ".local").exists())
+        remote = "ssh://branchyard-test-worker-01234567/srv/branchyard/test-worker"
+        with (
+            patch.object(cloud.shutil, "which", return_value="/bin/tool"),
+            patch.object(cloud, "image_for_release", return_value=IMAGE),
+            patch.object(cloud, "command", return_value=json.dumps({"remote": remote})) as command,
+        ):
+            code, out, err = self.main([*self.base, "--tunnel-through-iap", "--internal-ip", "--apply"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("--tunnel-through-iap", command.call_args.args[0])
+        self.assertIn("--internal-ip", command.call_args.args[0])
+        code, out, err = self.main([*self.base, "--kind=gke", "--tunnel-through-iap"])
+        self.assertEqual(code, 1)
+        self.assertIn("only for a GCE worker", err)
+
+    def test_private_gce_plan_names_route_and_outbound_requirements(self):
+        code, out, err = self.main([*self.base, "--internal-ip"])
+        self.assertEqual(code, 0, err)
+        plan = json.loads(out)
+        self.assertEqual(plan["ssh_transport"], "private")
+        self.assertFalse(plan["external_ip"])
+        self.assertTrue(plan["private_route_required"])
+        self.assertTrue(plan["outbound_access_required"])
+        self.assertIsNone(plan["iap_firewall"])
+        self.assertFalse((self.root / ".local").exists())
+        code, out, err = self.main([*self.base, "--kind=gke", "--internal-ip"])
+        self.assertEqual(code, 1)
+        self.assertIn("only for a GCE worker", err)
+
     def test_malformed_provider_json_is_not_echoed(self):
         with (
             patch.object(cloud.shutil, "which", return_value="/bin/tool"),

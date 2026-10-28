@@ -90,7 +90,10 @@ descendant's message; state your own status in a line with report_status (workin
 by substrate setup prepares the saved template; by substrate check --smoke verifies bridge execution \
 and cleanup without a model. by up and by doctor report the saved connection and remote credential readiness. \
 An operator can run by setup --guided to select a repository and compute backend. \
-by setup --up --json includes readiness in one report; --directory PATH selects the repository.";
+by setup --up --json includes readiness in one report; --directory PATH selects the repository. \
+An operator can use by compute gce --project PROJECT --zone ZONE --name NAME --tunnel-through-iap \
+to review an offline JSON plan; --apply provisions the VM and its dedicated IAP TCP 22 firewall rule. \
+Add --internal-ip to omit an external address. This operator command refuses harness sessions and --remote.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {

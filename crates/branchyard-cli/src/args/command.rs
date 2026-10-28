@@ -1012,6 +1012,12 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::substrate_cmd::Action,
     },
+    /// Plan or provision dedicated cloud workers from this machine; operator only
+    #[command(display_order = 605)]
+    Compute {
+        #[command(subcommand)]
+        action: crate::cloud_setup::Action,
+    },
     /// Tell a harness session what changed in this repository
     ///
     /// Tells a Claude Code session (or, with --harness, another harness's) what changed in
