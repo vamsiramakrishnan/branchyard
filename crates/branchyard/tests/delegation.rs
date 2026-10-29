@@ -515,7 +515,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     delegate
         .spawn(Spawn {
             budget: Budget::usd(0.6).turns(1),
-            ..spawn("HANG", "a")
+            ..spawn("AWAIT_STEER", "a")
         })
         .unwrap();
     denied(
@@ -546,6 +546,13 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
             limit: "max_usd".into()
         }
     );
+    // Consume a's first turn before cancelling it. A spawn can return
+    // before the harness receives its prompt.
+    wait::until("child a to acknowledge its first prompt", || {
+        delegate
+            .inspect("a")
+            .is_ok_and(|info| info.last_message.contains("waiting for steering"))
+    });
     // Cancelled, they hold only what they spent, and the parent runs.
     delegate.cancel("a").unwrap();
     delegate.cancel("b").unwrap();
@@ -554,6 +561,7 @@ fn child_budgets_fit_in_what_the_parent_has_left() {
     assert_eq!(root.info().status, BranchStatus::NoChanges);
     // A child's limits bound its turns whoever sends them.
     let a = f.yard.branch("a").unwrap();
+    assert_eq!(a.info().turns, 1);
     let a = a.send("say", f.options()).unwrap();
     assert_eq!(
         a.info().status,
