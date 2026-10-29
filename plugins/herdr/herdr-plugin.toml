@@ -3,7 +3,7 @@
 # directory; `./bin/...` is resolved against it. See README.md.
 id = "branchyard"
 name = "Branchyard"
-version = "0.2.0"
+version = "0.2.1"
 min_herdr_version = "0.9.1"
 description = "Show a Branchyard server's branches as Herdr panes, with their state in the sidebar"
 platforms = ["linux", "macos"]

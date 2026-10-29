@@ -1,6 +1,6 @@
 {
   "name": "branchyard-pi",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Get Branchyard branch updates in Pi and Oh My Pi: finished or failed work, blocked tasks and requests for input. Silent without the by CLI on PATH.",
   "license": "Apache-2.0",
