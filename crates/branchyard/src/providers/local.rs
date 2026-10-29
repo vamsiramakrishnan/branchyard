@@ -50,6 +50,10 @@ impl ProviderKind for Local {
         false
     }
 
+    fn copies_worktree(&self) -> bool {
+        false
+    }
+
     fn confines_egress(&self) -> bool {
         true
     }

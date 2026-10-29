@@ -36,6 +36,10 @@ impl ProviderKind for SandboxOptions {
         "microsandbox"
     }
 
+    fn copies_worktree(&self) -> bool {
+        false
+    }
+
     fn lifecycle(&self) -> Option<Lifecycle> {
         Some(Lifecycle::of(
             self.keep,

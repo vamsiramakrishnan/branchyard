@@ -78,6 +78,9 @@ pub(crate) trait ProviderKind {
         true
     }
 
+    /// Whether worktree files cross the guest transport instead of being local or mounted.
+    fn copies_worktree(&self) -> bool;
+
     /// Whether a harness in this provider's sandbox can open a connection
     /// to this host, so that it can be served the delegation tools over
     /// HTTP (`crate::endpoint`). A sandbox that cannot runs a delegating

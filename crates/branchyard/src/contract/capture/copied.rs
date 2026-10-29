@@ -36,10 +36,7 @@ pub(crate) fn staging_cleanup(yard: &Yard, fence: &Fence) -> Cleanup {
 impl CopiedCapture {
     /// Select only providers whose worktree travels through the guest transport.
     pub(crate) fn for_record(yard: &Yard, record: &Record, fence: &Fence) -> Option<Self> {
-        if !matches!(
-            record.provider,
-            Some(crate::Provider::Substrate(_) | crate::Provider::Recipe(_))
-        ) {
+        if !crate::providers::of(record.provider.as_ref()).copies_worktree() {
             return None;
         }
         let capture = record.result_contract.as_ref()?.capture.clone()?;
