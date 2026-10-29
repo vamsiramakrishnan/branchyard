@@ -53,6 +53,28 @@ class WorkspaceCase(unittest.TestCase):
 
 
 class FileTests(WorkspaceCase):
+    def test_bundle_publication_is_complete_and_preserves_existing_destinations(self):
+        out = self.root / "bundle"
+        with self.assertRaisesRegex(RuntimeError, "stop"), common.output_directory(out) as staged:
+            (staged / "partial").write_text("unfinished")
+            self.assertFalse(out.exists())
+            raise RuntimeError("stop")
+        self.assertEqual(list(self.root.iterdir()), [])
+        with common.output_directory(out) as staged:
+            (staged / "receipt.json").write_text("complete")
+            self.assertFalse(out.exists())
+        self.assertEqual((out / "receipt.json").read_text(), "complete")
+        with self.assertRaisesRegex(ArtifactError, "already exists"), common.output_directory(out):
+            pass
+        linked = self.root / "linked"
+        linked.symlink_to(self.root / "absent")
+        with self.assertRaisesRegex(ArtifactError, "already exists"), common.output_directory(linked):
+            pass
+        raced = self.root / "appeared"
+        with self.assertRaisesRegex(ArtifactError, "appeared"), common.output_directory(raced):
+            raced.mkdir()
+        self.assertEqual(list(raced.iterdir()), [])
+
     def test_atomic_writer_preserves_previous_output_on_failure(self):
         out = self.root / "report.pdf"
         out.write_bytes(b"original")
