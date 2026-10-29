@@ -9,10 +9,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 import zipfile
 from pathlib import Path
+
+tomllib = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK = ROOT / "sdk/python"
@@ -20,6 +21,21 @@ PACKAGE = SDK / "branchyard_artifacts"
 
 
 class PackagingTests(unittest.TestCase):
+    def test_matrix_installs_explicit_build_dependencies_before_distribution_tests(self):
+        build_input = (ROOT / "deploy/artifacts-test-requirements.in").read_text()
+        build_lock = (ROOT / "deploy/artifacts-test-requirements.lock").read_text()
+        for name in ["setuptools", "wheel", "tomli"]:
+            self.assertRegex(build_input, rf"(?m)^{name}==")
+            self.assertRegex(build_lock, rf"(?m)^{name}==[^\n]+\\\n\s+--hash=sha256:")
+        self.assertNotRegex((ROOT / "deploy/artifacts-requirements.in").read_text(), r"(?m)^setuptools==")
+        workflow = (ROOT / ".github/workflows/artifacts.yml").read_text()
+        install = "python -m pip install --require-hashes -r deploy/artifacts-test-requirements.lock"
+        preflight = "Require wheel build prerequisites"
+        run = "python tests/test_artifacts_distribution.py -v"
+        self.assertIn(install, workflow)
+        self.assertLess(workflow.index(install), workflow.index(preflight))
+        self.assertLess(workflow.index(preflight), workflow.index(run))
+
     def test_base_has_no_dependencies_and_artifact_pins_match_the_hashed_lock(self):
         project = tomllib.loads((SDK / "pyproject.toml").read_text())
         self.assertEqual(project["project"]["dependencies"], [])

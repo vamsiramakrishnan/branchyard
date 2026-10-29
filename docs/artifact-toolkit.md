@@ -75,6 +75,16 @@ The image installs LibreOffice, its system Python UNO bridge, fonts and Poppler.
 Operating-system packages still follow the Debian image's package repository.
 Building this image is an explicit installation step.
 
+The Python 3.9 and 3.12 document CI jobs also install the separate hash lock
+`deploy/artifacts-test-requirements.lock`. It pins the wheel build tools and
+the `tomli` test parser for Python before 3.11. The jobs require those build
+tools before running the installed-wheel test; a missing tool cannot turn
+that test into a passing skip. Regenerate this lock with `pip-compile
+--allow-unsafe --generate-hashes --no-emit-index-url --no-emit-trusted-host
+--output-file deploy/artifacts-test-requirements.lock
+deploy/artifacts-test-requirements.in` under Python 3.9 so its conditional
+parser is included. These tools add no dependencies to the base SDK.
+
 ## Create, inspect and update
 
 Commands print JSON. A successful operation exits 0, a failed request or check

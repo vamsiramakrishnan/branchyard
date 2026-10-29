@@ -1,0 +1,6 @@
+# Test/build tools only; the SDK and artifact runtime do not depend on these.
+# Keep wheel and its packaging dependency aligned with the runtime lock.
+setuptools==82.0.1
+wheel==0.46.1
+packaging==25.0
+tomli==2.2.1; python_version < "3.11"
