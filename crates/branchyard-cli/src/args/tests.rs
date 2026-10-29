@@ -2241,6 +2241,12 @@ fn setup_takes_its_flags_and_is_the_first_command_listed() {
         general[start..].starts_with("Start:\n  setup "),
         "{general}"
     );
+    let work = general.find("Work:").unwrap();
+    assert!(general[start..work].contains("\n  up "), "{general}");
+    assert!(
+        general.contains("Review changes and collect artifacts"),
+        "{general}"
+    );
     let all = listing_text(Listing::All, false);
     let shell = all.find("Shell and setup:").unwrap();
     assert!(all[shell..].contains("\n  setup "), "{all}");

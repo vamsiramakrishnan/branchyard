@@ -673,7 +673,7 @@ pub enum Listing {
 /// The commands of `by --help`, in the order a first hour uses them. A name
 /// no command has (a command another change adds) is left out.
 pub const FRONT: &[(&str, &[&str])] = &[
-    ("Start", &["setup", "init", "doctor"]),
+    ("Start", &["setup", "up", "init", "doctor"]),
     (
         "Work",
         &[

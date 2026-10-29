@@ -2,7 +2,7 @@
 
 Written 28 October 2026.
 
-`by up` brings a repository's configured backends up in one command. It reads `branchyard.toml` and the user file ([configuration](setup.md#configuration)), works out what the repository needs and the state of each piece, does what it can (install a harness the policy allows, start the connector gateway), and lists what only a person can do: a login, a key, a trust decision. `by doctor` ([doctor](doctor.md)) reads and repairs nothing; `by up` is the command that acts.
+`by up` brings a repository's configured backends up in one command. It appears in the Start group of `by --help`, beside setup and doctor. It reads `branchyard.toml` and the user file ([configuration](setup.md#configuration)), works out what the repository needs and the state of each piece, does what it can (install a harness the policy allows, start the connector gateway), and lists what only a person can do: a login, a key, a trust decision. `by doctor` ([doctor](doctor.md)) reads and repairs nothing; `by up` is the command that acts.
 
 ```sh
 by up            # install what is allowed, start the gateway, list the rest
