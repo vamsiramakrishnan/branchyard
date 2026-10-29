@@ -280,6 +280,24 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
             reason: format!("recovery could not finish the turn: {error}"),
         };
     }
+    if record
+        .result_contract
+        .as_ref()
+        .is_some_and(|contract| contract.capture.is_some())
+    {
+        let receipt = step(crate::contract::CAPTURE_STEP).and_then(|step| step.outcome.as_ref());
+        let captured = if step(placement::STEP_SANDBOX).is_some() && receipt.is_none() {
+            Err(Error::Denied("artifact recovery has no completed provider-transfer capture receipt; retry the task".into()))
+        } else {
+            crate::contract::collect_artifacts(yard, &record, &fence)
+                .and_then(|_| crate::contract::capture_native(yard, &record, &mut recorder))
+        };
+        if let Err(error) = captured {
+            record.info.status = BranchStatus::Failed {
+                reason: error.to_string(),
+            };
+        }
+    }
     // The cut-off turn's prompt, for `by send --retry`.
     if cut_off {
         record.retry = Some(crate::checkpoint::asked_text(&prompt).to_owned());

@@ -1757,6 +1757,32 @@ class ModuleSpawnAndReport(unittest.TestCase):
                     bm.spawn("Research", result=contract)
             run.assert_not_called()
 
+    def test_spawn_passes_explicit_capture_path_and_limits_without_changing_schema(self):
+        schema = {"type": "object", "additionalProperties": False}
+        result = {
+            "schema": schema,
+            "required": True,
+            "purpose": "deliverable",
+            "capture": {"manifest": "outputs/artifacts.json", "max_files": 4, "max_bytes": 4096},
+        }
+        seen, _ = self.run_by(lambda: bm.spawn("Create a report", result=result), self.SPAWNED)
+        args = seen[0][0]
+        self.assertEqual(args[args.index("--result-artifacts") + 1], "outputs/artifacts.json")
+        self.assertEqual(args[args.index("--result-artifacts-max-files") + 1], "4")
+        self.assertEqual(args[args.index("--result-artifacts-max-bytes") + 1], "4096")
+        self.assertEqual(json.loads(args[args.index("--result-schema") + 1]), schema)
+        with mock.patch.object(bm, "_run") as run:
+            for capture in [
+                {},
+                {"manifest": ""},
+                {"manifest": "x", "max_files": True},
+                {"manifest": "x", "max_bytes": 0},
+                {"manifest": "x", "actor": "other"},
+            ]:
+                with self.subTest(capture=capture), self.assertRaises(ValueError):
+                    bm.spawn("Create a report", result={**result, "capture": capture})
+            run.assert_not_called()
+
     def test_handoff_builds_one_cli_request_and_keeps_the_frozen_payload(self):
         expected = HANDOFF_MESSAGE["handoff"]["version"]
         seen, sent = self.run_by(

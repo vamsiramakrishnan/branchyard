@@ -925,6 +925,7 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
         schema: json!({"type": "string", "$ref": "#/a"}),
         required: false,
         purpose: branchyard::ResultPurpose::Report,
+        capture: None,
     };
     let error = repo
         .spawn("root", &spawn("bad", outside), &new_key())

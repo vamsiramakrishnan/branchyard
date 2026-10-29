@@ -215,7 +215,7 @@ pub use checkpoint::{
     Rewound,
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
-pub use contract::{ResultContract, ResultPurpose};
+pub use contract::{ResultCapture, ResultContract, ResultPurpose};
 pub use delegation::{
     nest_graph_budgets, nest_plan_budgets, Asked, Brief, Cancelled, ChildBudget, Children,
     Delegate, Delegated, DelegationPlan, Envelope, EventPage, Inbox, Inspection, Sent, Spawn,

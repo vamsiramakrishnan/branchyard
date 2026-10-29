@@ -364,6 +364,7 @@ fn a_contract_outside_the_subset_is_refused_at_spawn_and_creates_no_child() {
         schema: json!({"type": "object", "properties": {"id": {"type": "string", "$ref": "#/a"}}}),
         required: false,
         purpose: branchyard::ResultPurpose::Report,
+        capture: None,
     };
     let needle = "result.schema.properties.id uses `$ref`, which the contract does not support";
     denied(
@@ -463,6 +464,7 @@ fn a_contract_with_the_richer_keywords_and_a_null_result_works_end_to_end() {
         schema: json!({"properties": {"id": {"pattern": "(x"}}}),
         required: false,
         purpose: branchyard::ResultPurpose::Report,
+        capture: None,
     };
     denied(
         parent.spawn(spawn("say hi", "bad", Some(bad))),

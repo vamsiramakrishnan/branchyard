@@ -2575,58 +2575,109 @@ fn identities(conn: &Connection) -> Result<Vec<Identity>, Error> {
     Ok(found)
 }
 
+fn insert_artifact(tx: &Transaction<'_>, new: &NewArtifact) -> Result<ArtifactRow, Error> {
+    let now = to_db("now_ms", now_ms())?;
+    let ancestry = encode("ancestry", &new.ancestry)?;
+    let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
+    let labels = encode("labels", &new.labels)?;
+    tx.execute(
+        "INSERT INTO artifacts \
+         (id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, \
+          labels, publisher_incarnation, ancestry_incarnations) \
+         VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            new.digest,
+            to_db("size", new.size)?,
+            new.name,
+            new.media_type,
+            new.publisher_branch,
+            ancestry,
+            to_db("turn", new.turn)?,
+            now,
+            labels,
+            new.publisher_incarnation,
+            ancestry_incarnations,
+        ],
+    )
+    .map_err(|e| db("artifact", e))?;
+    let seq = tx.last_insert_rowid();
+    let id = format!("art{seq}");
+    tx.execute(
+        "UPDATE artifacts SET id = ?1 WHERE seq = ?2",
+        params![id, seq],
+    )
+    .map_err(|e| db("artifact", e))?;
+    artifact_row_from(ArtifactCols {
+        id,
+        digest: new.digest.clone(),
+        size: to_db("size", new.size)?,
+        name: new.name.clone(),
+        media_type: new.media_type.clone(),
+        publisher: new.publisher_branch.clone(),
+        ancestry,
+        turn: to_db("turn", new.turn)?,
+        created_ms: now,
+        labels,
+        publisher_incarnation: Some(new.publisher_incarnation),
+        ancestry_incarnations,
+    })
+}
+
 impl StorageBackend for Sqlite {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
         self.query(identities)
     }
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
+        self.tx(true, |tx| insert_artifact(tx, new))
+    }
+
+    fn capture_artifacts(
+        &self,
+        fence: &Fence,
+        manifest_digest: &str,
+        artifacts: &[NewArtifact],
+    ) -> Result<Vec<ArtifactRef>, Error> {
+        crate::contract::validate_capture_batch(fence, manifest_digest, artifacts)?;
         self.tx(true, |tx| {
+            check(tx, fence)?;
+            let (turn, expires): (i64, i64) = tx.query_row("SELECT turn, expires_ms FROM leases WHERE branch = ?1", params![fence.branch], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|error| db("capture lease", error))?;
+            if from_db("expires_ms", expires)? <= now_ms() {
+                return Err(fenced(fence, "expired before capture"));
+            }
+            let cancelled: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM cancels WHERE incarnation = ?1 AND turn = ?2)",
+                params![fence.incarnation, to_db("turn", fence.turn)?], |row| row.get(0))
+                .map_err(|error| db("capture cancellation", error))?;
+            if from_db("turn", turn)? != fence.turn || incarnation(tx, &fence.branch)? != Some(fence.incarnation) || cancelled {
+                return Err(Error::Denied("capture producer was cancelled, replaced or changed turn".into()));
+            }
+            let intent = serde_json::json!({"manifest_sha256": manifest_digest});
+            let prior: Option<(String, Option<String>)> = tx.query_row(
+                "SELECT intent, outcome FROM steps WHERE incarnation = ?1 AND turn = ?2 AND step = ?3",
+                params![fence.incarnation, to_db("turn", fence.turn)?, crate::contract::CAPTURE_STEP],
+                |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(|error| db("capture receipt", error))?;
+            if let Some((previous, outcome)) = prior {
+                if decode::<Value>("capture intent", &previous)? != intent {
+                    return Err(Error::Denied("capture manifest changed after publication".into()));
+                }
+                return match outcome {
+                    Some(text) => decode("capture receipt", &text),
+                    None => Err(Error::State("capture receipt has no completed outcome".into())),
+                };
+            }
+            if artifacts.is_empty() {
+                return Err(Error::Denied("capture needs at least one artifact".into()));
+            }
+            let published = artifacts.iter().map(|new| insert_artifact(tx, new).map(|row| row.artifact))
+                .collect::<Result<Vec<_>, Error>>()?;
             let now = to_db("now_ms", now_ms())?;
-            let ancestry = encode("ancestry", &new.ancestry)?;
-            let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
-            let labels = encode("labels", &new.labels)?;
-            tx.execute(
-                "INSERT INTO artifacts \
-                 (id, digest, size, name, media_type, publisher, ancestry, turn, created_ms, \
-                  labels, publisher_incarnation, ancestry_incarnations) \
-                 VALUES ('', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    new.digest,
-                    to_db("size", new.size)?,
-                    new.name,
-                    new.media_type,
-                    new.publisher_branch,
-                    ancestry,
-                    to_db("turn", new.turn)?,
-                    now,
-                    labels,
-                    new.publisher_incarnation,
-                    ancestry_incarnations,
-                ],
-            )
-            .map_err(|e| db("artifact", e))?;
-            let seq = tx.last_insert_rowid();
-            let id = format!("art{seq}");
-            tx.execute(
-                "UPDATE artifacts SET id = ?1 WHERE seq = ?2",
-                params![id, seq],
-            )
-            .map_err(|e| db("artifact", e))?;
-            artifact_row_from(ArtifactCols {
-                id,
-                digest: new.digest.clone(),
-                size: to_db("size", new.size)?,
-                name: new.name.clone(),
-                media_type: new.media_type.clone(),
-                publisher: new.publisher_branch.clone(),
-                ancestry,
-                turn: to_db("turn", new.turn)?,
-                created_ms: now,
-                labels,
-                publisher_incarnation: Some(new.publisher_incarnation),
-                ancestry_incarnations,
-            })
+            tx.execute("INSERT INTO steps (incarnation, turn, step, branch, generation, intent, outcome, started_ms, finished_ms) \
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)", params![fence.incarnation, to_db("turn", fence.turn)?,
+                crate::contract::CAPTURE_STEP, fence.branch, to_db("generation", fence.generation)?,
+                encode("capture intent", &intent)?, encode("capture receipt", &published)?, now])
+                .map_err(|error| db("capture receipt", error))?;
+            Ok(published)
         })
     }
 

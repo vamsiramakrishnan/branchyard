@@ -520,11 +520,17 @@ pub(crate) fn result_contract(
     file: Option<&str>,
     required: bool,
     deliverable: bool,
+    capture: Option<&branchyard::ResultCapture>,
 ) -> Result<Option<branchyard::ResultContract>, branchyard::Error> {
     json_flag("--result-schema", (schema, file))?
-        .map(|schema| match deliverable {
-            true => branchyard::ResultContract::deliverable(schema),
-            false => branchyard::ResultContract::new(schema, required),
+        .map(|schema| {
+            let mut contract = match deliverable {
+                true => branchyard::ResultContract::deliverable(schema)?,
+                false => branchyard::ResultContract::new(schema, required)?,
+            };
+            contract.capture = capture.cloned();
+            contract.check()?;
+            Ok(contract)
         })
         .transpose()
 }
@@ -538,6 +544,7 @@ pub(crate) fn result_for_task(
         task.result_schema_file.as_deref(),
         task.result_required,
         task.result_deliverable,
+        task.result_capture.as_ref(),
     )
 }
 

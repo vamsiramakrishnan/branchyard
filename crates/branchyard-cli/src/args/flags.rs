@@ -874,9 +874,40 @@ pub struct ResultFlags {
     /// Accept the native final JSON answer as the deliverable; no Git change is needed
     #[arg(long, help_heading = "Result")]
     result_deliverable: bool,
+    /// Collect this worktree-relative output manifest after the provider returns files
+    #[arg(long, value_name = "PATH", value_parser = non_blank, requires = "result_deliverable", help_heading = "Result")]
+    result_artifacts: Option<String>,
+    /// Maximum captured files (default: 32; at most 1024)
+    #[arg(
+        long,
+        value_name = "COUNT",
+        requires = "result_artifacts",
+        help_heading = "Result"
+    )]
+    result_artifacts_max_files: Option<u32>,
+    /// Maximum total captured bytes (default: 268435456)
+    #[arg(
+        long,
+        value_name = "BYTES",
+        requires = "result_artifacts",
+        help_heading = "Result"
+    )]
+    result_artifacts_max_bytes: Option<u64>,
 }
 
 impl ResultFlags {
+    fn capture(&self) -> Option<branchyard::ResultCapture> {
+        self.result_artifacts.as_ref().map(|manifest| {
+            let mut capture = branchyard::ResultCapture::new(manifest.clone());
+            if let Some(max_files) = self.result_artifacts_max_files {
+                capture.max_files = max_files;
+            }
+            if let Some(max_bytes) = self.result_artifacts_max_bytes {
+                capture.max_bytes = max_bytes;
+            }
+            capture
+        })
+    }
     fn validate(&self) -> Result<(), String> {
         if (self.result_required || self.result_deliverable)
             && self.result_schema.is_none()
@@ -896,6 +927,7 @@ impl ResultFlags {
 
     fn apply(self, task: &mut TaskArgs) -> Result<(), String> {
         self.validate()?;
+        task.result_capture = self.capture();
         task.result_schema = self.result_schema;
         task.result_schema_file = self.result_schema_file;
         task.result_required = self.result_required;
@@ -1627,6 +1659,7 @@ impl Flags for SpawnFlags {
     type Output = SpawnArgs;
     fn check(self) -> Result<SpawnArgs, String> {
         self.graph.result.validate()?;
+        let result_capture = self.graph.result.capture();
         let mut task = TaskArgs {
             harness: self.harness,
             name: self.name,
@@ -1661,6 +1694,7 @@ impl Flags for SpawnFlags {
             result_schema_file: self.graph.result.result_schema_file,
             result_required: self.graph.result.result_required,
             result_deliverable: self.graph.result.result_deliverable,
+            result_capture,
             owns: self
                 .graph
                 .owns

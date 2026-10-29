@@ -261,6 +261,7 @@ struct Actor {
     /// The private home on this host, and where it is in the actor.
     home: Option<(PathBuf, PathBuf)>,
     released: bool,
+    transfer_error: Option<String>,
 }
 
 impl Actor {
@@ -273,6 +274,7 @@ impl Actor {
             Ok(endpoint) => {
                 if let Some(pushed) = &self.pushed {
                     if let Err(error) = transfer::pull(endpoint.as_ref(), pushed, &self.worktree) {
+                        self.transfer_error = Some(error.to_string());
                         warnings.push(format!(
                             "could not bring the worktree back from {noun} {}: {error}",
                             self.name
@@ -288,10 +290,13 @@ impl Actor {
                     }
                 }
             }
-            Err(error) if self.pushed.is_some() => warnings.push(format!(
-                "could not bring anything back from {noun} {}: {error}",
-                self.name
-            )),
+            Err(error) if self.pushed.is_some() => {
+                self.transfer_error = Some(error.clone());
+                warnings.push(format!(
+                    "could not bring anything back from {noun} {}: {error}",
+                    self.name
+                ));
+            }
             Err(_) => {}
         }
         self.pushed = None;
@@ -597,6 +602,7 @@ impl Placement {
             pushed: None,
             home: None,
             released: false,
+            transfer_error: None,
         });
         let fail = |actor: &mut Actor, why: String| -> Result<Placement, String> {
             let warnings = actor.release();
@@ -816,6 +822,14 @@ impl Placement {
         // longer this turn's to reclaim.
         self.service = None;
         said
+    }
+
+    /// Whether copied work failed to return; cleanup warnings alone do not fail capture.
+    pub fn transfer_error(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Substrate(actor) => actor.transfer_error.as_deref(),
+            _ => None,
+        }
     }
 
     fn release_sandbox(&mut self, yard: &Yard, record: &Record, fence: &Fence) -> Vec<Activity> {

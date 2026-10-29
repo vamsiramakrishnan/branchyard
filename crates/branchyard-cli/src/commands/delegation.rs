@@ -43,6 +43,7 @@ pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outc
         args.result_schema_file.as_deref(),
         args.result_required,
         args.result_deliverable,
+        args.result_capture.as_ref(),
     ) {
         Ok(result) => result,
         Err(error) => return fail(json, &error),

@@ -2032,6 +2032,9 @@ class Repo:
         contract, `{"schema": {...}, "required": bool}`: the child reports a
         JSON value matching the schema, and `inspection.result` reads it
         back; a schema keyword outside the contract's subset is refused.
+        A required deliverable may add capture={manifest, max_files, max_bytes}
+        to collect bounded regular files after provider transfer. The receipt
+        and artifacts remain separate from the native result value.
         `bindings` is a list of `{"scratch", "access"}` or a dict from
         scratch area to `read_only` or `exclusive_write`. `owns` are the
         paths the child owns, `land` leaves it to the engine to land, and

@@ -166,6 +166,7 @@ fn run_takes_every_task_option() {
             result_schema_file: None,
             result_required: false,
             result_deliverable: false,
+            result_capture: None,
             no_files: false,
             no_preflight: false,
         }
@@ -2514,4 +2515,23 @@ fn no_files_is_a_fan_option_without_duplicating_task_new_or_run_flags() {
             .contains("cannot be used with")
     );
     assert!(help("fan").contains("--no-files"));
+}
+
+#[test]
+fn result_capture_flags_require_a_schema_and_deliverable_and_keep_explicit_limits() {
+    for command in ["run work", "fan work --harness codex"] {
+        let task = task(&format!("{command} --result-schema '{{}}' --result-deliverable --result-artifacts outputs/artifacts.json --result-artifacts-max-files 4 --result-artifacts-max-bytes 4096"));
+        let capture = task.result_capture.unwrap();
+        assert_eq!(capture.manifest, "outputs/artifacts.json");
+        assert_eq!((capture.max_files, capture.max_bytes), (4, 4096));
+    }
+    let Command::Spawn { spawn, .. } = parse_str("spawn work --result-schema '{}' --result-deliverable --result-artifacts outputs/artifacts.json").unwrap() else { panic!("spawn"); };
+    assert_eq!(spawn.result_capture.as_ref().unwrap().max_files, 32);
+    for flags in [
+        "--result-artifacts outputs/artifacts.json",
+        "--result-deliverable --result-artifacts outputs/artifacts.json",
+        "--result-artifacts-max-files 3",
+    ] {
+        assert!(parse_str(&format!("run work {flags}")).is_err(), "{flags}");
+    }
 }

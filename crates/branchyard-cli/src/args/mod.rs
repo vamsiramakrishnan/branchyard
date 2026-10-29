@@ -192,6 +192,7 @@ pub struct TaskArgs {
     pub result_required: bool,
     /// The structured result is the deliverable; Git changes are optional.
     pub result_deliverable: bool,
+    pub result_capture: Option<branchyard::ResultCapture>,
     /// `fan --no-files`: use private task storage without project files.
     pub no_files: bool,
     /// `--no-preflight`: do not check, before the branch is created, that

@@ -2966,7 +2966,7 @@ macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, removed_children,
             reservations, events,
-            concurrent_appends, contended_feed, races, storage, messages, delivery, handoffs, handoff_fencing, handoff_retries, graph, ports, sandboxes,
+            concurrent_appends, contended_feed, races, storage, artifact_capture, messages, delivery, handoffs, handoff_fencing, handoff_retries, graph, ports, sandboxes,
             outcomes, knowledge, pools, usage, effects, limits, corrupt);
     };
     ($open:expr; $($check:ident),*) => {
@@ -3064,4 +3064,156 @@ mod postgres {
             .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
             .unwrap();
     }
+}
+
+/// Capture metadata and its receipt commit together, once, under the producer's live fence.
+pub(crate) fn artifact_capture(s: Opened) {
+    use crate::storage::NewArtifact;
+    let digest = "a".repeat(64);
+    let producer = record("capture-producer");
+    s.backend.write(&producer, None).unwrap();
+    let fence = granted(
+        s.backend
+            .acquire(&producer, &owner("capture"), TTL)
+            .unwrap(),
+    );
+    let new = |fence: &Fence, size| NewArtifact {
+        digest: "content".into(),
+        size,
+        name: "evidence.txt".into(),
+        media_type: "text/plain".into(),
+        publisher_branch: fence.branch.clone(),
+        turn: fence.turn,
+        labels: Default::default(),
+        ancestry: Vec::new(),
+        publisher_incarnation: fence.incarnation,
+        ancestry_incarnations: Vec::new(),
+    };
+    let expired = record("capture-expired");
+    s.backend.write(&expired, None).unwrap();
+    let expired = granted(
+        s.backend
+            .acquire(&expired, &owner("expired"), Duration::ZERO)
+            .unwrap(),
+    );
+    assert!(matches!(
+        s.storage
+            .capture_artifacts(&expired, &digest, &[new(&expired, 12)]),
+        Err(Error::Fenced(_))
+    ));
+    let artifacts = vec![new(&fence, 12), new(&fence, 24)];
+    let published = s
+        .storage
+        .capture_artifacts(&fence, &digest, &artifacts)
+        .unwrap();
+    assert_eq!(published.len(), 2);
+    assert_eq!(s.storage.artifacts().unwrap().len(), 2);
+    let step = s
+        .backend
+        .steps(&fence.branch, fence.turn)
+        .unwrap()
+        .into_iter()
+        .find(|step| step.step == crate::contract::CAPTURE_STEP)
+        .unwrap();
+    assert_eq!(step.intent, serde_json::json!({"manifest_sha256":digest}));
+    assert_eq!(
+        step.outcome,
+        Some(serde_json::to_value(&published).unwrap())
+    );
+    assert_eq!(
+        s.storage.capture_artifacts(&fence, &digest, &[]).unwrap(),
+        published
+    );
+    assert!(s
+        .storage
+        .capture_artifacts(&fence, &"b".repeat(64), &artifacts)
+        .is_err());
+    let forged = Fence {
+        turn: fence.turn + 1,
+        ..fence.clone()
+    };
+    assert!(s
+        .storage
+        .capture_artifacts(&forged, &digest, &[new(&forged, 12)])
+        .is_err());
+    let mut wrong_publisher = new(&fence, 12);
+    wrong_publisher.publisher_branch = "another-branch".into();
+    assert!(s
+        .storage
+        .capture_artifacts(&fence, &digest, &[wrong_publisher])
+        .is_err());
+    assert!(s
+        .backend
+        .request_cancel(&fence.branch, "operator", false)
+        .unwrap());
+    assert!(s.storage.capture_artifacts(&fence, &digest, &[]).is_err());
+    let lease = s
+        .backend
+        .leases()
+        .unwrap()
+        .into_iter()
+        .find(|lease| lease.branch == fence.branch)
+        .unwrap();
+    let taken = s
+        .backend
+        .take_over(&lease, &owner("new-capture"), TTL)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        s.storage.capture_artifacts(&fence, &digest, &artifacts),
+        Err(Error::Fenced(_))
+    ));
+    s.backend.finish(&taken, None, None).unwrap();
+    s.backend.delete(&fence.branch).unwrap();
+    s.backend.write(&producer, None).unwrap();
+    let replaced = granted(
+        s.backend
+            .acquire(&producer, &owner("replacement"), TTL)
+            .unwrap(),
+    );
+    assert_ne!(replaced.incarnation, fence.incarnation);
+    assert!(matches!(
+        s.storage.capture_artifacts(&fence, &digest, &artifacts),
+        Err(Error::Fenced(_))
+    ));
+    assert!(s
+        .backend
+        .steps(&replaced.branch, replaced.turn)
+        .unwrap()
+        .is_empty());
+
+    // An error inserting the second artifact rolls the first insertion back as well.
+    let rollback = record("capture-rollback");
+    s.backend.write(&rollback, None).unwrap();
+    let rollback = granted(
+        s.backend
+            .acquire(&rollback, &owner("rollback"), TTL)
+            .unwrap(),
+    );
+    let before = s.storage.artifacts().unwrap();
+    assert!(s
+        .storage
+        .capture_artifacts(
+            &rollback,
+            &digest,
+            &[new(&rollback, 12), new(&rollback, u64::MAX)]
+        )
+        .is_err());
+    assert_eq!(s.storage.artifacts().unwrap(), before);
+    assert!(s
+        .backend
+        .steps(&rollback.branch, rollback.turn)
+        .unwrap()
+        .is_empty());
+    let completed = s
+        .storage
+        .capture_artifacts(&rollback, &digest, &[new(&rollback, 12)])
+        .unwrap();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        s.storage
+            .capture_artifacts(&rollback, &digest, &[])
+            .unwrap(),
+        completed
+    );
 }
