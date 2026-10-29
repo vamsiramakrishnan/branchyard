@@ -1485,6 +1485,25 @@ impl Backend for Sqlite {
         })
     }
 
+    fn execution_host(&self, name: &str) -> Result<Option<String>, Error> {
+        self.query(|conn| {
+            let text = conn.query_row(
+                "SELECT s.intent FROM steps s JOIN branches b ON b.incarnation = s.incarnation \
+                 WHERE b.name = ?1 AND s.step = 'start' ORDER BY s.turn DESC LIMIT 1",
+                params![name], |row| row.get::<_, String>(0),
+            ).optional().map_err(|error| db("execution host", error))?;
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let intent: Value = decode("start", &text)?;
+            Ok(intent
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned))
+        })
+    }
+
     fn record_process(&self, fence: &Fence, process: &ProcessRow) -> Result<(), Error> {
         self.tx(true, |tx| {
             check(tx, fence)?;

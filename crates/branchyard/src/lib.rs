@@ -173,6 +173,7 @@ pub mod tasks;
 pub mod up;
 mod wake;
 mod workspace;
+pub mod workspace_runtime;
 
 use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;

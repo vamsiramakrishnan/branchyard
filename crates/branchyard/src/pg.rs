@@ -1748,6 +1748,25 @@ impl Backend for Postgres {
             .collect()
     }
 
+    fn execution_host(&self, name: &str) -> Result<Option<String>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+            "SELECT s.intent FROM by_steps s JOIN by_branches b ON b.incarnation = s.incarnation \
+             WHERE b.repo = $1 AND b.name = $2 AND s.step = 'start' ORDER BY s.turn DESC LIMIT 1",
+            &[&self.repo, &name],
+        )
+        })?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let intent: Value = decode("start", &row.get::<_, String>(0))?;
+        Ok(intent
+            .get("host")
+            .and_then(Value::as_str)
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned))
+    }
+
     fn record_process(&self, fence: &Fence, process: &ProcessRow) -> Result<(), Error> {
         self.tx(true, |tx| {
             self.check(tx, fence)?;

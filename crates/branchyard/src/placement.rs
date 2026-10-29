@@ -122,6 +122,8 @@ pub(crate) enum SandboxPlan {
     /// [`snapshots::acquire`].
     #[default]
     Default,
+    /// An interactive helper may resume only this branch's existing allocation.
+    Retained,
     /// A sandbox made for this turn already (a fan's branch of its prepared
     /// sandbox), whose `sandbox` step is journaled.
     Handed { name: String, origin: SandboxOrigin },
@@ -350,6 +352,43 @@ fn journal_sandbox(yard: &Yard, fence: &Fence, name: &str, extra: Value) -> Resu
 }
 
 impl Placement {
+    /// Stop owning cleanup after a workspace lease was lost. Recovery owns it.
+    pub(crate) fn detach_workspace(&mut self) {
+        match &mut self.kind {
+            Kind::Local(_) => {}
+            Kind::Sandbox { released, .. } => *released = true,
+            Kind::Substrate(actor) => actor.released = true,
+        }
+        self.service = None;
+    }
+
+    /// Execute an operator-controlled workspace helper through this placement.
+    pub(crate) fn exec_workspace(
+        &self,
+        argv: Vec<String>,
+        env: BTreeMap<OsString, OsString>,
+    ) -> Result<Box<dyn branchyard_sandbox::Process>, String> {
+        let spec = branchyard_sandbox::ExecSpec {
+            argv,
+            cwd: self.cwd().into(),
+            env,
+            writable: self.writable.clone(),
+        };
+        match &self.kind {
+            Kind::Local(_) => branchyard_runtime::LocalProvider::spawn(&spec)
+                .map(|process| Box::new(process) as Box<dyn branchyard_sandbox::Process>)
+                .map_err(|error| error.to_string()),
+            Kind::Sandbox { provider, name, .. } => provider
+                .exec(name, &spec)
+                .map_err(|error| error.to_string()),
+            Kind::Substrate(actor) => actor
+                .provider
+                .provider()
+                .exec(&actor.name, &spec)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     /// Prepare the record's provider: for a sandbox, get it now (kept,
     /// branched, handed over or fresh, as `plan` and the store say). A
     /// failure is the turn's failure reason.
@@ -411,10 +450,15 @@ impl Placement {
                     },
                 }
             }
-            SandboxPlan::Default => {
+            SandboxPlan::Default | SandboxPlan::Retained => {
                 let store = yard.store();
                 let environment = environment(yard, record, &key);
-                snapshots::acquire(
+                let acquire = if matches!(plan, SandboxPlan::Retained) {
+                    snapshots::acquire_retained
+                } else {
+                    snapshots::acquire
+                };
+                acquire(
                     &store,
                     provider.as_ref(),
                     &journal,
@@ -565,9 +609,14 @@ impl Placement {
                         }
                     })
             }),
-            SandboxPlan::Default => {
+            SandboxPlan::Default | SandboxPlan::Retained => {
                 let environment = environment(yard, record, &key);
-                snapshots::acquire(
+                let acquire = if matches!(plan, SandboxPlan::Retained) {
+                    snapshots::acquire_retained
+                } else {
+                    snapshots::acquire
+                };
+                acquire(
                     &store,
                     remote.provider(),
                     &journal,
