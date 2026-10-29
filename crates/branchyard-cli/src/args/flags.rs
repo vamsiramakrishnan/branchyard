@@ -1458,6 +1458,34 @@ impl Flags for SendFlags {
     }
 }
 
+/// Operator sends distinguish session edits from provisioning replacements.
+/// Other commands sharing [`SendFlags`] retain their replacement semantics.
+#[derive(Args, Clone, Debug, Default, PartialEq)]
+pub struct SendSessionFlags {
+    #[command(flatten)]
+    send: SendFlags,
+}
+
+impl Flags for SendSessionFlags {
+    type Output = TaskArgs;
+    fn check(self) -> Result<TaskArgs, String> {
+        let mut task = self.send.check()?;
+        if let Some(spec) = &task.provision {
+            let mut rest = spec.clone();
+            rest.model = None;
+            rest.effort = None;
+            if rest.is_empty() && task.instructions.is_none() {
+                task.session_patch = Some(branchyard::SessionPatch {
+                    model: spec.model.clone(),
+                    effort: spec.effort,
+                });
+                task.provision = None;
+            }
+        }
+        Ok(task)
+    }
+}
+
 /// `by fork`'s task options.
 #[derive(Args, Clone, Debug, Default, PartialEq)]
 pub struct ForkFlags {

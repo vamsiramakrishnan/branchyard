@@ -319,6 +319,26 @@ class Requests(ServerCase):
         body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
         self.assertEqual(body, {"prompt": "more", "budget": {"max_usd": 1}})
 
+    def test_session_patch_is_explicit_and_does_not_merge_replacement_provisioning(self):
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, self.op("op-patch", "queued")))
+        patch = {"model": "m", "effort": "low"}
+        self.app.send("b", "more", session_patch=patch)
+        body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
+        self.assertEqual(body["session_patch"], patch)
+        self.assertNotIn("provision", body)
+        for invalid in [{}, {"model": " "}, {"model": None}, {"effort": True}, {"effort": []}, {"secrets": []}]:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.app.send("b", "more", session_patch=invalid)
+        for replacement in [{"provision": {}}, {"provision": {"secrets": []}}, {"connectors": []}]:
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                self.app.send("b", "more", session_patch=patch, **replacement)
+        self.assertEqual(len(self.requests("POST", f"{REPO}/branches/b/send")), 1)
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, self.op("op-replace", "queued")))
+        self.app.send("b", "revoke", provision={"secrets": [], "mcp_servers": []})
+        replacement = self.requests("POST", f"{REPO}/branches/b/send")[-1][3]
+        self.assertEqual(replacement["provision"], {"secrets": [], "mcp_servers": []})
+        self.assertNotIn("session_patch", replacement)
+
     def test_spawn_asks_for_the_childs_grant_in_the_object_form(self):
         self.fake.answer("POST", f"{REPO}/branches/p/spawn", (202, self.op("op4", "queued", "kid", kind="spawn")))
         self.app.spawn("p", "work", name="kid", connectors=["github:read:issues.list"], max_depth=0)
@@ -2121,6 +2141,28 @@ class OneApi(ServerCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
         super().tearDown()
+
+    def test_operator_session_patch_reaches_http_and_is_refused_inside_a_harness(self):
+        queued = self.op("patch-one-api", "queued")
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, queued))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/patch-one-api",
+            (200, {**queued, "state": "succeeded", "result": {"branches": [{**KID_INFO, "name": "b"}]}}),
+        )
+        outside = bc.connect(self.app, branch="lead")
+        patch = {"effort": "low"}
+        self.assertEqual(outside.send("b", "more", session_patch=patch).name, "b")
+        body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
+        self.assertEqual(body["session_patch"], patch)
+        with mock.patch.dict(os.environ, {"BRANCHYARD_DELEGATION": "token"}):
+            inside = bc.connect()
+            with self.assertRaises(bc.DeniedError):
+                inside.send("b", "more", session_patch=patch)
+        with mock.patch.object(bm, "_run") as run:
+            with self.assertRaises(bc.DeniedError):
+                bm.send("b", "more", session_patch=patch)
+            run.assert_not_called()
 
     def inside(self) -> list[Any]:
         answers: dict[str, Any] = {

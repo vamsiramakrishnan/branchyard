@@ -98,7 +98,7 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["ask", "steer", "wait"])]
         detach: bool,
         #[command(flatten)]
-        task: Checked<SendFlags>,
+        task: Checked<SendSessionFlags>,
     },
     /// Add to a branch's running turn without interrupting it
     ///

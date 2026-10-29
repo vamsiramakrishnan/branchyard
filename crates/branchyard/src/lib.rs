@@ -206,7 +206,7 @@ pub use branchyard_provision::network::{
 };
 pub use branchyard_provision::{
     logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport,
-    SecretFrom, SecretSource, Telemetry, Via,
+    SecretFrom, SecretSource, SessionPatch, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
@@ -1438,6 +1438,10 @@ pub struct TaskOptions {
     /// parent's. Secrets need a home private to the branch:
     /// [`TaskOptions::isolated`] or a sandbox provider.
     pub provision: Option<Provisioning>,
+    /// Update only model or reasoning effort during a send, preserving the
+    /// stored credentials and other provisioning. Mutually exclusive with
+    /// [`TaskOptions::provision`]; refused for new tasks, forks and reincarnations.
+    pub session_patch: Option<SessionPatch>,
     /// Make the branch the root of a rig: the seat it occupies and the
     /// seats below it, which its harness then spawns by name (see
     /// `docs/rigs.md`). Needs [`TaskOptions::delegation`], which still

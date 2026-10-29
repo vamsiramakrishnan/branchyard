@@ -84,6 +84,37 @@ pub use permissions::{Permissions, PermissionsWritten};
 /// The Scion revision the translated provisioners follow.
 pub const SCION_REVISION: &str = "d9b9e6a2e1e29e428e6f8e72c2d5ab0df0475338";
 
+/// A send's model and reasoning-effort edits, preserving all other provisioning.
+/// This is distinct from replacing the branch's complete [`Provisioning`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionPatch {
+    /// Model to select, subject to the existing session's model restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Reasoning effort for the next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
+}
+
+impl SessionPatch {
+    /// Reject an empty edit or a blank model before changing a branch.
+    pub fn check(&self) -> Result<(), String> {
+        if self.model.is_none() && self.effort.is_none() {
+            return Err("session_patch needs a model or effort".into());
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err("session_patch model must not be blank".into());
+        }
+        Ok(())
+    }
+}
+
 /// What a task asks to have provisioned. Stored with the branch, so it
 /// holds where secrets come from, never their values; every turn resolves
 /// them again.
@@ -1318,6 +1349,36 @@ pub(crate) fn json_text(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_patch_requires_a_setting_and_rejects_provisioning_fields() {
+        assert!(SessionPatch::default().check().is_err());
+        for model in ["", " \t"] {
+            assert!(SessionPatch {
+                model: Some(model.into()),
+                effort: None
+            }
+            .check()
+            .is_err());
+        }
+        let patch: SessionPatch =
+            serde_json::from_value(serde_json::json!({"model":"m","effort":"low"})).unwrap();
+        assert!(patch.check().is_ok());
+        assert_eq!(patch.effort, Some(Effort::Low));
+        assert!(SessionPatch {
+            effort: Some(Effort::High),
+            ..Default::default()
+        }
+        .check()
+        .is_ok());
+        for value in [
+            serde_json::json!({"secrets":[]}),
+            serde_json::json!({"connectors":[]}),
+            serde_json::json!({"effort":"unknown"}),
+        ] {
+            assert!(serde_json::from_value::<SessionPatch>(value).is_err());
+        }
+    }
 
     #[test]
     fn file_logins_are_the_auth_file_methods_and_where_each_file_is() {

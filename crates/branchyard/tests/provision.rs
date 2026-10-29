@@ -13,11 +13,149 @@ use std::path::{Path, PathBuf};
 
 use branchyard::{
     Activity, BranchStatus, Effort, McpServerSpec, Policy, Provisioning, RemoteMcpSpec,
-    RemoteMcpTransport, RemoveOptions, SecretSource, TaskOptions, Via,
+    RemoteMcpTransport, RemoveOptions, SecretSource, SessionPatch, TaskOptions, Via,
 };
 use common::{edit_record, stored_record, text, Fixture};
 
 const OPENAI_SECRET: &str = "sk-proj-PROVISIONED-SECRET-0123456789abcdefXYZ";
+
+#[test]
+fn session_patch_keeps_secret_sources_and_full_replacement_still_clears_them() {
+    let f = Fixture::new();
+    let source = f.dir.join("operator-key");
+    fs::write(&source, OPENAI_SECRET).unwrap();
+    let original = Provisioning {
+        secrets: vec![
+            SecretSource::parse(&format!("OPENAI_API_KEY=@{}", source.display())).unwrap(),
+        ],
+        auth: Some("api-key".into()),
+        effort: Some(Effort::High),
+        mcp_servers: vec![McpServerSpec::parse("docs=/usr/bin/false").unwrap()],
+        instructions: Some("Keep this standing instruction".into()),
+        ..Provisioning::default()
+    };
+    let options = |provision, session_patch| TaskOptions {
+        harness: Some("codex-acp".into()),
+        isolated: true,
+        policy: Policy::allow_all(),
+        provision,
+        session_patch,
+        ..f.options()
+    };
+    let branch = f
+        .yard
+        .task("say hi")
+        .options(options(Some(original.clone()), None))
+        .name("patched")
+        .run()
+        .unwrap();
+    let home = PathBuf::from(stored_record(&f.root, "patched")["home"].as_str().unwrap());
+    assert!(fs::read_to_string(home.join(".codex/auth.json"))
+        .unwrap()
+        .contains(OPENAI_SECRET));
+
+    let refreshed = "sk-proj-REFRESHED-SECRET-0123456789abcdefXYZ";
+    fs::write(&source, refreshed).unwrap();
+    let sent = branch
+        .send(
+            "say hi",
+            options(
+                None,
+                Some(SessionPatch {
+                    model: Some("gpt-5.5-codex".into()),
+                    effort: Some(Effort::Low),
+                }),
+            ),
+        )
+        .unwrap();
+    let mut expected = original.clone();
+    expected.model = Some("gpt-5.5-codex".into());
+    expected.effort = Some(Effort::Low);
+    assert_eq!(
+        stored_record(&f.root, "patched")["provision"],
+        serde_json::to_value(&expected).unwrap()
+    );
+    assert!(fs::read_to_string(home.join(".codex/auth.json"))
+        .unwrap()
+        .contains(refreshed));
+    let events = serde_json::to_string(&sent.events().unwrap()).unwrap();
+    assert!(!events.contains(refreshed));
+    assert!(!stored_record(&f.root, "patched")
+        .to_string()
+        .contains(refreshed));
+    assert!(sent
+        .send(
+            "say hi",
+            options(
+                None,
+                Some(SessionPatch {
+                    model: Some("another-model".into()),
+                    effort: None,
+                })
+            )
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("cannot switch"));
+
+    // A full replacement must stop reading the old source, even if it disappears.
+    fs::remove_file(&source).unwrap();
+    let revoked = sent
+        .send("say hi", options(Some(Provisioning::default()), None))
+        .unwrap();
+    let after = stored_record(&f.root, "patched");
+    assert_eq!(
+        after["provision"],
+        serde_json::to_value(Provisioning {
+            model: expected.model,
+            effort: expected.effort,
+            ..Provisioning::default()
+        })
+        .unwrap()
+    );
+    assert_eq!(revoked.info().turns, 3);
+}
+
+#[test]
+fn session_patch_is_rejected_when_empty_conflicting_or_not_a_send() {
+    let f = Fixture::new();
+    let branch = f.task("say hi").name("patch-boundary").run().unwrap();
+    let valid = SessionPatch {
+        effort: Some(Effort::Low),
+        ..Default::default()
+    };
+    let options = |patch, provision| TaskOptions {
+        session_patch: Some(patch),
+        provision,
+        ..f.options()
+    };
+    for invalid in [
+        options(SessionPatch::default(), None),
+        options(valid.clone(), Some(Provisioning::default())),
+    ] {
+        assert!(branch.send("never submitted", invalid).is_err());
+    }
+    assert!(f
+        .yard
+        .task("never started")
+        .options(options(valid.clone(), None))
+        .run()
+        .unwrap_err()
+        .to_string()
+        .contains("only supported by send"));
+    assert!(branch
+        .fork("never forked", true, options(valid.clone(), None))
+        .unwrap_err()
+        .to_string()
+        .contains("only supported by send"));
+    assert!(branch
+        .reincarnate(options(valid, None))
+        .unwrap_err()
+        .to_string()
+        .contains("only supported by send"));
+    assert_eq!(stored_record(&f.root, "patch-boundary")["info"]["turns"], 1);
+    assert_eq!(f.yard.branches().unwrap().len(), 1);
+}
 
 #[test]
 fn a_non_delegating_task_receives_source_free_document_tools() {

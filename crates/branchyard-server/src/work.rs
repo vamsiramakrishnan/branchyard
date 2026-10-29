@@ -884,6 +884,14 @@ pub(crate) fn send_options(
     repo: &RepoState,
     request: &SendRequest,
 ) -> Result<TaskOptions, ApiError> {
+    if let Some(patch) = &request.session_patch {
+        patch.check().map_err(ApiError::bad_request)?;
+        if request.provision.is_some() {
+            return Err(ApiError::bad_request(
+                "session_patch and provision are mutually exclusive",
+            ));
+        }
+    }
     match (request.retry, request.prompt.trim().is_empty()) {
         (true, false) => {
             return Err(ApiError::bad_request(
@@ -912,6 +920,7 @@ pub(crate) fn send_options(
     )?;
     Ok(TaskOptions {
         provision: app.provision(request.provision.clone())?,
+        session_patch: request.session_patch.clone(),
         ..app.options(
             repo,
             budget,

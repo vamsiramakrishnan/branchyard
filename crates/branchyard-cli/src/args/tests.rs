@@ -146,6 +146,7 @@ fn run_takes_every_task_option() {
             unapproved_tools: false,
             deny: Vec::new(),
             provision: None,
+            session_patch: None,
             instructions: None,
             issue: None,
             pr: None,
@@ -2534,4 +2535,51 @@ fn result_capture_flags_require_a_schema_and_deliverable_and_keep_explicit_limit
     ] {
         assert!(parse_str(&format!("run work {flags}")).is_err(), "{flags}");
     }
+}
+
+#[test]
+fn send_session_settings_patch_without_replacing_explicit_provisioning() {
+    for flags in [
+        "--model m",
+        "--effort low",
+        "--model m --effort high --yes --allow-unapproved-tools",
+    ] {
+        let options = task(&format!("send b more {flags}"));
+        assert!(options.provision.is_none(), "{flags}");
+        assert!(
+            options
+                .session_patch
+                .as_ref()
+                .is_some_and(|patch| patch.check().is_ok()),
+            "{flags}"
+        );
+    }
+    for flags in [
+        "--model m --secret GEMINI_API_KEY",
+        "--effort low --auth api-key",
+        "--model m --instructions standing.md",
+        "--effort high --connector github:read",
+    ] {
+        let options = task(&format!("send b more {flags}"));
+        assert!(options.session_patch.is_none(), "{flags}");
+        assert!(options.provision.is_some(), "{flags}");
+    }
+    assert!(task("send b more --yes").session_patch.is_none());
+    assert_eq!(
+        task("run work --model m")
+            .provision
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("m")
+    );
+    let Command::Plan {
+        action: PlanAction::Approve { task, .. },
+        ..
+    } = parse_str("plan approve b --model m").unwrap()
+    else {
+        panic!("plan approve");
+    };
+    assert!(task.session_patch.is_none());
+    assert_eq!(task.provision.as_ref().unwrap().model.as_deref(), Some("m"));
 }
