@@ -34,11 +34,13 @@ fn add(f: &Fixture, text: &str, path: Option<&str>, kind: Option<TaskKind>) -> u
         .id
 }
 
-fn provisioned(events: &[RecordedEvent]) -> Vec<Vec<u64>> {
+fn provisioned_knowledge(events: &[RecordedEvent]) -> Vec<Vec<u64>> {
     events
         .iter()
         .filter_map(|e| match &e.activity {
-            Activity::Provisioned { knowledge, .. } => Some(knowledge.clone()),
+            Activity::Provisioned { knowledge, .. } if !knowledge.is_empty() => {
+                Some(knowledge.clone())
+            }
             _ => None,
         })
         .collect()
@@ -72,7 +74,10 @@ fn adopted_entries_are_given_most_specific_first_and_traced() {
     // "Fix" makes it a bugfix; the prompt names a.txt, a file of the repo.
     let branch = f.task("Fix a.txt SHOW_INSTRUCTIONS").run().unwrap();
     let events = branch.events().unwrap();
-    assert_eq!(provisioned(&events), [vec![text_files, bugfix, repo]]);
+    assert_eq!(
+        provisioned_knowledge(&events),
+        [vec![text_files, bugfix, repo]]
+    );
     let reply = text(&events);
     let at = |needle: &str| {
         reply
@@ -88,7 +93,7 @@ fn adopted_entries_are_given_most_specific_first_and_traced() {
 
     // A send gets them again, now with the files its candidate changed.
     let sent = branch.send("SHOW_INSTRUCTIONS", f.options()).unwrap();
-    assert_eq!(provisioned(&sent.events().unwrap()).len(), 2);
+    assert_eq!(provisioned_knowledge(&sent.events().unwrap()).len(), 2);
 
     // A small budget keeps the most specific that fit and says what not.
     f.yard.use_knowledge(KnowledgeSettings {
@@ -97,7 +102,7 @@ fn adopted_entries_are_given_most_specific_first_and_traced() {
     });
     let small = f.task("Fix a.txt SHOW_INSTRUCTIONS").run().unwrap();
     let events = small.events().unwrap();
-    assert_eq!(provisioned(&events), [vec![text_files]]);
+    assert_eq!(provisioned_knowledge(&events), [vec![text_files]]);
     assert!(events.iter().any(|e| matches!(
         &e.activity,
         Activity::Warning(w) if w.contains(&format!("#{bugfix}, #{repo} matched but did not fit the 50-token budget"))
@@ -109,7 +114,7 @@ fn adopted_entries_are_given_most_specific_first_and_traced() {
         ..KnowledgeSettings::default()
     });
     let off = f.task("Fix a.txt SHOW_INSTRUCTIONS").run().unwrap();
-    assert!(provisioned(&off.events().unwrap()).is_empty());
+    assert!(provisioned_knowledge(&off.events().unwrap()).is_empty());
 }
 
 #[test]
@@ -160,7 +165,7 @@ fn a_merged_branch_proposes_its_corrections_and_nothing_is_used_until_adopted() 
 
     // Proposed entries are not given to anyone.
     let before = f.task("Note SHOW_INSTRUCTIONS").run().unwrap();
-    assert!(provisioned(&before.events().unwrap()).is_empty());
+    assert!(provisioned_knowledge(&before.events().unwrap()).is_empty());
 
     // Adopted, it is; rejected, it is not, and is never proposed again.
     let summary = proposed[0].id;
@@ -172,7 +177,7 @@ fn a_merged_branch_proposes_its_corrections_and_nothing_is_used_until_adopted() 
         .unwrap();
     let after = f.task("Note SHOW_INSTRUCTIONS").run().unwrap();
     let events = after.events().unwrap();
-    assert_eq!(provisioned(&events), [vec![summary]]);
+    assert_eq!(provisioned_knowledge(&events), [vec![summary]]);
     assert!(text(&events).contains("Always end notes with a summary line"));
     let again = f.yard.distill(&name, None).unwrap();
     assert!(again.proposed.is_empty());

@@ -1092,11 +1092,14 @@ mod tests {
                 .map(|path| path.split('.').next().unwrap().to_owned())
                 .collect();
             assert_eq!(listed, expected, "{}'s arguments", tool.name);
-            // A nested argument, such as budget.max_usd, is in its object.
+            // Every segment of a nested argument is in its declared object.
             for path in operation.params.iter().filter_map(|p| p.tool) {
                 if let Some((outer, inner)) = path.split_once('.') {
-                    let nested = &properties[outer]["properties"][inner];
-                    assert!(nested.is_object(), "{} has no {path}", tool.name);
+                    let mut nested = &properties[outer];
+                    for segment in inner.split('.') {
+                        nested = &nested["properties"][segment];
+                        assert!(nested.is_object(), "{} has no {path}", tool.name);
+                    }
                 }
             }
         }
