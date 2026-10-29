@@ -5,6 +5,7 @@
 //! the scratch directory.
 
 #![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -102,6 +103,30 @@ impl Setup {
         self.home.join(relative)
     }
 
+    /// Unique destinations in a shipped manifest: the settings
+    /// fragments merge into one file, while write directories expand.
+    fn harness_files(&self, harness: &str) -> BTreeSet<PathBuf> {
+        let manifest = branchyard_setup::install::manifest(harness)
+            .unwrap()
+            .unwrap();
+        let bundle = branchyard_setup::install::BUILT;
+        let mut files = BTreeSet::new();
+        for entry in manifest.files {
+            let target = self.home.join(entry.to.strip_prefix("~/").unwrap());
+            if bundle.file(&entry.from).is_some() {
+                files.insert(target);
+            } else {
+                files.extend(
+                    bundle
+                        .dir(&entry.from)
+                        .into_iter()
+                        .map(|(relative, _)| target.join(relative)),
+                );
+            }
+        }
+        files
+    }
+
     /// Every file under HOME and the repository (not `.git`), by path:
     /// what `by setup` changed shows as a difference between two calls.
     fn snapshot(&self) -> Vec<(PathBuf, Vec<u8>)> {
@@ -145,8 +170,6 @@ fn setup_yes_writes_the_config_and_the_hooks_and_prints_the_card() {
         "Claude Code 9.9.9",
         "Qwen Code 9.9.9",
         "wrote branchyard.toml: harness claude-code · check \"cargo test\" · local, no isolation",
-        "installed 13 files (hooks, commands, skills, statusline)",
-        "installed 1 file (hooks)",
         "hooks: by hook answers · never heard: start a new Codex session",
         "hooks: by hook answers · never heard: start a new Gemini CLI session",
         "Only you can do:",
@@ -154,6 +177,24 @@ fn setup_yes_writes_the_config_and_the_hooks_and_prints_the_card() {
         "Next: by run \"fix the flaky test\" --check \"cargo test\"",
     ] {
         assert!(card.contains(expected), "{expected:?} missing:\n{card}");
+    }
+    for (harness, label, provides) in [
+        (
+            "claude-code",
+            "Claude Code",
+            "hooks, commands, skills, statusline",
+        ),
+        ("codex", "Codex", "hooks, skills"),
+        ("gemini-cli", "Gemini CLI", "hooks, commands"),
+        ("qwen-code", "Qwen Code", "hooks, statusline"),
+    ] {
+        let count = s.harness_files(harness).len();
+        let noun = if count == 1 { "file" } else { "files" };
+        let expected = format!("{label} installed {count} {noun} ({provides})");
+        assert!(
+            flat(&card).contains(&expected),
+            "{expected:?} missing:\n{card}"
+        );
     }
     assert!(!card.contains("silent"), "{card}");
     assert!(
@@ -182,6 +223,13 @@ fn setup_yes_writes_the_config_and_the_hooks_and_prints_the_card() {
         assert!(body.contains(calls), "{path}:\n{body}");
     }
     assert!(s.file(".claude/skills/setup/SKILL.md").exists());
+    let installed_files: BTreeSet<_> = s
+        .snapshot()
+        .into_iter()
+        .map(|(path, _)| path)
+        .filter(|path| path.starts_with(s.file(".claude")))
+        .collect();
+    assert_eq!(installed_files, s.harness_files("claude-code"));
     // The hook check left no cursor behind.
     assert!(!s.repo.root.join(".branchyard/hooks").exists());
 }
@@ -219,7 +267,13 @@ fn dry_run_and_a_missing_terminal_write_nothing() {
     assert_eq!(dry.status.code(), Some(0), "{}", text(&dry));
     let card = stdout(&dry);
     assert!(card.contains("would write branchyard.toml"), "{card}");
-    assert!(card.contains("would install 13 files"), "{card}");
+    assert!(
+        card.contains(&format!(
+            "would install {} files",
+            s.harness_files("claude-code").len()
+        )),
+        "{card}"
+    );
     assert!(card.contains("create ~/.claude/settings.json"), "{card}");
     assert!(card.contains("Nothing was written (--dry-run)."), "{card}");
     assert!(card.contains("Next: by setup --yes"), "{card}");
@@ -881,11 +935,15 @@ fn on_a_terminal_it_asks_once_and_leaves_untrusted_scripts_to_the_person() {
     let out = process.wait_with_output().unwrap();
     let screen = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{screen}");
+    let install = format!(
+        "will install {} files",
+        s.harness_files("claude-code").len()
+    );
     for expected in [
         "Detected",
         "Should harnesses run isolated",
         "will write branchyard.toml",
-        "will install 13 files",
+        install.as_str(),
         "Write ",
         "Trust the [workspace] scripts above now?",
         "wrote branchyard.toml",
