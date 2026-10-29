@@ -19,6 +19,11 @@ The external manager bounds each tool's text and structured JSON payload to
 cursors. Artifact previews default to 25 rows. Narrow the preview or request a
 focused calculation instead of loading a large document into the lead's context.
 
+The manager's `workspace_action` requires `revision` from `inspect_workspace`,
+alongside the workspace, action and idempotency key. A `revision_conflict` is
+returned without an automatic retry. Inspect again before explicitly proposing
+a new action with a new key.
+
 The PR gateway exposes `GET /v1/workspaces/{workspace}/sessions/{session}/pr`
 for cached PR/check observations. `POST /v1/workspaces/{workspace}/sessions/{session}/pr`
 accepts optional `title`, `base` and `draft`; `POST /v1/workspaces/{workspace}/sessions/{session}/pr/refresh`

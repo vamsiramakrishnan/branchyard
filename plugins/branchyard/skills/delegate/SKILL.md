@@ -40,6 +40,9 @@ Oversized responses return an error with small identifiers and cursors. Narrow
 the preview, download the original through its authorized endpoint, or delegate
 a focused calculation. A mutation can already have succeeded; inspect its
 operation and reuse its original idempotency key when reconciling.
+For `workspace_action`, pass the `revision` from `inspect_workspace`. A
+`revision_conflict` requires fresh inspection and an explicit new proposal with
+a new key; never refresh and resubmit automatically.
 The operator manager's `start_session` accepts explicit `unapproved_tools: true`
 for a profile such as AGY that cannot route tool approvals. The server operator
 must also permit it. Omission means false; do not infer this acknowledgment.

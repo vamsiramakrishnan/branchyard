@@ -101,6 +101,7 @@ For a repository-free console, an operator runs by serve --app --knowledge; this
 BRANCHYARD_MANAGER_TOKEN is reserved for that operator and is never forwarded to native harnesses. \
 Manager tool outputs have a bounded JSON budget, with explicit errors for oversized responses; use focused previews or compute for large documents. \
 The operator manager's start_session accepts explicit unapproved_tools acknowledgment for profiles without routed approvals, still subject to server permission. \
+Its workspace_action requires revision from inspect_workspace. On revision_conflict inspect again before explicitly proposing a new action; never automatically refresh and resubmit. \
 That separate manager uses an HTTP principal; it is not added to this branch-scoped delegation server.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {

@@ -49,6 +49,12 @@ bounded document previews, accept deliverables, and observe operations. Each
 mutation requires an `idempotency_key`: use one key for one intended action and
 reuse that key after a lost connection. A new key is a new intended action.
 
+For `workspace_action`, first use `inspect_workspace` and pass its `revision`
+with the requested action. The manager forwards that exact revision. If the
+server returns `revision_conflict`, inspect the updated workspace before
+explicitly proposing a new action with a new key. The manager never refreshes
+the revision or repeats a conflicting action automatically.
+
 Concurrent session starts refresh internal workspace and tenant quota snapshots
 when another admission wins their metadata compare-and-set. A bounded retry
 rechecks current authorization, workspace state, source grants and quota, using

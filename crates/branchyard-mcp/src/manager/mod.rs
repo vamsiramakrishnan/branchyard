@@ -23,8 +23,9 @@ pub use cli::{main_with_args, serve_configured};
 
 const INSTRUCTIONS: &str = "Manage authorized Branchyard projects, workspaces and native agent conversations. \
 Knowledge work can start without a user Git repository and can finish with immutable deliverables, without a Git diff. \
-Use one stable idempotency_key per intended mutation and reuse it on retries. Accepted operations continue after an MCP \
-disconnect; inspect or wait on their operation IDs. Starting a conversation does not replace any native lead, plan or \
+Use one stable idempotency_key per intended mutation and reuse it on retries. \
+For workspace_action, pass revision from inspect_workspace. On revision_conflict inspect again and explicitly propose a new action with a new key; never automatically refresh and resubmit. \
+Accepted operations continue after an MCP disconnect; inspect or wait on their operation IDs. Starting a conversation does not replace any native lead, plan or \
 subagents. Review current outputs and contracts before finalizing. Workspace permissions do not grant worker IAM or \
 upstream connector permissions. Tools never accept arbitrary shell commands, filesystem destinations or request URLs. \
 This external manager uses its own HTTP credential and is distinct from the restricted in-task delegation MCP. \
@@ -147,7 +148,17 @@ impl Server {
                     "restore" => Lifecycle::Restore,
                     _ => return Err(CallError::Arguments("unsupported workspace action".into())),
                 };
-                Write::Lifecycle { workspace, action }
+                let revision = args
+                    .get("revision")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        CallError::Arguments("revision must be an unsigned integer".into())
+                    })?;
+                Write::Lifecycle {
+                    workspace,
+                    revision,
+                    action,
+                }
             }
             _ => {
                 return Err(CallError::Arguments(format!(
@@ -281,6 +292,40 @@ fn ensure_operator() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn lifecycle_revision_is_required_and_conflicts_are_not_retried() {
+        let http = branchyard_testkit::MockHttp::start(|request| {
+            assert_eq!(request.path, "/v1/workspaces/w/actions/archive");
+            assert_eq!(request.json(), json!({"revision":7}));
+            branchyard_testkit::Response::json(
+                409,
+                &json!({"error":{"code":"revision_conflict","message":"inspect the workspace before proposing a new action"}}),
+            )
+        });
+        let server = Server::new(Client::new(&http.url(), "fixture").unwrap());
+        let error = server.call("workspace_action", json!({"workspace_id":"w","action":"archive","revision":7,"idempotency_key":"archive-once"})).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CallError::Http(branchyard_client::Error::Api { status: 409, .. })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(http.requests().len(), 1);
+        for revision in [None, Some(json!(-1)), Some(json!(1.5)), Some(json!("7"))] {
+            let mut args =
+                json!({"workspace_id":"w","action":"archive","idempotency_key":"archive-once"});
+            if let Some(value) = revision {
+                args["revision"] = value;
+            }
+            assert!(matches!(
+                server.call("workspace_action", args),
+                Err(CallError::Arguments(_))
+            ));
+        }
+        assert_eq!(http.requests().len(), 1);
+    }
     use super::*;
     use branchyard_testkit::{MockHttp, Response};
 
@@ -376,7 +421,7 @@ mod tests {
             ),
             (
                 "workspace_action",
-                json!({"workspace_id":"w","action":"sleep","idempotency_key":"k"}),
+                json!({"workspace_id":"w","action":"sleep","revision":1,"idempotency_key":"k"}),
             ),
             ("operation_status", json!({"operation_id":"o"})),
             ("wait_operation", json!({"operation_id":"o","seconds":0})),

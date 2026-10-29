@@ -99,3 +99,42 @@ fn a_managed_child_cannot_start_the_external_manager_or_load_its_credential() {
     );
     assert!(!error.contains("token file"));
 }
+
+#[test]
+fn lifecycle_revision_crosses_stdio_and_conflicts_do_not_retry() {
+    let scratch = Scratch::new("manager-lifecycle-protocol");
+    let token = scratch.join("token");
+    std::fs::write(&token, "manager-lifecycle-fixture\n").unwrap();
+    let server = MockHttp::start(|request| {
+        assert_eq!(request.path, "/v1/workspaces/w/actions/archive");
+        assert_eq!(request.json(), json!({"revision":12}));
+        assert_eq!(request.header("idempotency-key"), Some("archive-once"));
+        Response::json(
+            409,
+            &json!({"error":{"code":"revision_conflict","message":"workspace changed; inspect again","detail":{"actual":13}}}),
+        )
+    });
+    let mut client = Client::manager(&server.url(), &token);
+    client.initialize();
+    let listed = client.request("tools/list", json!({}));
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "workspace_action")
+        .unwrap();
+    assert!(tool["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("revision")));
+    let invalid = client.request("tools/call", json!({"name":"workspace_action","arguments":{"workspace_id":"w","action":"archive","idempotency_key":"archive-once"}}));
+    assert!(invalid.get("error").is_some());
+    assert!(server.requests().is_empty());
+    let (failed, text) = client.call("workspace_action", json!({"workspace_id":"w","action":"archive","revision":12,"idempotency_key":"archive-once"}));
+    assert!(failed, "{text}");
+    let error: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(error["status"], 409);
+    assert_eq!(error["error"]["code"], "revision_conflict");
+    assert_eq!(server.requests().len(), 1);
+    assert!(client.finish().success());
+}

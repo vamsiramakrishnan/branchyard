@@ -65,6 +65,9 @@ does not expand your branch's permissions. Use your branch-scoped tools here.
 The operator-only `BRANCHYARD_MANAGER_TOKEN` is never forwarded to harnesses.
 An operator starts a repository-free console with `by serve --app --knowledge`.
 This opt-in keeps configured storage and quotas and does not expand your grant.
+Its `workspace_action` needs `revision` from `inspect_workspace`. On
+`revision_conflict`, inspect again before explicitly proposing a new action with
+a new key. Never refresh and resubmit automatically.
 Operator sessions for a harness without routed tool approvals require explicit
 `unapproved_tools` acknowledgment and server permission. It defaults to false.
 That manager bounds its JSON responses and returns an explicit error for large

@@ -129,6 +129,8 @@ pub enum Write {
     Lifecycle {
         /// Owning workspace.
         workspace: String,
+        /// Current workspace revision returned by workspace inspection.
+        revision: u64,
         /// The desired action.
         action: Lifecycle,
     },
@@ -263,9 +265,13 @@ fn write_parts(write: &Write) -> (String, Value) {
             format!("{}/finalize", workspace_path(workspace)),
             request.clone(),
         ),
-        Write::Lifecycle { workspace, action } => (
+        Write::Lifecycle {
+            workspace,
+            revision,
+            action,
+        } => (
             format!("{}/actions/{}", workspace_path(workspace), action.as_str()),
-            serde_json::json!({}),
+            serde_json::json!({"revision": revision}),
         ),
     }
 }
@@ -379,6 +385,7 @@ mod tests {
             },
             Write::Lifecycle {
                 workspace: "w".into(),
+                revision: 7,
                 action: Lifecycle::Archive,
             },
         ];
@@ -391,6 +398,7 @@ mod tests {
             .iter()
             .all(|r| r.method == "POST" && r.header("idempotency-key") == Some("same-key")));
         assert_eq!(requests[6].path, "/v1/workspaces/w/actions/archive");
+        assert_eq!(requests[6].json(), json!({"revision":7}));
         assert_eq!(requests[5].json()["revision"], 2);
         assert_eq!(Lifecycle::Sleep.as_str(), "sleep");
         assert_eq!(Lifecycle::Wake.as_str(), "wake");
