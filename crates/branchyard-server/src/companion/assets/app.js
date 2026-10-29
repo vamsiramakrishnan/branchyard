@@ -8,9 +8,18 @@
 (() => {
   const TOKEN_KEY = 'branchyard.token';
   const REPO_KEY = 'branchyard.repo';
+  const SOURCE_KEY = 'branchyard.source';
   // What `R` in `by watch` sends to an interrupted branch.
   const RESUME_PROMPT = 'Your previous turn was interrupted before it finished. ' +
     'Continue the task from where you left off, then summarize what you did.';
+  // What "Collect outputs" asks of a new session: a required deliverable
+  // whose declared files the server publishes as the workspace's outputs
+  // after the turn (docs/artifact-capture.md).
+  const OUTPUT_MANIFEST = 'outputs/artifacts.json';
+  const OUTPUT_CONTRACT = {
+    schema: { type: 'object', required: ['summary'], properties: { summary: { type: 'string' } } },
+    required: true, purpose: 'deliverable', capture: { manifest: OUTPUT_MANIFEST },
+  };
   const DIFF_LIMIT = 400000;
   // The server's largest event page; an open branch keeps at most
   // EVENT_KEEP of its latest events.
@@ -23,6 +32,14 @@
     me: null,
     repos: [],
     repo: null,
+    // What the sidebar lists: a repository's branches ({ kind: 'repo' },
+    // the one in `repo`), a project's workspaces ({ kind: 'project', id }),
+    // or nothing yet ({ kind: 'none' }).
+    source: { kind: 'none' },
+    // null when this server has no projects; otherwise every project.
+    projects: null,
+    // The listed project's workspaces.
+    workspaces: { project: null, list: [], loaded: false, error: null },
     branches: new Map(),
     lastActive: new Map(),
     cursor: null,
@@ -80,7 +97,7 @@
   const enc = encodeURIComponent;
   const cap = (text) => text.charAt(0).toUpperCase() + text.slice(1);
   // A `when` reason as a sentence; one that opens with a branch's name keeps its case.
-  const sentence = (why, name) => `${why.startsWith(name) ? why : cap(why)}.`;
+  const sentence = (why, name) => `${name && why.startsWith(name) ? why : cap(why)}.`;
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const branchHref = (name) => `#/b/${enc(state.repo)}/${enc(name)}`;
   let uid = 0;
@@ -174,10 +191,11 @@
   // The API
 
   class ApiError extends Error {
-    constructor(status, code, message) {
+    constructor(status, code, message, detail) {
       super(message);
       this.status = status;
       this.code = code;
+      this.detail = detail || null;
     }
   }
 
@@ -188,18 +206,19 @@
     return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  async function api(method, path, body) {
-    const headers = { Accept: 'application/json' };
-    if (state.token) headers.Authorization = `Bearer ${state.token}`;
-    const init = { method, headers, cache: 'no-store', credentials: 'omit' };
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
-      if (method === 'POST') headers['Idempotency-Key'] = key();
-    }
+  // Every request carries this tab's token, and nothing else of the
+  // browser's (no cookies, no cache).
+  function authFetch(path, init = {}) {
+    const headers = new Headers(init.headers || {});
+    if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
+    return fetch(path, { ...init, headers, cache: 'no-store', credentials: 'omit' });
+  }
+
+  // A response as JSON, or its error envelope as an ApiError.
+  async function call(path, init) {
     let response;
     try {
-      response = await fetch(path, init);
+      response = await authFetch(path, init);
     } catch (e) {
       throw new ApiError(0, 'unavailable', 'The server cannot be reached.');
     }
@@ -211,9 +230,57 @@
       if (response.status === 401 && state.me) {
         signOut('This token is no longer accepted (expired or revoked). Pair again.');
       }
-      throw new ApiError(response.status, err.code || 'error', err.message || `HTTP ${response.status}`);
+      throw new ApiError(response.status, err.code || 'error', err.message || `HTTP ${response.status}`, err.detail);
     }
     return json;
+  }
+
+  function api(method, path, body) {
+    const headers = { Accept: 'application/json' };
+    const init = { method, headers };
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+      if (method === 'POST') headers['Idempotency-Key'] = key();
+    }
+    return call(path, init);
+  }
+
+  // An operation polled until it settles, at `by`'s cadence: every second
+  // at first, then every three. null when it is still going after half an
+  // hour, or this tab signed out.
+  async function awaitOperation(id) {
+    for (let i = 0; i < 600 && state.token; i++) {
+      await new Promise((r) => setTimeout(r, i < 10 ? 1000 : 3000));
+      let op;
+      try { op = await api('GET', `/v1/operations/${enc(id)}`); } catch (_) { continue; }
+      if (['succeeded', 'failed', 'interrupted'].includes(op.state)) return op;
+    }
+    return null;
+  }
+
+  // Save a response's body under its name, through a Blob URL that is
+  // revoked once the download has had time to start.
+  async function download(path, name) {
+    let blob;
+    try {
+      const response = await authFetch(path);
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try { message = (await response.json()).error.message || message; } catch (_) { /* not JSON */ }
+        throw new Error(message);
+      }
+      blob = await response.blob();
+    } catch (e) {
+      toast(`Could not download ${name}: ${e instanceof TypeError ? 'the server cannot be reached' : e.message}.`);
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = h('a', { href: url, download: name, hidden: true });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   const can = (scope) => !!(state.me && state.me.scopes.includes(scope));
@@ -312,6 +379,18 @@
     return LANES.map((lane) => ({ lane, branches: sorted.filter((b) => laneOf(b, waiting) === lane) }));
   }
 
+  // Workspaces grouped by state in the same order and colours: one that
+  // failed to start needs you; one starting, running, archiving or
+  // restoring runs; an idle one is ready for work; archived ones fold away.
+  const WORKSPACE_LANES = [
+    { key: 'needs', label: 'Needs you', collapsed: false, states: ['failed', 'interrupted'] },
+    { key: 'running', label: 'Running', collapsed: false, states: ['running', 'pending', 'restoring', 'archiving'] },
+    { key: 'ready', label: 'Ready', collapsed: false, states: ['ready'] },
+    { key: 'done', label: 'Archived', collapsed: true, states: null },
+  ];
+  const workspaceLane = (w) => WORKSPACE_LANES.find((lane) => !lane.states || lane.states.includes(w.state));
+  const workspaceStateText = (w) => ({ pending: 'starting' }[w.state] || w.state);
+
   function money(v) {
     return v == null ? '—' : `$${Number(v).toFixed(v < 1 ? 4 : 2)}`;
   }
@@ -401,6 +480,15 @@
     save(TOKEN_KEY, null);
     if (state.stream) state.stream.abort();
     state.stream = null;
+    closePreview();
+    closeWorkspace();
+    clearTimeout(workspacesTimer);
+    Object.assign(state, {
+      repos: [], repo: null, source: { kind: 'none' }, projects: null,
+      workspaces: { project: null, list: [], loaded: false, error: null },
+      branches: new Map(), lastActive: new Map(), loaded: false, branchError: null,
+      permissions: [], inbox: [], approvals: [], effects: [],
+    });
     $('sidebar').hidden = true;
     document.title = 'Branchyard';
     setLive('off', 'signed out');
@@ -477,28 +565,161 @@
   // ---------------------------------------------------------------
   // Loading and the live stream
 
+  // A token that reaches no repository still has a console when this
+  // server has projects: knowledge work needs none.
   async function start() {
     state.me = await api('GET', '/v1/app/me');
-    const { repos } = await api('GET', '/v1/repos');
+    const [{ repos }, projects] = await Promise.all([api('GET', '/v1/repos'), loadProjects()]);
     state.repos = repos.map((r) => r.name);
-    if (!state.repos.length) throw new ApiError(403, 'no_repos', 'This token can reach no repository.');
-    const asked = parseRoute().repo;
+    state.projects = projects instanceof ApiError ? null : projects;
+    if (!state.repos.length && !state.projects) {
+      if (projects instanceof ApiError) throw projects;
+      throw new ApiError(403, 'no_repos', 'This token can reach no repository.');
+    }
+    if (projects instanceof ApiError) toast(`Projects did not load: ${projects.message}`);
+    const asked = parseRoute();
     const remembered = load(REPO_KEY);
-    state.repo = state.repos.includes(asked) ? asked : state.repos.includes(remembered) ? remembered : state.repos[0];
-    fill($('repo'), ...state.repos.map((r) => h('option', { value: r, text: r, selected: r === state.repo })));
-    $('repo-pick').hidden = state.repos.length < 2;
-    $('repo-name').hidden = state.repos.length > 1;
-    $('new-task').hidden = !can('run');
+    state.repo = state.repos.includes(asked.repo) ? asked.repo : state.repos.includes(remembered) ? remembered : state.repos[0] || null;
+    state.source = initialSource(asked);
+    renderPicker();
     $('sidebar').hidden = false;
-    const loading = switchRepo(state.repo);
+    $('live').hidden = !state.repo;
+    const loading = state.repo ? switchRepo(state.repo) : Promise.resolve();
+    if (state.source.kind === 'project') loadWorkspaces(state.source.id);
     route();
     await loading;
+  }
+
+  // ---------------------------------------------------------------
+  // Sources: repositories and projects, in the sidebar's picker
+
+  // Every project; null on a server without them; the error when the list
+  // failed, so a token with repositories still gets its branches.
+  async function loadProjects() {
+    try {
+      return (await api('GET', '/v1/projects')).projects;
+    } catch (e) {
+      if (e.status === 404) return null;
+      if (e.status === 401) throw e;
+      return e;
+    }
+  }
+
+  const projectOf = (id) => (state.projects || []).find((p) => p.id === id) || null;
+
+  // A workspace's route names no project: opening it shows its own.
+  function initialSource(asked) {
+    if (asked.name === 'branch' && state.repo) return { kind: 'repo' };
+    if (asked.name === 'project') return { kind: 'project', id: asked.project };
+    const remembered = /^project:(.+)$/.exec(load(SOURCE_KEY) || '');
+    if (remembered && projectOf(remembered[1])) return { kind: 'project', id: remembered[1] };
+    if (state.repo) return { kind: 'repo' };
+    if (state.projects && state.projects.length) return { kind: 'project', id: state.projects[0].id };
+    return { kind: 'none' };
+  }
+
+  function useSource(source) {
+    state.source = source;
+    save(SOURCE_KEY, source.kind === 'project' ? `project:${source.id}` : source.kind);
+    renderPicker();
+  }
+
+  // One select for both: Repositories, then Projects, then "New project…".
+  function renderPicker() {
+    const select = $('repo');
+    const current = state.source.kind === 'project' ? `project:${state.source.id}` : state.repo ? `repo:${state.repo}` : '';
+    const groups = [];
+    if (state.repos.length) {
+      groups.push(h('optgroup', { label: 'Repositories' }, state.repos.map((r) => h('option', { value: `repo:${r}`, text: r }))));
+    }
+    if (state.projects && state.projects.length) {
+      groups.push(h('optgroup', { label: 'Projects' }, state.projects.map((p) => h('option', { value: `project:${p.id}`, text: p.name }))));
+    }
+    const creating = state.projects && can('run');
+    fill(select, current ? null : h('option', { value: '', text: 'Choose a project', disabled: true }), groups,
+      creating ? h('option', { value: 'new-project', text: 'New project…' }) : null);
+    select.value = current;
+    const options = select.options.length;
+    $('repo-pick').hidden = options < 2;
+    $('repo-name').hidden = options > 1;
+    $('repo-name').textContent = current.startsWith('repo:') ? state.repo : (projectOf(state.source.id) || {}).name || '';
+    updateSideLinks();
+  }
+
+  async function pickSource(value) {
+    if (value === 'new-project') { renderPicker(); go('#/p/new'); return; }
+    const at = value.indexOf(':');
+    const kind = value.slice(0, at);
+    const name = value.slice(at + 1);
+    if (kind === 'project') { go(`#/p/${enc(name)}`); return; }
+    closePreview();
+    closeWorkspace();
+    useSource({ kind: 'repo' });
+    if (name !== state.repo) await switchRepo(name);
+    renderPicker();
+    go('#/');
+  }
+
+  // Navigate, or route again when the address already says so.
+  function go(hash) {
+    if (location.hash === hash) route(); else location.hash = hash;
+  }
+
+  // The sidebar's link to start work follows the source.
+  function updateSideLinks() {
+    const link = $('new-task');
+    const project = state.source.kind === 'project' ? state.source.id : null;
+    link.hidden = !can('run') || (!project && !state.repo);
+    link.href = project ? `#/p/${enc(project)}/new` : '#/new';
+    link.dataset.route = project ? 'newWorkspace' : 'new';
+    link.lastChild.textContent = project ? 'New workspace' : 'New task';
+    const what = project ? 'workspaces' : 'branches';
+    $('branch-filter').placeholder = `Filter ${what}`;
+    $('branch-filter-label').textContent = `Filter ${what}`;
+    $('sidebar').setAttribute('aria-label', cap(what));
+  }
+
+  // The listed project's workspaces, refreshed every few seconds while
+  // one of them is starting, running, archiving or restoring.
+  let workspacesTimer = null;
+  async function loadWorkspaces(project) {
+    clearTimeout(workspacesTimer);
+    const list = state.workspaces;
+    if (list.project !== project) state.workspaces = { project, list: [], loaded: false, error: null };
+    renderLanes();
+    let workspaces;
+    try {
+      ({ workspaces } = await api('GET', `/v1/workspaces?project=${enc(project)}`));
+    } catch (e) {
+      if (state.workspaces.project !== project) return;
+      state.workspaces.error = e.message;
+      workspacesChanged();
+      return;
+    }
+    if (state.workspaces.project !== project) return;
+    state.workspaces = { project, list: workspaces, loaded: true, error: null };
+    workspacesChanged();
+    if (workspaces.some((w) => workspaceLane(w).key === 'running')) {
+      workspacesTimer = setTimeout(() => {
+        if (state.source.kind === 'project' && state.source.id === project) loadWorkspaces(project);
+      }, 3000);
+    }
+  }
+
+  function workspacesChanged() {
+    renderLanes();
+    if (state.route.name === 'project' || (state.route.name === 'home' && state.source.kind === 'project')) updateProjectGlance();
+  }
+
+  // Show a project in the sidebar, loading its workspaces when it was not.
+  function useProject(id) {
+    if (state.source.kind !== 'project' || state.source.id !== id) useSource({ kind: 'project', id });
+    if (state.workspaces.project !== id) loadWorkspaces(id);
   }
 
   async function switchRepo(repo) {
     state.repo = repo;
     save(REPO_KEY, repo);
-    $('repo-name').textContent = repo;
     state.branches = new Map();
     state.lastActive = new Map();
     state.cursor = null;
@@ -666,33 +887,46 @@
     triggers: renderTriggers,
     queue: renderQueue,
     settings: renderSettings,
+    newProject: renderNewProject,
+    project: renderProject,
+    workspace: renderWorkspace,
   };
 
   function parseRoute() {
     const hash = location.hash || '#/';
     const parts = hash.replace(/^#\/?/, '').split('/').map((p) => { try { return decodeURIComponent(p); } catch (_) { return p; } });
     if (parts[0] === 'b') return { name: 'branch', repo: parts[1], branch: parts.slice(2).join('/') };
+    if (parts[0] === 'p' && parts[1] === 'new') return { name: 'newProject' };
+    if (parts[0] === 'p' && parts[1]) return { name: 'project', project: parts[1], creating: parts[2] === 'new' };
+    if (parts[0] === 'w' && parts[1]) return { name: 'workspace', workspace: parts[1], session: parts[2] === 's' && parts[3] ? parts[3] : null };
     const name = ALIASES[parts[0]] || parts[0];
-    return { name: VIEWS[name] ? name : 'home' };
+    return { name: VIEWS[name] && !['branch', 'newProject', 'project', 'workspace'].includes(name) ? name : 'home' };
   }
 
   async function route() {
     if (!state.token) return;
+    closePreview();
     state.route = parseRoute();
-    if (state.route.name === 'branch' && state.route.repo && state.route.repo !== state.repo && state.repos.includes(state.route.repo)) {
-      $('repo').value = state.route.repo;
-      await switchRepo(state.route.repo);
+    const r = state.route;
+    if (r.name === 'branch' && r.repo && state.repos.includes(r.repo)) {
+      if (state.source.kind !== 'repo') useSource({ kind: 'repo' });
+      if (r.repo !== state.repo) { await switchRepo(r.repo); renderPicker(); }
     }
-    document.body.dataset.view = state.route.name;
+    if (r.name === 'project') useProject(r.project);
+    if (r.name !== 'workspace' || (wsView && wsView.id !== r.workspace)) closeWorkspace();
+    // On a phone a project's glance is its workspace list, the sidebar.
+    document.body.dataset.view = r.name === 'project' && !r.creating ? 'home' : r.name;
     view = null;
     drawn = null;
+    const current = r.name === 'project' && r.creating ? 'newWorkspace' : r.name;
     for (const link of document.querySelectorAll('#sidebar a[data-route]')) {
-      if (link.dataset.route === state.route.name) link.setAttribute('aria-current', 'page');
+      if (link.dataset.route === current) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
     renderLanes();
-    await VIEWS[state.route.name]();
-    focusHeading();
+    await VIEWS[r.name]();
+    const field = r.name === 'project' && r.creating ? $('workspace-title') : null;
+    if (field) field.focus(); else focusHeading();
   }
 
   // A live update redraws a page only when what it shows changed, so focus
@@ -706,55 +940,79 @@
 
   function branchesChanged() {
     renderLanes();
-    if (state.route.name === 'home') redraw(homeSignature(), renderHome);
+    if (state.route.name === 'home' && state.source.kind === 'repo') redraw(homeSignature(), renderHome);
     if (state.route.name === 'attention') redraw(attentionSignature(), renderAttention);
     if (state.route.name === 'branch') updateBranch();
   }
 
   // ---------------------------------------------------------------
-  // The sidebar: branches by lane
+  // The sidebar: a repository's branches, or a project's workspaces, by lane
 
   function renderLanes() {
     const list = $('branch-list');
-    const all = Array.from(state.branches.values());
-    const needle = state.filter.trim().toLowerCase();
-    const matches = (b) => !needle || b.name.toLowerCase().includes(needle) || (b.prompt || '').toLowerCase().includes(needle);
-    const shown = all.filter(matches);
-    const groups = lanes(shown);
-    const waiting = attention();
-    const needs = lanes(all)[0].branches.length;
+    const needs = lanes(Array.from(state.branches.values()))[0].branches.length;
     document.title = needs ? `(${needs}) Branchyard` : 'Branchyard';
     $('attention-count').hidden = !needs;
     $('attention-count').textContent = String(needs);
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+    const needle = state.filter.trim().toLowerCase();
+    if (state.source.kind === 'none') { $('filter').hidden = true; fill(list); return; }
+    fill(list, ...(state.source.kind === 'project' ? workspaceLanes(needle) : branchLanes(needle)));
+    if (focused) {
+      const again = Array.from(list.querySelectorAll('a.branch-row')).find((a) => a.dataset.key === focused);
+      if (again) again.focus({ preventScroll: true });
+    }
+  }
+
+  // A lane of rows: a heading and its count, or, when collapsed, a
+  // disclosure that a search opens.
+  function laneGroup(lane, rows, needle, prefix) {
+    if (!rows.length) return null;
+    const id = `${prefix}${lane.key}`;
+    const items = h('ul', { class: 'lane-list' }, rows);
+    if (!lane.collapsed) {
+      return h('section', { class: 'lane', id, 'aria-labelledby': `${id}-h` },
+        h('h2', { class: 'lane-head', id: `${id}-h` }, h('span', { text: lane.label }), h('span', { class: 'lane-count', text: String(rows.length) })),
+        items);
+    }
+    const open = state.doneOpen || !!needle;
+    const summary = h('summary', { class: 'lane-head' }, h('span', { text: `${open ? 'Hide' : 'Show'} ${rows.length} ${lane.label.toLowerCase()}` }));
+    const box = h('details', { class: 'lane', id, open }, summary, items);
+    box.addEventListener('toggle', () => {
+      if (!needle) state.doneOpen = box.open;
+      summary.firstChild.textContent = `${box.open ? 'Hide' : 'Show'} ${rows.length} ${lane.label.toLowerCase()}`;
+    });
+    return box;
+  }
+
+  function noMatches(hint) {
+    return h('section', { class: 'list-state' },
+      h('h2', { text: `No matching ${state.source.kind === 'project' ? 'workspaces' : 'branches'}` }),
+      h('p', { class: 'muted', text: hint }),
+      h('button', { type: 'button', text: 'Clear search', onclick: () => {
+        const search = $('branch-filter');
+        state.filter = '';
+        search.value = '';
+        renderLanes();
+        search.focus();
+      } }));
+  }
+
+  function branchLanes(needle) {
+    const all = Array.from(state.branches.values());
+    const matches = (b) => !needle || b.name.toLowerCase().includes(needle) || (b.prompt || '').toLowerCase().includes(needle);
+    const shown = all.filter(matches);
+    const waiting = attention();
     $('filter').hidden = !all.length;
     $('branch-count').textContent = needle
       ? `Showing ${shown.length} of ${all.length} branches`
       : plural(all.length, 'branch', 'branches');
-    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.branch : null;
     const current = state.route.name === 'branch' ? state.route.branch : null;
     const row = (b, lane) => h('li', {}, h('a', {
-      class: 'branch-row', href: branchHref(b.name), 'data-branch': b.name, title: b.name,
+      class: 'branch-row', href: branchHref(b.name), 'data-branch': b.name, 'data-key': `b:${b.name}`, title: b.name,
       'aria-current': b.name === current ? 'page' : null,
     }, dot(lane.key), h('span', { class: 'row-name', text: b.name }),
     h('span', { class: 'row-meta' }, lane.meta(b, waiting), lane.key === 'needs' || lane.key === 'running' ? [' · ', ago(activeAt(b), '')] : null)));
-    const group = ({ lane, branches }) => {
-      if (!branches.length) return null;
-      const id = `lane-${lane.key}`;
-      const items = h('ul', { class: 'lane-list' }, branches.map((b) => row(b, lane)));
-      if (!lane.collapsed) {
-        return h('section', { class: 'lane', id, 'aria-labelledby': `${id}-h` },
-          h('h2', { class: 'lane-head', id: `${id}-h` }, h('span', { text: lane.label }), h('span', { class: 'lane-count', text: String(branches.length) })),
-          items);
-      }
-      const open = state.doneOpen || !!needle;
-      const summary = h('summary', { class: 'lane-head' }, h('span', { text: `${open ? 'Hide' : 'Show'} ${branches.length} ${lane.label.toLowerCase()}` }));
-      const box = h('details', { class: 'lane', id, open }, summary, items);
-      box.addEventListener('toggle', () => {
-        if (!needle) state.doneOpen = box.open;
-        summary.firstChild.textContent = `${box.open ? 'Hide' : 'Show'} ${branches.length} ${lane.label.toLowerCase()}`;
-      });
-      return box;
-    };
     const status = [];
     if (state.branchError) {
       status.push(h('section', { class: 'list-state error-state', role: 'alert' },
@@ -774,23 +1032,38 @@
             : 'Branches started from the CLI or another browser will appear here. This token has read access.'
           : 'Getting the latest work from your server.' })));
     }
-    if (all.length && !shown.length) {
-      status.push(h('section', { class: 'list-state' },
-        h('h2', { text: 'No matching branches' }),
-        h('p', { class: 'muted', text: 'Try another name or a word from the prompt.' }),
-        h('button', { type: 'button', text: 'Clear search', onclick: () => {
-          const search = $('branch-filter');
-          state.filter = '';
-          search.value = '';
-          renderLanes();
-          search.focus();
-        } })));
+    if (all.length && !shown.length) status.push(noMatches('Try another name or a word from the prompt.'));
+    return [...status, ...lanes(shown).map(({ lane, branches }) => laneGroup(lane, branches.map((b) => row(b, lane)), needle, 'lane-'))];
+  }
+
+  function workspaceLanes(needle) {
+    const { list: all, loaded, error } = state.workspaces;
+    const shown = all.filter((w) => !needle || w.title.toLowerCase().includes(needle));
+    $('filter').hidden = !all.length;
+    $('branch-count').textContent = needle
+      ? `Showing ${shown.length} of ${all.length} workspaces`
+      : plural(all.length, 'workspace');
+    const current = state.route.name === 'workspace' ? state.route.workspace : null;
+    const row = (w, lane) => h('li', {}, h('a', {
+      class: 'branch-row', href: `#/w/${enc(w.id)}`, 'data-workspace': w.id, 'data-key': `w:${w.id}`, title: w.title,
+      'aria-current': w.id === current ? 'page' : null,
+    }, dot(lane.key), h('span', { class: 'row-name', text: w.title }), h('span', { class: 'row-meta', text: workspaceStateText(w) })));
+    const status = [];
+    if (error) {
+      status.push(h('section', { class: 'list-state error-state', role: 'alert' },
+        h('h2', { text: loaded ? 'Could not refresh workspaces' : 'Could not load workspaces' }),
+        h('p', { text: error }),
+        h('button', { type: 'button', text: 'Retry loading workspaces', onclick: () => loadWorkspaces(state.source.id) })));
+    } else if (!all.length) {
+      status.push(h('section', { class: 'list-state', role: loaded ? null : 'status' },
+        h('h2', { text: loaded ? 'No workspaces yet.' : 'Loading workspaces…' }),
+        h('p', { class: 'muted', text: loaded
+          ? can('run') ? 'A workspace holds sources, sessions and their outputs. Start one with New workspace.' : 'Workspaces you are a member of appear here.'
+          : 'Getting this project\'s workspaces.' })));
     }
-    fill(list, ...status, ...groups.map(group).filter(Boolean));
-    if (focused) {
-      const again = Array.from(list.querySelectorAll('a.branch-row')).find((a) => a.dataset.branch === focused);
-      if (again) again.focus({ preventScroll: true });
-    }
+    if (all.length && !shown.length) status.push(noMatches('Try another word from a workspace title.'));
+    const sorted = shown.slice().sort((x, y) => y.created_at_ms - x.created_at_ms);
+    return [...status, ...WORKSPACE_LANES.map((lane) => laneGroup(lane, sorted.filter((w) => workspaceLane(w) === lane).map((w) => row(w, lane)), needle, 'ws-lane-'))];
   }
 
   // `j` and `k` walk the visible branches; Enter follows the focused link.
@@ -812,6 +1085,8 @@
   }
 
   function renderHome() {
+    if (state.source.kind === 'project') return renderProject();
+    if (state.source.kind === 'none') return renderNoSource();
     const all = Array.from(state.branches.values());
     const groups = lanes(all);
     const needs = groups[0].branches;
@@ -837,6 +1112,183 @@
       state.loaded && !all.length && can('run') ? h('div', { class: 'welcome' },
         h('p', { text: 'Start a task and it gets a branch of its own, with its conversation, its changes and a merge button.' }),
         h('a', { class: 'button primary', href: '#/new', text: 'Start a task' })) : null));
+  }
+
+  // A token that reaches no repository, before its first project.
+  function renderNoSource() {
+    main(h('div', { class: 'page' },
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Projects' }),
+        h('p', { class: 'lede', text: 'This token reaches no repository. A knowledge project needs none: it holds the sources you upload, the sessions that work on them, and the outputs you accept.' }))),
+      can('run') ? h('div', { class: 'welcome' },
+        h('p', { text: 'Start a project, then a workspace in it, and give its sessions your documents.' }),
+        h('a', { class: 'button primary', href: '#/p/new', text: 'New project' }))
+        : h('p', { class: 'muted', text: 'This token has read access only; projects started elsewhere appear in the picker.' })));
+  }
+
+  // ---------------------------------------------------------------
+  // Projects: a new one, and one at a glance with its workspaces
+
+  const RESULT_MODES = [
+    ['artifacts', 'Outputs to accept'],
+    ['mixed', 'Code and outputs'],
+    ['code', 'Code changes'],
+  ];
+  const resultText = (mode) => (RESULT_MODES.find(([m]) => m === mode) || [mode, mode])[1].toLowerCase();
+  const sourceText = (p) => (p.source.kind === 'knowledge' ? 'Knowledge project' : `Repository project on ${p.source.repo}`);
+
+  function renderNewProject() {
+    const nameId = nextId('project');
+    const sourceId = nextId('source');
+    const modeId = nextId('mode');
+    const name = h('input', { id: nameId, type: 'text', autocomplete: 'off', required: true });
+    const source = h('select', { id: sourceId },
+      h('option', { value: 'knowledge', text: 'Knowledge work (no repository)' }),
+      state.repos.map((r) => h('option', { value: `repo:${r}`, text: `Repository ${r}` })));
+    const mode = h('select', { id: modeId }, RESULT_MODES.map(([value, text]) => h('option', { value, text })));
+    const error = h('p', { class: 'error', role: 'alert' });
+    const back = state.source.kind === 'project' ? `#/p/${enc(state.source.id)}` : '#/';
+    const go = h('button', {
+      type: 'button', class: 'primary', text: 'Create project', disabled: !can('run'),
+      onclick: async () => {
+        const title = name.value.trim();
+        if (!title) { name.focus(); return; }
+        const body = {
+          name: title,
+          source: source.value === 'knowledge' ? { kind: 'knowledge' } : { kind: 'repository', repo: source.value.slice(5) },
+          result_mode: mode.value,
+        };
+        go.disabled = true;
+        error.textContent = '';
+        let project;
+        try {
+          project = await api('POST', '/v1/projects', body);
+        } catch (e) {
+          error.textContent = e.code === 'knowledge_disabled' ? `${e.message}: this server keeps no knowledge projects until its operator turns them on.` : e.message;
+          go.disabled = false;
+          return;
+        }
+        state.projects = (state.projects || []).filter((p) => p.id !== project.id).concat(project);
+        toast(`Project ${project.name} created.`);
+        location.hash = `#/p/${enc(project.id)}`;
+      },
+    });
+    name.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') go.click(); });
+    main(h('div', { class: 'page narrow' },
+      h('a', { class: 'back', href: back, text: '‹ Back' }),
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'New project' }),
+        h('p', { class: 'lede', text: 'A project names where work comes from and what counts as its result. Its workspaces hold the sessions and their outputs.' }))),
+      h('div', { class: 'card form' },
+        h('label', { class: 'block', for: nameId, text: 'Project name' }), name,
+        h('div', { class: 'form-grid' },
+          h('div', {}, h('label', { class: 'block', for: sourceId, text: 'Source' }), source),
+          h('div', {}, h('label', { class: 'block', for: modeId, text: 'Results' }), mode)),
+        h('p', { class: 'hint', text: 'Knowledge work keeps its files on the server; a repository project works on branches of a repository this token reaches.' }),
+        h('div', { class: 'row form-actions' }, go),
+        can('run') ? null : h('p', { class: 'hint', text: 'This token lacks the run scope.' })),
+      error));
+  }
+
+  // A project at a glance, as home is a repository's: counts per lane, a
+  // field to start a workspace, and its workspaces.
+  async function renderProject() {
+    const route = state.route;
+    const id = route.name === 'project' ? route.project : state.source.id;
+    let project = projectOf(id);
+    if (!project) {
+      let error = null;
+      try {
+        project = await api('GET', `/v1/projects/${enc(id)}`);
+        state.projects = (state.projects || []).filter((p) => p.id !== id).concat(project);
+        renderPicker();
+      } catch (e) {
+        error = e;
+      }
+      if (state.route !== route) return;
+      if (error) {
+        main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Back' }),
+          h('h1', { text: 'Project not found' }), h('p', { class: 'error', text: error.message })));
+        return;
+      }
+    }
+    const titleField = h('input', { id: 'workspace-title', type: 'text', autocomplete: 'off', placeholder: 'What is this workspace for?' });
+    const status = h('p', { class: 'hint', role: 'status' });
+    const create = h('button', {
+      type: 'button', class: 'primary', text: 'Create workspace', disabled: !can('run'),
+      onclick: () => createWorkspace(project, titleField, create, status),
+    });
+    titleField.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') create.click(); });
+    main(h('div', { class: 'page' },
+      h('a', { class: 'back', href: `#/p/${enc(project.id)}`, text: '‹ Workspaces' }),
+      h('header', { class: 'page-head' }, h('div', {},
+        h('h1', { text: project.name }),
+        h('p', { class: 'lede', id: 'project-lede' }))),
+      h('ul', { class: 'glance', id: 'project-glance', 'aria-label': 'Workspaces by state' }),
+      can('run') ? h('section', { class: 'card new-workspace', 'aria-label': 'New workspace' },
+        h('label', { class: 'block', for: 'workspace-title', text: 'Workspace title' }),
+        h('div', { class: 'row inline-form' }, titleField, create),
+        status) : null,
+      h('h2', { text: 'Workspaces' }),
+      h('div', { id: 'project-cards' })));
+    updateProjectGlance();
+  }
+
+  // What the glance shows from the workspace list; a poll redraws only this,
+  // so a title being typed stays.
+  function updateProjectGlance() {
+    const lede = $('project-lede');
+    if (!lede) return;
+    const project = projectOf(state.workspaces.project);
+    const { list, loaded, error } = state.workspaces;
+    if (!project) return;
+    lede.textContent = `${sourceText(project)} · ${resultText(project.result_mode)} · ${loaded ? plural(list.length, 'workspace') : 'loading workspaces…'}`;
+    fill($('project-glance'), loaded && list.length ? WORKSPACE_LANES.map((lane) => {
+      const n = list.filter((w) => workspaceLane(w) === lane).length;
+      return h('li', { class: 'glance-item' }, h('span', { class: 'glance-label' }, dot(n ? lane.key : 'done'), lane.label), h('b', { text: String(n) }));
+    }) : null);
+    const sorted = list.slice().sort((x, y) => y.created_at_ms - x.created_at_ms);
+    fill($('project-cards'), error ? h('p', { class: 'error', text: error })
+      : !loaded ? h('p', { class: 'muted', text: 'Loading…' })
+        : !list.length ? h('p', { class: 'muted', text: 'No workspaces yet.' })
+          : h('ul', { class: 'cards' }, sorted.map((w) => {
+            const lane = workspaceLane(w);
+            return h('li', {}, h('a', { class: 'card card-link', href: `#/w/${enc(w.id)}` },
+              h('span', { class: 'card-head' }, dot(lane.key), h('span', { class: 'card-name', text: w.title }), ago(w.created_at_ms)),
+              h('span', { class: 'card-text', text: cap(workspaceStateText(w)) }),
+              w.error ? h('span', { class: 'card-prompt', text: w.error.message }) : null));
+          })));
+  }
+
+  // A workspace is reserved at once and set up by a queued operation; it
+  // opens when that operation has succeeded.
+  async function createWorkspace(project, field, button, status) {
+    const title = field.value.trim();
+    if (!title) { field.focus(); return; }
+    button.disabled = true;
+    button.textContent = 'Creating…';
+    status.textContent = 'Setting up the workspace…';
+    const reset = (text) => {
+      button.disabled = false;
+      button.textContent = 'Create workspace';
+      status.textContent = text;
+    };
+    let op;
+    try {
+      op = await api('POST', '/v1/workspaces', { project_id: project.id, title });
+    } catch (e) {
+      reset(`Could not create the workspace: ${e.message}`);
+      return;
+    }
+    const done = await awaitOperation(op.id);
+    if (!done || done.state !== 'succeeded') {
+      reset(done ? `The workspace did not start: ${done.error ? done.error.message : done.state}.` : 'The workspace is still being set up; it appears in the list when it is ready.');
+      if (state.workspaces.project === project.id) loadWorkspaces(project.id);
+      return;
+    }
+    const id = done.workspace_id || op.workspace_id;
+    field.value = '';
+    toast(`Workspace ${title} is ready.`);
+    if (state.workspaces.project === project.id) loadWorkspaces(project.id);
+    if (status.isConnected) location.hash = `#/w/${enc(id)}`;
   }
 
   // ---------------------------------------------------------------
@@ -1054,24 +1506,19 @@
 
   async function followOperation(id, action, name) {
     const repo = state.repo;
-    for (let i = 0; i < 600; i++) {
-      await new Promise((r) => setTimeout(r, i < 10 ? 1000 : 3000));
-      let op;
-      try { op = await api('GET', `/v1/operations/${enc(id)}`); } catch (_) { continue; }
-      if (!['succeeded', 'failed', 'interrupted'].includes(op.state)) continue;
-      let info = null;
-      if (name && repo === state.repo) {
-        try { info = await api('GET', branchPath(name)); state.branches.set(name, info); } catch (_) { /* the list refresh catches up */ }
-      }
-      if (state.pending.get(name) === action.busy) state.pending.delete(name);
-      if (op.state !== 'succeeded') toast(`${action.label} ${op.state}${op.error ? `: ${op.error.message}` : '.'}`);
-      else if (action.finished) {
-        if (action === ACTIONS.merge) state.merged.add(name);
-        toast(action.finished(info));
-      }
-      branchesChanged();
-      return;
+    const op = await awaitOperation(id);
+    if (!op) return;
+    let info = null;
+    if (name && repo === state.repo) {
+      try { info = await api('GET', branchPath(name)); state.branches.set(name, info); } catch (_) { /* the list refresh catches up */ }
     }
+    if (state.pending.get(name) === action.busy) state.pending.delete(name);
+    if (op.state !== 'succeeded') toast(`${action.label} ${op.state}${op.error ? `: ${op.error.message}` : '.'}`);
+    else if (action.finished) {
+      if (action === ACTIONS.merge) state.merged.add(name);
+      toast(action.finished(info));
+    }
+    branchesChanged();
   }
 
   async function runAction(action, name) {
@@ -1105,25 +1552,13 @@
       open: new Set(), signature: null, operations: null,
     };
     view = v;
-    const tabs = [['changes', 'Changes'], ['details', 'Details'], ['activity', 'Activity']];
     main(h('div', { class: 'branch' },
       h('section', { class: 'focus', 'aria-label': 'Conversation' },
         h('header', { class: 'strip', id: 'strip' }),
         h('div', { class: 'convo', id: 'convo' }, h('p', { class: 'muted', text: 'Loading the conversation…' })),
-        composer()),
+        composer(() => submitComposer())),
       h('aside', { class: 'inspector', id: 'inspector', 'aria-label': 'Inspector' },
-        h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Inspector', onkeydown: (ev) => {
-          const at = tabs.findIndex(([k]) => k === v.tab);
-          const by = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
-          if (!by) return;
-          const [k] = tabs[(at + by + tabs.length) % tabs.length];
-          selectTab(v, k);
-          $(`tab-${k}`).focus();
-        } }, tabs.map(([k, label]) => h('button', {
-          type: 'button', role: 'tab', id: `tab-${k}`, 'aria-controls': `panel-${k}`,
-          'aria-selected': String(k === v.tab), tabindex: k === v.tab ? '0' : '-1',
-          onclick: () => selectTab(v, k),
-        }, label, k === 'changes' ? [' ', h('span', { class: 'tab-count', id: 'changes-count' })] : null))),
+        tablist(BRANCH_TABS, () => v.tab, (k) => selectTab(v, k)),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-changes', 'aria-labelledby': 'tab-changes' }, h('div', { id: 'changes' })),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-details', 'aria-labelledby': 'tab-details', hidden: true },
           h('dl', { class: 'facts', id: 'facts' }),
@@ -1140,14 +1575,37 @@
     loadOperations(v);
   }
 
-  function selectTab(v, tab) {
-    v.tab = tab;
-    for (const k of ['changes', 'details', 'activity']) {
+  const BRANCH_TABS = [['changes', 'Changes', 'changes-count'], ['details', 'Details'], ['activity', 'Activity']];
+
+  // The inspector's tabs: [key, label, id of a count beside it]. Arrow keys
+  // move between them.
+  function tablist(tabs, current, pick) {
+    return h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Inspector', onkeydown: (ev) => {
+      const at = tabs.findIndex(([k]) => k === current());
+      const by = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
+      if (!by) return;
+      const [k] = tabs[(at + by + tabs.length) % tabs.length];
+      pick(k);
+      $(`tab-${k}`).focus();
+    } }, tabs.map(([k, label, count]) => h('button', {
+      type: 'button', role: 'tab', id: `tab-${k}`, 'aria-controls': `panel-${k}`,
+      'aria-selected': String(k === current()), tabindex: k === current() ? '0' : '-1',
+      onclick: () => pick(k),
+    }, label, count ? [' ', h('span', { class: 'tab-count', id: count })] : null)));
+  }
+
+  function showTab(tabs, tab) {
+    for (const [k] of tabs) {
       const on = k === tab;
       $(`tab-${k}`).setAttribute('aria-selected', String(on));
       $(`tab-${k}`).tabIndex = on ? 0 : -1;
       $(`panel-${k}`).hidden = !on;
     }
+  }
+
+  function selectTab(v, tab) {
+    v.tab = tab;
+    showTab(BRANCH_TABS, tab);
     drawTimeline(v);
   }
 
@@ -1231,10 +1689,10 @@
       last && !outcome && info ? workingLine(info) : null);
   }
 
-  function composer() {
+  function composer(submit) {
     const area = h('textarea', { id: 'composer-text', rows: '2' });
     area.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submitComposer(); }
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submit(); }
     });
     return h('div', { class: 'composer', id: 'composer' },
       h('label', { class: 'visually-hidden', for: 'composer-text', id: 'composer-label' }),
@@ -1248,7 +1706,7 @@
           $('composer-text').focus();
         } }),
         h('span', { class: 'spacer' }),
-        h('button', { type: 'button', class: 'primary', id: 'composer-go', onclick: () => submitComposer() })));
+        h('button', { type: 'button', class: 'primary', id: 'composer-go', onclick: () => submit() })));
   }
 
   function applyComposer(info) {
@@ -1423,9 +1881,863 @@
   }
 
   // ---------------------------------------------------------------
+  // One workspace: the strip with its acceptance and lifecycle actions,
+  // its sessions as tabs over one conversation and message box, and an
+  // inspector of its sources, outputs and details
+
+  const workspacePath = (id) => `/v1/workspaces/${enc(id)}`;
+  const workspaceHref = (id, session) => `#/w/${enc(id)}${session ? `/s/${enc(session)}` : ''}`;
+
+  function size(n) {
+    if (n == null) return '';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  // Short names for formats people know; any other shows its media type,
+  // which a row's tooltip always gives in full.
+  const FORMATS = {
+    'text/csv': 'CSV',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+    'application/pdf': 'PDF',
+    'application/json': 'JSON',
+    'text/plain': 'Text',
+    'text/markdown': 'Markdown',
+    'image/png': 'PNG',
+    'image/jpeg': 'JPEG',
+  };
+  const formatOf = (type) => FORMATS[(type || '').split(';')[0].trim().toLowerCase()] || type || 'File';
+
+  // The server reads a source's title from a header, which carries printable
+  // ASCII only: accents are dropped and any other character becomes `_`.
+  const asciiTitle = (name) => name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '_').slice(0, 512);
+
+  // A session's native status once its turn exists. Before that it has no
+  // `status_detail`, and `status` is its admission operation's state.
+  const sessionStatus = (s) => (s.status_detail ? { name: s.name, status: s.status_detail } : null);
+  const unstarted = (s) => !s.status_detail && ['failed', 'interrupted'].includes(s.status);
+  function sessionActive(s) {
+    const info = sessionStatus(s);
+    return info ? ['running', 'waiting', 'waiting_on_children'].includes(info.status.state) : !unstarted(s);
+  }
+  function sessionLane(s) {
+    const info = sessionStatus(s);
+    if (!info) return unstarted(s) ? 'needs' : 'running';
+    return info.status.state === 'waiting_on_children' ? 'running' : laneOf(info, new Map()).key;
+  }
+  function sessionText(s) {
+    if (unstarted(s)) return `did not start${s.error ? `: ${s.error.message}` : ''}`;
+    const info = sessionStatus(s);
+    return info ? statusOf(info).text : 'starting';
+  }
+  const sessionsOf = (v) => (v.workspace.sessions || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
+  const selectedSession = (v) => sessionsOf(v).find((s) => s.id === v.session) || null;
+
+  // The message box's verb for the selected session, by the branch rules:
+  // a running turn steers, an interrupted one resumes, any other sends.
+  const SESSION_COMPOSER = {
+    send: {
+      action: 'send', label: 'Send', title: 'Send a follow-up', rule: when.send,
+      placeholder: (s) => `Follow up in ${s.name}…`, started: 'Sent. A new turn is starting.',
+    },
+    steer: {
+      action: 'steer', label: 'Steer', title: 'Steer the running turn', rule: when.steer,
+      placeholder: (s) => `Steer ${s.name}'s running turn…`, started: 'Steering sent. The running turn reads it next.',
+    },
+    resume: {
+      action: 'resume', label: 'Resume', title: 'Resume the interrupted turn', rule: when.resume, empty: RESUME_PROMPT,
+      placeholder: () => 'Resume as it was, or say what to do next…', started: 'Resuming. A new turn is starting.',
+    },
+  };
+
+  function sessionComposer(v, s) {
+    const info = s && sessionStatus(s);
+    const st = info && info.status.state;
+    const mode = st === 'running' ? SESSION_COMPOSER.steer : st === 'interrupted' ? SESSION_COMPOSER.resume : SESSION_COMPOSER.send;
+    let why = null;
+    if (!can('run')) why = 'this token lacks the run scope';
+    else if (!s) why = 'start a session first';
+    else if (!['ready', 'running'].includes(v.workspace.state)) why = `the workspace is ${workspaceStateText(v.workspace)}`;
+    else if (unstarted(s)) why = `${s.name} did not start${s.error ? `: ${s.error.message}` : ''}`;
+    else if (!info) why = `${s.name} is starting; its first turn has not begun`;
+    else if (state.me.subject && s.subject && s.subject !== state.me.subject) why = `only ${s.subject} can continue ${s.name}`;
+    else why = mode.rule(info);
+    return { mode, why };
+  }
+
+  // The workspace's rare actions, in the ⋯ menu. `when` is false when an
+  // action does not apply now (not shown), the server's reason when it
+  // reports the capability missing (shown disabled, with that reason), or
+  // null when it can be asked for.
+  const WORKSPACE_MENU = [
+    {
+      label: 'Cancel turn', danger: true, run: (v, s) => cancelSession(v, s),
+      when: (v, s) => (s && sessionActive(s) && can('run') ? null : false),
+    },
+    {
+      label: 'Archive', run: (v) => lifecycle(v, 'archive'),
+      when: (v) => (v.workspace.state === 'ready' && can('run') ? null : false),
+    },
+    {
+      label: 'Restore', run: (v) => lifecycle(v, 'restore'),
+      when: (v) => (['archived', 'failed', 'interrupted'].includes(v.workspace.state) && can('run') ? null : false),
+    },
+    { label: 'Sleep', run: (v) => lifecycle(v, 'sleep'), when: (v) => capability(v, 'sleep') },
+  ];
+
+  function capability(v, name) {
+    const c = (v.workspace.capabilities || {})[name];
+    if (!c || v.workspace.state !== 'ready' || !can('run')) return false;
+    return c.available ? null : c.reason || 'not available';
+  }
+
+  // The open workspace, kept across polls and session switches.
+  let wsView = null;
+
+  function closeWorkspace() {
+    if (wsView) clearTimeout(wsView.timer);
+    wsView = null;
+  }
+
+  // The one live preview, disposed on every route, tab, output and source
+  // change and on signing out, so no hidden preview keeps fetching.
+  let livePreview = null;
+  function disposePreview() {
+    if (livePreview && livePreview.handle) livePreview.handle.dispose();
+    livePreview = null;
+  }
+  function closePreview() {
+    disposePreview();
+    if (!wsView) return;
+    wsView.previewing = null;
+    const slot = $('preview');
+    if (slot) fill(slot);
+    for (const b of document.querySelectorAll('#outputs .output-name')) b.setAttribute('aria-pressed', 'false');
+  }
+
+  // Every write the server checks against the workspace's revision reads it
+  // here. A stale revision (or a write that lost a race for the record)
+  // reloads the workspace and asks the person to try again: no write is
+  // retried behind their back.
+  async function revised(v, what, write) {
+    try {
+      return await write(v.workspace.revision);
+    } catch (e) {
+      if (e.status !== 409 || e.code !== 'revision_conflict') throw e;
+      let reloaded = true;
+      try { await reloadDetail(v); } catch (_) { reloaded = false; }
+      if (wsView === v) drawWorkspace(v);
+      toast(reloaded
+        ? `${what}: the workspace changed meanwhile. It is reloaded at revision ${v.workspace.revision}; try again.`
+        : `${what}: the workspace changed meanwhile, and reloading it failed. Reload the page, then try again.`);
+      return null;
+    }
+  }
+
+  async function renderWorkspace() {
+    const { workspace: id, session } = state.route;
+    if (wsView && wsView.id === id && $('workspace')) {
+      selectSession(wsView, session);
+      return;
+    }
+    const v = {
+      id, workspace: null, session: null, messages: new Map(),
+      artifacts: null, artifactsError: null, artifactsFor: null,
+      selected: new Set(), previewing: null, tab: 'sources',
+      composing: false, busy: null, sending: false, following: 0, drafts: new Map(),
+      timer: null, refreshing: false, again: false, failures: 0, failure: null,
+      asked: 0, applied: 0, drawn: {},
+    };
+    wsView = v;
+    main(h('div', { class: 'page' }, h('p', { class: 'muted', role: 'status', text: 'Opening the workspace…' })));
+    try {
+      await reloadDetail(v);
+    } catch (e) {
+      if (wsView !== v) return;
+      main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Back' }),
+        h('h1', { text: 'Workspace not available' }), h('p', { class: 'error', text: e.message })));
+      return;
+    }
+    if (wsView !== v) return;
+    workspaceLayout(v);
+    selectSession(v, session);
+    loadArtifacts(v).then(() => { if (wsView === v) drawOutputs(v); });
+    scheduleWorkspace(v);
+  }
+
+  // Reads overlap (a poll, an upload's reload): one asked earlier never
+  // replaces one asked later.
+  async function reloadDetail(v) {
+    const asked = (v.asked += 1);
+    const ws = await api('GET', workspacePath(v.id));
+    if (wsView !== v || asked < v.applied) return;
+    v.applied = asked;
+    v.workspace = ws;
+    if (!projectOf(ws.project_id)) {
+      const project = await api('GET', `/v1/projects/${enc(ws.project_id)}`);
+      state.projects = (state.projects || []).filter((p) => p.id !== project.id).concat(project);
+      if (wsView !== v) return;
+    }
+    useProject(ws.project_id);
+    const row = state.workspaces.list.find((w) => w.id === ws.id);
+    if (row && (row.state !== ws.state || row.title !== ws.title)) {
+      Object.assign(row, { state: ws.state, title: ws.title, revision: ws.revision });
+      workspacesChanged();
+    } else if (!row && state.workspaces.loaded && state.workspaces.project === ws.project_id) {
+      loadWorkspaces(ws.project_id);
+    }
+  }
+
+  const INSPECTOR = [['sources', 'Sources', 'sources-count'], ['outputs', 'Outputs', 'outputs-count'], ['details', 'Details']];
+
+  function workspaceLayout(v) {
+    const files = h('input', { type: 'file', id: 'source-file', multiple: true, hidden: true, tabindex: '-1' });
+    files.addEventListener('change', () => {
+      const picked = Array.from(files.files);
+      files.value = '';
+      if (picked.length) uploadSources(v, picked);
+    });
+    const drop = h('div', { class: 'drop', id: 'source-drop', text: 'Or drop files here' });
+    drop.addEventListener('dragover', (ev) => { ev.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      drop.classList.remove('over');
+      const picked = Array.from((ev.dataTransfer && ev.dataTransfer.files) || []);
+      if (picked.length && can('run')) uploadSources(v, picked);
+    });
+    main(h('div', { class: 'branch workspace', id: 'workspace' },
+      h('section', { class: 'focus', 'aria-label': 'Conversation' },
+        h('header', { class: 'strip', id: 'strip' }),
+        h('nav', { class: 'sessions', id: 'sessions', 'aria-label': 'Sessions' }),
+        h('div', { class: 'convo', id: 'convo' }),
+        composer(() => submitSession(v))),
+      h('aside', { class: 'inspector', id: 'inspector', 'aria-label': 'Inspector' },
+        tablist(INSPECTOR, () => v.tab, (tab) => selectWorkspaceTab(v, tab)),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-sources', 'aria-labelledby': 'tab-sources' },
+          h('div', { class: 'panel-tools' },
+            h('button', { type: 'button', id: 'upload-sources', text: 'Upload sources', disabled: !can('run'), onclick: () => files.click() }),
+            files, can('run') ? drop : null),
+          h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' })),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
+          h('div', { id: 'outputs-list' }),
+          h('div', { class: 'preview', id: 'preview', 'aria-label': 'Preview' })),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-details', 'aria-labelledby': 'tab-details', hidden: true },
+          h('dl', { class: 'facts', id: 'ws-facts' }),
+          h('h2', { text: 'Sessions' }), h('ul', { class: 'events', id: 'ws-sessions' }),
+          h('h2', { text: 'Members' }), h('ul', { class: 'events', id: 'ws-members' })))));
+  }
+
+  function selectWorkspaceTab(v, tab) {
+    closePreview();
+    v.tab = tab;
+    showTab(INSPECTOR, tab);
+    if (tab === 'outputs' && v.artifacts === null) loadArtifacts(v).then(() => { if (wsView === v) drawOutputs(v); });
+    drawWorkspace(v);
+  }
+
+  // The session the route names, else the most recent; a workspace with no
+  // session opens the form for its first.
+  function selectSession(v, id) {
+    const sessions = sessionsOf(v);
+    const chosen = sessions.find((s) => s.id === id) || sessions[sessions.length - 1] || null;
+    const area = $('composer-text');
+    if (v.session !== (chosen && chosen.id)) {
+      if (v.session) v.drafts.set(v.session, area.value);
+      area.value = (chosen && v.drafts.get(chosen.id)) || '';
+    }
+    v.session = chosen ? chosen.id : null;
+    if (v.composing || !chosen) {
+      v.composing = !chosen && can('run') && v.workspace.state === 'ready';
+      v.drawn.convo = null;
+    }
+    drawWorkspace(v);
+    if (v.composing) openSessionForm(v);
+    if (chosen && sessionStatus(chosen)) loadMessages(v, chosen.id).then(() => { if (wsView === v) drawWorkspace(v); });
+  }
+
+  // A session's messages page by page from its cursor. The server reads
+  // the native log a page at a time, so a page may hold no message while
+  // the cursor still moves.
+  function loadMessages(v, id) {
+    let m = v.messages.get(id);
+    if (!m) {
+      m = { list: [], cursor: '0', loaded: false, error: null, loading: null };
+      v.messages.set(id, m);
+    }
+    if (m.loading) return m.loading;
+    m.loading = (async () => {
+      try {
+        for (;;) {
+          const page = await api('GET', `${workspacePath(v.id)}/sessions/${enc(id)}/messages?after=${enc(m.cursor)}`);
+          m.list.push(...page.messages);
+          const moved = page.next_cursor !== m.cursor;
+          m.cursor = page.next_cursor;
+          if (!moved) break;
+        }
+        m.loaded = true;
+        m.error = null;
+      } catch (e) {
+        m.error = e.message;
+      } finally {
+        m.loading = null;
+      }
+    })();
+    return m.loading;
+  }
+
+  async function loadArtifacts(v) {
+    const sessions = v.workspace.sessions || [];
+    v.artifactsFor = JSON.stringify(sessions.map((s) => [s.id, s.status, s.turns]));
+    if (!sessions.length) { v.artifacts = []; return; }
+    try {
+      v.artifacts = (await api('GET', `${workspacePath(v.id)}/artifacts`)).artifacts;
+      v.artifactsError = null;
+    } catch (e) {
+      v.artifactsError = e.message;
+      if (v.artifacts === null) v.artifacts = [];
+    }
+    for (const id of v.selected) if (!v.artifacts.some((a) => a.id === id)) v.selected.delete(id);
+  }
+
+  // While anything here is starting, running or settling, the page reads
+  // the workspace again every second and a half; managed workspaces have
+  // no event stream to listen to.
+  function scheduleWorkspace(v, delay = 1500) {
+    clearTimeout(v.timer);
+    if (wsView !== v || !v.workspace || v.gone) return;
+    const busy = v.following > 0 || workspaceLane(v.workspace).key === 'running' || (v.workspace.sessions || []).some(sessionActive);
+    if (busy) v.timer = setTimeout(() => refreshWorkspace(v), Math.min(30000, delay * 2 ** v.failures));
+  }
+
+  async function refreshWorkspace(v) {
+    if (wsView !== v) return;
+    if (v.refreshing) { v.again = true; return; }
+    v.refreshing = true;
+    try {
+      await reloadDetail(v);
+      const s = wsView === v ? selectedSession(v) : null;
+      if (s && sessionStatus(s)) await loadMessages(v, s.id);
+      const settled = JSON.stringify((v.workspace.sessions || []).map((x) => [x.id, x.status, x.turns]));
+      if (wsView === v && settled !== v.artifactsFor) await loadArtifacts(v);
+      v.failures = 0;
+      v.failure = null;
+    } catch (e) {
+      v.failures += 1;
+      v.gone = e.status === 403 || e.status === 404;
+      v.failure = v.gone ? `This workspace is no longer open to this token: ${e.message}` : `Could not refresh: ${e.message}`;
+    } finally {
+      v.refreshing = false;
+    }
+    if (wsView !== v || !state.token) return;
+    drawWorkspace(v);
+    if (v.again) { v.again = false; refreshWorkspace(v); return; }
+    scheduleWorkspace(v);
+  }
+
+  // Watch an operation this page started; the workspace is read again as
+  // it settles, and a failure (or `finished`) is said.
+  async function follow(v, op, label, finished) {
+    v.following += 1;
+    scheduleWorkspace(v, 300);
+    const done = await awaitOperation(op.id);
+    v.following -= 1;
+    if (done && done.state !== 'succeeded') toast(`${label} ${done.state}${done.error ? `: ${done.error.message}` : '.'}`);
+    else if (done && finished) toast(finished);
+    if (wsView === v) refreshWorkspace(v);
+  }
+
+  function drawWorkspace(v) {
+    if (wsView !== v || !$('strip')) return;
+    drawStrip(v);
+    drawSessions(v);
+    if (v.composing && v.syncForm) v.syncForm();
+    drawConversation(v);
+    applySessionComposer(v);
+    drawSources(v);
+    drawOutputs(v);
+    drawDetails(v);
+  }
+
+  function drawStrip(v) {
+    const ws = v.workspace;
+    const s = selectedSession(v);
+    const project = projectOf(ws.project_id);
+    const lane = workspaceLane(ws);
+    const items = WORKSPACE_MENU.map((item) => ({ item, why: item.when(v, s) })).filter(({ why }) => why !== false);
+    const n = v.selected.size;
+    const signature = JSON.stringify([ws.title, ws.state, ws.revision, project && project.name, n, v.busy, v.failure, s && s.id, items.map(({ item, why }) => [item.label, why])]);
+    if (signature === v.drawn.strip) return;
+    const strip = $('strip');
+    if (strip.querySelector('details.menu[open]')) return;
+    v.drawn.strip = signature;
+    const kept = document.activeElement === strip.querySelector('h1');
+    const focused = strip.contains(document.activeElement) && document.activeElement.id;
+    let action = null;
+    if (v.busy) action = h('button', { type: 'button', class: 'primary', disabled: true, text: v.busy });
+    else if (n) action = h('button', { type: 'button', class: 'primary', id: 'accept', text: `Accept ${n} selected`, disabled: !can('run'), onclick: () => acceptSelected(v) });
+    fill(strip,
+      h('a', { class: 'back', href: `#/p/${enc(ws.project_id)}`, text: '‹ Workspaces' }),
+      h('div', { class: 'strip-title' }, h('h1', { tabindex: '-1', text: ws.title }),
+        h('p', { class: 'strip-meta', text: `${project ? project.name : 'Project'} · revision ${ws.revision}` })),
+      h('p', { class: `state state-${lane.key}` }, dot(lane.key), cap(workspaceStateText(ws))),
+      action,
+      items.length ? workspaceMenu(v, s, items) : null,
+      v.failure ? h('p', { class: 'error strip-error', role: 'status', text: v.failure }) : null);
+    if (kept) strip.querySelector('h1').focus({ preventScroll: true });
+    else if (focused && $(focused)) $(focused).focus({ preventScroll: true });
+  }
+
+  function workspaceMenu(v, s, items) {
+    const menu = h('details', { class: 'menu' },
+      h('summary', { 'aria-label': 'More actions', title: 'More actions' }, h('span', { 'aria-hidden': 'true', text: '⋯' })),
+      h('div', { class: 'menu-list' }, items.map(({ item, why }) => h('button', {
+        type: 'button', class: item.danger ? 'menu-item danger-text' : 'menu-item', disabled: why != null,
+        onclick: () => { menu.open = false; item.run(v, s); },
+      }, h('span', { text: item.label }), why != null ? h('span', { class: 'menu-why', text: `Not available here: ${why}` }) : null))));
+    menu.addEventListener('toggle', () => { if (!menu.open && wsView === v) drawStrip(v); });
+    return menu;
+  }
+
+  function drawSessions(v) {
+    const sessions = sessionsOf(v);
+    const signature = JSON.stringify([sessions.map((s) => [s.id, s.name, sessionLane(s), sessionText(s)]), v.session, v.composing]);
+    if (signature === v.drawn.sessions) return;
+    v.drawn.sessions = signature;
+    fill($('sessions'), sessions.map((s) => h('a', {
+      class: 'session-tab', href: workspaceHref(v.id, s.id), 'data-session': s.id, title: `${s.name}: ${sessionText(s)}`,
+      'aria-current': s.id === v.session && !v.composing ? 'page' : null,
+      onclick: () => { if (v.composing) { v.composing = false; v.drawn.convo = null; drawWorkspace(v); } },
+    }, dot(sessionLane(s)), h('span', { class: 'session-name', text: s.name }))),
+    can('run') ? h('button', {
+      type: 'button', class: 'ghost new-session', id: 'new-session', 'aria-pressed': String(v.composing), text: '+ Session',
+      onclick: () => { v.composing = true; v.drawn.convo = null; drawWorkspace(v); openSessionForm(v); },
+    }) : null);
+  }
+
+  // Messages are turned into turns by the branch conversation's reducer:
+  // what the person sent opens a turn and the agent's text joins it.
+  function drawConversation(v) {
+    if (v.composing) return;
+    const box = $('convo');
+    const s = selectedSession(v);
+    const m = s ? v.messages.get(s.id) : null;
+    const signature = JSON.stringify([s && s.id, s && sessionText(s), m && [m.list.length, m.error, m.loaded]]);
+    if (signature === v.drawn.convo) return;
+    const fresh = !v.drawn.convo || JSON.parse(v.drawn.convo)[0] !== (s && s.id);
+    v.drawn.convo = signature;
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+    if (!s) {
+      fill(box, h('p', { class: 'muted', text: can('run') ? 'No sessions yet. Start one with + Session.' : 'No sessions yet.' }));
+      return;
+    }
+    const working = sessionActive(s);
+    const turns = conversation((m ? m.list : []).map((x) => ({
+      activity: x.role === 'user' ? { prompt: x.text } : { harness: { type: 'message_delta', text: x.text } },
+    })));
+    const workingLine = () => h('p', { class: 'outcome' }, dot('running'), sessionStatus(s) ? 'Working…' : 'Starting…');
+    fill(box,
+      m && m.error ? h('p', { class: 'error', text: m.error }) : null,
+      turns.map((t, i) => h('article', { class: 'turn' },
+        t.text != null ? h('div', { class: 'you' }, h('p', { text: t.text })) : null,
+        t.said.length ? h('div', { class: 'agent' }, t.said.map((x) => h('p', { text: x }))) : null,
+        working && i === turns.length - 1 ? workingLine() : null)),
+      working && !turns.length ? workingLine() : null,
+      unstarted(s) ? h('p', { class: 'outcome outcome-needs' }, dot('needs'), cap(sessionText(s))) : null,
+      !working && !unstarted(s) && !turns.length && m && m.loaded ? h('p', { class: 'muted', text: 'No messages yet.' }) : null);
+    if (atEnd || fresh) box.scrollTop = box.scrollHeight;
+  }
+
+  function applySessionComposer(v) {
+    const s = selectedSession(v);
+    const { mode, why } = sessionComposer(v, s);
+    const area = $('composer-text');
+    $('composer').hidden = v.composing;
+    $('composer').dataset.mode = why ? 'off' : mode.action;
+    $('composer-label').textContent = mode.title;
+    area.placeholder = why ? sentence(why, s && s.name) : mode.placeholder(s);
+    area.disabled = !!why;
+    $('composer-go').disabled = !!why || v.sending;
+    $('composer-go').textContent = mode.label;
+    $('composer-allow-box').hidden = true;
+    $('composer-cancel').hidden = true;
+  }
+
+  async function submitSession(v) {
+    if (wsView !== v) return;
+    const s = selectedSession(v);
+    const { mode, why } = sessionComposer(v, s);
+    const area = $('composer-text');
+    if (why || v.sending) return;
+    const text = area.value.trim() || mode.empty;
+    if (!text) { area.focus(); return; }
+    v.sending = true;
+    applySessionComposer(v);
+    const verb = mode.label.toLowerCase();
+    let op = null;
+    try {
+      op = await revised(v, `Could not ${verb}`, () => api('POST', `${workspacePath(v.id)}/sessions/${enc(s.id)}/messages`, { prompt: text, action: mode.action }));
+    } catch (e) {
+      toast(`Could not ${verb}: ${e.message}`);
+    }
+    v.sending = false;
+    if (wsView !== v) return;
+    if (op) {
+      area.value = '';
+      toast(mode.started);
+      follow(v, op, mode.label);
+    }
+    applySessionComposer(v);
+  }
+
+  async function cancelSession(v, s) {
+    if (!(await confirmDialog('Cancel turn?', `Cancel ${s.name}'s running turn?`, 'Cancel turn', true)) || wsView !== v) return;
+    let op = null;
+    try {
+      op = await revised(v, 'Could not cancel the turn', () => api('POST', `${workspacePath(v.id)}/sessions/${enc(s.id)}/cancel`, {}));
+    } catch (e) {
+      toast(`Could not cancel the turn: ${e.message}`);
+    }
+    if (!op || wsView !== v) return;
+    toast('Cancelling the running turn.');
+    follow(v, op, 'Cancel', 'Turn cancelled.');
+  }
+
+  const LIFECYCLE = {
+    archive: { busy: 'Archiving…', finished: 'Archived. Its sources, transcripts and accepted outputs are kept.' },
+    restore: { busy: 'Restoring…', finished: 'Restored.' },
+    sleep: { busy: 'Going to sleep…', finished: 'Asleep.' },
+  };
+
+  async function lifecycle(v, action) {
+    const ws = v.workspace;
+    if (action === 'archive' && !(await confirmDialog(`Archive ${ws.title}?`,
+      'Its sources, transcripts and accepted outputs are kept, and Restore brings it back. No session runs while it is archived.', 'Archive'))) return;
+    if (wsView !== v) return;
+    v.busy = LIFECYCLE[action].busy;
+    drawStrip(v);
+    let op = null;
+    try {
+      op = await revised(v, `Could not ${action} ${ws.title}`, (revision) => api('POST', `${workspacePath(v.id)}/actions/${action}`, { revision }));
+    } catch (e) {
+      const reason = e.detail && e.detail.reason ? ` (${e.detail.reason})` : '';
+      toast(`Could not ${action} ${ws.title}: ${e.message}${reason}.`);
+    }
+    v.busy = null;
+    if (wsView !== v) return;
+    if (op) follow(v, op, cap(action), LIFECYCLE[action].finished);
+    drawWorkspace(v);
+  }
+
+  // Sources upload one at a time: each upload moves the revision the next
+  // one must name. A file the server refuses is named and the rest still
+  // go; a stale revision or a failed reload stops, naming what was not sent.
+  async function uploadSources(v, files) {
+    const sent = [];
+    const refused = [];
+    let unsent = [];
+    for (const [i, file] of files.entries()) {
+      let source = null;
+      try {
+        source = await revised(v, `Could not upload ${file.name}`, (revision) => call(`${workspacePath(v.id)}/sources`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': file.type || 'application/octet-stream',
+            'X-Source-Title': asciiTitle(file.name),
+            'X-Workspace-Revision': String(revision),
+            'Idempotency-Key': key(),
+          },
+          body: file,
+        }));
+      } catch (e) {
+        if (wsView !== v) return;
+        refused.push(`${file.name} (${e.message})`);
+        continue;
+      }
+      if (wsView !== v) return;
+      if (!source) { unsent = files.slice(i); break; }
+      sent.push(file.name);
+      try { await reloadDetail(v); } catch (_) { unsent = files.slice(i + 1); break; }
+    }
+    if (wsView !== v) return;
+    if (sent.length) toast(`Uploaded ${plural(sent.length, 'source')}.`);
+    if (refused.length) toast(`Not uploaded: ${refused.join('; ')}.`);
+    if (unsent.length) toast(`Not sent: ${unsent.map((f) => f.name).join(', ')}. Upload ${unsent.length === 1 ? 'it' : 'them'} again.`);
+    drawWorkspace(v);
+  }
+
+  async function acceptSelected(v) {
+    const ids = Array.from(v.selected);
+    const names = ids.map((id) => ((v.artifacts || []).find((a) => a.id === id) || { name: id }).name);
+    if (!(await confirmDialog(`Accept ${plural(ids.length, 'output')}?`,
+      `${names.join(', ')} become accepted deliverables of ${v.workspace.title}. The server checks each came from its session's latest finished turn.`, 'Accept'))) return;
+    if (wsView !== v) return;
+    v.busy = 'Accepting…';
+    drawStrip(v);
+    let result = null;
+    try {
+      result = await revised(v, 'Could not accept', (revision) => api('POST', `${workspacePath(v.id)}/finalize`, { revision, artifacts: ids }));
+    } catch (e) {
+      toast(`Could not accept: ${e.message}`);
+    }
+    v.busy = null;
+    if (wsView !== v) return;
+    if (result) {
+      v.selected.clear();
+      toast(`Accepted ${plural(result.artifacts.length, 'output')}.`);
+      try { await reloadDetail(v); } catch (_) { /* the poll catches up */ }
+    }
+    drawWorkspace(v);
+  }
+
+  function drawSources(v) {
+    const sources = (v.workspace.sources || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
+    $('sources-count').textContent = sources.length ? String(sources.length) : '';
+    const signature = JSON.stringify(sources.map((src) => src.id));
+    if (signature === v.drawn.sources) return;
+    v.drawn.sources = signature;
+    fill($('sources'), sources.length ? sources.map((src) => h('li', { class: 'file-item', 'data-source': src.id },
+      h('div', { class: 'file-main' },
+        h('span', { class: 'file-title', text: src.title, title: src.title }),
+        h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
+      h('button', {
+        type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`,
+        onclick: () => download(`${workspacePath(v.id)}/sources/${enc(src.id)}/content`, src.title),
+      })))
+      : h('li', { class: 'muted pad', text: 'No sources yet. Upload the documents this workspace\'s sessions should read; each new session gets the ones you tick.' }));
+  }
+
+  function drawOutputs(v) {
+    const list = $('outputs-list');
+    if (!list || wsView !== v) return;
+    const accepted = new Set((v.workspace.accepted_deliverables || []).map((a) => a.artifact_id));
+    const all = v.artifacts || [];
+    $('outputs-count').textContent = all.length ? String(all.length) : '';
+    const signature = JSON.stringify([all.map((a) => a.id), Array.from(accepted), v.artifactsError, v.artifacts === null]);
+    if (signature === v.drawn.outputs) return;
+    v.drawn.outputs = signature;
+    const names = new Map((v.workspace.sessions || []).map((s) => [s.branch, s.name]));
+    const row = (a) => {
+      const done = accepted.has(a.id);
+      const box = h('input', { type: 'checkbox', 'aria-label': `Select ${a.name}`, checked: done || v.selected.has(a.id), disabled: done || !can('run') });
+      box.addEventListener('change', () => {
+        if (box.checked) v.selected.add(a.id); else v.selected.delete(a.id);
+        drawStrip(v);
+      });
+      return h('li', { class: done ? 'output-row accepted' : 'output-row', 'data-artifact': a.id },
+        box,
+        h('div', { class: 'file-main' },
+          h('button', { type: 'button', class: 'output-name', 'aria-pressed': String(v.previewing === a.id), title: `Preview ${a.name}`, text: a.name, onclick: () => openPreview(v, a) }),
+          h('span', { class: 'item-meta', title: a.media_type, text: `${formatOf(a.media_type)} · ${size(a.size)} · ${names.get(a.publisher_branch) || a.publisher_branch}, turn ${a.turn}` })),
+        done ? h('span', { class: 'tag tag-accepted' }, checkMark(false), 'Accepted') : null);
+    };
+    fill(list,
+      v.artifactsError ? h('p', { class: 'error pad', text: `Could not list outputs: ${v.artifactsError}` }) : null,
+      v.artifacts === null ? h('p', { class: 'muted pad', text: 'Loading outputs…' })
+        : !all.length ? h('p', { class: 'muted pad', text: `No outputs yet. A session started with Collect outputs publishes the files it lists in ${OUTPUT_MANIFEST} when its turn ends.` })
+          : h('ul', { class: 'files file-list', id: 'outputs', 'aria-label': 'Outputs' }, all.map(row)));
+  }
+
+  // Mount the preview component for one output. It asks the workspace's
+  // preview route; when this server answers 404 there, it has none, and
+  // the inspector says so in place of a preview.
+  function openPreview(v, a) {
+    closePreview();
+    v.previewing = a.id;
+    for (const b of document.querySelectorAll('#outputs .output-name')) {
+      b.setAttribute('aria-pressed', String(b.closest('[data-artifact]').dataset.artifact === a.id));
+    }
+    const base = `${workspacePath(v.id)}/artifacts/${enc(a.id)}`;
+    const host = h('div', { class: 'preview-host', id: 'preview-host' });
+    fill($('preview'),
+      h('div', { class: 'preview-head' },
+        h('h3', { id: 'preview-title', text: a.name, title: a.name }),
+        h('button', { type: 'button', text: 'Download original', onclick: () => download(`${base}/content`, a.name) })),
+      host);
+    const live = { handle: null };
+    livePreview = live;
+    live.handle = window.BranchyardArtifactPreview.mount(host, {
+      baseUrl: base,
+      displayName: a.name,
+      mediaType: a.media_type,
+      fetchAuthenticated: (path, init) => authFetch(path, init).then(async (response) => {
+        if (response.status === 404 && path.startsWith(`${base}/preview?`) && livePreview === live) {
+          let message = null;
+          try { message = (await response.clone().json()).error.message; } catch (_) { /* not the error envelope */ }
+          // The router's fallback answers an unknown route; a 404 from a
+          // preview route itself (an output gone) is the component's to show.
+          if (livePreview === live && message === 'no such route') previewMissing(host, message);
+        }
+        return response;
+      }),
+    });
+  }
+
+  function previewMissing(host, message) {
+    disposePreview();
+    fill(host, h('div', { class: 'preview-missing', role: 'status' },
+      h('p', { class: 'preview-missing-title', text: 'This server cannot preview workspace outputs yet.' }),
+      h('p', { text: 'Download the original to open it on this device.' }),
+      message ? h('p', { class: 'hint', text: `The server answered: ${message}.` }) : null));
+  }
+
+  function drawDetails(v) {
+    const ws = v.workspace;
+    const project = projectOf(ws.project_id);
+    const sessions = sessionsOf(v);
+    const caps = ws.capabilities || {};
+    const signature = JSON.stringify([ws.state, ws.revision, project && project.name, sessions.map((s) => [s.id, sessionText(s)]), ws.members, caps]);
+    if (signature === v.drawn.details) return;
+    v.drawn.details = signature;
+    const lane = workspaceLane(ws);
+    const unavailable = Object.entries(caps).filter(([, c]) => c && c.available === false);
+    const rows = [
+      ['Project', project ? h('a', { href: `#/p/${enc(project.id)}`, text: project.name }) : ws.project_id],
+      ['State', h('span', { class: 'fact-state' }, dot(lane.key), cap(workspaceStateText(ws)))],
+      ['Revision', String(ws.revision)],
+      ['Results', cap(resultText(ws.result_mode))],
+      ['Task', h('span', { class: 'mono', text: ws.task_id })],
+      ['Created', new Date(ws.created_at_ms).toLocaleString()],
+      ...unavailable.map(([name, c]) => [cap(name), `not available: ${c.reason}`]),
+    ];
+    fill($('ws-facts'), ...rows.map(([k, val]) => [h('dt', { text: k }), h('dd', {}, val)]).flat());
+    fill($('ws-sessions'), sessions.length ? sessions.map((s) => h('li', {},
+      h('a', { href: workspaceHref(v.id, s.id), text: s.name }),
+      ` · ${[s.harness, s.access, sessionText(s)].filter(Boolean).join(' · ')}`))
+      : h('li', { class: 'muted', text: 'None yet.' }));
+    const members = ws.members || [];
+    fill($('ws-members'), members.length ? members.map((m) => h('li', {}, h('span', { class: 'mono', text: m.subject }), ` · ${m.role}`))
+      : h('li', { class: 'muted', text: 'This server lists no members.' }));
+  }
+
+  // The form for a new session, in the conversation pane until started or
+  // cancelled. A poll does not redraw it.
+  async function openSessionForm(v) {
+    const box = $('convo');
+    if (!box || box.querySelector('#session-form')) return;
+    const ids = { name: nextId('session'), harness: nextId('harness'), access: nextId('access'), prompt: nextId('first') };
+    const name = h('input', { id: ids.name, type: 'text', autocomplete: 'off', placeholder: 'For example: Analyst' });
+    let harness = h('select', { id: ids.harness, disabled: true }, h('option', { value: '', text: 'Loading…' }));
+    const harnessSlot = h('div', {}, h('label', { class: 'block', for: ids.harness, text: 'Harness' }), harness);
+    const access = h('select', { id: ids.access },
+      h('option', { value: 'writer', text: 'Writer: works in its own copy' }),
+      h('option', { value: 'reviewer', text: 'Reviewer: reads outputs you choose' }));
+    const prompt = h('textarea', { id: ids.prompt, rows: '5', placeholder: 'What should this session do?' });
+    const checkbox = (label, checked, value) => {
+      const input = h('input', { type: 'checkbox', checked, value });
+      return h('label', { class: 'toggle' }, input, h('span', { text: label }));
+    };
+    // The sources and outputs to choose from follow the workspace while the
+    // form is open, keeping what was ticked; a new source starts ticked.
+    const sourcesBox = h('fieldset', { class: 'choices' });
+    const outputsBox = h('fieldset', { class: 'choices', hidden: true });
+    const choices = (box, legend, items, ticked, empty) => {
+      const was = new Map(Array.from(box.querySelectorAll('input'), (i) => [i.value, i.checked]));
+      fill(box, h('legend', { text: legend }), items.length
+        ? items.map(([value, label]) => checkbox(label, was.has(value) ? was.get(value) : ticked, value))
+        : h('p', { class: 'hint', text: empty }));
+    };
+    let synced = null;
+    v.syncForm = () => {
+      const sources = (v.workspace.sources || []).map((src) => [src.id, src.title]);
+      const outputs = (v.artifacts || []).map((a) => [a.id, a.name]);
+      const signature = JSON.stringify([sources, outputs]);
+      if (signature === synced) return;
+      synced = signature;
+      choices(sourcesBox, 'Sources to give it', sources, true, 'No sources yet: the Sources tab uploads them.');
+      choices(outputsBox, 'Outputs to review', outputs, false, 'No outputs yet: a reviewer needs at least one.');
+    };
+    v.syncForm();
+    const collect = checkbox(`Collect outputs (${OUTPUT_MANIFEST})`, v.workspace.result_mode !== 'code');
+    const allow = checkbox('Allow every tool', false);
+    const error = h('p', { class: 'error', role: 'alert' });
+    const ready = v.workspace.state === 'ready';
+    const start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready });
+    const cancel = h('button', {
+      type: 'button', text: 'Cancel',
+      onclick: () => { v.composing = false; v.drawn.convo = null; drawWorkspace(v); $('composer-text').focus(); },
+    });
+    access.addEventListener('change', () => {
+      outputsBox.hidden = access.value !== 'reviewer';
+      collect.hidden = access.value === 'reviewer';
+    });
+    start.addEventListener('click', async () => {
+      const body = { name: name.value.trim(), prompt: prompt.value.trim(), harness: harness.value.trim(), access: access.value };
+      const missing = !body.name ? [name, 'Name the session.'] : !body.harness ? [harness, 'Choose a harness.'] : !body.prompt ? [prompt, 'Give it a first prompt.'] : null;
+      if (missing) { error.textContent = missing[1]; missing[0].focus(); return; }
+      const ticked = (box) => Array.from(box.querySelectorAll('input:checked'), (i) => i.value);
+      if (ticked(sourcesBox).length) body.sources = ticked(sourcesBox);
+      if (body.access === 'reviewer') {
+        body.artifacts = ticked(outputsBox);
+        if (!body.artifacts.length) { error.textContent = 'Choose at least one output to review.'; return; }
+      } else if (collect.querySelector('input').checked) body.result_contract = OUTPUT_CONTRACT;
+      if (allow.querySelector('input').checked) body.policy = { mode: 'allow' };
+      start.disabled = true;
+      error.textContent = '';
+      let op = null;
+      try {
+        op = await revised(v, 'Could not start the session', () => api('POST', `${workspacePath(v.id)}/sessions`, body));
+      } catch (e) {
+        error.textContent = e.message;
+      }
+      if (wsView !== v) return;
+      if (!op) { start.disabled = false; return; }
+      toast('Session started.');
+      v.composing = false;
+      v.drawn.convo = null;
+      try { await reloadDetail(v); } catch (_) { /* the poll catches up */ }
+      follow(v, op, 'Session');
+      if (wsView === v) go(workspaceHref(v.id, op.session_id));
+    });
+    fill(box, h('section', { class: 'card form session-form', id: 'session-form', 'aria-labelledby': 'session-form-h' },
+      h('h2', { id: 'session-form-h', text: 'New session' }),
+      h('label', { class: 'block', for: ids.name, text: 'Session name' }), name,
+      h('div', { class: 'form-grid' }, harnessSlot,
+        h('div', {}, h('label', { class: 'block', for: ids.access, text: 'Access' }), access)),
+      h('label', { class: 'block', for: ids.prompt, text: 'First prompt' }), prompt,
+      sourcesBox,
+      outputsBox,
+      h('div', { class: 'row choices-row' }, collect, allow),
+      h('p', { class: 'hint', text: `Collect outputs asks the session to list its result files in ${OUTPUT_MANIFEST} and end with a JSON summary; the server publishes those files as outputs you can preview and accept.` }),
+      ready ? null : h('p', { class: 'hint', text: `The workspace is ${workspaceStateText(v.workspace)}; sessions start once it is ready.` }),
+      h('div', { class: 'row form-actions' }, start, cancel),
+      error));
+    name.focus();
+    let listed = null;
+    let why = null;
+    try {
+      listed = (await api('GET', '/v1/harnesses')).harnesses;
+    } catch (e) {
+      why = e.message;
+    }
+    if (!harness.isConnected) return;
+    const usable = (listed || []).filter((x) => x.available);
+    if (usable.length) {
+      fill(harness, usable.map((x) => h('option', { value: x.harness, text: x.harness })));
+      harness.disabled = false;
+    } else {
+      const typed = h('input', { id: ids.harness, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'A harness this server runs' });
+      harness.replaceWith(typed);
+      harness = typed;
+      harnessSlot.append(h('p', { class: 'hint', text: why ? `The server lists no harnesses for this token (${why}); type one it runs.` : 'The server lists no available harness; type one it runs.' }));
+    }
+  }
+
+  // ---------------------------------------------------------------
   // A new task
 
   async function renderNew() {
+    if (!state.repo) {
+      main(h('div', { class: 'page narrow' }, h('a', { class: 'back', href: '#/', text: '‹ Back' }),
+        h('h1', { text: 'New task' }),
+        h('p', { class: 'lede', text: 'A task runs in a repository, and this token reaches none. Start a knowledge project instead.' }),
+        can('run') ? h('div', { class: 'row form-actions' }, h('a', { class: 'button primary', href: '#/p/new', text: 'New project' })) : null));
+      return;
+    }
     const promptId = nextId('prompt');
     const nameId = nextId('name');
     const harnessId = nextId('harness');
@@ -1611,7 +2923,8 @@
     main(h('div', { class: 'page' },
       h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
       h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Needs you' }),
-        h('p', { class: 'lede', text: total ? `${plural(total, 'thing')} ${total === 1 ? 'waits' : 'wait'} for you in ${state.repo}.` : `Nothing in ${state.repo} waits for you.` }))),
+        h('p', { class: 'lede', text: !state.repo ? 'This token reaches no repository. A workspace shows what it waits for in its own project.'
+          : total ? `${plural(total, 'thing')} ${total === 1 ? 'waits' : 'wait'} for you in ${state.repo}.` : `Nothing in ${state.repo} waits for you.` }))),
       state.approvals.length ? section('Waiting for approval', state.approvals.map((a) => h('li', { class: 'card' },
         h('div', { class: 'card-head' }, dot('needs'), h('a', { class: 'card-name', href: branchHref(a.branch), text: a.branch }),
           h('span', { class: 'tag', text: a.resolved ? a.resolved.layer : 'ask' })),
@@ -1701,13 +3014,14 @@
     main(h('div', { class: 'page' },
       h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
       h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Queue and stats' }),
-        h('p', { class: 'lede', text: `Work queued and done in ${state.repo}.` }))),
+        h('p', { class: 'lede', text: state.repo ? `Work queued and done in ${state.repo}.` : 'Work queued and done in your repositories.' }))),
       h('div', { class: 'stats' },
         stat('branches', String(all.length)),
         lanes(all).map(({ lane, branches }) => stat(lane.label.toLowerCase(), String(branches.length), branches.length ? lane.key : 'done')),
         stat('turns', String(turns)),
         stat('cost reported', money(cost))),
       h('h2', { text: 'Queued and running operations' }), opsSlot));
+    if (!state.repo) { fill(opsSlot, h('p', { class: 'muted', text: 'This token reaches no repository.' })); return; }
     try {
       const { operations } = await api('GET', `${repoPath()}/operations`);
       fill(opsSlot, operations.length
@@ -1829,11 +3143,7 @@
   }
 
   async function boot() {
-    $('repo').addEventListener('change', async (ev) => {
-      await switchRepo(ev.target.value);
-      location.hash = '#/';
-      route();
-    });
+    $('repo').addEventListener('change', (ev) => pickSource(ev.target.value));
     $('branch-filter').addEventListener('input', (ev) => {
       state.filter = ev.target.value;
       renderLanes();

@@ -5,7 +5,7 @@
 'use strict';
 
 const CACHE = 'branchyard-app-v1';
-const SHELL = ['./', 'app.js', 'app.css', 'icon.svg', 'manifest.webmanifest'];
+const SHELL = ['./', 'app.js', 'app.css', 'artifact-preview.js', 'artifact-preview.css', 'icon.svg', 'manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

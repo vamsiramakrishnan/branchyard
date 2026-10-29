@@ -31,6 +31,10 @@ const preview = window.BranchyardArtifactPreview.mount(container, {
 // preview.dispose();
 ```
 
+## In the console
+
+The companion serves both files from `/app/` (the `ASSETS` table in `crates/branchyard-server/src/companion/mod.rs`), loads them from `index.html`, and keeps them in the service worker's offline shell. The page's policy allows `img-src 'self' blob:` for the component's page images; scripts and requests stay same-origin. A workspace's **Outputs** tab mounts the component under the output list with `baseUrl` `/v1/workspaces/{workspace}/artifacts/{artifact}`, and `fetchAuthenticated` adds the tab's bearer token to each request. The console keeps one live handle and disposes it when the route, the inspector tab, the output or the source changes, and on sign-out. When the preview request is answered 404, the console disposes the component and says that the server cannot preview workspace outputs yet; see [projects and workspaces](companion.md#projects-and-workspaces).
+
 ## Security & Architecture Contract
 
 - **No Tokens Stored**: Component never accepts or stores credentials. All authenticated network requests are delegated through `options.fetchAuthenticated`.
@@ -61,4 +65,6 @@ node crates/branchyard-server/tests/artifact_preview_browser.js
 
 Evidence: hermetic (isolated Playwright headless browser test suite running against intercepted route handlers; deterministic clock and promise control, zero fixed sleeps or live model/server calls).
 
-Not done: real-server/UI integration wiring (static asset endpoint registration in `crates/branchyard-server` and mounting inside companion web console `app.js`/`index.html` are owned by the parent UI branch).
+Console integration, 29 October 2026: hermetic. `tests/console_workspace_browser.rs` mounts the component from the console against a real server on a combined tree (the foundation's commit `f51fc785` with the console branch on top), checks that it requests the workspace preview path for CSV, XLSX, DOCX and PPTX outputs, and that leaving the workspace or the tab aborts a preview still loading.
+
+Not done: a rendered preview inside the console. The server has no workspace preview route, so every preview request from the console is answered 404.

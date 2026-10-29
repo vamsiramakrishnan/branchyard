@@ -8,8 +8,10 @@
 <meta name="theme-color" content="#1f6f4a">
 <title>Branchyard</title>
 <link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="artifact-preview.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<script src="artifact-preview.js" defer></script>
 <script src="app.js" defer></script>
 </head>
 <body>
@@ -20,7 +22,7 @@
     <a class="brand" href="#/"><img src="icon.svg" alt="Branchyard" width="20" height="20"></a>
     <span id="repo-name" class="repo-name"></span>
     <label class="repo-pick" id="repo-pick" hidden>
-      <span class="visually-hidden">Repository</span>
+      <span class="visually-hidden">Source</span>
       <select id="repo"></select>
     </label>
     <span id="live" class="live" data-state="off" role="status" aria-live="polite">offline</span>
@@ -30,7 +32,7 @@
     <a class="side-link" href="#/attention" data-route="attention"><span class="side-icon ring" aria-hidden="true"></span>Needs you <span id="attention-count" class="count" hidden></span></a>
   </nav>
   <div class="filter" id="filter" hidden>
-    <label for="branch-filter" class="visually-hidden">Filter branches</label>
+    <label for="branch-filter" class="visually-hidden" id="branch-filter-label">Filter branches</label>
     <input id="branch-filter" type="search" placeholder="Filter branches" autocomplete="off" spellcheck="false">
     <p id="branch-count" class="result-count" role="status" aria-live="polite"></p>
   </div>
