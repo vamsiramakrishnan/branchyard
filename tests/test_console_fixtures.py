@@ -23,6 +23,10 @@ def _available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+@unittest.skipUnless(
+    all(_available(name) for name in ["docx", "openpyxl", "pptx", "jsonschema", "blake3"]),
+    "Complete knowledge fixtures need the Python artifacts extra",
+)
 class ConsoleFixturesTest(unittest.TestCase):
     """Generate once per test method into a fresh scratch directory."""
 
