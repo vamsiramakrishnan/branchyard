@@ -68,6 +68,8 @@ ring = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+branchyard-runtime = { path = "../branchyard-runtime" }
+branchyard-sandbox = { path = "../branchyard-sandbox" }
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 branchyard-testkit = { path = "../branchyard-testkit" }
 blake3 = { workspace = true }

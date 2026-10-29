@@ -1345,6 +1345,8 @@ class Client:
         prompt: str,
         *,
         harness: str,
+        provider: Optional[JSON] = None,
+        unapproved_tools: Optional[bool] = None,
         model: Optional[str] = None,
         effort: Optional[str] = None,
         policy: Optional[JSON] = None,
@@ -1359,13 +1361,18 @@ class Client:
         """Queue an isolated writer or reviewer using the existing harness.
         Omitted policy retains the server's deny default. Sources and review
         artifacts are immutable IDs; candidate is an exact workspace commit.
-        Provisioning names operator-known secrets and connector grants."""
+        Provisioning names operator-known secrets and connector grants.
+        Provider choices retain the server operator's backend policy.
+        Unapproved tools require explicit acknowledgment and operator permission;
+        reviewers always require enforced tool approvals."""
         return self._operation(
             self._workspace(workspace, "/sessions"),
             {
                 "name": name,
                 "prompt": prompt,
                 "harness": harness,
+                "provider": provider,
+                "unapproved_tools": unapproved_tools,
                 "model": model,
                 "effort": effort,
                 "policy": policy,

@@ -303,6 +303,8 @@ fn typed_client_reads_durable_console_metadata_and_native_conversations() {
         .start_workspace_session(
             &workspace.id,
             &StartSessionRequest {
+                unapproved_tools: false,
+                provider: None,
                 name: "Writer".into(),
                 prompt: "Hello".into(),
                 harness: "gemini-cli".into(),

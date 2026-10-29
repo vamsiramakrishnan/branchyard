@@ -447,7 +447,15 @@ pub async fn start(config: Config) -> Result<Running, String> {
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
         triggers: hub,
+        runtime: Default::default(),
+        pull_requests: Default::default(),
     });
+    crate::console::services::install(&app).map_err(|error| {
+        format!(
+            "could not initialize workspace services: {}",
+            error.body.message
+        )
+    })?;
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
         .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;

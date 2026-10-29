@@ -26,6 +26,14 @@ accepts `{}`. Both POST routes require `Idempotency-Key` and return the existing
 durable operation envelope with status 202. The embedding server supplies live
 console authorization and queue callbacks. See [workspace management](workspace-management.md).
 
+The standard server now installs the runtime and PR gateways. Session creation
+accepts a typed `provider` subject to the ordinary operator allowlist. Resource
+actions and PR jobs use native branch locks and the shared durable queue, pinned
+to their execution host. Successful operations expose `result.runtime` or
+`result.pull_request`. Uncertain publication stays interrupted on same-key retry.
+Profiles without routed tool approvals also need explicit `unapproved_tools`
+acknowledgment, default false, plus the server operator's permission.
+
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
 ## Branch operations

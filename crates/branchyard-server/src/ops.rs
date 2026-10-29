@@ -366,10 +366,11 @@ impl Registry {
         self.inventory.lock_recovering("inventory").clone()
     }
 
-    /// The labels this worker claims with: its configured ones and those
-    /// its inventory derives (`harness:<id>`).
+    /// The labels this worker claims with: its host/boot, configured ones
+    /// and those its inventory derives (`harness:<id>`).
     pub fn labels(&self) -> Vec<String> {
         let mut labels = self.options.labels.clone();
+        labels.push(format!("worker-host:{}", self.worker.host));
         if let Some(inventory) = self.inventory() {
             labels.extend(inventory.labels());
         }
@@ -1006,6 +1007,9 @@ impl Registry {
         drop(span);
         let (outcome, result, error) = match finished.result {
             Ok(result) => (OperationState::Succeeded, Some(result), None),
+            Err(error) if error.code == "pr_effect_uncertain" => {
+                (OperationState::Interrupted, None, Some(error))
+            }
             Err(error) => (OperationState::Failed, None, Some(error)),
         };
         stored.operation.state = outcome;
@@ -1267,11 +1271,103 @@ impl Drop for Hold {
     }
 }
 
+fn console_error(error: io::Error) -> ApiError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        ApiError::new(StatusCode::CONFLICT, "revision_conflict", error.to_string())
+    } else {
+        ApiError::internal(format!("could not persist console metadata: {error}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::{MemoryStore, SqliteStore};
     use std::sync::mpsc;
+
+    #[test]
+    fn core_execution_host_labels_prevent_foreign_dispatcher_claims() {
+        let registry = Registry::open(
+            Box::new(SqliteStore::memory()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        assert_eq!(registry.worker().host, branchyard::process_identity().0);
+        let required = format!("worker-host:{}", registry.worker().host);
+        assert!(registry.labels().contains(&required));
+        let mut request = new(Some("host-bound"), &["a"]);
+        request.requires = vec![required];
+        let (operation, _) = registry.submit(request, Value::Null).unwrap();
+        let foreign = Worker {
+            id: "foreign-dispatcher".into(),
+            host: "another-host-and-boot".into(),
+            ..registry.worker().clone()
+        };
+        assert!(registry
+            .store
+            .claim(
+                &foreign,
+                &["r".into()],
+                &["worker-host:another-host-and-boot".into()],
+                DEFAULT_LEASE
+            )
+            .unwrap()
+            .is_none());
+        let claim = registry
+            .store
+            .claim(
+                registry.worker(),
+                &["r".into()],
+                &registry.labels(),
+                DEFAULT_LEASE,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.operation.operation.id, operation.id);
+        registry.close();
+    }
+
+    #[test]
+    fn ambiguous_pr_effect_is_interrupted_and_same_key_never_executes_it_again() {
+        struct Uncertain(std::sync::atomic::AtomicUsize);
+        impl Executor for Uncertain {
+            fn execute(&self, _: &StoredOperation, _: &Value) -> Finished {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Finished {
+                    result: Err(ErrorBody {
+                        code: "pr_effect_uncertain".into(),
+                        message: "inspect forge state before another publication".into(),
+                        detail: Some(serde_json::json!({"unknown_effect":true})),
+                    }),
+                    end_cursor: None,
+                }
+            }
+        }
+        let registry = Registry::open(
+            Box::new(SqliteStore::memory()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        let executor = Arc::new(Uncertain(std::sync::atomic::AtomicUsize::new(0)));
+        registry.start(executor.clone()).unwrap();
+        let (operation, _) = registry
+            .submit(new(Some("uncertain"), &["a"]), Value::Null)
+            .unwrap();
+        branchyard_testkit::wait::until("uncertain PR outcome to be recorded", || {
+            registry
+                .get(&operation.id)
+                .unwrap()
+                .is_some_and(|op| op.state == OperationState::Interrupted)
+        });
+        let (replayed, was_replay) = registry
+            .submit(new(Some("uncertain"), &["a"]), Value::Null)
+            .unwrap();
+        assert!(was_replay);
+        assert_eq!(replayed.id, operation.id);
+        assert_eq!(replayed.state, OperationState::Interrupted);
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        registry.close();
+    }
 
     /// Runs work `{"n": N}` by recording N; `{"wait": true}` blocks until
     /// released.
@@ -1763,13 +1859,5 @@ mod tests {
         assert!(registry.submit(new(None, &["a", "b"]), Value::Null).is_ok());
         registry.close();
         drop(admitting);
-    }
-}
-
-fn console_error(error: io::Error) -> ApiError {
-    if error.kind() == io::ErrorKind::AlreadyExists {
-        ApiError::new(StatusCode::CONFLICT, "revision_conflict", error.to_string())
-    } else {
-        ApiError::internal(format!("could not persist console metadata: {error}"))
     }
 }

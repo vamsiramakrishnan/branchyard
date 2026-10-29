@@ -7,6 +7,7 @@ mod quotas;
 mod routes;
 mod runtime;
 mod scheduling;
+pub(crate) mod services;
 pub(crate) mod sources;
 #[cfg(test)]
 mod tests;

@@ -16,6 +16,28 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ConsoleWork {
+    /// Apply a retained provider action without starting a model turn.
+    Runtime {
+        /// Stable workspace presentation identity.
+        workspace_id: String,
+        /// Native session bound at admission.
+        session_id: String,
+        /// Existing provider action, with native idempotency under the operation ID.
+        control: branchyard::workspace_runtime::RuntimeAction,
+        /// Exact core host/boot identity required by the admitted allocation.
+        owner_host: String,
+    },
+    /// Publish or refresh PR state through the ordinary fenced worker.
+    PullRequest {
+        /// Stable workspace presentation identity.
+        workspace_id: String,
+        /// Native session bound at admission.
+        session_id: String,
+        /// Candidate-bound service command, separate from its client request identity.
+        command: crate::console_pr_gateway::PrCommand,
+        /// Exact admitting execution host; no control-server fallback.
+        owner_host: String,
+    },
     /// Initialize the already reserved native task without starting a turn.
     Initialize {
         /// Stable console workspace identity.
@@ -59,6 +81,17 @@ pub enum ConsoleWork {
     },
 }
 impl ConsoleWork {
+    /// Classify publication by its required merge scope in the existing queue.
+    pub(crate) fn operation_kind(&self) -> OperationKind {
+        match self {
+            Self::PullRequest {
+                command: crate::console_pr_gateway::PrCommand::Publish { .. },
+                ..
+            } => OperationKind::Merge,
+            _ => OperationKind::Task,
+        }
+    }
+
     pub(super) fn workspace_id(&self) -> &str {
         match self {
             Self::Initialize { workspace_id }
@@ -66,6 +99,9 @@ impl ConsoleWork {
             | Self::Send { workspace_id, .. }
             | Self::Control { workspace_id, .. }
             | Self::Lifecycle { workspace_id, .. } => workspace_id,
+            Self::Runtime { workspace_id, .. } | Self::PullRequest { workspace_id, .. } => {
+                workspace_id
+            }
         }
     }
 }
@@ -323,6 +359,22 @@ pub(super) fn admit(
         ConsoleWork::Start { session_id, .. }
         | ConsoleWork::Send { session_id, .. }
         | ConsoleWork::Control { session_id, .. } => vec![session_id.clone()],
+        ConsoleWork::Runtime {
+            workspace_id,
+            session_id,
+            ..
+        }
+        | ConsoleWork::PullRequest {
+            workspace_id,
+            session_id,
+            ..
+        } => {
+            vec![text(
+                &session(app, caller, workspace_id, session_id)?.body,
+                "branch",
+            )?
+            .into()]
+        }
     };
     let locks = match &command {
         ConsoleWork::Control { .. } => Vec::new(),
@@ -346,7 +398,7 @@ pub(super) fn admit(
     let requires = super::scheduling::requirements(app, caller, repo, &command)?;
     let new = NewOperation {
         repo: repo.into(),
-        kind: OperationKind::Task,
+        kind: command.operation_kind(),
         branches,
         cursor: 0,
         locks,
@@ -366,7 +418,7 @@ pub(super) fn admit(
     let (operation, _) = app.registry.submit_console(new, value, &mutations)?;
     operation_value(app, &operation)
 }
-fn operation_idem(
+pub(super) fn operation_idem(
     caller: &Caller,
     headers: &HeaderMap,
     route: &str,
@@ -415,6 +467,10 @@ pub(super) fn start(
     let name = text(&body, "name")?;
     let prompt = text(&body, "prompt")?;
     let harness = text(&body, "harness")?;
+    if access == "reviewer" {
+        // Acknowledgment cannot replace the promised read-only enforcement.
+        branchyard::admit_harness(harness, false).map_err(sdk)?;
+    }
     let sid = format!("s-{}", id()?.to_lowercase());
     let mut provision: branchyard::Provisioning =
         match body.get("provision").filter(|value| !value.is_null()) {
@@ -466,6 +522,17 @@ pub(super) fn start(
     let repo = resolve(app, &workspace)?;
     let candidate = review_candidate(app, caller, &workspace, &repo, &body, access)?;
     let request = TaskRequest {
+        unapproved_tools: body
+            .get("unapproved_tools")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        provider: body
+            .get("provider")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| ApiError::bad_request(format!("invalid provider: {error}")))?,
         base: candidate.as_ref().map(|(commit, _)| commit.clone()),
         prompt: prompt.into(),
         harness: Some(harness.into()),
@@ -494,7 +561,7 @@ pub(super) fn start(
         Collection::Sessions,
         &sid,
         caller,
-        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":body.get("model").filter(|value| !value.is_null()),"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
+        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":body.get("model").filter(|value| !value.is_null()),"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"unapproved_tools":access != "reviewer" && request.unapproved_tools,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
     );
     let mutations = vec![
         insert(row),
@@ -587,6 +654,8 @@ pub(super) fn continue_session(
     let branch = repo.yard.branch(text(&row.body, "branch")?).map_err(sdk)?;
     let request = SendRequest {
         prompt: text(&body, "prompt")?.into(),
+        unapproved_tools: row.body["access"] != "reviewer"
+            && row.body["unapproved_tools"].as_bool().unwrap_or(false),
         ..Default::default()
     };
     crate::work::send_options(app, &repo, &request)?;
@@ -745,6 +814,17 @@ pub(super) fn ensure_idle(
     repo: Option<&RepoState>,
     ignore_operation: Option<&str>,
 ) -> Result<(), ApiError> {
+    if app
+        .runtime
+        .get()
+        .is_some_and(|runtime| runtime.has_manual_writer(&workspace.id, None))
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "workspace_busy",
+            "close the workspace's terminal before changing its lifecycle",
+        ));
+    }
     let sessions = related(app, Collection::Sessions, caller, &workspace.id)?;
     let mut resources = std::collections::BTreeSet::new();
     for session in &sessions {

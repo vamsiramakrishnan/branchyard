@@ -65,6 +65,47 @@ operation and reuse the original idempotency key when reconciling.
 
 ## Pull-request service integration
 
+The standard server installs the runtime and PR gateways at startup, including
+when started with `by serve`. Terminal access requires the
+operator's `allow_client_commands` setting. PR publication requires merge scope;
+refresh and runtime controls require run scope, as well as workspace editor
+membership and a writer session. Terminals and PR actions retain the native
+session creator's upstream identity. Sharing a workspace does not share another
+creator's account.
+Publication is admitted as merge work, so a read-and-merge credential does not
+need run scope. It still cannot refresh a PR or control a runtime without run.
+
+Session requests accept the existing typed `provider` object. It passes through
+the same operator allowlist and provider validation as ordinary task requests.
+Python clients use `start_workspace_session(..., provider={...})`. A denied or
+failed remote backend stays denied or failed; it never becomes a local turn.
+Remote terminal access requires an allocation retained by the provider.
+For AGY and other profiles that cannot route individual tool approvals, pass
+`unapproved_tools: true` explicitly. The operator must enable
+`allow_unapproved_tools` too. Typed clients, Python and manager MCP preserve this
+acknowledgment; its server default is false and it is never enabled automatically.
+The creator's explicit acknowledgment is retained for continuation, subject to
+current operator policy. Reviewers require a harness that routes tool approvals;
+acknowledgment cannot bypass their read-only policy.
+
+Runtime controls and PR work use the existing durable operation queue, with
+native branch locks and compare-and-set checks on workspace, member, session
+and resource binding records. A worker-host label pins these jobs to the exact
+native execution host and boot. Inspection of a foreign runtime returns its
+owner and an unavailable reason; manual mutations do not fall back to the
+control server. Cross-host terminal forwarding is not provided here.
+
+Completed operations retain provider state in `result.runtime` and bounded PR
+output in `result.pull_request`, including returned review metadata. Ambiguous
+publication becomes an `interrupted` operation with `pr_effect_uncertain`, its
+operation ID and the underlying cause. Retrying its original idempotency key
+returns that operation; it does not publish again. Inspect the forge before
+requesting another publication.
+
+Close an open terminal before archiving a workspace. Archive and restore retain
+native conversations, source originals and accepted outputs. They do not replay
+a model turn.
+
 The server service in `console_pr` reuses the installed `by pr --json` command for
 candidate checks, pushing and PR creation/update. It refreshes the existing
 engine observations with `by show --refresh --json` and obtains comments, reviews
@@ -123,8 +164,8 @@ executables. The PR tests cover revocation before and during publication,
 stale candidates, malformed output, output limits and process deadlines.
 Clippy for the changed crates and rustdoc with warnings denied passed. See the [verification record](evidence/console-management-2026-10-29.json) for
 the exact suite scopes and log digests.
-Not done: integrated workspace HTTP routes, the UI, or a live GitHub publication
-through this service.
+Not done in that service-only record: integrated workspace HTTP routes, the UI,
+or a live GitHub publication through this service.
 
 Hermetic followup verification on 29 October 2026 passed the installed manager
 startup guard, credential scrubbing with a real fake-harness process, reserved
@@ -140,5 +181,19 @@ fake forge executables. Router and worker checks, service regressions, focused
 Clippy and rustdoc passed. The fast gate identified the new PR routes as missing
 SDK parity coverage, assigned to the separate SDK slice. All other fast steps
 passed. See the [gateway verification record](evidence/console-pr-gateway-2026-10-29.json).
-Not done: central queue and authentication wiring, integrated SDK route parity,
-or live forge, cloud and model calls for this gateway slice.
+Not done in that gateway-only record: central queue and authentication wiring,
+integrated SDK route parity, or live forge, cloud and model calls. The standard
+server integration above now supplies that wiring and SDK coverage.
+
+The standard-server integration was verified hermetically on 29 October 2026
+with authenticated HTTP routes, a SQLite operation queue, native repositories,
+fake forge executables, a fake retained provider and fake ACP and AGY NDJSON
+agents. The final server run passed 235 tests, with one existing test ignored.
+The checks cover saved runtime and PR results, merge-only publication, live grant
+revocation, interrupted reconciliation, host pinning, archive/restore and explicit
+AGY acknowledgment through continuation. Shipped text checks, SDK tests, strict
+Clippy and rustdoc also passed. The isolated fast gate found one schema-root
+completeness failure; the parent integration supplies its separate schema fix.
+See the [standard-server verification record](evidence/console-services-2026-10-29.json).
+Not done in this record: merged schema regeneration, PostgreSQL, the UI, live
+forge publication, cloud execution or model calls.

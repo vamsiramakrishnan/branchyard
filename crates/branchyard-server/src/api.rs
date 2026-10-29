@@ -68,6 +68,10 @@ pub struct App {
     pub sync: Option<Arc<crate::sync::ServerSync>>,
     /// One bounded renderer shared by legacy and workspace preview routes.
     pub(crate) preview: Arc<crate::preview::PreviewService>,
+    /// Workspace interaction service; callbacks retain only a weak application reference.
+    pub(crate) runtime: std::sync::OnceLock<Arc<crate::console_runtime::RuntimeGateway>>,
+    /// Candidate-bound PR service using the existing operation dispatcher.
+    pub(crate) pull_requests: std::sync::OnceLock<Arc<crate::console_pr_gateway::PrGateway>>,
 }
 
 #[derive(Clone)]
@@ -881,6 +885,12 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::preview::router(app.preview.clone()))
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
+    let v1 = match (app.runtime.get(), app.pull_requests.get()) {
+        (Some(runtime), Some(pr)) => v1
+            .merge(crate::console_runtime::router(runtime.clone()))
+            .merge(crate::console_pr_gateway::router(pr.clone())),
+        _ => v1,
+    };
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))

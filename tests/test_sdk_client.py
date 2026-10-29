@@ -807,6 +807,7 @@ class WorkspaceRequests(unittest.TestCase):
         contract = {"schema": {"const": None}, "required": True}
         policy = {"preset": "read-only"}
         provision = {"secrets": [{"name": "OPERATOR_KNOWN"}]}
+        provider = {"kind": "microsandbox", "image": "fixture:1", "keep": "pause"}
         body = {
             "name": "Review",
             "prompt": "Check evidence",
@@ -815,6 +816,8 @@ class WorkspaceRequests(unittest.TestCase):
             "effort": "high",
             "policy": policy,
             "provision": provision,
+            "provider": provider,
+            "unapproved_tools": True,
             "result_contract": contract,
             "access": "reviewer",
             "sources": [],
@@ -831,6 +834,8 @@ class WorkspaceRequests(unittest.TestCase):
                 effort="high",
                 policy=policy,
                 provision=provision,
+                provider=provider,
+                unapproved_tools=True,
                 result_contract=contract,
                 access="reviewer",
                 sources=[],
@@ -853,6 +858,17 @@ class WorkspaceRequests(unittest.TestCase):
             "/v1/workspaces/w1/sessions",
             {"name": "Writer", "prompt": "Draft", "harness": "agy", "access": "writer"},
             key="minimal",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.start_workspace_session(
+                "w1", "Writer", "Draft", harness="agy", unapproved_tools=False, key="no-ack"
+            ),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/sessions",
+            {"name": "Writer", "prompt": "Draft", "harness": "agy", "access": "writer", "unapproved_tools": False},
+            key="no-ack",
             query=None,
         )
 

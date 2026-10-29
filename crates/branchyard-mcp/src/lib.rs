@@ -100,6 +100,7 @@ An external operator can run by mcp manager --url URL --token-file FILE, with op
 For a repository-free console, an operator runs by serve --app --knowledge; this keeps configured storage and quotas and does not expand your grant. \
 BRANCHYARD_MANAGER_TOKEN is reserved for that operator and is never forwarded to native harnesses. \
 Manager tool outputs have a bounded JSON budget, with explicit errors for oversized responses; use focused previews or compute for large documents. \
+The operator manager's start_session accepts explicit unapproved_tools acknowledgment for profiles without routed approvals, still subject to server permission. \
 That separate manager uses an HTTP principal; it is not added to this branch-scoped delegation server.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {

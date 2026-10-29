@@ -203,6 +203,13 @@ pub struct Session {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartSessionRequest {
+    /// Explicitly acknowledge a harness that cannot enforce tool permissions.
+    /// False by default, and refused unless the operator also permits it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unapproved_tools: bool,
+    /// Existing typed execution backend; still subject to operator provider policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<branchyard::Provider>,
     /// Human title.
     pub name: String,
     /// Initial instruction.

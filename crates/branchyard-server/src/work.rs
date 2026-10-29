@@ -114,7 +114,7 @@ pub enum Work {
 impl Work {
     pub fn kind(&self) -> OperationKind {
         match self {
-            Work::Console { .. } => OperationKind::Task,
+            Work::Console { command, .. } => command.operation_kind(),
             Work::Task { .. } => OperationKind::Task,
             Work::Send { .. } => OperationKind::Send,
             Work::Fork { .. } => OperationKind::Fork,

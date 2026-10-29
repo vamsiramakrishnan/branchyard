@@ -83,6 +83,13 @@ for step in plan.todo:                        # the steps that are not ready, in
 
 ## The HTTP client
 
+For workspace conversations, `Client.start_workspace_session` accepts the existing
+typed backend options through `provider`. The server still checks its provider
+allowlist. Runtime resource operations expose their saved state in
+`operation.result.runtime`; PR operations retain their output in
+`operation.result.pull_request`. An interrupted PR publication requires forge
+inspection before a new request. Reuse the original key to recover its operation.
+
 For a service that is not on the machine that does the work, or that outlives a run: serve the repository, then connect.
 
 ```sh

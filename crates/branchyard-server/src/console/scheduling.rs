@@ -13,6 +13,9 @@ pub(super) fn requirements(
     work: &ConsoleWork,
 ) -> Result<Vec<String>, ApiError> {
     let (mut labels, named, command, provider) = match work {
+        ConsoleWork::Runtime { owner_host, .. } | ConsoleWork::PullRequest { owner_host, .. } => {
+            return Ok(vec![format!("worker-host:{owner_host}")]);
+        }
         ConsoleWork::Start { request, .. } => {
             let named = if request.harnesses.is_empty() {
                 request.harness.iter().cloned().collect::<Vec<_>>()

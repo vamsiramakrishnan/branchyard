@@ -40,6 +40,9 @@ Oversized responses return an error with small identifiers and cursors. Narrow
 the preview, download the original through its authorized endpoint, or delegate
 a focused calculation. A mutation can already have succeeded; inspect its
 operation and reuse its original idempotency key when reconciling.
+The operator manager's `start_session` accepts explicit `unapproved_tools: true`
+for a profile such as AGY that cannot route tool approvals. The server operator
+must also permit it. Omission means false; do not infer this acknowledgment.
 
 Continue while your own native tasks or tools are active. A managed lead may
 end its turn to await Branchyard children after its native work finishes.

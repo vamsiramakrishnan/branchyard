@@ -863,6 +863,12 @@ impl OperationState {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OperationResult {
+    /// Workspace provider state after a queued resource action; never a model replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Value>,
+    /// Complete bounded PR publication or refresh result, including forge review metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<Value>,
     /// Branches a task, send or fork ran, in request order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<BranchInfo>,

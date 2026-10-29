@@ -30,7 +30,8 @@ upstream connector permissions. Tools never accept arbitrary shell commands, fil
 This external manager uses its own HTTP credential and is distinct from the restricted in-task delegation MCP. \
 Tool responses have a bounded context budget; oversized responses return a structured error with small identifiers and cursors. \
 Preview defaults to 25 rows. Use narrower previews, authorized original downloads or focused compute for large tables. \
-A mutation can succeed before its response is found too large; inspect its operation and reuse the original idempotency_key.";
+A mutation can succeed before its response is found too large; inspect its operation and reuse the original idempotency_key. \
+For a harness that cannot route tool approvals, start_session requires explicit unapproved_tools:true and the operator's permission. It defaults to false; never infer consent.";
 
 /// Tool definitions for the external manager only.
 pub fn tools() -> Vec<Tool> {
@@ -288,12 +289,13 @@ mod tests {
         let http = MockHttp::start(|_| Response::json(202, &json!({"id":"op"})));
         let server = Server::new(Client::new(&http.url(), "fixture-secret").unwrap());
         server.call("create_project",json!({"name":"Research","source":{"kind":"knowledge"},"result_mode":"artifacts","idempotency_key":"project-key"})).unwrap();
-        server.call("start_session",json!({"workspace_id":"w","name":"Researcher","prompt":"Check supplied sources","harness":"antigravity","access":"writer","idempotency_key":"session-key"})).unwrap();
+        server.call("start_session",json!({"workspace_id":"w","name":"Researcher","prompt":"Check supplied sources","harness":"antigravity","access":"writer","unapproved_tools":true,"idempotency_key":"session-key"})).unwrap();
         server.call("steer_session",json!({"workspace_id":"w","session_id":"s","prompt":"Preserve source quotations","idempotency_key":"steer-key"})).unwrap();
         let requests = http.requests();
         assert_eq!(requests[0].json()["source"], json!({"kind":"knowledge"}));
         assert_eq!(requests[1].path, "/v1/workspaces/w/sessions");
         assert!(requests[1].json().get("workspace_id").is_none());
+        assert_eq!(requests[1].json()["unapproved_tools"], true);
         assert_eq!(requests[2].json()["action"], "steer");
         assert_eq!(requests[2].header("idempotency-key"), Some("steer-key"));
         assert!(!format!("{server:?}").contains("fixture-secret"));

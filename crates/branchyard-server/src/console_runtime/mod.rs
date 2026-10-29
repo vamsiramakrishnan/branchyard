@@ -166,6 +166,21 @@ pub struct RuntimeGateway {
 }
 
 impl RuntimeGateway {
+    /// Whether a starting or live terminal owns a workspace's manual writer lease.
+    pub(crate) fn has_manual_writer(&self, workspace: &str, session: Option<&str>) -> bool {
+        self.slots
+            .lock_recovering("workspace terminals")
+            .values()
+            .any(|slot| {
+                slot.meta.workspace == workspace
+                    && session.is_none_or(|session| slot.meta.session == session)
+                    && slot
+                        .entry
+                        .as_ref()
+                        .is_none_or(|entry| !entry.terminal.is_closed())
+            })
+    }
+
     /// Construct the gateway without starting any process or provider resource.
     pub fn new(
         options: RuntimeGatewayOptions,

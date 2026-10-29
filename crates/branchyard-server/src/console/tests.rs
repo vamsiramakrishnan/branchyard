@@ -1,5 +1,7 @@
 //! Socket-free HTTP and durable worker regressions, using only the fake agent.
 
+mod services;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,6 +163,8 @@ impl Fixture {
             triggers: Arc::new(hub),
             companion: None,
             sync: None,
+            runtime: Default::default(),
+            pull_requests: Default::default(),
         });
         let fixture = Self {
             app,
@@ -174,6 +178,9 @@ impl Fixture {
     }
 
     fn start(&self) {
+        if self.app.runtime.get().is_none() {
+            super::services::install(&self.app).unwrap();
+        }
         self.app
             .registry
             .start(Arc::new(ReservedFakeAgentPorts(self.app.clone())))
@@ -298,6 +305,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Some(runtime) = self.app.runtime.get() {
+            runtime.close_all();
+        }
         self.app.registry.close();
     }
 }

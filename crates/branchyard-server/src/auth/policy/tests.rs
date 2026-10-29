@@ -190,6 +190,8 @@ fn app(mut config: Config) -> (tempfile::TempDir, Arc<App>) {
         preview: Arc::new(
             crate::preview::PreviewService::new(directory.path().join("previews")).unwrap(),
         ),
+        runtime: Default::default(),
+        pull_requests: Default::default(),
         repos: Default::default(),
         registry: crate::ops::Registry::open(
             Box::new(crate::store::MemoryStore::default()),

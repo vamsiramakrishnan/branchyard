@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-29",
+  "evidence": "hermetic",
+  "models_called": false,
+  "log_directory": "/home/user/branchyard-console-work-20261029/native-workers",
+  "records": [
+    {
+      "log": "console-services-final-regressions.log",
+      "status": "passed",
+      "scope": "Final source: server library 235 passed and 1 existing ignored; server Clippy --lib --tests with -D warnings; server/client/MCP rustdoc with -D warnings. Includes merge-only publication, reviewer enforcement and AGY continuation.",
+      "sha256": "96035ba4ede6d8b92b2c9529a2f83f8868df0dff304410a6f7132e3e4077c42f",
+      "test_summaries": [
+        {
+          "passed": 235,
+          "failed": 0,
+          "ignored": 1
+        }
+      ]
+    },
+    {
+      "log": "console-services-acceptance.log",
+      "status": "passed",
+      "scope": "Earlier acceptance: server234/ignored1, inventory2, workspace_acl5, manager unit8 and stdio2, setup skills1, projection4, CLI operations9; server and MCP Clippy --lib --tests; server/client/MCP rustdoc with warnings denied.",
+      "sha256": "483e8a15daa412915dcafaed9f98c5f9ff9135e2f259341bc0dbda9ef6271ebe",
+      "test_summaries": [
+        {
+          "passed": 234,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0
+        }
+      ]
+    },
+    {
+      "log": "console-services-sdk-final.log",
+      "status": "passed",
+      "scope": "119 Python SDK tests, silent-failure and documentation checks.",
+      "sha256": "05e8063991bdbeeaa8e6c0f5006e2039cc0eb3094868e412b36adb7f60e6f64a",
+      "test_summaries": []
+    },
+    {
+      "log": "console-services-fast-verified.log",
+      "status": "integration_dependency",
+      "scope": "Full fast gate: one failed step, test_schema_validation, because the integration base lacks the Value response schema root. All other fast steps passed. Parent schema prerequisite 5cc04593 supplies the typed replacement; contract.json is intentionally not edited by this slice.",
+      "sha256": "f1e0940a4e2efc12326c0b20259a0fa6f8f4c8905536f987dc7588d55dc61484",
+      "test_summaries": []
+    }
+  ],
+  "coverage": [
+    "Actual authenticated Axum routes and a SQLite operation queue",
+    "Current tenant, workspace membership, creator subject and provider policy",
+    "Revocation during publication; uncertain effect remains interrupted on same-key retry",
+    "Saved runtime/PR results; native host/boot pinning; honest foreign-owner and unsupported results",
+    "Fake retained provider resume/pause/destroy without model replay",
+    "Explicit default-false AGY acknowledgment, continuation and enforced reviewer policy",
+    "Archive/restore after terminal closure preserves native transcripts"
+  ],
+  "not_done": [
+    "Merged schema regeneration after the parent typed-schema prerequisite",
+    "PostgreSQL or UI validation in this slice",
+    "Live forge publication, cloud execution or model calls"
+  ]
+}

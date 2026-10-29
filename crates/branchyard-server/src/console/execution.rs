@@ -17,7 +17,16 @@ pub(crate) fn execute(
     caller: Caller,
 ) -> Finished {
     let run = || -> Result<OperationResult, ApiError> {
-        let required = if let ConsoleWork::Start { session_id, .. }
+        app.check_caller(&caller)?;
+        let required = if matches!(
+            &command,
+            ConsoleWork::PullRequest {
+                command: crate::console_pr_gateway::PrCommand::Publish { .. },
+                ..
+            }
+        ) {
+            "merge"
+        } else if let ConsoleWork::Start { session_id, .. }
         | ConsoleWork::Send { session_id, .. }
         | ConsoleWork::Control { session_id, .. } = &command
         {
@@ -64,6 +73,34 @@ pub(crate) fn execute(
             ));
         }
         match command {
+            ConsoleWork::Runtime {
+                workspace_id,
+                session_id,
+                control,
+                owner_host,
+            } => super::services::execute_runtime(
+                app,
+                &caller,
+                &workspace_id,
+                &session_id,
+                control,
+                &owner_host,
+                &stored.operation.id,
+            ),
+            ConsoleWork::PullRequest {
+                workspace_id,
+                session_id,
+                command,
+                owner_host,
+            } => super::services::execute_pr(
+                app,
+                &caller,
+                &workspace_id,
+                &session_id,
+                &command,
+                &owner_host,
+                &stored.operation.id,
+            ),
             ConsoleWork::Initialize { .. } => {
                 ensure_idle(
                     app,
@@ -122,6 +159,11 @@ pub(crate) fn execute(
                 super::sources::prepare(app, &caller, &workspace, &session, &repo, &mut options)?;
                 cancel_observer(app, &repo, &session_id, &mut options);
                 if session.body["access"] == "reviewer" {
+                    let harness = options.harness.as_deref().ok_or_else(|| {
+                        ApiError::bad_request("reviewer work requires an enforcing named harness")
+                    })?;
+                    branchyard::admit_harness(harness, false).map_err(sdk)?;
+                    options.unapproved_tools = false;
                     options.policy = reviewer_policy(options.policy);
                     request.prompt=format!("Review the frozen candidate and input artifacts. Do not modify or integrate writer branches.\n{}",request.prompt);
                 }
@@ -147,13 +189,16 @@ pub(crate) fn execute(
                     ));
                 }
                 let mut options = crate::work::send_options(app, &repo, &request)?;
-                if session.body["access"] == "reviewer" {
-                    options.policy = reviewer_policy(options.policy);
-                }
                 let branch = repo
                     .yard
                     .branch(text(&session.body, "branch")?)
                     .map_err(sdk)?;
+                if session.body["access"] == "reviewer" {
+                    let harness = options.harness.as_deref().unwrap_or(&branch.info().harness);
+                    branchyard::admit_harness(harness, false).map_err(sdk)?;
+                    options.unapproved_tools = false;
+                    options.policy = reviewer_policy(options.policy);
+                }
                 crate::work::send_allowed(app, &branch, text(&session.body, "branch")?, &request)?;
                 cancel_observer(app, &repo, &session_id, &mut options);
                 branch.send(&request.prompt, options).map_err(sdk)?;

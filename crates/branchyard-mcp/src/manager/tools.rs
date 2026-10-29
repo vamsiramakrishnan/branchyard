@@ -59,7 +59,7 @@ fn definition(name: &str) -> (&'static str, Value, Vec<&'static str>, bool) {
         "list_sessions" => ("List native conversations attached to the workspace.",json!({"workspace_id":id()}),vec!["workspace_id"],true),
         "start_session" => ("Start an isolated writer or constrained reviewer through the ordinary durable queue. Native plans and subagents remain native.",
             json!({"workspace_id":id(),"name":text(500),"prompt":text(131072),"harness":id(),"model":text(500),"effort":choices(&["low","medium","high","xhigh","max","ultra"]),
-                "access":choices(&["writer","reviewer"]),"result_contract":{"type":"object"},"sources":strings(),"artifacts":strings(),"idempotency_key":id()}),
+                "access":choices(&["writer","reviewer"]),"unapproved_tools":{"type":"boolean"},"result_contract":{"type":"object"},"sources":strings(),"artifacts":strings(),"idempotency_key":id()}),
             vec!["workspace_id","name","prompt","harness","access","idempotency_key"],false),
         "session_messages" => ("Read a native conversation without copying or replacing its session state. Pass next_cursor as after.",
             json!({"workspace_id":id(),"session_id":id(),"after":text(1024)}),vec!["workspace_id","session_id"],true),
