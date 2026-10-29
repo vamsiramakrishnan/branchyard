@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
-use std::io::Read;
-use std::path::{Component, Path};
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{open, openat, Mode, OFlags};
 use serde::Deserialize;
@@ -13,6 +13,9 @@ use super::ResultCapture;
 use crate::state::{Fence, Record};
 use crate::storage::{ArtifactRef, Lineage, NewArtifact};
 use crate::{BranchStatus, Error, Yard};
+
+mod copied;
+pub(crate) use copied::{staging_cleanup, CopiedCapture};
 
 /// One fixed receipt per producer incarnation and engine turn.
 pub(crate) const CAPTURE_STEP: &str = "capture_artifacts";
@@ -121,6 +124,52 @@ struct Entry {
     sha256: String,
 }
 
+fn manifest(bytes: &[u8], capture: &ResultCapture) -> Result<Manifest, Error> {
+    let manifest: Manifest = serde_json::from_slice(bytes)
+        .map_err(|error| Error::Denied(format!("invalid artifact capture manifest: {error}")))?;
+    if manifest.schema_version != 1
+        || manifest.files.is_empty()
+        || manifest.files.len() > capture.max_files as usize
+    {
+        return Err(Error::Denied(
+            "capture manifest needs schema_version 1 and files within max_files".into(),
+        ));
+    }
+    let manifest_path = Path::new(&capture.manifest);
+    let mut seen = HashSet::new();
+    for entry in &manifest.files {
+        let parts = relative(&entry.path)?;
+        if !seen.insert(parts.iter().copied().collect::<PathBuf>())
+            || (parts.len() == 1 && Some(parts[0]) == manifest_path.file_name())
+        {
+            return Err(Error::Denied(
+                "capture manifest contains a duplicate or itself".into(),
+            ));
+        }
+        if !sha256(&entry.sha256)
+            || entry.media_type.is_empty()
+            || entry.media_type.len() > 255
+            || entry.media_type.chars().any(char::is_control)
+        {
+            return Err(Error::Denied(
+                "captured file needs lowercase SHA-256 and a media type".into(),
+            ));
+        }
+        let name = entry.name.as_deref().unwrap_or_else(|| {
+            Path::new(&entry.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+        });
+        if name.trim().is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
+            return Err(Error::Denied(
+                "captured display name is empty or invalid".into(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
 fn sha256(text: &str) -> bool {
     text.len() == 64 && text == text.to_ascii_lowercase() && hex::decode(text).is_ok()
 }
@@ -155,6 +204,8 @@ pub(crate) fn collect_artifacts(
     else {
         return Ok(Vec::new());
     };
+    let copied = CopiedCapture::for_record(yard, record, fence);
+    let _cleanup = copied.as_ref().map(CopiedCapture::cleanup_on_drop);
     if !matches!(
         record.info.status,
         BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
@@ -162,13 +213,31 @@ pub(crate) fn collect_artifacts(
         return Ok(Vec::new());
     }
     check_config(capture)?;
+    let store = yard.store();
+    let previous = store.backend().steps(&fence.branch, fence.turn)?;
+    let receipt = previous.iter().find(|step| step.step == CAPTURE_STEP);
+    if copied.as_ref().is_some_and(|copied| !copied.has_snapshot()) {
+        if let Some(receipt) = receipt {
+            let digest = receipt
+                .intent
+                .get("manifest_sha256")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| Error::State("capture receipt has no manifest digest".into()))?;
+            return store.storage().capture_artifacts(fence, digest, &[]);
+        }
+    }
     let parts = relative(&capture.manifest)?;
     let (manifest_name, parents) = parts
         .split_last()
         .ok_or_else(|| Error::Denied("empty capture manifest path".into()))?;
+    let root_path = if let Some(copied) = &copied {
+        copied.contents()?
+    } else {
+        record.info.worktree.clone()
+    };
     let root = File::from(
         open(
-            &record.info.worktree,
+            &root_path,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -184,52 +253,20 @@ pub(crate) fn collect_artifacts(
         return Err(Error::Denied("capture manifest exceeds 1 MiB".into()));
     }
     let manifest_digest = hex::encode(Sha256::digest(&bytes));
-    let store = yard.store();
-    if store
-        .backend()
-        .steps(&fence.branch, fence.turn)?
-        .iter()
-        .any(|step| step.step == CAPTURE_STEP)
-    {
+    if receipt.is_some() {
         return store
             .storage()
             .capture_artifacts(fence, &manifest_digest, &[]);
     }
-    let manifest: Manifest = serde_json::from_slice(&bytes)
-        .map_err(|error| Error::Denied(format!("invalid artifact capture manifest: {error}")))?;
-    if manifest.schema_version != 1
-        || manifest.files.is_empty()
-        || manifest.files.len() > capture.max_files as usize
-    {
-        return Err(Error::Denied(
-            "capture manifest needs schema_version 1 and files within max_files".into(),
-        ));
-    }
+    let manifest = manifest(&bytes, capture)?;
     let lineage = Lineage::load(&store)?;
     if lineage.id(&fence.branch)? != fence.incarnation {
         return Err(Error::Fenced("capture producer was replaced".into()));
     }
-    let mut seen = HashSet::new();
     let mut remaining = capture.max_bytes;
     let mut artifacts = Vec::new();
     for entry in manifest.files {
         let parts = relative(&entry.path)?;
-        if !seen.insert(parts.iter().copied().collect::<std::path::PathBuf>())
-            || (parts.len() == 1 && parts[0] == *manifest_name)
-        {
-            return Err(Error::Denied(
-                "capture manifest contains a duplicate or itself".into(),
-            ));
-        }
-        if !sha256(&entry.sha256)
-            || entry.media_type.is_empty()
-            || entry.media_type.len() > 255
-            || entry.media_type.chars().any(char::is_control)
-        {
-            return Err(Error::Denied(
-                "captured file needs lowercase SHA-256 and a media type".into(),
-            ));
-        }
         let (name, parents) = parts
             .split_last()
             .ok_or_else(|| Error::Denied("empty captured path".into()))?;
@@ -244,11 +281,6 @@ pub(crate) fn collect_artifacts(
         let name = entry
             .name
             .unwrap_or_else(|| name.to_string_lossy().into_owned());
-        if name.trim().is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
-            return Err(Error::Denied(
-                "captured display name is empty or invalid".into(),
-            ));
-        }
         artifacts.push(NewArtifact {
             digest,
             size,

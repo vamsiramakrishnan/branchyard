@@ -262,6 +262,7 @@ struct Actor {
     home: Option<(PathBuf, PathBuf)>,
     released: bool,
     transfer_error: Option<String>,
+    capture: Option<crate::contract::capture::CopiedCapture>,
 }
 
 impl Actor {
@@ -279,6 +280,12 @@ impl Actor {
                             "could not bring the worktree back from {noun} {}: {error}",
                             self.name
                         ));
+                    }
+                    if let Some(capture) = &self.capture {
+                        if let Err(error) = capture.receive(endpoint.as_ref(), &pushed.guest) {
+                            warnings
+                                .push(format!("could not stage declared artifact outbox: {error}"));
+                        }
                     }
                 }
                 if let Some((host, guest)) = &self.home {
@@ -603,6 +610,7 @@ impl Placement {
             home: None,
             released: false,
             transfer_error: None,
+            capture: crate::contract::capture::CopiedCapture::for_record(yard, record, fence),
         });
         let fail = |actor: &mut Actor, why: String| -> Result<Placement, String> {
             let warnings = actor.release();
@@ -620,6 +628,11 @@ impl Placement {
         let guest_home = PathBuf::from(&how.home);
         let pushed = (|| -> Result<Pushed, String> {
             let endpoint = actor.provider.guest(&name)?;
+            if let Some(capture) = &actor.capture {
+                capture
+                    .probe(endpoint.as_ref(), &workdir)
+                    .map_err(|error| error.to_string())?;
+            }
             // A resumed or branched sandbox still holds a worktree and a
             // home from before: the worktree's files go (what git ignores,
             // such as what setup installed, stays), and so does the home,

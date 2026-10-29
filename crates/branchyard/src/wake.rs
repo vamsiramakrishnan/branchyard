@@ -71,6 +71,31 @@ pub(crate) struct Parked {
     pub budget: Limits,
 }
 
+/// The completed turn's own wake inputs, durable before its result is concluded.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ParkInput {
+    /// Effective limits used by this turn, including tighter caller limits.
+    pub budget: Limits,
+    /// Descendants whose settlement the turn's answer could not have seen.
+    pub held_on: Vec<String>,
+}
+
+impl ParkInput {
+    /// Snapshot the same inputs used by normal completion and recovery.
+    pub(crate) fn new(budget: &Budget, held_on: &[String]) -> Self {
+        Self {
+            budget: Limits {
+                max_usd: budget.max_usd,
+                max_turns: budget.max_turns,
+                max_duration_ms: budget
+                    .max_duration
+                    .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)),
+            },
+            held_on: held_on.to_vec(),
+        }
+    }
+}
+
 pub(crate) fn is_zero(value: &u32) -> bool {
     *value == 0
 }
@@ -104,8 +129,8 @@ pub(crate) fn is_parked(status: &BranchStatus) -> bool {
 /// nothing on a merged branch), and a descendant still runs. A merged
 /// branch is merged again when it settles: its status is restored from
 /// [`Parked::ended`], and its wake keeps it ([`crate::run`]).
-/// `budget` is the turn's own, stored for a wake started elsewhere.
-/// `held_on` are the descendants the turn's latest answer cannot have
+/// `input.budget` is the turn's own, stored for a wake started elsewhere.
+/// `input.held_on` are the descendants the turn's latest answer cannot have
 /// seen settle, if the engine cut its hold (see `Driven::held_on`): it
 /// parks for those that settled and still wait for it ([`awaits_parent`]),
 /// and the look after the turn wakes it at once if nothing still runs.
@@ -113,8 +138,7 @@ pub(crate) fn park(
     yard: &Yard,
     record: &mut Record,
     recorder: &mut Recorder,
-    budget: &Budget,
-    held_on: &[String],
+    input: &ParkInput,
 ) -> Result<(), Error> {
     if !matches!(
         record.info.status,
@@ -138,7 +162,7 @@ pub(crate) fn park(
         .collect();
     let unseen: Vec<String> = below
         .iter()
-        .filter(|info| awaits_parent(&info.status) && held_on.contains(&info.name))
+        .filter(|info| awaits_parent(&info.status) && input.held_on.contains(&info.name))
         .map(|info| info.name.clone())
         .collect();
     // Children it left to the engine to land, ready now: they land while
@@ -204,13 +228,7 @@ pub(crate) fn park(
         since_ms: now_ms(),
         ended: record.info.status.clone(),
         on,
-        budget: Limits {
-            max_usd: budget.max_usd,
-            max_turns: budget.max_turns,
-            max_duration_ms: budget
-                .max_duration
-                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-        },
+        budget: input.budget.clone(),
     });
     record.info.status = BranchStatus::WaitingOnChildren;
     Ok(())
@@ -618,6 +636,23 @@ pub(crate) fn recovered_note(store: &Store, record: &Record, reason: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_park_inputs_preserve_effective_limits_and_unseen_descendants() {
+        let input = ParkInput::new(
+            &Budget::usd(1.25)
+                .turns(3)
+                .duration(std::time::Duration::from_millis(4001)),
+            &["still-running".into(), "settled-unseen".into()],
+        );
+        let encoded = serde_json::to_value(&input).unwrap();
+        let decoded: ParkInput = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, input);
+        assert_eq!(decoded.budget.max_usd, Some(1.25));
+        assert_eq!(decoded.budget.max_turns, Some(3));
+        assert_eq!(decoded.budget.max_duration_ms, Some(4001));
+        assert_eq!(decoded.held_on, ["still-running", "settled-unseen"]);
+    }
 
     #[test]
     fn only_turns_that_will_run_keep_a_parent_parked() {

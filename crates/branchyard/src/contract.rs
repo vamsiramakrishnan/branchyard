@@ -52,7 +52,7 @@ use crate::record::{self, Recorder};
 use crate::state::Record;
 use crate::{Activity, BranchStatus, Error, Observer, RecordedEvent, Yard};
 
-mod capture;
+pub(crate) mod capture;
 pub(crate) use capture::{collect_artifacts, validate_capture_batch, CAPTURE_STEP};
 
 /// Bounded files collected from a producer's worktree after provider transfer.

@@ -102,6 +102,266 @@ fn options(f: &Fixture, recipe: &RecipeOptions) -> TaskOptions {
     }
 }
 
+#[test]
+fn captured_ignored_outputs_return_over_the_copied_provider_without_a_git_candidate() {
+    let f = Fixture::new();
+    let recipe = recipe(&f);
+    fs::write(f.root.join(".gitignore"), "outputs/\n").unwrap();
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-qm", "Ignore generated outbox"]);
+    let mut result = branchyard::ResultContract::deliverable(serde_json::json!({
+        "type":"object", "required":["answer"], "additionalProperties":false,
+        "properties":{"answer":{"type":"string"}}
+    }))
+    .unwrap();
+    result.capture = Some(branchyard::ResultCapture::new("outputs/artifacts.json"));
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"copied evidence"));
+    let manifest = serde_json::json!({"schema_version":1,"files":[{
+        "path":"nested/evidence.txt","media_type":"text/plain","sha256":digest
+    }]})
+    .to_string();
+    let prompt = format!(
+        "SH mkdir -p outputs/nested && printf %s 'copied evidence' > outputs/nested/evidence.txt && printf %s unrelated > outputs/private.txt && printf %s {} > outputs/artifacts.json && printf '\\n```json\\n{{\"answer\":\"checked\"}}\\n```\\n'",
+        branchyard_recipe::quote(&manifest)
+    );
+    let branch = f
+        .yard
+        .task(prompt)
+        .options(TaskOptions {
+            result: Some(result),
+            ..options(&f, &recipe)
+        })
+        .name("capture")
+        .run()
+        .unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges);
+    assert!(branch.info().candidate.is_none());
+    assert!(!branch.info().worktree.join("outputs").exists());
+    let artifacts = f.yard.artifacts("capture").unwrap();
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].labels["capture.path"], "nested/evidence.txt");
+    let target = f.dir.join("captured.txt");
+    f.yard
+        .read_artifact("capture", &artifacts[0].id, &target)
+        .unwrap();
+    assert_eq!(fs::read(target).unwrap(), b"copied evidence");
+    assert_eq!(
+        branchyard::contract::current(&branch.events().unwrap()),
+        Some(serde_json::json!({"answer":"checked"}))
+    );
+    assert_eq!(
+        fs::read_dir(f.root.join(".branchyard/capture-staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn copied_capture_limits_digest_and_symlinks_fail_without_partial_snapshots_or_results() {
+    let f = Fixture::new();
+    let recipe = recipe(&f);
+    fs::write(f.root.join(".gitignore"), "outputs/\n").unwrap();
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-qm", "Ignore generated outbox"]);
+    for (name, limit, digest, setup) in [
+        (
+            "size",
+            3,
+            hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"copied evidence")),
+            "printf %s 'copied evidence' > outputs/evidence.txt",
+        ),
+        (
+            "digest",
+            64,
+            "0".repeat(64),
+            "printf %s 'copied evidence' > outputs/evidence.txt",
+        ),
+        (
+            "symlink",
+            64,
+            "0".repeat(64),
+            "ln -s /etc/hosts outputs/evidence.txt",
+        ),
+        ("count", 64, "0".repeat(64), "true"),
+    ] {
+        let mut result =
+            branchyard::ResultContract::deliverable(serde_json::json!({"type":"object"})).unwrap();
+        let mut capture = branchyard::ResultCapture::new("outputs/artifacts.json");
+        capture.max_bytes = limit;
+        capture.max_files = 1;
+        result.capture = Some(capture);
+        let mut manifest = serde_json::json!({"schema_version":1,"files":[{
+            "path":"evidence.txt","media_type":"text/plain","sha256":digest
+        }]});
+        if name == "count" {
+            let mut second = manifest["files"][0].clone();
+            second["path"] = serde_json::json!("other.txt");
+            manifest["files"].as_array_mut().unwrap().push(second);
+        }
+        let manifest = manifest.to_string();
+        let prompt = format!("SH mkdir -p outputs && {setup} && printf %s {} > outputs/artifacts.json && printf '\\n```json\\n{{}}\\n```\\n'", branchyard_recipe::quote(&manifest));
+        assert!(f
+            .yard
+            .task(prompt)
+            .options(TaskOptions {
+                result: Some(result),
+                ..options(&f, &recipe)
+            })
+            .name(name)
+            .run()
+            .is_err());
+        let branch = f.yard.branch(name).unwrap();
+        assert!(matches!(branch.info().status, BranchStatus::Failed { .. }));
+        assert!(f.yard.artifacts(name).unwrap().is_empty());
+        assert_eq!(
+            branchyard::contract::current(&branch.events().unwrap()),
+            None
+        );
+        assert_eq!(
+            fs::read_dir(f.root.join(".branchyard/capture-staging"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+#[test]
+fn copied_capture_refuses_an_image_without_python_before_the_harness_turn() {
+    let f = Fixture::new();
+    let recipe = recipe(&f);
+    let script = fs::read_to_string(&recipe.create).unwrap();
+    fs::write(
+        &recipe.create,
+        script.replace("\"CI\":\"1\"", "\"PATH\":\"/no-such-image-tools\""),
+    )
+    .unwrap();
+    let mut result =
+        branchyard::ResultContract::deliverable(serde_json::json!({"type":"object"})).unwrap();
+    result.capture = Some(branchyard::ResultCapture::new("outputs/artifacts.json"));
+    let branch = f
+        .yard
+        .task("No model must start")
+        .options(TaskOptions {
+            result: Some(result),
+            ..options(&f, &recipe)
+        })
+        .name("no-python")
+        .run()
+        .unwrap();
+    let BranchStatus::Failed { ref reason } = branch.info().status else {
+        panic!("missing prerequisite must fail before a turn")
+    };
+    assert!(reason.contains("requires Python3"), "{reason}");
+    assert_eq!(branch.info().turns, 0);
+}
+
+#[test]
+fn a_copied_managed_lead_defers_its_missing_outbox_until_the_final_wake() {
+    let f = Fixture::new();
+    let mut recipe = recipe(&f);
+    // Default guest paths are distinct for each branch, as real machines are.
+    recipe.workdir.clear();
+    recipe.home.clear();
+    fs::write(f.root.join(".gitignore"), "outputs/\n").unwrap();
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-qm", "Ignore generated outbox"]);
+    let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(b"final evidence"));
+    let manifest = serde_json::json!({"schema_version":1,"files":[{
+        "path":"evidence.txt","media_type":"text/plain","sha256":digest
+    }]})
+    .to_string();
+    let wake = f.dir.join("wake-capture.txt");
+    fs::write(&wake, format!("SH mkdir -p outputs && printf %s 'final evidence' > outputs/evidence.txt && printf %s {} > outputs/artifacts.json && printf '\\n```json\\n{{}}\\n```\\n'", branchyard_recipe::quote(&manifest))).unwrap();
+    let mut result =
+        branchyard::ResultContract::deliverable(serde_json::json!({"type":"object"})).unwrap();
+    result.capture = Some(branchyard::ResultCapture::new("outputs/artifacts.json"));
+    let agent = fake_agent().display().to_string();
+    let options = TaskOptions {
+        command: Some(vec![
+            "env".into(),
+            format!("FAKE_ACP_WAKE={}", wake.display()),
+            agent.clone(),
+        ]),
+        delegation: Some(branchyard::Envelope::default()),
+        delegation_server: Some(vec![agent]),
+        policy: Policy::allow_all(),
+        result: Some(result),
+        ..options(&f, &recipe)
+    };
+    let yard = f.yard.clone();
+    let lead_options = options.clone();
+    let running = std::thread::spawn(move || {
+        yard.task("AWAIT_STEER")
+            .options(lead_options)
+            .name("lead")
+            .run()
+    });
+    wait::until("the copied lead to start its own work", || {
+        f.yard
+            .branch("lead")
+            .ok()
+            .filter(|branch| text(&branch.events().unwrap()).contains("waiting for steering"))
+    });
+    let lead = f.yard.branch("lead").unwrap();
+    let delegate = lead.delegate(options).unwrap();
+    delegate
+        .spawn(branchyard::Spawn {
+            prompt: "AWAIT_STEER".into(),
+            name: Some("child".into()),
+            ..branchyard::Spawn::default()
+        })
+        .unwrap();
+    wait::until("the copied child to remain active", || {
+        delegate
+            .inspect("child")
+            .ok()
+            .filter(|child| child.last_message.contains("waiting for steering"))
+    });
+    lead.steer("Wait for your child").unwrap();
+    wait::until(
+        "the copied lead to park without an intermediate outbox",
+        || {
+            f.yard
+                .branch("lead")
+                .ok()
+                .filter(|branch| branch.info().status == BranchStatus::WaitingOnChildren)
+        },
+    );
+    assert!(f.yard.artifacts("lead").unwrap().is_empty());
+    assert_eq!(
+        branchyard::contract::current(&f.yard.branch("lead").unwrap().events().unwrap()),
+        None
+    );
+    delegate.steer("child", "Done").unwrap();
+    wait::until(
+        "the copied lead's final wake to capture its ignored files",
+        || {
+            f.yard.branch("lead").ok().filter(|branch| {
+                matches!(
+                    branch.info().status,
+                    BranchStatus::Ready | BranchStatus::NoChanges
+                ) && branchyard::contract::current(&branch.events().unwrap())
+                    == Some(serde_json::json!({}))
+                    && f.yard.artifacts("lead").unwrap().len() == 1
+            })
+        },
+    );
+    running.join().unwrap().unwrap();
+    for name in ["lead", "child"] {
+        let branch = f.yard.branch(name).unwrap();
+        let guest = recipe.workdir(name, &branch.info().worktree);
+        branchyard_support::cleanup_dir(Path::new(&guest).parent().unwrap());
+    }
+    assert_eq!(
+        fs::read_dir(f.root.join(".branchyard/capture-staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
 /// What the recipe's scripts ran, in order: `mode instance` lines.
 fn log(f: &Fixture) -> Vec<String> {
     fs::read_to_string(f.dir.join("recipe.log"))

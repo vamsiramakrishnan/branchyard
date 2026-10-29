@@ -4,7 +4,9 @@
 mod common;
 
 use std::fs;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use branchyard::{
     BranchStatus, Provider, ResultCapture, ResultContract, SandboxOptions, TaskOptions,
@@ -12,7 +14,7 @@ use branchyard::{
 use branchyard_runtime::LocalProvider;
 use branchyard_sandbox::fake::FakeProvider;
 use branchyard_testkit::wait;
-use common::Fixture;
+use common::{edit_record, stored_record, Fixture};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -339,4 +341,234 @@ fn a_managed_lead_parks_without_intermediate_output_then_captures_on_its_wake() 
         Some(json!({"answer":"checked"}))
     );
     assert_eq!(f.yard.artifacts("lead").unwrap().len(), 1);
+}
+
+#[test]
+#[ignore = "the child process of the captured-lead recovery tests"]
+fn captured_lead_crash_child() {
+    let (Ok(root), Ok(agent), Ok(wake)) = (
+        std::env::var("BY_CAPTURE_ROOT"),
+        std::env::var("BY_CAPTURE_AGENT"),
+        std::env::var("BY_CAPTURE_WAKE"),
+    ) else {
+        return;
+    };
+    let yard = branchyard::Yard::open(root).unwrap();
+    let max_wakes = std::env::var("BY_CAPTURE_MAX_WAKES")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let options = TaskOptions {
+        harness: Some("gemini-cli".into()),
+        command: Some(vec![
+            "env".into(),
+            format!("FAKE_ACP_WAKE={wake}"),
+            agent.clone(),
+        ]),
+        delegation: Some(branchyard::Envelope {
+            max_wakes,
+            ..branchyard::Envelope::default()
+        }),
+        delegation_server: Some(vec![agent]),
+        policy: branchyard::Policy::allow_all(),
+        budget: branchyard::Budget::usd(5.5)
+            .turns(4)
+            .duration(Duration::from_secs(600)),
+        result: Some(contract()),
+        observer: Some(Arc::new(|event| {
+            if matches!(&event.activity, branchyard::Activity::Checkpoint(checkpoint)
+                if checkpoint.turn == 1)
+            {
+                // The event and turn_end are durable; the parked record is not.
+                std::process::exit(86);
+            }
+        })),
+        ..TaskOptions::default()
+    };
+    yard.task("AWAIT_STEER")
+        .options(options)
+        .name("lead")
+        .run()
+        .unwrap();
+}
+
+fn crash_before_park_finish(f: &Fixture, max_wakes: u32) -> branchyard::Delegate {
+    let wake = f.dir.join("recovered-wake.txt");
+    fs::write(
+        &wake,
+        script(
+            f,
+            "recovered-final",
+            Some(manifest()),
+            "printf %s 'checked evidence' > outputs/evidence.txt",
+        ),
+    )
+    .unwrap();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    branchyard_testkit::hermetic(&mut command);
+    let mut child = command
+        .args([
+            "captured_lead_crash_child",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("BY_CAPTURE_ROOT", &f.root)
+        .env("BY_CAPTURE_AGENT", common::fake_agent())
+        .env("BY_CAPTURE_WAKE", &wake)
+        .env("BY_CAPTURE_MAX_WAKES", max_wakes.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait::until("the lead's crashable own turn", || {
+        f.yard.branch("lead").ok().filter(|branch| {
+            common::text(&branch.events().unwrap()).contains("waiting for steering")
+        })
+    });
+    let lead = f.yard.branch("lead").unwrap();
+    let delegate = lead
+        .delegate(TaskOptions {
+            delegation_server: Some(vec![common::fake_agent().display().to_string()]),
+            ..f.options()
+        })
+        .unwrap();
+    delegate
+        .spawn(branchyard::Spawn {
+            prompt: "AWAIT_STEER".into(),
+            name: Some("worker".into()),
+            budget: branchyard::Budget::usd(0.25),
+            ..branchyard::Spawn::default()
+        })
+        .unwrap();
+    wait::until("the separately owned worker to remain running", || {
+        delegate
+            .inspect("worker")
+            .ok()
+            .filter(|worker| worker.last_message.contains("waiting for steering"))
+    });
+    lead.steer("End this turn while your worker remains running")
+        .unwrap();
+    let status = wait::until(
+        "the engine to crash after durable turn_end before park finish",
+        || child.try_wait().unwrap(),
+    );
+    assert_eq!(status.code(), Some(86));
+    assert_eq!(
+        f.yard.branch("lead").unwrap().info().status,
+        BranchStatus::Running
+    );
+    delegate
+}
+
+#[test]
+fn recovery_parks_a_captured_lead_before_requiring_final_outputs_and_preserves_its_budget() {
+    let f = Fixture::new();
+    let delegate = crash_before_park_finish(&f, 2);
+    edit_record(&f.root, "lead", |record| {
+        record["limits"] = json!({"max_usd":99.0,"max_turns":99,"max_duration_ms":999999});
+    });
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let (incarnation, turn, generation): (i64, i64, i64) = db
+        .query_row(
+            "SELECT incarnation, turn, generation FROM leases WHERE branch = 'lead'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let interrupted_stage = f
+        .root
+        .join(".branchyard/capture-staging")
+        .join(format!("{incarnation}-{turn}-{generation}"));
+    fs::create_dir_all(&interrupted_stage).unwrap();
+    fs::write(interrupted_stage.join("partial"), "not a completed outbox").unwrap();
+    let yard = branchyard::Yard::open(&f.root).unwrap();
+    assert!(
+        !interrupted_stage.exists(),
+        "recovery reclaims the previous fenced staging directory"
+    );
+    let lead = yard.branch("lead").unwrap();
+    assert_eq!(lead.info().status, BranchStatus::WaitingOnChildren);
+    assert!(!lead.info().worktree.join("outputs/artifacts.json").exists());
+    assert_eq!(branchyard::contract::current(&lead.events().unwrap()), None);
+    assert!(yard.artifacts("lead").unwrap().is_empty());
+    let stored = stored_record(&f.root, "lead");
+    assert_eq!(
+        stored["parked"]["budget"],
+        json!({"max_usd":5.5,"max_turns":4,"max_duration_ms":600000})
+    );
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    let receipts: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM steps WHERE branch = 'lead' AND step = 'capture_artifacts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipts, 0);
+    delegate.steer("worker", "Finished").unwrap();
+    wait::until("the recovered lead's final wake and captured files", || {
+        yard.branch("lead").ok().filter(|branch| {
+            matches!(
+                branch.info().status,
+                BranchStatus::Ready | BranchStatus::NoChanges
+            ) && branchyard::contract::current(&branch.events().unwrap())
+                == Some(json!({"answer":"checked"}))
+                && yard.artifacts("lead").unwrap().len() == 1
+        })
+    });
+    assert!(yard.recover().unwrap().is_empty());
+}
+
+#[test]
+fn recovery_does_not_enable_disabled_wakes_or_invent_a_missing_legacy_policy() {
+    for legacy in [false, true] {
+        let f = Fixture::new();
+        let delegate = crash_before_park_finish(&f, if legacy { 2 } else { 0 });
+        if legacy {
+            let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+            let intent: String = db
+                .query_row(
+                    "SELECT intent FROM steps WHERE branch = 'lead' AND step = 'turn_end'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut intent: Value = serde_json::from_str(&intent).unwrap();
+            intent.as_object_mut().unwrap().remove("wake");
+            db.execute(
+                "UPDATE steps SET intent = ?1 WHERE branch = 'lead' AND step = 'turn_end'",
+                [intent.to_string()],
+            )
+            .unwrap();
+        }
+        let yard = branchyard::Yard::open(&f.root).unwrap();
+        let lead = yard.branch("lead").unwrap();
+        let BranchStatus::Failed { reason } = &lead.info().status else {
+            panic!("recovery must not create an unbounded wake")
+        };
+        assert!(
+            if legacy {
+                reason.contains("no wake policy")
+            } else {
+                reason.contains("capture")
+            },
+            "{reason}"
+        );
+        assert!(yard.artifacts("lead").unwrap().is_empty());
+        assert_eq!(branchyard::contract::current(&lead.events().unwrap()), None);
+        delegate.steer("worker", "Finished").unwrap();
+        wait::until(
+            "the worker to finish without waking the failed lead",
+            || {
+                delegate.inspect("worker").ok().filter(|worker| {
+                    !matches!(worker.status, BranchStatus::Running | BranchStatus::Waiting)
+                })
+            },
+        );
+        assert!(matches!(
+            yard.branch("lead").unwrap().info().status,
+            BranchStatus::Failed { .. }
+        ));
+    }
 }

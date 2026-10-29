@@ -94,12 +94,28 @@ It opens directories and files through pinned descriptors with `NOFOLLOW`,
 then copies and hashes bounded contents from those same opened files. A path
 replacement cannot redirect a later reopen outside the selected directory.
 
-An outbox may be ignored by Git in a local or shared-mount task, so useful
-files can complete a no-change deliverable. Copied-provider work currently
-returns through the provider's ordinary worktree transfer. Ignored copied
-outboxes need the scoped transfer integration and are not qualified by this
-unit. A copied worktree transfer failure prevents capture rather than accepting
-an older host outbox.
+An outbox may be ignored by Git, including on a copied provider, so useful
+files can complete a no-change deliverable. Substrate and recipe providers
+return the explicitly declared manifest and files through their existing exec
+transport. A bundled Python3 standard-library helper pins directory descriptors,
+refuses symlinks and special files, and streams bounded raw bytes. The host
+enforces its own byte bound and SHA-256 check while copying. No archive is
+extracted, and unrelated ignored files do not cross.
+
+Capture-enabled copied providers require Python3 with POSIX descriptor-relative
+opens in the image. Branchyard probes that prerequisite before the harness
+turn starts and reports a missing prerequisite directly. It installs nothing.
+The returned outbox lives in a private staging directory identified by producer
+incarnation, engine turn and lease generation. Collection revalidates this
+snapshot before publication and removes it on success, failure or an
+intermediate park. Files are available through artifact reads; this transfer
+does not write arbitrary paths into the host worktree.
+
+A missing or invalid outbox during an intermediate parked lead turn does not
+demand an invented intermediate deliverable. Its deferred transfer error fails
+collection only if that turn settles as a completed deliverable. A generic
+copied-worktree transfer failure still prevents capture, so an older host outbox
+cannot satisfy a failed return transfer.
 
 ## Publication and retries
 
@@ -135,8 +151,18 @@ complete its required deliverable. Local recovery can finish collection after
 a recorded successful turn. Sandbox recovery without a completed capture
 receipt fails closed until provider-transfer evidence is available.
 
+The existing `turn_end` journal also keeps the completed turn's effective wake
+limits and unseen-child list. After a crash, recovery applies that same park
+decision before attempting native result or artifact capture. It preserves
+disabled or exhausted wake settings and tighter caller limits. A captured
+managed lead whose older journal has no wake policy fails with a retry message
+instead of inventing a wake policy or treating intermediate files as final.
+
 Status: hermetic fake-harness tests and storage conformance verify collection,
 bounded descriptor reads, receipt idempotence and rejection of invalid producer
 authority. Shared-mount fake sandbox tests exercise the post-harness boundary.
-Not done: real provider qualification, ignored copied-provider outbox transfer,
-cloud services or model runs.
+Fake-SSH recipe tests exercise ignored copied outboxes, transfer limits, digest
+and symlink rejection, prerequisite checks and staging cleanup, including a
+managed lead's later wake. Process-crash tests verify recovery parks before
+capture and preserves the turn's wake limits. Not done: real provider
+qualification, cloud services or model runs.
