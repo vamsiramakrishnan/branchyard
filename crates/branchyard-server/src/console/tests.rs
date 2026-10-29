@@ -145,6 +145,13 @@ impl Fixture {
             "http://inprocess.invalid".into(),
         );
         let app = Arc::new(App {
+            #[cfg(target_os = "linux")]
+            preview: Arc::new(crate::preview::tests::fake_service(
+                &scratch,
+                "printf '%s\\n' '{\"status\":\"passed\",\"kind\":\"table\",\"format\":\"csv\",\"columns\":[\"value\"],\"rows\":[[\"=1+1\"]],\"offset\":0,\"next_offset\":null,\"warnings\":[]}'",
+            )),
+            #[cfg(not(target_os = "linux"))]
+            preview: Arc::new(crate::preview::PreviewService::new(scratch.join("previews")).unwrap()),
             repos: BTreeMap::new(),
             registry,
             credentials: Credentials::new(config.all_credentials()),
@@ -427,6 +434,31 @@ async fn knowledge_sources_native_deliverable_acceptance_and_revocation_without_
     assert_eq!(status, StatusCode::OK, "{artifacts}");
     assert_eq!(artifacts["artifacts"].as_array().unwrap().len(), 1);
     let aid = artifacts["artifacts"][0]["id"].as_str().unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        let (status, preview) = fixture
+            .json(
+                Method::GET,
+                &format!("/v1/workspaces/{wid}/artifacts/{aid}/preview"),
+                OWNER,
+                None,
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["kind"], "table");
+        let (status, _) = fixture
+            .bytes(
+                Method::GET,
+                &format!("/v1/workspaces/{wid}/artifacts/{aid}/preview/assets/page-1.png"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
     let current = fixture.detail(&wid).await;
     assert_eq!(current["sessions"][0]["status"], "no_changes");
     assert_eq!(
@@ -717,12 +749,30 @@ async fn legacy_artifacts_check_publisher_and_streams_close_after_revocation() {
             artifact.id
         ),
         format!("/v1/repos/app/branches/own/artifacts/{}", artifact.id),
+        format!(
+            "/v1/repos/app/branches/own/artifacts/{}/preview",
+            artifact.id
+        ),
+        format!(
+            "/v1/repos/app/branches/own/artifacts/{}/preview/assets/page-1.png",
+            artifact.id
+        ),
         "/v1/repos/app/branches/own/artifacts".into(),
     ] {
         let (status, _) = fixture
             .bytes(Method::GET, &path, OWNER, None, &[], Vec::new())
             .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+    for suffix in ["preview", "preview/assets/page-1.png"] {
+        let path = format!(
+            "/v1/workspaces/workspace/artifacts/{}/{suffix}",
+            artifact.id
+        );
+        let (status, _) = fixture
+            .bytes(Method::GET, &path, OWNER, None, &[], Vec::new())
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
     }
     // The legacy repository stream requires access to all bound workspaces.
     // Grant the second workspace so this stream can open before revocation.
@@ -1520,4 +1570,270 @@ async fn console_admission_respects_a_negative_tenant_priority_ceiling() {
             .priority,
         -5
     );
+}
+
+#[cfg(target_os = "linux")]
+mod preview_http {
+    use super::*;
+    use branchyard_testkit::wait;
+
+    #[tokio::test]
+    async fn oversized_original_is_rejected_before_conversion() {
+        let fixture = Fixture::new(true);
+        let workspace = fixture.workspace().await;
+        let source = upload(&fixture, &workspace, "oversized.csv", b"value\n1\n").await;
+        let id = source["id"].as_str().unwrap();
+        let metadata = fixture
+            .app
+            .registry
+            .console_get(Collection::Sources, id)
+            .unwrap()
+            .unwrap();
+        let mut body = metadata.body.clone();
+        body["size_bytes"] = json!(crate::preview::MAX_INPUT + 1);
+        fixture
+            .app
+            .registry
+            .console_mutate(&[super::super::update(metadata, body)])
+            .unwrap();
+        let (status, error) = fixture
+            .json(
+                Method::GET,
+                &format!("/v1/workspaces/{workspace}/sources/{id}/preview"),
+                OWNER,
+                None,
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error["error"]["code"], "preview_too_large");
+        assert_eq!(
+            std::fs::read_dir(fixture._scratch.join("cache"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    async fn upload(fixture: &Fixture, workspace: &str, title: &str, data: &[u8]) -> Value {
+        let detail = fixture.detail(workspace).await;
+        assert_eq!(detail["current_subject"], "owner");
+        assert_eq!(detail["current_role"], "owner");
+        assert!(detail["capabilities"]["max_upload_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(detail["capabilities"]["can_admin"], true);
+        let (status, body) = fixture
+            .bytes(
+                Method::POST,
+                &format!("/v1/workspaces/{workspace}/sources"),
+                OWNER,
+                Some(title),
+                &[
+                    ("content-type", "application/octet-stream".into()),
+                    ("x-source-title", title.into()),
+                    ("x-workspace-revision", detail["revision"].to_string()),
+                ],
+                data.to_vec(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn source_preview_preserves_original_and_requires_current_membership() {
+        let fixture = Fixture::new(true);
+        let workspace = fixture.workspace().await;
+        let original = b"value\n=1+1\n";
+        let source = upload(&fixture, &workspace, "inputs.csv", original).await;
+        let base = format!(
+            "/v1/workspaces/{workspace}/sources/{}",
+            source["id"].as_str().unwrap()
+        );
+        let request = Request::builder()
+            .uri(format!("{base}/preview?view=table&limit=2"))
+            .header("authorization", format!("Bearer {OWNER}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::api::router(fixture.app.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 2 * 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["kind"], "table");
+        assert_eq!(body["rows"][0][0], "=1+1");
+        let (status, bytes) = fixture
+            .bytes(
+                Method::GET,
+                &format!("{base}/content"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, original);
+        for suffix in ["/preview", "/preview/assets/page-1.png"] {
+            let (status, _) = fixture
+                .bytes(
+                    Method::GET,
+                    &format!("{base}{suffix}"),
+                    EDITOR,
+                    None,
+                    &[],
+                    Vec::new(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let member = fixture
+            .app
+            .registry
+            .console_get(Collection::Members, &format!("{workspace}:owner"))
+            .unwrap()
+            .unwrap();
+        fixture
+            .app
+            .registry
+            .console_mutate(&[Mutation::Delete {
+                collection: Collection::Members,
+                id: member.id,
+                tenant: member.tenant,
+                expected: member.revision,
+            }])
+            .unwrap();
+        for suffix in ["/preview", "/preview/assets/page-1.png"] {
+            let (status, _) = fixture
+                .bytes(
+                    Method::GET,
+                    &format!("{base}{suffix}"),
+                    OWNER,
+                    None,
+                    &[],
+                    Vec::new(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_page_assets_are_authenticated_and_cannot_select_another_image() {
+        let mut fixture = Fixture::new(false);
+        let scratch = branchyard_testkit::Scratch::new("console-page-preview");
+        let body = "mkdir \"$output/derived\"\nprintf '\\211PNG\\r\\n\\032\\n' > \"$output/derived/page-1.png\"\nprintf '%s\\n' '{\"status\":\"passed\",\"kind\":\"pages\",\"format\":\"pdf\",\"page\":1,\"pages\":1,\"image\":\"page-1.png\",\"width\":1,\"height\":1,\"warnings\":[]}'";
+        Arc::get_mut(&mut fixture.app).unwrap().preview =
+            Arc::new(crate::preview::tests::fake_service(&scratch, body));
+        fixture.start();
+        let workspace = fixture.workspace().await;
+        let source = upload(
+            &fixture,
+            &workspace,
+            "report.pdf",
+            b"inert converter fixture",
+        )
+        .await;
+        let base = format!(
+            "/v1/workspaces/{workspace}/sources/{}/preview",
+            source["id"].as_str().unwrap()
+        );
+        let (status, result) = fixture
+            .json(Method::GET, &base, OWNER, None, Value::Null)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["image"], "page-1.png");
+        let (status, png) = fixture
+            .bytes(
+                Method::GET,
+                &format!("{base}/assets/page-1.png"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(png, b"\x89PNG\r\n\x1a\n");
+        let (status, _) = fixture
+            .bytes(
+                Method::GET,
+                &format!("{base}/assets/page-2.png"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = fixture
+            .bytes(
+                Method::GET,
+                &format!("{base}/assets/page-1.png"),
+                FOREIGN,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn membership_revoked_during_conversion_blocks_the_result() {
+        let mut fixture = Fixture::new(false);
+        let scratch = branchyard_testkit::Scratch::new("console-preview-revocation");
+        let entered = scratch.join("entered");
+        let gate = scratch.join("release");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&gate)
+            .status()
+            .unwrap()
+            .success());
+        let body = format!("printf ready > '{}'\nread release < '{}'\nprintf '%s\\n' '{{\"status\":\"passed\",\"kind\":\"table\",\"format\":\"csv\",\"columns\":[\"value\"],\"rows\":[[\"1\"]],\"offset\":0,\"next_offset\":null,\"warnings\":[]}}'", entered.display(), gate.display());
+        Arc::get_mut(&mut fixture.app).unwrap().preview =
+            Arc::new(crate::preview::tests::fake_service(&scratch, &body));
+        fixture.start();
+        let workspace = fixture.workspace().await;
+        let source = upload(&fixture, &workspace, "revocation.csv", b"value\n1\n").await;
+        let request = Request::builder()
+            .uri(format!(
+                "/v1/workspaces/{workspace}/sources/{}/preview",
+                source["id"].as_str().unwrap()
+            ))
+            .header("authorization", format!("Bearer {OWNER}"))
+            .body(Body::empty())
+            .unwrap();
+        let router = crate::api::router(fixture.app.clone());
+        let pending = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+        wait::until("the fixture converter to reach the revocation gate", || {
+            entered.exists()
+        });
+        let member = fixture
+            .app
+            .registry
+            .console_get(Collection::Members, &format!("{workspace}:owner"))
+            .unwrap()
+            .unwrap();
+        fixture
+            .app
+            .registry
+            .console_mutate(&[Mutation::Delete {
+                collection: Collection::Members,
+                id: member.id,
+                tenant: member.tenant,
+                expected: member.revision,
+            }])
+            .unwrap();
+        std::fs::write(gate, b"continue\n").unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 }

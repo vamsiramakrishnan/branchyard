@@ -36,6 +36,7 @@ pub(crate) fn router() -> Router<Shared> {
             post(super::sources::finalize),
         )
         .merge(super::sources::router())
+        .merge(super::previews::router())
         .merge(super::collaboration::router())
 }
 fn project_access(app: &App, caller: &Caller, p: &Record, required: &str) -> Result<(), ApiError> {
@@ -313,6 +314,10 @@ async fn workspace(
     let row = auth::authorize_workspace(&app, &caller, &wid, "read")?;
     let sessions = super::runtime::session_views(&app, &caller, &row)?;
     let mut body = super::runtime::workspace_view(&app, &row, &sessions)?;
+    let subject = caller.0.connector_subject();
+    let member = super::get(&app, Collection::Members, &format!("{wid}:{subject}"))?;
+    body["current_subject"] = json!(subject);
+    body["current_role"] = member.body["role"].clone();
     body["sessions"] = json!(sessions);
     for (key, c) in [
         ("members", Collection::Members),
@@ -325,6 +330,20 @@ async fn workspace(
             .collect::<Vec<_>>());
     }
     body["capabilities"] = json!({"isolated_writers":true,"source_upload":true,"artifact_acceptance":true,"terminal":{"available":false,"reason":"runtime_owner_required"},"sleep":{"available":false,"reason":"provider_capability_required"}});
+    body["capabilities"]["max_upload_bytes"] = json!(app.config.managed_knowledge.max_upload_bytes);
+    body["capabilities"]["max_source_bytes"] = json!(app.config.managed_knowledge.max_source_bytes);
+    body["capabilities"]["can_admin"] =
+        json!(caller.0.allows("admin") && member.body["role"] == "owner");
+    body["capabilities"]["can_run"] = json!(
+        caller.0.allows("run") && matches!(member.body["role"].as_str(), Some("owner" | "editor"))
+    );
+    body["capabilities"]["can_comment"] = json!(
+        caller.0.allows("run")
+            && matches!(
+                member.body["role"].as_str(),
+                Some("owner" | "editor" | "reviewer")
+            )
+    );
     Ok(Json(body))
 }
 async fn sessions(

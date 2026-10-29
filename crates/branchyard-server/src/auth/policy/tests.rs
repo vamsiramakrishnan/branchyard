@@ -187,6 +187,9 @@ fn app(mut config: Config) -> (tempfile::TempDir, Arc<App>) {
     config.app.enabled = true;
     config.app.push = false;
     let app = Arc::new(App {
+        preview: Arc::new(
+            crate::preview::PreviewService::new(directory.path().join("previews")).unwrap(),
+        ),
         repos: Default::default(),
         registry: crate::ops::Registry::open(
             Box::new(crate::store::MemoryStore::default()),

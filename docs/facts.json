@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 3031,
+    "total": 3035,
     "ignored": 34,
     "by_crate": {
       "branchyard": {
@@ -129,7 +129,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 393,
+        "tests": 397,
         "ignored": 1
       },
       "branchyard-setup": {
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 119,
+    "route_count": 123,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -265,6 +265,8 @@
       "/v1/workspaces/{workspace}/actions/{action}",
       "/v1/workspaces/{workspace}/artifacts",
       "/v1/workspaces/{workspace}/artifacts/{artifact}/content",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/preview",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/preview/assets/{asset}",
       "/v1/workspaces/{workspace}/comments",
       "/v1/workspaces/{workspace}/finalize",
       "/v1/workspaces/{workspace}/members",
@@ -283,7 +285,9 @@
       "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/output",
       "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/resize",
       "/v1/workspaces/{workspace}/sources",
-      "/v1/workspaces/{workspace}/sources/{source}/content"
+      "/v1/workspaces/{workspace}/sources/{source}/content",
+      "/v1/workspaces/{workspace}/sources/{source}/preview",
+      "/v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}"
     ]
   },
   "runtime": {

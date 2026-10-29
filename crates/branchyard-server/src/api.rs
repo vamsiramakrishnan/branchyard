@@ -66,6 +66,8 @@ pub struct App {
     /// Sync to durable storage, when the configuration has `sync`; see
     /// `crate::sync`.
     pub sync: Option<Arc<crate::sync::ServerSync>>,
+    /// One bounded renderer shared by legacy and workspace preview routes.
+    pub(crate) preview: Arc<crate::preview::PreviewService>,
 }
 
 #[derive(Clone)]
@@ -207,6 +209,14 @@ fn repo_not_allowed(repo: &str) -> ApiError {
 }
 
 impl App {
+    /// Revalidate the admitted credential and its current issuer policy.
+    pub(crate) fn check_caller(&self, caller: &Caller) -> Result<(), ApiError> {
+        if *self.shutdown.borrow() {
+            return Err(ApiError::shutting_down());
+        }
+        crate::auth::recheck_caller(self, caller, caller.verified())
+    }
+
     /// The repository named `name`, for a caller that is not asking: a
     /// trigger's own. Unlike [`App::authorized_repo`], its error lists no
     /// repositories, since there is no one to list them for.
@@ -868,6 +878,7 @@ pub fn router(app: Shared) -> Router {
         // Tasks and their attempts: `task_routes`.
         .merge(crate::task_routes::router())
         .merge(crate::console::router())
+        .merge(crate::preview::router(app.preview.clone()))
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
     let log = app.config.log_requests;

@@ -434,6 +434,10 @@ pub async fn start(config: Config) -> Result<Running, String> {
     #[cfg(test)]
     let credentials = credentials.with_google_jwks(config.google_jwks_url.as_deref());
     let app = Arc::new(App {
+        preview: Arc::new(
+            crate::preview::PreviewService::new(config.data_dir.join("previews"))
+                .map_err(|error| error.body.message)?,
+        ),
         sync: sync.clone(),
         companion,
         repos,

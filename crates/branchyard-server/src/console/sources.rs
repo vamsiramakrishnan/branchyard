@@ -442,7 +442,7 @@ fn native_artifacts(
     }
 }
 
-fn find_artifact(
+pub(super) fn find_artifact(
     app: &App,
     caller: &Caller,
     workspace: &Record,

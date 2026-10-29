@@ -8,7 +8,8 @@ mod cache;
 mod routes;
 mod sandbox;
 
-pub(crate) use routes::{authorized_input, router};
+pub(crate) use cache::read_regular;
+pub(crate) use routes::{png, private, router};
 
 use cache::{cache_key, materialize_helper, safe_asset, suffix, validate_response};
 
@@ -23,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const MAX_INPUT: u64 = 64 * 1024 * 1024;
+/// Largest original document admitted before materialization.
+pub(crate) const MAX_INPUT: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSIONS: usize = 2;
 const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 /// The requested document representation.
@@ -371,4 +373,4 @@ fn unknown_asset() -> ApiError {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

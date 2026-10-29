@@ -4,14 +4,15 @@ The workspace console can derive a table or page image from an immutable
 artifact. Downloading the original remains a separate action. A preview does
 not change its source, accept a deliverable or establish visual approval.
 
-Status, 29 October 2026: hermetic Rust fixtures pass, including the real embedded
-CSV/text helper through a fake namespace adapter, encoded-byte pagination,
-materialization admission, concurrent cache access and process teardown. The
-explicit multi-sheet XLSX fixture passes with the artifact-runtime Python.
-Evidence: `cargo test --locked --offline -p branchyard-server --lib preview::`
-and the explicit ignored XLSX fixture. Not done: actual Bubblewrap/Office page
-rendering or workspace-membership HTTP checks in this isolated slice; the parent
-console integration records those checks separately.
+Status, 29 October 2026: hermetic cache, converter and HTTP fixtures pass with
+fake namespace commands, including current membership, original preservation,
+authenticated page images and revocation during conversion. The explicit
+multi-sheet XLSX fixture also passes with the artifact-runtime Python. Live
+converter CLI checks used Bubblewrap 0.9.0, LibreOffice 24.2.7.2 and Poppler
+24.09.0 on synthetic CSV, XLSX, DOCX and PPTX documents. Network access was
+blocked and the originals stayed unchanged. The [dated converter record](evidence/console-document-converters-2026-10-29.json)
+contains the cases and original digests. Not done: complete console browser
+acceptance, model turns or remote-provider qualification of these previews.
 
 ## Open a preview
 
@@ -20,12 +21,26 @@ An authorized client requests:
 ```text
 GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview
 GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview/assets/{image}
+GET /v1/workspaces/{workspace}/sources/{source}/preview
+GET /v1/workspaces/{workspace}/sources/{source}/preview/assets/{image}
+GET /v1/workspaces/{workspace}/artifacts/{artifact}/preview
+GET /v1/workspaces/{workspace}/artifacts/{artifact}/preview/assets/{image}
 ```
 
 Both requests need the original artifact's current read grant. A cached image
 has no independent sharing capability. Workspace aliases apply workspace
 membership in addition to the original grant. Do not put bearer tokens in image
 URLs; fetch bytes with the authenticated client and display a Blob URL.
+
+The server checks the exact credential and current membership before loading
+the original and again after conversion. A permission revoked during conversion
+blocks the response. Preview JSON and page images carry `private, no-store` and
+`nosniff`. Legacy routes and workspace aliases share the same conversion slots
+and derivative cache.
+
+Workspace detail includes `current_subject`, `current_role` and permitted actions
+under `capabilities`. It also reports `max_upload_bytes` and `max_source_bytes`
+so an upload form can show the server's limits before sending a document.
 
 Query options apply to both requests:
 

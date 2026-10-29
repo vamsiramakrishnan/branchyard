@@ -1,0 +1,65 @@
+{
+  "evidence": "Real Bubblewrap0.9.0, LibreOffice and Poppler conversion of synthetic knowledge fixtures; no model calls.",
+  "isolation": {
+    "network_blocked": true,
+    "host_home_absent": true
+  },
+  "checks": [
+    {
+      "name": "csv-table",
+      "status": "passed",
+      "kind": "table"
+    },
+    {
+      "name": "xlsx-backlog",
+      "status": "passed",
+      "kind": "table"
+    },
+    {
+      "name": "xlsx-summary",
+      "status": "passed",
+      "kind": "table"
+    },
+    {
+      "name": "xlsx-print",
+      "status": "passed",
+      "kind": "pages"
+    },
+    {
+      "name": "docx-page",
+      "status": "passed",
+      "kind": "pages"
+    },
+    {
+      "name": "pptx-slide1",
+      "status": "passed",
+      "kind": "pages"
+    },
+    {
+      "name": "pptx-slide2",
+      "status": "passed",
+      "kind": "pages"
+    },
+    {
+      "name": "pptx-slide3",
+      "status": "passed",
+      "kind": "pages"
+    }
+  ],
+  "original_sha256": {
+    "backlog_briefing.pptx": "a2c79d361a536db67ac06d9105aca2f9aac9383469fa87d01a7c7a1053d250e2",
+    "ticket_backlog.csv": "422dc795899e3f9006fa1d684c37883398146580152c4f7420f735360aa527b8",
+    "backlog_report.docx": "7c749eadf11466b70d69f8ee89c8fba0336a1e3a5a4867348e9a4634018d3632",
+    "backlog_metrics.xlsx": "130e7e0daad7aac33fc10a2040a4efc6fe1302be3c5baa00db22c5bc3206acb6"
+  },
+  "originals_unchanged": true,
+  "status": "passed",
+  "not_done": "Complete browser console, harness model turns and remote-provider qualification.",
+  "date": "2026-10-29",
+  "evidence_kind": "live_converter_cli_with_synthetic_fixtures",
+  "tools": {
+    "bubblewrap": "bubblewrap 0.9.0",
+    "libreoffice": "LibreOffice 24.2.7.2 420(Build:2)",
+    "poppler": "pdftoppm version 24.09.0"
+  }
+}

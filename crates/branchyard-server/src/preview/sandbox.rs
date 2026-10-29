@@ -26,11 +26,9 @@ impl Settings {
     pub(super) fn from_env() -> Self {
         Self {
             bwrap: std::env::var_os("BRANCHYARD_PREVIEW_BWRAP")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("bwrap")),
+                .map_or_else(|| PathBuf::from("bwrap"), PathBuf::from),
             python: std::env::var_os("BRANCHYARD_PREVIEW_PYTHON")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("python3")),
+                .map_or_else(|| PathBuf::from("python3"), PathBuf::from),
         }
     }
 

@@ -399,6 +399,12 @@ impl Executor for AppExecutor {
                 };
             };
             let caller = crate::api::Caller::authenticated(principal, credential);
+            if let Err(error) = app.check_caller(&caller) {
+                return Finished {
+                    result: Err(*error.body),
+                    end_cursor: None,
+                };
+            }
             return crate::console::execute(app, stored, command, caller);
         }
         // Membership may have changed while this operation waited in the queue.

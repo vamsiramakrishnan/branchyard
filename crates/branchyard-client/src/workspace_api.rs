@@ -133,6 +133,15 @@ pub struct Workspace {
     /// Workspace result contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_contract: Option<ResultContract>,
+    /// Verified subject observing this response, independent of device name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_subject: Option<String>,
+    /// The observer's current workspace membership, intersected with server policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_role: Option<Role>,
+    /// Server readiness, upload limits and the observer's permitted actions.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capabilities: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// A named native attempt, without a transcript copy.

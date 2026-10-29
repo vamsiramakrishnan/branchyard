@@ -7,7 +7,6 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
-use serde_json::Value;
 
 use super::cache::read_regular;
 use super::{io_error, PreviewInput, PreviewOptions, PreviewPermit, PreviewService, MAX_INPUT};
@@ -34,12 +33,16 @@ async fn preview_route(
     Extension(caller): Extension<Caller>,
     Extension(service): Extension<Arc<PreviewService>>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let options = PreviewOptions::parse(query.as_deref())?;
-    app.authorized_repo(&caller, &repo, "read")?;
+    app.check_caller(&caller)?;
+    crate::console::auth::authorize_branch(&app, &caller, &repo, &branch, "read")?;
     let permit = service.admit()?;
-    let input = authorized_input(&app, &caller, &repo, branch, id, &permit).await?;
-    Ok(Json(permit.preview(input, options).await?))
+    let input = authorized_input(&app, &caller, &repo, branch.clone(), id, &permit).await?;
+    let result = permit.preview(input, options).await?;
+    app.check_caller(&caller)?;
+    crate::console::auth::authorize_branch(&app, &caller, &repo, &branch, "read")?;
+    Ok(private(Json(result).into_response()))
 }
 
 async fn asset_route(
@@ -50,13 +53,18 @@ async fn asset_route(
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
     let options = PreviewOptions::parse(query.as_deref())?;
-    app.authorized_repo(&caller, &repo, "read")?;
+    app.check_caller(&caller)?;
+    crate::console::auth::authorize_branch(&app, &caller, &repo, &branch, "read")?;
     let permit = service.admit_asset(&asset)?;
-    let input = authorized_input(&app, &caller, &repo, branch, id, &permit).await?;
-    let mut response = permit.asset(input, options, &asset).await?.into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    let input = authorized_input(&app, &caller, &repo, branch.clone(), id, &permit).await?;
+    let bytes = permit.asset(input, options, &asset).await?;
+    app.check_caller(&caller)?;
+    crate::console::auth::authorize_branch(&app, &caller, &repo, &branch, "read")?;
+    Ok(png(bytes))
+}
+
+/// Response headers shared by preview metadata and immutable page images.
+pub(crate) fn private(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
@@ -65,7 +73,16 @@ async fn asset_route(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    Ok(response)
+    response
+}
+
+/// Deliver an authorized PNG without allowing a browser to retain a grant.
+pub(crate) fn png(bytes: Vec<u8>) -> Response {
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+    private(response)
 }
 
 /// Reauthorize and digest-check the original before every derivative request.

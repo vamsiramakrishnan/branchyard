@@ -815,12 +815,23 @@ fields. Poll the existing operation route to determine its outcome.
 | `GET /v1/workspaces/{workspace}/sessions/{session}/messages?after=CURSOR` | Read native prompt, output, and steering text with a cursor |
 | `POST /v1/workspaces/{workspace}/sessions/{session}/messages` | Continue `{prompt,action:"send"|"resume"|"steer"}` in the same native attempt |
 | `POST /v1/workspaces/{workspace}/sessions/{session}/cancel` | Admit attributed native cancellation |
+| `GET /v1/workspaces/{workspace}/sessions/{session}/runtime` | Inspect the owning provider, retained allocation, capabilities and terminal readiness |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/runtime/actions/{action}` | Admit a supported resource lifecycle action into the durable queue |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/terminals` | Open an explicitly permitted idle writer terminal with a real provider PTY |
+| `GET /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/output` | Read bounded terminal replay after a sequence cursor |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/input` | Send sequenced input without replaying duplicate writes |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/resize` | Resize the existing provider PTY |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close` | Close the handle and terminate its shell process group |
 | `POST /v1/workspaces/{workspace}/actions/{action}` | Archive or restore at `{revision}`; unsupported provider actions return structured capability reasons |
 | `GET /v1/workspaces/{workspace}/sources` | List immutable original source metadata |
 | `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
 | `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment |
+| `GET /v1/workspaces/{workspace}/sources/{source}/preview` | Render a bounded original source after checking current membership |
+| `GET /v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}` | Read a derived page image under the same source grant |
 | `GET /v1/workspaces/{workspace}/artifacts` | List native immutable artifacts owned by this workspace |
 | `GET /v1/workspaces/{workspace}/artifacts/{artifact}/content` | Download a permitted digest-verified native artifact |
+| `GET /v1/workspaces/{workspace}/artifacts/{artifact}/preview` | Render a bounded artifact owned by this workspace |
+| `GET /v1/workspaces/{workspace}/artifacts/{artifact}/preview/assets/{asset}` | Read a derived PNG after rechecking the artifact publisher and membership |
 | `POST /v1/workspaces/{workspace}/finalize` | Accept `{revision,artifacts:[IDs]}` independently of code integration |
 | `GET /v1/workspaces/{workspace}/members` | List roles |
 | `GET /v1/workspaces/{workspace}/members/{subject}` | Read one verified subject's membership |

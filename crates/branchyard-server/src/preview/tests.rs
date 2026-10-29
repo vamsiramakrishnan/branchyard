@@ -192,7 +192,7 @@ fn script(path: &FilePath, contents: &str) {
 }
 
 #[cfg(target_os = "linux")]
-fn fake_service(scratch: &Scratch, body: &str) -> PreviewService {
+pub(crate) fn fake_service(scratch: &Scratch, body: &str) -> PreviewService {
     let python = scratch.join("python");
     script(&python, "#!/bin/sh\nprintf '%s\\n' '{\"executable\":\"/usr/bin/python3\",\"prefix\":\"/usr\",\"base_prefix\":\"/usr\",\"version\":\"fixture\"}'\n");
     let bwrap = scratch.join("bwrap");
@@ -442,8 +442,7 @@ async fn valid_wide_csv_is_paginated_before_stdout_reaches_its_byte_bound() {
 async fn real_multisheet_xlsx_helper_publishes_and_reuses_a_table_cache() {
     let scratch = Scratch::new("preview-real-xlsx");
     let python = std::env::var_os("BRANCHYARD_PREVIEW_TEST_PYTHON")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| "/usr/bin/python3".into());
+        .map_or_else(|| PathBuf::from("/usr/bin/python3"), PathBuf::from);
     let path = scratch.join("book.xlsx");
     let status = std::process::Command::new(&python).args(["-I", "-c", "import sys;from openpyxl import Workbook;w=Workbook();s=w.active;s.title='Inputs';s.append(['account','formula']);s.append(['001','=1+1']);t=w.create_sheet('Costs');t.append(['cost']);t.append([12]);w.save(sys.argv[1])"]).arg(&path).env_clear().env("PATH", "/usr/bin:/bin").status().unwrap();
     assert!(status.success());

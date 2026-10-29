@@ -118,7 +118,7 @@ pub(super) fn safe_asset(name: &str) -> bool {
 }
 
 /// Read a bounded regular file while refusing symbolic links.
-pub(super) fn read_regular(path: &FilePath, limit: u64) -> Result<Vec<u8>, ApiError> {
+pub(crate) fn read_regular(path: &FilePath, limit: u64) -> Result<Vec<u8>, ApiError> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if !metadata.is_file() || metadata.len() > limit {
         return Err(ApiError::internal(
