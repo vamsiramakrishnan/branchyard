@@ -8,10 +8,13 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{io_error, json_error, ApiError, PreviewInput, PreviewOptions, MAX_CONVERSIONS};
+use super::{
+    io_error, json_error, ApiError, Cached, MaterializationGuard, PreviewInput, PreviewOptions,
+    MAX_CONVERSIONS, MAX_RESPONSE_BYTES,
+};
 
 pub(super) const MAX_IMAGE: u64 = 16 * 1024 * 1024;
-const MAX_JSON: u64 = 2 * 1024 * 1024;
+const MAX_JSON: u64 = MAX_RESPONSE_BYTES;
 const MAX_DERIVATIVE: u64 = 64 * 1024 * 1024;
 const CACHE_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const CACHE_ENTRIES: usize = 256;
@@ -32,6 +35,9 @@ pub(super) fn suffix(name: &str) -> Result<&str, ApiError> {
         "png" => Ok("png"),
         "jpg" | "jpeg" => Ok("jpg"),
         "webp" => Ok("webp"),
+        "txt" => Ok("txt"),
+        "md" | "markdown" => Ok("md"),
+        "json" => Ok("json"),
         _ => Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "preview_unsupported",
@@ -55,6 +61,7 @@ pub(super) fn cache_key(
             suffix(&input.name)?,
             options,
             runtime,
+            MAX_RESPONSE_BYTES,
             env!("CARGO_PKG_VERSION"),
         ))
         .map_err(json_error)?,
@@ -170,6 +177,11 @@ pub(super) fn validate_response(value: &Value, output: &FilePath) -> Result<(), 
                 return Err(invalid());
             }
         }
+        Some("text")
+            if value
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| text.len() <= 256 * 1024) => {}
         _ => return Err(invalid()),
     }
     let mut total = 0;
@@ -222,15 +234,96 @@ pub(super) fn reusable_cache(directory: &FilePath) -> Result<Option<Value>, ApiE
     match read_cached(directory) {
         Ok(value) => Ok(value),
         Err(error) => {
-            if let Ok(metadata) = fs::symlink_metadata(directory) {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(error);
-                }
-                fs::remove_dir_all(directory).map_err(io_error)?;
+            let metadata = match fs::symlink_metadata(directory) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(io_error(error)),
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(error);
             }
+            remove_entry(directory)?;
             Ok(None)
         }
     }
+}
+
+fn remove_entry(path: &FilePath) -> Result<(), ApiError> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+/// Read or publish cache state while holding the same short cross-process lock.
+async fn locked<T: Send + 'static>(
+    root: std::path::PathBuf,
+    action: impl FnOnce(&FilePath) -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    crate::api::blocking(move || {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join(".lock"))
+            .map_err(io_error)?;
+        file.lock().map_err(io_error)?;
+        // A distinct file description for each critical section also serializes
+        // threads in this process. Closing it releases the lock on every exit.
+        action(&root)
+    })
+    .await?
+}
+
+fn pin(value: Value, directory: &FilePath) -> Result<Cached, ApiError> {
+    let image = match value.get("image").and_then(Value::as_str) {
+        Some(name) if safe_asset(name) => Some(read_regular(&directory.join(name), MAX_IMAGE)?),
+        _ => None,
+    };
+    Ok(Cached { value, image })
+}
+
+/// Pin a cache hit's image bytes before any eviction can remove its files.
+pub(super) async fn lookup(
+    root: std::path::PathBuf,
+    key: String,
+    admission: MaterializationGuard,
+) -> Result<Option<Cached>, ApiError> {
+    locked(root, move |root| {
+        let _admission = admission;
+        let directory = root.join(key);
+        match reusable_cache(&directory)? {
+            Some(value) => Ok(Some(pin(value, &directory)?)),
+            None => {
+                cleanup_cache(root)?;
+                Ok(None)
+            }
+        }
+    })
+    .await
+}
+
+/// Atomically publish derivatives under the read/eviction lock, then pin bytes.
+pub(super) async fn publish(
+    root: std::path::PathBuf,
+    key: String,
+    staged: std::path::PathBuf,
+    value: Value,
+    admission: MaterializationGuard,
+) -> Result<Cached, ApiError> {
+    locked(root, move |root| {
+        let _admission = admission;
+        let directory = root.join(key);
+        if let Some(existing) = reusable_cache(&directory)? {
+            return pin(existing, &directory);
+        }
+        cleanup_cache(root)?;
+        fs::rename(staged, &directory).map_err(io_error)?;
+        pin(value, &directory)
+    })
+    .await
 }
 
 /// Evict expired/over-budget owned entries and abandoned staging directories.
@@ -240,7 +333,11 @@ pub(super) fn cleanup_cache(root: &FilePath) -> Result<(), ApiError> {
     for entry in fs::read_dir(root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
+        let metadata = match fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(error)),
+        };
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
@@ -250,11 +347,21 @@ pub(super) fn cleanup_cache(root: &FilePath) -> Result<(), ApiError> {
         if name.starts_with(".stage-")
             && now.saturating_sub(modified) > Duration::from_secs(600).as_millis() as u64
         {
-            fs::remove_dir_all(entry.path()).map_err(io_error)?;
+            remove_entry(&entry.path())?;
         } else if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
             let mut bytes = 0;
-            for file in fs::read_dir(entry.path()).map_err(io_error)? {
-                bytes += file.map_err(io_error)?.metadata().map_err(io_error)?.len();
+            let files = match fs::read_dir(entry.path()) {
+                Ok(files) => files,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(error)),
+            };
+            for file in files {
+                let file = file.map_err(io_error)?;
+                match file.metadata() {
+                    Ok(metadata) => bytes += metadata.len(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io_error(error)),
+                }
             }
             entries.push((modified, entry.path(), bytes));
         }
@@ -270,7 +377,7 @@ pub(super) fn cleanup_cache(root: &FilePath) -> Result<(), ApiError> {
         {
             break;
         }
-        fs::remove_dir_all(path).map_err(io_error)?;
+        remove_entry(&path)?;
         count -= 1;
         total = total.saturating_sub(bytes);
     }

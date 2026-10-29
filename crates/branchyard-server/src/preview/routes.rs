@@ -10,7 +10,7 @@ use axum::{Extension, Json, Router};
 use serde_json::Value;
 
 use super::cache::read_regular;
-use super::{io_error, PreviewInput, PreviewOptions, PreviewService, MAX_INPUT};
+use super::{io_error, PreviewInput, PreviewOptions, PreviewPermit, PreviewService, MAX_INPUT};
 use crate::api::{blocking, Caller, Shared};
 use crate::error::{self, ApiError};
 
@@ -36,8 +36,10 @@ async fn preview_route(
     RawQuery(query): RawQuery,
 ) -> Result<Json<Value>, ApiError> {
     let options = PreviewOptions::parse(query.as_deref())?;
-    let input = authorized_input(&app, &caller, &repo, branch, id).await?;
-    Ok(Json(service.preview(input, options).await?))
+    app.authorized_repo(&caller, &repo, "read")?;
+    let permit = service.admit()?;
+    let input = authorized_input(&app, &caller, &repo, branch, id, &permit).await?;
+    Ok(Json(permit.preview(input, options).await?))
 }
 
 async fn asset_route(
@@ -48,8 +50,10 @@ async fn asset_route(
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
     let options = PreviewOptions::parse(query.as_deref())?;
-    let input = authorized_input(&app, &caller, &repo, branch, id).await?;
-    let mut response = service.asset(input, options, &asset).await?.into_response();
+    app.authorized_repo(&caller, &repo, "read")?;
+    let permit = service.admit_asset(&asset)?;
+    let input = authorized_input(&app, &caller, &repo, branch, id, &permit).await?;
+    let mut response = permit.asset(input, options, &asset).await?.into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
@@ -71,10 +75,13 @@ pub(crate) async fn authorized_input(
     repo: &str,
     branch: String,
     id: String,
+    permit: &PreviewPermit<'_>,
 ) -> Result<PreviewInput, ApiError> {
     let yard = app.authorized_repo(caller, repo, "read")?.yard.clone();
     let tenant = caller.tenant().to_owned();
+    let admission = permit.materialization_guard();
     blocking(move || {
+        let _admission = admission;
         let metadata = yard
             .artifacts(&branch)
             .map_err(|e| error::sdk(&e))?

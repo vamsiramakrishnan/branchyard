@@ -10,23 +10,22 @@ mod sandbox;
 
 pub(crate) use routes::{authorized_input, router};
 
-use cache::{
-    cache_key, cleanup_cache, materialize_helper, read_regular, reusable_cache, safe_asset, suffix,
-    validate_response, MAX_IMAGE,
-};
+use cache::{cache_key, materialize_helper, safe_asset, suffix, validate_response};
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::ApiError;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX_INPUT: u64 = 64 * 1024 * 1024;
 const MAX_CONVERSIONS: usize = 2;
+const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 /// The requested document representation.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -151,13 +150,67 @@ pub struct PreviewInput {
 /// Isolated renderer and its private, bounded derivative cache.
 pub struct PreviewService {
     root: PathBuf,
-    slots: Semaphore,
+    slots: Arc<Semaphore>,
     settings: sandbox::Settings,
 }
 
 struct Cached {
     value: Value,
-    directory: Option<PathBuf>,
+    image: Option<Vec<u8>>,
+}
+
+/// Admission held from original materialization through derivative delivery.
+///
+/// HTTP adapters acquire this before reading the original. Its methods use the
+/// same permit throughout conversion; they never acquire a second slot.
+pub struct PreviewPermit<'a> {
+    service: &'a PreviewService,
+    admission: MaterializationGuard,
+}
+
+/// Admission retained by a blocking original reader, even after disconnection.
+#[derive(Clone)]
+pub struct MaterializationGuard {
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+impl PreviewPermit<'_> {
+    /// Retain this in a blocking loader so cancellation cannot free its slot early.
+    pub fn materialization_guard(&self) -> MaterializationGuard {
+        self.admission.clone()
+    }
+    /// Preview already-authorized bytes while retaining this request's slot.
+    pub async fn preview(
+        self,
+        input: PreviewInput,
+        options: PreviewOptions,
+    ) -> Result<Value, ApiError> {
+        Ok(self
+            .service
+            .derive(input, options, self.admission.clone())
+            .await?
+            .value)
+    }
+
+    /// Return the matching PNG bytes, pinned before releasing the cache lock.
+    pub async fn asset(
+        self,
+        input: PreviewInput,
+        options: PreviewOptions,
+        asset: &str,
+    ) -> Result<Vec<u8>, ApiError> {
+        if !safe_asset(asset) {
+            return Err(unknown_asset());
+        }
+        let cached = self
+            .service
+            .derive(input, options, self.admission.clone())
+            .await?;
+        if cached.value.get("image").and_then(Value::as_str) != Some(asset) {
+            return Err(unknown_asset());
+        }
+        cached.image.ok_or_else(unknown_asset)
+    }
 }
 
 impl PreviewService {
@@ -182,18 +235,46 @@ impl PreviewService {
         }
         Ok(Self {
             root: fs::canonicalize(root).map_err(io_error)?,
-            slots: Semaphore::new(MAX_CONVERSIONS),
+            slots: Arc::new(Semaphore::new(MAX_CONVERSIONS)),
             settings,
         })
     }
 
-    /// Derive one bounded representation from authorized immutable bytes.
+    /// Admit a request before copying or allocating original artifact bytes.
+    pub fn admit(&self) -> Result<PreviewPermit<'_>, ApiError> {
+        let slot = self.slots.clone().try_acquire_owned().map_err(|_| {
+            ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "preview_busy",
+                "both document renderers are busy; retry shortly",
+            )
+            .detail(json!({"retry_after": 2}))
+        })?;
+        Ok(PreviewPermit {
+            service: self,
+            admission: MaterializationGuard {
+                _permit: Arc::new(slot),
+            },
+        })
+    }
+
+    /// Reject malformed image names before admitting or materializing a source.
+    pub fn admit_asset(&self, asset: &str) -> Result<PreviewPermit<'_>, ApiError> {
+        if !safe_asset(asset) {
+            return Err(unknown_asset());
+        }
+        self.admit()
+    }
+
+    /// Derive a preview for an input the caller has already materialized.
+    ///
+    /// HTTP handlers use [`Self::admit`] before reading their original instead.
     pub async fn preview(
         &self,
         input: PreviewInput,
         options: PreviewOptions,
     ) -> Result<Value, ApiError> {
-        Ok(self.derive(input, options).await?.value)
+        self.admit()?.preview(input, options).await
     }
 
     /// Read exactly the image named by this authorized preview response.
@@ -203,21 +284,14 @@ impl PreviewService {
         options: PreviewOptions,
         asset: &str,
     ) -> Result<Vec<u8>, ApiError> {
-        if !safe_asset(asset) {
-            return Err(unknown_asset());
-        }
-        let cached = self.derive(input, options).await?;
-        if cached.value.get("image").and_then(Value::as_str) != Some(asset) {
-            return Err(unknown_asset());
-        }
-        let directory = cached.directory.ok_or_else(unknown_asset)?;
-        read_regular(&directory.join(asset), MAX_IMAGE)
+        self.admit_asset(asset)?.asset(input, options, asset).await
     }
 
     async fn derive(
         &self,
         input: PreviewInput,
         options: PreviewOptions,
+        admission: MaterializationGuard,
     ) -> Result<Cached, ApiError> {
         options.validate()?;
         if input.bytes.len() as u64 > MAX_INPUT {
@@ -228,24 +302,13 @@ impl PreviewService {
             ));
         }
         let suffix = suffix(&input.name)?;
-        let _slot = self.slots.try_acquire().map_err(|_| {
-            ApiError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "preview_busy",
-                "both document renderers are busy; retry shortly",
-            )
-            .detail(json!({"retry_after": 2}))
-        })?;
         let runtime = self.settings.runtime().await?;
         let key = cache_key(&input, &options, &runtime.identity())?;
-        let final_dir = self.root.join(&key);
-        if let Some(value) = reusable_cache(&final_dir)? {
-            return Ok(Cached {
-                value,
-                directory: Some(final_dir),
-            });
+        if let Some(cached) =
+            cache::lookup(self.root.clone(), key.clone(), admission.clone()).await?
+        {
+            return Ok(cached);
         }
-        cleanup_cache(&self.root)?;
         let stage = tempfile::Builder::new()
             .prefix(".stage-")
             .tempdir_in(&self.root)
@@ -269,35 +332,27 @@ impl PreviewService {
         )
         .await?;
         if value.get("status").and_then(Value::as_str) != Some("passed") {
-            return Ok(Cached {
-                value,
-                directory: None,
-            });
+            return Ok(Cached { value, image: None });
         }
         let derived = output.join("derived");
+        if matches!(
+            value.get("kind").and_then(Value::as_str),
+            Some("table" | "text")
+        ) {
+            // JSON-only helper modes intentionally create no output directory.
+            match fs::create_dir(&derived) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
         validate_response(&value, &derived)?;
         fs::write(
             derived.join("result.json"),
             serde_json::to_vec(&value).map_err(json_error)?,
         )
         .map_err(io_error)?;
-        match fs::rename(&derived, &final_dir) {
-            Ok(()) => {}
-            Err(error) => {
-                // Another server may have published the same immutable derivative.
-                if let Some(value) = reusable_cache(&final_dir)? {
-                    return Ok(Cached {
-                        value,
-                        directory: Some(final_dir),
-                    });
-                }
-                return Err(io_error(error));
-            }
-        }
-        Ok(Cached {
-            value,
-            directory: Some(final_dir),
-        })
+        cache::publish(self.root.clone(), key, derived, value, admission).await
     }
 }
 

@@ -80,6 +80,7 @@ pub mod metrics;
 pub mod models;
 pub mod observe;
 pub mod ops;
+pub mod preview;
 pub mod serve;
 mod services_routes;
 pub mod storage_routes;

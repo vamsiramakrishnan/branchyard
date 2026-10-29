@@ -4,11 +4,14 @@ The workspace console can derive a table or page image from an immutable
 artifact. Downloading the original remains a separate action. A preview does
 not change its source, accept a deliverable or establish visual approval.
 
-Status, 29 October 2026: static review and formatting cover the service's
-namespace arguments, cache and renderer boundaries. Hermetic fixtures exercise
-fake conversion, query bounds, cache identity, output validation and teardown.
-Not done: running the Rust fixtures or a real converter in this isolated slice;
-the parent console integration coordinates Cargo and the live renderer checks.
+Status, 29 October 2026: hermetic Rust fixtures pass, including the real embedded
+CSV/text helper through a fake namespace adapter, encoded-byte pagination,
+materialization admission, concurrent cache access and process teardown. The
+explicit multi-sheet XLSX fixture passes with the artifact-runtime Python.
+Evidence: `cargo test --locked --offline -p branchyard-server --lib preview::`
+and the explicit ignored XLSX fixture. Not done: actual Bubblewrap/Office page
+rendering or workspace-membership HTTP checks in this isolated slice; the parent
+console integration records those checks separately.
 
 ## Open a preview
 
@@ -40,6 +43,11 @@ CSV and XLSX values are shown without executing formulas. XLSX print preview,
 DOCX pages and PPTX slides use the native rendering helper; PDF and raster
 images use the same bounded page response.
 
+Table JSON has a 2 MiB encoded response budget. A wide table can return fewer
+rows than `limit`; continue at `next_offset`. The response includes a warning,
+and cell strings remain unchanged. Plain text and Markdown use an inert text
+response. JSON-only modes need no image output directory from the helper.
+
 Missing tools produce `preview_unavailable` with setup guidance. Busy converters
 produce `preview_busy` with a retry interval. Conversion timeouts produce
 `preview_timeout`. These failures preserve the original download. They never
@@ -67,14 +75,17 @@ guidance.
 The converter gets a fresh user, PID, IPC, UTS and network namespace, private
 temporary directory and home, a cleared environment, read-only source and helper,
 and one writable output directory. Minimal system executables/libraries, fonts,
-loader configuration and the selected Python installation are available.
+loader configuration, `/etc/libreoffice` when installed, and the selected Python
+installation are available.
 The helper disables Office macros and external updates; OS network isolation
 holds even if document content attempts an external fetch.
 
 ## Bounds and cache behavior
 
-The server accepts at most 64 MiB of original bytes and runs at most two
-conversions concurrently. The converter has a 45-second wall deadline, 35-second
+The server accepts at most 64 MiB of original bytes. Request admission bounds
+original copying and conversion together to two requests. Blocking readers keep
+their admission even if the client disconnects; malformed image names are
+rejected before the original is copied. The converter has a 45-second wall deadline, 35-second
 CPU limit, 2 GiB address-space limit, 32 MiB per-file limit and bounded output
 pipes. Timeout, cancellation and normal exit tear down its process group.
 The format helper also checks archives, page counts, dimensions and table sizes.
@@ -85,3 +96,15 @@ renderer payload, package version and Python runtime. Failed or unavailable
 conversions are not cached. Cache entries are private, expire after one day,
 and are evicted before exceeding the entry/byte budget. Each rendering server
 owns its derivative cache; the cache is not a source of artifact authority.
+
+Servers sharing a cache root use one short cross-process file lock for lookup,
+eviction and publication. Conversion runs outside that lock. Image bytes are
+read while pinned by the lock, so eviction cannot invalidate an in-flight image
+response. A missing or incomplete entry is derived again from the original.
+
+Server adapters call `PreviewService::admit()` or `admit_asset(image)` before
+loading original bytes, then use that permit's `preview` or `asset` method.
+`authorized_input` requires the permit and keeps its materialization guard in
+the blocking reader. Other blocking source loaders must retain
+`permit.materialization_guard()` in their closure too. The ordinary service
+methods remain available for inputs that are already materialized.

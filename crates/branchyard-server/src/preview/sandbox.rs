@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use super::{ApiError, PreviewOptions};
 
 const TIMEOUT: Duration = Duration::from_secs(45);
-const PIPE_BYTES: u64 = 2 * 1024 * 1024;
+const PIPE_BYTES: u64 = super::MAX_RESPONSE_BYTES;
 
 /// Operator-selected trusted executables, read once when the service is opened.
 #[derive(Clone)]
@@ -146,6 +146,8 @@ fn remove_internal_paths(value: &mut Value) {
         "image",
         "width",
         "height",
+        "text",
+        "truncated",
     ];
     if let Some(object) = value.as_object_mut() {
         object.retain(|key, _| FIELDS.contains(&key.as_str()));
@@ -199,7 +201,7 @@ fn arguments(
             push(&[os("--ro-bind"), prefix.as_os_str(), prefix.as_os_str()]);
         }
     }
-    for path in ["/etc/fonts", "/etc/ld.so.cache"] {
+    for path in ["/etc/fonts", "/etc/ld.so.cache", "/etc/libreoffice"] {
         if Path::new(path).exists() {
             push(&[os("--ro-bind"), os(path), os(path)]);
         }
@@ -237,6 +239,7 @@ fn arguments(
         runtime.executable.as_os_str(),
         os("-I"),
         os("/helper/launcher.py"),
+        os(&super::MAX_RESPONSE_BYTES.to_string()),
         os("--file"),
         input.as_os_str(),
         os("--out"),
@@ -272,7 +275,7 @@ struct ProcessGroup(u32);
 
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        branchyard_support::process::kill_group(self.0);
+        branchyard_support::kill_group(self.0);
     }
 }
 
@@ -318,7 +321,7 @@ async fn run(
     match completed {
         Ok(Ok((status, stdout, _stderr))) => Ok((status, stdout)),
         other => {
-            branchyard_support::process::kill_group(group.0);
+            branchyard_support::kill_group(group.0);
             branchyard_support::best_effort("reap document renderer", child.wait().await);
             match other {
                 Err(_) => Err(ApiError::new(
@@ -374,6 +377,11 @@ mod tests {
         assert!(!values
             .iter()
             .any(|a| a == "/" || a == "/home/user" || a == "/etc" || a == "/sys"));
+        if Path::new("/etc/libreoffice").exists() {
+            assert!(values
+                .windows(3)
+                .any(|a| a == ["--ro-bind", "/etc/libreoffice", "/etc/libreoffice"]));
+        }
     }
 
     #[test]
@@ -392,9 +400,11 @@ mod tests {
 
     #[test]
     fn temporary_virtual_environments_are_bound_after_private_tmp() {
+        let scratch = branchyard_testkit::Scratch::new("preview-venv-mount");
+        let prefix = scratch.join("runtime");
         let runtime = Runtime {
-            executable: "/tmp/runtime/bin/python".into(),
-            prefix: "/tmp/runtime".into(),
+            executable: prefix.join("bin/python"),
+            prefix: prefix.clone(),
             base_prefix: "/usr".into(),
             version: "fixture".into(),
         };
@@ -414,9 +424,10 @@ mod tests {
             .windows(2)
             .position(|a| a == ["--tmpfs", "/tmp"])
             .unwrap();
+        let path = prefix.to_string_lossy();
         let venv = values
             .windows(3)
-            .position(|a| a == ["--ro-bind", "/tmp/runtime", "/tmp/runtime"])
+            .position(|a| a == ["--ro-bind", path.as_ref(), path.as_ref()])
             .unwrap();
         assert!(private_tmp < venv);
     }
