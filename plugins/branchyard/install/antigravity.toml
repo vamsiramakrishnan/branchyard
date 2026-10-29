@@ -1,6 +1,11 @@
 harness = "antigravity"
 binaries = ["agy", "antigravity"]
-provides = ["hooks", "statusline"]
+provides = ["hooks", "statusline", "skills"]
+
+[[file]]
+from = "skills"
+to = "~/.gemini/antigravity-cli/skills"
+how = "write"
 
 [[file]]
 from = "harnesses/antigravity/hooks.json"

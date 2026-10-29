@@ -201,6 +201,14 @@ pub(crate) trait StorageBackend: Send + Sync + fmt::Debug {
     fn identities(&self) -> Result<Vec<Identity>, Error>;
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error>;
+    /// Publish a fenced producer's whole capture and completed receipt atomically.
+    /// A retry with the same digest returns the original publications.
+    fn capture_artifacts(
+        &self,
+        fence: &crate::state::Fence,
+        manifest_digest: &str,
+        artifacts: &[NewArtifact],
+    ) -> Result<Vec<ArtifactRef>, Error>;
     fn artifact(&self, id: &str) -> Result<Option<ArtifactRow>, Error>;
     /// Every artifact, oldest first.
     fn artifacts(&self) -> Result<Vec<ArtifactRow>, Error>;
@@ -311,7 +319,8 @@ impl Lineage {
     }
 
     /// `incarnation`'s ancestors, oldest first, as far up as the walk goes.
-    fn ancestors(&self, incarnation: i64) -> Vec<i64> {
+    /// Snapshot the current ancestor identities for immutable publication grants.
+    pub(crate) fn ancestors(&self, incarnation: i64) -> Vec<i64> {
         let mut chain = Vec::new();
         let mut cur = incarnation;
         while let Some(parent) = self.parents.get(&cur) {
@@ -443,11 +452,23 @@ impl Drop for TempBlob {
 /// and size. Opening `path` once and never again means the stored bytes are
 /// the bytes that were hashed, whatever happens to `path` meanwhile.
 fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| Error::State(format!("open {}: {error}", path.display())))?;
+    store_open_blob(dir, &mut file, u64::MAX, None)
+}
+
+/// Copy bounded, already-open contents once; hash the exact bytes installed.
+pub(crate) fn store_open_blob(
+    dir: &Path,
+    file: &mut dyn Read,
+    max_bytes: u64,
+    expected_sha256: Option<&str>,
+) -> Result<(String, u64), Error> {
+    use sha2::{Digest, Sha256};
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let io = |what: &str, p: &Path, e: std::io::Error| {
         Error::State(format!("{what} {}: {e}", p.display()))
     };
-    let mut file = std::fs::File::open(path).map_err(|e| io("open", path, e))?;
     let root = dir.join(ARTIFACTS_DIR);
     std::fs::create_dir_all(&root).map_err(|e| io("create", &root, e))?;
     let temp_path = root.join(format!(
@@ -463,17 +484,29 @@ fn store_blob(dir: &Path, path: &Path) -> Result<(String, u64), Error> {
         .map_err(|e| io("create", &temp_path, e))?;
     let mut temp = TempBlob(Some(temp_path.clone()));
     let mut hasher = blake3::Hasher::new();
+    let mut sha256 = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut size: u64 = 0;
     loop {
-        let n = file.read(&mut buf).map_err(|e| io("read", path, e))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| io("read capture", dir, e))?;
         if n == 0 {
             break;
         }
+        if n as u64 > max_bytes.saturating_sub(size) {
+            return Err(Error::Denied(
+                "artifact capture exceeds its total byte limit".into(),
+            ));
+        }
         hasher.update(&buf[..n]);
+        sha256.update(&buf[..n]);
         out.write_all(&buf[..n])
             .map_err(|e| io("write", &temp_path, e))?;
         size += n as u64;
+    }
+    if expected_sha256.is_some_and(|expected| expected != hex::encode(sha256.finalize())) {
+        return Err(Error::Denied("artifact capture SHA-256 mismatch".into()));
     }
     out.sync_all().map_err(|e| io("sync", &temp_path, e))?;
     drop(out);

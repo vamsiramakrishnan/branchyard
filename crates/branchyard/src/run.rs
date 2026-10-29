@@ -377,6 +377,11 @@ pub(crate) fn first_prompt(prompt: &str, options: &TaskOptions) -> String {
 
 /// Refuse a plan or goal that cannot work, before anything is created.
 fn check_plan_and_goal(profile: &'static Profile, options: &TaskOptions) -> Result<(), Error> {
+    if options.session_patch.is_some() {
+        return Err(Error::Denied(
+            "session_patch is only supported by send".into(),
+        ));
+    }
     if let Some(contract) = &options.result {
         contract.check()?;
         if contract.is_deliverable() && options.goal.is_some() {
@@ -965,6 +970,10 @@ pub(crate) fn send(
 ) -> Result<Branch, Error> {
     let prepared = prepare_send(yard, name, options, false)?;
     let prompt = prepared.prompt(prompt);
+    // The edit was committed with the lease. Automatic wakes use the stored
+    // provisioning rather than replaying the command that changed it.
+    let mut turn_options = options.clone();
+    turn_options.session_patch = None;
     engine::execute(
         Turn {
             yard,
@@ -973,7 +982,7 @@ pub(crate) fn send(
             command: prepared.command,
             mode: prepared.mode,
             prompt: &prompt,
-            options,
+            options: &turn_options,
             fork_source: None,
             note: prepared.note,
             sandbox: Default::default(),
@@ -1068,6 +1077,19 @@ fn prepare(
     plan: bool,
     wake: bool,
 ) -> Result<Option<Prepared>, Error> {
+    if let Some(patch) = &options.session_patch {
+        if plan || wake {
+            return Err(Error::Denied(
+                "session_patch is only supported by send".into(),
+            ));
+        }
+        patch.check().map_err(Error::Denied)?;
+        if options.provision.is_some() {
+            return Err(Error::Denied(
+                "session_patch and provision are mutually exclusive".into(),
+            ));
+        }
+    }
     let store = yard.store();
     recover::stale(yard, name)?;
     let mut record = store.read(name)?;
@@ -1200,8 +1222,22 @@ fn prepare(
         record.check = options.check.clone();
         record.check_inherited = false;
     }
-    if let Some(asked) = &options.provision {
-        let mut spec = same_model(name, &record, asked.clone())?;
+    let asked = match (&options.provision, &options.session_patch) {
+        (Some(spec), _) => Some(spec.clone()),
+        (None, Some(patch)) => {
+            let mut spec = record.provision.clone().unwrap_or_default();
+            if let Some(model) = &patch.model {
+                spec.model = Some(model.clone());
+            }
+            if let Some(effort) = patch.effort {
+                spec.effort = Some(effort);
+            }
+            Some(spec)
+        }
+        (None, None) => None,
+    };
+    if let Some(asked) = asked {
+        let mut spec = same_model(name, &record, asked)?;
         // A delegated child's connectors stay within its parent's grant,
         // whoever sends it.
         // So does its network policy.
@@ -1368,6 +1404,11 @@ pub(crate) fn fork(
     at: Option<u32>,
     options: &TaskOptions,
 ) -> Result<Branch, Error> {
+    if options.session_patch.is_some() {
+        return Err(Error::Denied(
+            "session_patch is only supported by send".into(),
+        ));
+    }
     let store = yard.store();
     let parent = store.read(name)?;
     // At a checkpoint: its commit, and what the parent's events say of it.
@@ -1588,6 +1629,11 @@ pub(crate) fn reincarnate_with(
     options: &TaskOptions,
     how: Reincarnation,
 ) -> Result<Branch, Error> {
+    if options.session_patch.is_some() {
+        return Err(Error::Denied(
+            "session_patch is only supported by send".into(),
+        ));
+    }
     let store = yard.store();
     let parent = store.read(name)?;
     let candidate = match (parent.info.candidate.clone(), how.from_base) {

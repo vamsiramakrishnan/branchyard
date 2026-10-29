@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "title": "Evidence brief",
+  "paragraphs": [
+    {
+      "text": "Source-backed findings.",
+      "space_before_pt": 0,
+      "space_after_pt": 8
+    }
+  ],
+  "footer": "Prepared for review"
+}

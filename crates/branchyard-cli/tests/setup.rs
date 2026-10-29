@@ -4,6 +4,7 @@
 //! generated secret is checked to appear in no output.
 
 #![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
+use branchyard_setup::skills::SKILLS;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -851,12 +852,11 @@ fn by_init_plugin_lists_previews_and_installs_a_harness_once() {
     assert!(text(&preview).contains("merge-json"), "{}", text(&preview));
     // What each gets, diffs named under the home, and the command that writes them.
     let shown = text(&preview);
-    assert!(
-        shown.contains(
-            "Claude Code: 2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json"
-        ),
-        "{shown}"
+    let summary = format!(
+        "Claude Code: {} skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json",
+        SKILLS.len()
     );
+    assert!(shown.contains(&summary), "{shown}");
     assert!(
         shown.contains("+++ b/.claude/skills/setup/SKILL.md") && !shown.contains("b//"),
         "{shown}"
@@ -1188,10 +1188,11 @@ fn claude_codes_status_line_is_merged_when_absent_and_kept_when_present() {
     let preview = by(&["init", "plugin", "claude-code"]);
     let shown = text(&preview);
     assert!(preview.status.success(), "{shown}");
-    assert!(
-        shown.contains("Claude Code: 2 skills, 3 commands, 2 hooks in ~/.claude/settings.json"),
-        "{shown}"
+    let summary = format!(
+        "Claude Code: {} skills, 3 commands, 2 hooks in ~/.claude/settings.json",
+        SKILLS.len()
     );
+    assert!(shown.contains(&summary), "{shown}");
     assert!(
         shown.contains("kept the \"statusLine\" already in ~/.claude/settings.json."),
         "{shown}"
@@ -1260,10 +1261,11 @@ fn the_plugin_wizard_asks_which_harnesses_and_writes_what_naming_them_would() {
     let out = process.wait_with_output().unwrap();
     let screen = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{screen}");
+    let summary = format!("{} skills, 3 commands, 2 hooks", SKILLS.len());
     for expected in [
         "Hooks and skills for your coding harnesses",
         "Which harnesses should get Branchyard's hooks, commands and skills?",
-        "2 skills, 3 commands, 2 hooks",
+        summary.as_str(),
         "wrote",
         "by setup",
     ] {

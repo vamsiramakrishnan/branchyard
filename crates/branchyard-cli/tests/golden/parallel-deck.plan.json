@@ -1,0 +1,132 @@
+{
+  "rig": "parallel-deck",
+  "description": "Independent section workers return captured specifications; one lead assembles and checks the deck",
+  "root": {
+    "seat": "lead",
+    "name": "parallel-deck",
+    "harness": "antigravity",
+    "profile": "antigravity-stream-json",
+    "budget": {
+      "max_usd": 12.0,
+      "max_turns": 12,
+      "max_minutes": 15.0
+    },
+    "policy": {
+      "default": "allow",
+      "deny": [],
+      "allow": [],
+      "delegation_commands": true
+    },
+    "check": null,
+    "result": {
+      "schema": {
+        "type": "object",
+        "required": [
+          "file",
+          "slides",
+          "verification"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "slides": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "verification": {
+            "type": "string"
+          }
+        }
+      },
+      "required": true,
+      "purpose": "deliverable",
+      "capture": {
+        "manifest": "outputs/artifacts.json",
+        "max_files": 128,
+        "max_bytes": 268435456
+      }
+    },
+    "isolated": true,
+    "provision": {
+      "secrets": [
+        {
+          "name": "GEMINI_API_KEY"
+        }
+      ],
+      "instructions": "# Rig parallel-deck: seat lead\n\nYou fill seat `lead` in the Branchyard rig `parallel-deck`. Your role: Freeze the design and slide inventory, delegate independent sections and assemble the selected evidence\n\nYou delegate only by seat, and only to these seats. Spawn a child with `by spawn --seat SEAT \"<task>\"` (Python: `branchyard.spawn(task, seat=SEAT)`; MCP: the spawn tool's `seat`). The seat sets the child's harness, budget, check and instructions; you may give it less budget, not more. Integrate a finished child with `by integrate <child>`.\n\n- `section` (antigravity, up to 3 at once, $3.00 each, 4 turns): Write only the assigned section specification and its assets; validate before returning\n\n## From guidance/cooperative-team.md\n\n# Working with coworkers\n\nKeep your native plan, task graph, tools, and subagents. Branchyard coordinates\nwork between harness sessions. You do not need to copy your internal task\ngraph into Branchyard.\n\nAgree on the output contract and shared interfaces before parallel work.\nGive coding coworkers separate owned paths. Give researchers separate\nquestions and a result schema. Branchyard child limits apply to Branchyard\nbranches, not to the harness's native subagents. Your harness's own permissions\nand limits still apply. Dollar limits depend on reported usage and cannot\nprovide a hard spending guarantee when the harness reports no cost.\n\nKeep working while your native tasks or tools are active. A managed lead may\nend its turn to await Branchyard children when its own native work is finished.\nAn external lead keeps its existing session and uses explicit waits or status\ncommands. Operator commands do not adopt or restart that session.\n\nReview evidence before using a result. A valid JSON shape does not establish\nthat a finding is true. Handoffs carry a settled result and selected immutable\nartifacts to an existing recipient's next turn. A handoff never starts that turn.\n\n## From guidance/parallel-deck.md\n\n# Parallel presentation contract\n\nLoad the task capabilities index and the parallel-deck and pptx skills when\nworking on a presentation. Run the toolkit doctor before choosing operations.\nMissing native dependencies are prerequisites, not a reason to claim a check\npassed.\n\nThe lead owns the outline, design, ordered section and slide inventory, sources\nand final presentation. Assign each section worker its own slide IDs and the\nsame design. Workers write versioned section JSON and local assets beneath\noutputs, validate against that design, then write outputs/artifacts.json with\nthe toolkit manifest command. Return native final JSON matching the seat's\ncontract. Do not write the shared PPTX or fabricate a Git change.\n\nAfter workers settle, review their results and published artifacts. Retrieve\nthe selected producer-owned files through the existing artifact operations.\nBind their paths and hashes in the lead's deck manifest. Preserve section-local\nasset paths. The lead runs the single assembler, checks the requested page\ninventory, editability and facts, and renders and inspects previews. A structural\ncheck is not visual review. Include the final presentation and any requested\nsource specifications in the lead's output manifest before returning final JSON.\n\nUse handoffs when another recipient needs selected immutable artifacts. A\nhandoff does not start a turn. Keep the harness's own planning, subagents and\ninternal DAG; these roles describe artifact ownership and acceptance boundaries.\nFor revisions, retain the original and build from explicitly selected inputs.\n"
+    },
+    "delegation": {
+      "max_depth": 1,
+      "max_children": 3,
+      "harnesses": [
+        "antigravity"
+      ]
+    }
+  },
+  "seats": {
+    "rig": "parallel-deck",
+    "seat": "lead",
+    "delegates_to": [
+      "section"
+    ],
+    "table": {
+      "section": {
+        "harness": "antigravity",
+        "budget": {
+          "max_usd": 3.0,
+          "max_turns": 4,
+          "max_minutes": 10.0
+        },
+        "owns": [
+          "outputs"
+        ],
+        "result": {
+          "schema": {
+            "type": "object",
+            "required": [
+              "section",
+              "slides",
+              "spec"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "section": {
+                "type": "string"
+              },
+              "slides": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "spec": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true,
+          "purpose": "deliverable",
+          "capture": {
+            "manifest": "outputs/artifacts.json",
+            "max_files": 64,
+            "max_bytes": 67108864
+          }
+        },
+        "isolated": true,
+        "provision": {
+          "secrets": [
+            {
+              "name": "GEMINI_API_KEY"
+            }
+          ],
+          "instructions": "# Rig parallel-deck: seat section\n\nYou fill seat `section` in the Branchyard rig `parallel-deck`. Your role: Write only the assigned section specification and its assets; validate before returning\n\nYou do not delegate: do your task on your own branch and leave the result there.\n\n## From guidance/cooperative-team.md\n\n# Working with coworkers\n\nKeep your native plan, task graph, tools, and subagents. Branchyard coordinates\nwork between harness sessions. You do not need to copy your internal task\ngraph into Branchyard.\n\nAgree on the output contract and shared interfaces before parallel work.\nGive coding coworkers separate owned paths. Give researchers separate\nquestions and a result schema. Branchyard child limits apply to Branchyard\nbranches, not to the harness's native subagents. Your harness's own permissions\nand limits still apply. Dollar limits depend on reported usage and cannot\nprovide a hard spending guarantee when the harness reports no cost.\n\nKeep working while your native tasks or tools are active. A managed lead may\nend its turn to await Branchyard children when its own native work is finished.\nAn external lead keeps its existing session and uses explicit waits or status\ncommands. Operator commands do not adopt or restart that session.\n\nReview evidence before using a result. A valid JSON shape does not establish\nthat a finding is true. Handoffs carry a settled result and selected immutable\nartifacts to an existing recipient's next turn. A handoff never starts that turn.\n\n## From guidance/parallel-deck.md\n\n# Parallel presentation contract\n\nLoad the task capabilities index and the parallel-deck and pptx skills when\nworking on a presentation. Run the toolkit doctor before choosing operations.\nMissing native dependencies are prerequisites, not a reason to claim a check\npassed.\n\nThe lead owns the outline, design, ordered section and slide inventory, sources\nand final presentation. Assign each section worker its own slide IDs and the\nsame design. Workers write versioned section JSON and local assets beneath\noutputs, validate against that design, then write outputs/artifacts.json with\nthe toolkit manifest command. Return native final JSON matching the seat's\ncontract. Do not write the shared PPTX or fabricate a Git change.\n\nAfter workers settle, review their results and published artifacts. Retrieve\nthe selected producer-owned files through the existing artifact operations.\nBind their paths and hashes in the lead's deck manifest. Preserve section-local\nasset paths. The lead runs the single assembler, checks the requested page\ninventory, editability and facts, and renders and inspects previews. A structural\ncheck is not visual review. Include the final presentation and any requested\nsource specifications in the lead's output manifest before returning final JSON.\n\nUse handoffs when another recipient needs selected immutable artifacts. A\nhandoff does not start a turn. Keep the harness's own planning, subagents and\ninternal DAG; these roles describe artifact ownership and acceptance boundaries.\nFor revisions, retain the original and build from explicitly selected inputs.\n"
+        },
+        "instances": 3
+      }
+    }
+  },
+  "unapproved_tools": [
+    "lead",
+    "section"
+  ]
+}

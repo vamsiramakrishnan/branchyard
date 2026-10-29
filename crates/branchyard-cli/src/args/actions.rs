@@ -435,6 +435,8 @@ pub struct SpawnArgs {
     pub result_required: bool,
     /// Accept a current structured answer as the deliverable without a Git change.
     pub result_deliverable: bool,
+    /// Optional producer-bound artifact capture for a required deliverable.
+    pub result_capture: Option<branchyard::ResultCapture>,
     /// `--owns`, repeatable: the paths the child owns. Empty: none of its
     /// own, bounded only by the scope its parent works under.
     pub owns: Vec<String>,

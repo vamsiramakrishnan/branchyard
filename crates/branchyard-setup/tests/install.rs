@@ -340,7 +340,10 @@ fn by_init_plugin_offers_detected_harnesses_and_plans_them() {
     // One line per harness: what it gets, and where.
     assert_eq!(
         plan.summary[0],
-        "Claude Code: 2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json",
+        format!(
+            "Claude Code: {} skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json",
+            branchyard_setup::skills::SKILLS.len()
+        ),
         "{:?}",
         plan.summary
     );
@@ -483,7 +486,10 @@ fn a_status_line_you_already_have_is_kept_and_the_note_gives_the_line_to_choose(
     // The summary does not claim a status line it did not install.
     assert_eq!(
         plan.summary[0],
-        "Claude Code: 2 skills, 3 commands, 2 hooks in ~/.claude/settings.json"
+        format!(
+            "Claude Code: {} skills, 3 commands, 2 hooks in ~/.claude/settings.json",
+            branchyard_setup::skills::SKILLS.len()
+        )
     );
 
     // Theirs is the very line Branchyard would set: nothing to say.
@@ -516,15 +522,68 @@ fn unless_set_is_for_a_top_level_json_merge_only() {
 }
 
 #[test]
+fn summary_counts_distinct_skill_roots_without_treating_payloads_as_hook_places() {
+    let bundle = Bundle(&[
+        ("skills/pptx/SKILL.md", "presentation skill"),
+        ("skills/pptx/scripts/run.py", "print('pptx')"),
+        ("skills/artifact-tools/SKILL.md", "toolkit skill"),
+        ("skills/artifact-tools/runtime.lock.json", "{}"),
+        ("skills/loose.py", "print('not a skill')"),
+        (
+            "harnesses/fixture/hooks.json",
+            r#"{"hooks":{"SessionStart":[]}}"#,
+        ),
+    ]);
+    let manifest = toml::from_str(
+        r#"
+harness = "fixture"
+binaries = ["fixture"]
+provides = ["skills", "hooks"]
+[[file]]
+from = "skills"
+to = "~/.agents/skills"
+how = "write"
+[[file]]
+from = "skills/pptx/SKILL.md"
+to = "~/.agents/skills/pptx/SKILL.md"
+how = "write"
+[[file]]
+from = "skills/pptx/scripts/run.py"
+to = "~/.agents/skills/pptx/scripts/run.py"
+how = "write"
+[[file]]
+from = "harnesses/fixture/hooks.json"
+to = "~/.fixture/hooks.json"
+how = "merge-json"
+"#,
+    )
+    .unwrap();
+    assert!(bundle.check(&manifest, "fixture").is_empty());
+    assert_eq!(
+        install::summary_from(bundle, &manifest, &[]),
+        "2 skills, 1 hook in ~/.fixture/hooks.json"
+    );
+}
+
+#[test]
 fn every_built_harness_summarizes_what_it_gets_and_where() {
     let manifests = install::manifests().unwrap();
     let line =
         |id: &str| install::summary(manifests.iter().find(|m| m.harness == id).unwrap(), &[]);
     assert_eq!(
         line("claude-code"),
-        "2 skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json"
+        format!(
+            "{} skills, 3 commands, 2 hooks, status line in ~/.claude/settings.json",
+            branchyard_setup::skills::SKILLS.len()
+        )
     );
-    assert_eq!(line("codex"), "2 hooks in ~/.codex/hooks.json");
+    assert_eq!(
+        line("codex"),
+        format!(
+            "{} skills, 2 hooks in ~/.codex/hooks.json",
+            branchyard_setup::skills::SKILLS.len()
+        )
+    );
     assert_eq!(
         line("gemini-cli"),
         "3 commands, 1 hook in ~/.gemini/settings.json"
@@ -535,7 +594,7 @@ fn every_built_harness_summarizes_what_it_gets_and_where() {
     );
     assert_eq!(
         line("antigravity"),
-        "2 hooks, status line in ~/.gemini/config/hooks.json and ~/.gemini/antigravity-cli/settings.json"
+        format!("{} skills, 2 hooks, status line in ~/.gemini/config/hooks.json and ~/.gemini/antigravity-cli/settings.json", branchyard_setup::skills::SKILLS.len())
     );
     assert_eq!(
         line("droid"),
@@ -606,7 +665,10 @@ fn the_plugin_topic_has_one_installer_and_one_question() {
     let defaulted = go(BTreeMap::new(), true);
     let plan = defaulted.plan.unwrap();
     assert!(
-        plan.summary[0].starts_with("Claude Code: 2 skills"),
+        plan.summary[0].starts_with(&format!(
+            "Claude Code: {} skills",
+            branchyard_setup::skills::SKILLS.len()
+        )),
         "{:?}",
         plan.summary
     );
@@ -627,7 +689,21 @@ fn the_plugin_topic_has_one_installer_and_one_question() {
         "{:#?}",
         plan.files
     );
-    assert_eq!(plan.summary, ["Codex: 2 hooks in ~/.codex/hooks.json"]);
+    assert_eq!(
+        plan.summary,
+        [format!(
+            "Codex: {} skills, 2 hooks in ~/.codex/hooks.json",
+            branchyard_setup::skills::SKILLS.len()
+        )]
+    );
+    assert!(plan
+        .files
+        .iter()
+        .any(|f| f.path == "/home/dev/.agents/skills/pptx/SKILL.md"));
+    assert!(plan
+        .files
+        .iter()
+        .any(|f| f.path == "/home/dev/.agents/skills/artifact-tools/scripts/run.py"));
     // Choosing none installs nothing and points at the listing.
     let none = go([("harnesses".to_owned(), json!([]))].into(), false);
     let plan = none.plan.unwrap();

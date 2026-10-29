@@ -1,10 +1,15 @@
-# What `by init plugin` installs for Codex. The plugin itself (skills and
-# the same hooks) installs with `codex plugin marketplace add` and
+# What `by init plugin` installs for Codex. The plugin (the same skills
+# and hooks) installs with `codex plugin marketplace add` and
 # `codex plugin add branchyard@branchyard`; see
 # docs/harness-hooks.md. Install one or the other, not both.
 harness = "codex"
 binaries = ["codex"]
-provides = ["hooks"]
+provides = ["hooks", "skills"]
+
+[[file]]
+from = "skills"
+to = "~/.agents/skills"
+how = "write"
 
 [[file]]
 from = "harnesses/codex/hooks.json"

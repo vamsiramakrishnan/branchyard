@@ -25,6 +25,7 @@ schema = ["dep:schemars"]
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
+google-cloud-auth = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
@@ -65,6 +66,7 @@ ring = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 branchyard-testkit = { path = "../branchyard-testkit" }
 blake3 = { workspace = true }
 branchyard-sync = { path = "../branchyard-sync", features = ["testing"] }

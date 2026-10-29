@@ -32,6 +32,109 @@ fn refused(client: &Client, request: &TaskRequest) -> (u16, String, String) {
     }
 }
 
+#[test]
+fn send_session_patch_keeps_operator_secret_sources_and_rejects_ambiguous_requests() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let source = f.dir.join("operator-secret");
+    std::fs::write(&source, "first-test-credential").unwrap();
+    let mut config = f.config();
+    config.secrets.insert(
+        "GEMINI_API_KEY".into(),
+        branchyard::SecretSource::parse(&format!("GEMINI_API_KEY=@{}", source.display())).unwrap(),
+    );
+    let server = Server::start(config);
+    let client = server.client();
+    let mut request = task("say hi", "session-patch");
+    request.isolated = true;
+    request.provision = Some(branchyard::Provisioning {
+        secrets: vec![branchyard::SecretSource::parse("GEMINI_API_KEY").unwrap()],
+        auth: Some("api-key".into()),
+        ..Default::default()
+    });
+    assert_eq!(run(&client, &request).state, OperationState::Succeeded);
+    let repo = client.repo("app");
+    for body in [
+        r#"{"prompt":"never","session_patch":{}}"#,
+        r#"{"prompt":"never","session_patch":{"model":"m"},"provision":{}}"#,
+        r#"{"prompt":"never","session_patch":{"secrets":[]}}"#,
+    ] {
+        let (status, _, response) = raw(
+            server.addr,
+            &post(
+                "/v1/repos/app/branches/session-patch/send",
+                Some(TOKEN),
+                "",
+                body,
+            ),
+        );
+        assert_eq!(status, 400, "{response}");
+    }
+    for path in [
+        "/v1/repos/app/tasks",
+        "/v1/repos/app/branches/session-patch/fork",
+        "/v1/repos/app/branches/session-patch/reincarnate",
+    ] {
+        let (status, _, response) = raw(
+            server.addr,
+            &post(
+                path,
+                Some(TOKEN),
+                "",
+                r#"{"prompt":"never","session_patch":{"model":"m"}}"#,
+            ),
+        );
+        assert_eq!(status, 400, "{path}: {response}");
+    }
+    std::fs::write(&source, "refreshed-test-credential").unwrap();
+    let prompt = "SH /usr/bin/python3 -c 'import hashlib,os;print(hashlib.sha256(os.environ.get(\"GEMINI_API_KEY\",\"\").encode()).hexdigest())'";
+    let sent = repo
+        .send(
+            "session-patch",
+            &SendRequest {
+                prompt: prompt.into(),
+                policy: PolicySpec::allow_all(),
+                session_patch: Some(branchyard::SessionPatch {
+                    model: Some("fixture-model".into()),
+                    effort: None,
+                }),
+                ..Default::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    let sent = await_operation(&client, &sent.id);
+    assert_eq!(sent.state, OperationState::Succeeded, "{sent:?}");
+    assert_eq!(
+        repo.branch("session-patch").unwrap().model.as_deref(),
+        Some("fixture-model")
+    );
+    let events = serde_json::to_string(&repo.events("session-patch", 0).unwrap()).unwrap();
+    assert!(
+        events.contains(&hex::encode(Sha256::digest(b"refreshed-test-credential"))),
+        "{events}"
+    );
+    assert!(!events.contains("refreshed-test-credential"));
+    std::fs::remove_file(&source).unwrap();
+    let revoked = repo
+        .send(
+            "session-patch",
+            &SendRequest {
+                prompt: "say hi".into(),
+                policy: PolicySpec::allow_all(),
+                provision: Some(branchyard::Provisioning::default()),
+                ..Default::default()
+            },
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(
+        await_operation(&client, &revoked.id).state,
+        OperationState::Succeeded
+    );
+    assert_eq!(repo.branch("session-patch").unwrap().turns, 3);
+}
+
 fn substrate(key: &str) -> Provider {
     Provider::Substrate(SubstrateOptions {
         endpoint: "http://127.0.0.1:1".into(),
@@ -925,6 +1028,7 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
         schema: json!({"type": "string", "$ref": "#/a"}),
         required: false,
         purpose: branchyard::ResultPurpose::Report,
+        capture: None,
     };
     let error = repo
         .spawn("root", &spawn("bad", outside), &new_key())

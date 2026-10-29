@@ -1,0 +1,39 @@
+#:schema ../../schema/rig.json
+# by rig check examples/rigs/parallel-deck.toml
+version = 1
+name = "parallel-deck"
+root = "lead"
+description = "Independent section workers return captured specifications; one lead assembles and checks the deck"
+
+[startup]
+files = ["guidance/cooperative-team.md", "guidance/parallel-deck.md"]
+
+[seats.lead]
+harness = "antigravity"
+isolated = true
+secrets = ["GEMINI_API_KEY"]
+description = "Freeze the design and slide inventory, delegate independent sections and assemble the selected evidence"
+budget = { max_usd = 12, max_turns = 12, max_minutes = 15 }
+delegates_to = ["section"]
+policy = { default = "allow", delegation_commands = true }
+
+[seats.lead.result]
+purpose = "deliverable"
+required = true
+capture = { manifest = "outputs/artifacts.json", max_files = 128, max_bytes = 268435456 }
+schema = { type = "object", required = ["file", "slides", "verification"], additionalProperties = false, properties = { file = { type = "string" }, slides = { type = "integer", minimum = 1 }, verification = { type = "string" } } }
+
+[seats.section]
+harness = "antigravity"
+isolated = true
+secrets = ["GEMINI_API_KEY"]
+description = "Write only the assigned section specification and its assets; validate before returning"
+budget = { max_usd = 3, max_turns = 4, max_minutes = 10 }
+instances = 3
+owns = ["outputs"]
+
+[seats.section.result]
+purpose = "deliverable"
+required = true
+capture = { manifest = "outputs/artifacts.json", max_files = 64, max_bytes = 67108864 }
+schema = { type = "object", required = ["section", "slides", "spec"], additionalProperties = false, properties = { section = { type = "string" }, slides = { type = "integer", minimum = 1 }, spec = { type = "string" } } }

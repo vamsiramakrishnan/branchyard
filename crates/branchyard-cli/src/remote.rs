@@ -1272,6 +1272,7 @@ fn send_request(
             allow_delegation: task.allow_delegation,
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
+            session_patch: task.session_patch.clone(),
             require_labels: task.require_labels.clone(),
             priority: task.priority,
             feedback: None,
@@ -1316,15 +1317,15 @@ pub fn send_feedback(
     finish_one(env, remote, &op, delegating)
 }
 
-/// `send --json`: activity on stderr, then the branch's name and status,
-/// as local mode prints them once the turn and its subtree have ended.
+/// `send --json`: activity on stderr, then the completed branch for the
+/// caller to print as `Sent` and check for failure, as local mode does.
 pub fn send_json(
     env: &Env,
     remote: &Remote,
     branch: &str,
     prompt: Prompt<'_>,
     task: &TaskArgs,
-) -> Result<Sent, branchyard::Error> {
+) -> Result<BranchInfo, branchyard::Error> {
     let (request, notice) = send_request(task, prompt)?;
     let op = remote
         .repo
@@ -1332,15 +1333,7 @@ pub fn send_json(
         .map_err(sdk_error)?;
     crate::detach::accepted(branch);
     announce_for(remote, notice, None, false, branch);
-    let info = follow_result(env, remote, &op)?
-        .branches
-        .into_iter()
-        .next()
-        .ok_or_else(|| missing("branch"))?;
-    Ok(Sent {
-        name: info.name,
-        status: info.status,
-    })
+    Ok(first_branch(follow_result(env, remote, &op)?)?)
 }
 
 /// Follow an operation with activity on stderr, and return its result or
@@ -1773,6 +1766,37 @@ fn missing(what: &str) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_send_keeps_session_patch_distinct_from_full_provisioning() {
+        let options = TaskArgs {
+            permissions: crate::args::Permissions::Yes,
+            session_patch: Some(branchyard::SessionPatch {
+                model: Some("m".into()),
+                effort: Some(branchyard::Effort::Low),
+            }),
+            ..Default::default()
+        };
+        let (request, _) = send_request(&options, Prompt::Text("more")).unwrap();
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            wire["session_patch"],
+            serde_json::json!({"model":"m","effort":"low"})
+        );
+        assert!(wire.get("provision").is_none());
+        let (request, _) = send_request(
+            &TaskArgs {
+                permissions: crate::args::Permissions::Yes,
+                provision: Some(branchyard::Provisioning::default()),
+                ..Default::default()
+            },
+            Prompt::Text("replace"),
+        )
+        .unwrap();
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(wire["provision"], serde_json::json!({}));
+        assert!(wire.get("session_patch").is_none());
+    }
 
     fn info(name: &str, provider: &str, isolated: bool) -> BranchInfo {
         BranchInfo {

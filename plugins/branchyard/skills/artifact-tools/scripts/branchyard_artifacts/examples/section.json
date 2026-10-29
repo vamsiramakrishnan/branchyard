@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "kind": "section",
+  "id": "evidence",
+  "design_id": "brief-v1",
+  "assets": [],
+  "slides": [
+    {
+      "id": "revenue",
+      "title": "Revenue by quarter",
+      "elements": [
+        {
+          "kind": "chart",
+          "box": [
+            0.7,
+            1.5,
+            7.0,
+            4.8
+          ],
+          "chart_type": "column",
+          "title": "Revenue",
+          "unit": "USD millions",
+          "number_format": "0.0",
+          "categories": [
+            "Q1",
+            "Q2",
+            "Q3"
+          ],
+          "series": [
+            {
+              "name": "Revenue",
+              "values": [
+                12,
+                14,
+                18
+              ]
+            }
+          ]
+        },
+        {
+          "kind": "text",
+          "box": [
+            8.2,
+            1.5,
+            4.3,
+            2.7
+          ],
+          "text": "Revenue grew across the supplied quarters. Values are illustrative.",
+          "font_size_pt": 22,
+          "space_after_pt": 6
+        }
+      ],
+      "citations": [
+        {
+          "label": "Illustrative source",
+          "url": "https://example.com/source"
+        }
+      ]
+    }
+  ]
+}

@@ -1601,6 +1601,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -1622,6 +1633,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -3222,6 +3261,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -3243,6 +3293,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -3841,6 +3919,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -3862,6 +3951,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         }
       }
     },
@@ -4293,6 +4410,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -4314,6 +4442,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         }
       }
     },
@@ -6090,6 +6246,17 @@
               ],
               "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
             },
+            "session_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+            },
             "require_labels": {
               "type": "array",
               "items": {
@@ -6754,6 +6921,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",
@@ -6972,6 +7164,17 @@
               ],
               "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
             },
+            "session_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+            },
             "require_labels": {
               "type": "array",
               "items": {
@@ -7636,6 +7839,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",
@@ -12263,6 +12491,17 @@
           ],
           "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
         },
+        "session_patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionPatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+        },
         "require_labels": {
           "type": "array",
           "items": {
@@ -12929,6 +13168,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",
@@ -15882,6 +16146,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -15903,6 +16178,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "ReviewSpec": {
           "type": "object",
@@ -16349,6 +16652,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -16370,6 +16684,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "ReviewSpec": {
           "type": "object",
@@ -18793,6 +19135,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -18814,6 +19167,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Dependency": {
           "type": "object",
@@ -20361,6 +20742,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -20382,6 +20774,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Dependency": {
           "type": "object",
@@ -22155,6 +22575,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -22176,6 +22607,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Dependency": {
           "type": "object",
@@ -35292,6 +35751,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -35313,6 +35783,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Dependency": {
           "type": "object",
@@ -37732,6 +38230,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -37753,6 +38262,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Dependency": {
           "type": "object",
@@ -46814,6 +47351,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -46835,6 +47383,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -48759,6 +49335,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -48780,6 +49367,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -50723,6 +51338,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -50744,6 +51370,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -52683,6 +53337,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -52704,6 +53369,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",
@@ -55008,6 +55701,17 @@
             "purpose": {
               "$ref": "#/$defs/ResultPurpose",
               "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior."
+            },
+            "capture": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResultCapture"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional producer-bound artifact capture, valid only for required deliverables."
             }
           },
           "required": [
@@ -55029,6 +55733,34 @@
             }
           ],
           "description": "Whether a structured answer is metadata or the task's deliverable."
+        },
+        "ResultCapture": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "description": "Manifest path relative to the producer's worktree; no symlinks or traversal."
+            },
+            "max_files": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Maximum number of files; defaults to 32, at most 1024.",
+              "default": 32
+            },
+            "max_bytes": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Maximum total captured bytes; defaults to 256 MiB.",
+              "default": 268435456
+            }
+          },
+          "required": [
+            "manifest"
+          ],
+          "description": "Bounded files collected from a producer's worktree after provider transfer."
         },
         "Binding": {
           "type": "object",

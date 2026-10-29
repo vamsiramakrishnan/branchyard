@@ -99,6 +99,7 @@ mod adopt;
 mod assignment;
 mod broker;
 mod bundle;
+mod capabilities;
 mod capacity;
 mod checkpoint;
 mod compare;
@@ -205,7 +206,7 @@ pub use branchyard_provision::network::{
 };
 pub use branchyard_provision::{
     logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport,
-    SecretFrom, SecretSource, Telemetry, Via,
+    SecretFrom, SecretSource, SessionPatch, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
@@ -215,7 +216,7 @@ pub use checkpoint::{
     Rewound,
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
-pub use contract::{ResultContract, ResultPurpose};
+pub use contract::{ResultCapture, ResultContract, ResultPurpose};
 pub use delegation::{
     nest_graph_budgets, nest_plan_budgets, Asked, Brief, Cancelled, ChildBudget, Children,
     Delegate, Delegated, DelegationPlan, Envelope, EventPage, Inbox, Inspection, Sent, Spawn,
@@ -1437,6 +1438,10 @@ pub struct TaskOptions {
     /// parent's. Secrets need a home private to the branch:
     /// [`TaskOptions::isolated`] or a sandbox provider.
     pub provision: Option<Provisioning>,
+    /// Update only model or reasoning effort during a send, preserving the
+    /// stored credentials and other provisioning. Mutually exclusive with
+    /// [`TaskOptions::provision`]; refused for new tasks, forks and reincarnations.
+    pub session_patch: Option<SessionPatch>,
     /// Make the branch the root of a rig: the seat it occupies and the
     /// seats below it, which its harness then spawns by name (see
     /// `docs/rigs.md`). Needs [`TaskOptions::delegation`], which still

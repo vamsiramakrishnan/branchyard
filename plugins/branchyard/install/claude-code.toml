@@ -1,4 +1,4 @@
-# Claude Code without the marketplace plugin: the two skills and the
+# Claude Code without the marketplace plugin: all canonical skills and the
 # commands into your user directory, the plugin's two hooks merged into
 # ~/.claude/settings.json (the same commands as hooks/hooks.json), and the
 # status line, merged only when you have none (a plugin cannot set one).
@@ -7,13 +7,8 @@ binaries = ["claude"]
 provides = ["hooks", "commands", "skills", "statusline"]
 
 [[file]]
-from = "skills/setup"
-to = "~/.claude/skills/setup"
-how = "write"
-
-[[file]]
-from = "skills/delegate"
-to = "~/.claude/skills/delegate"
+from = "skills"
+to = "~/.claude/skills"
 how = "write"
 
 [[file]]

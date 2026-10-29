@@ -383,6 +383,27 @@ pub const OPERATIONS: &[Operation] = &[
             Param::all("--result-schema", "result.schema", "result"),
             RESULT_REQUIRED,
             RESULT_DELIVERABLE,
+            Param {
+                cli: Some("--result-artifacts"),
+                tool: Some("result.capture.manifest"),
+                python: None,
+                why: "Python gives capture settings in result.capture",
+                inside: None,
+            },
+            Param {
+                cli: Some("--result-artifacts-max-files"),
+                tool: Some("result.capture.max_files"),
+                python: None,
+                why: "Python gives capture limits in result.capture",
+                inside: None,
+            },
+            Param {
+                cli: Some("--result-artifacts-max-bytes"),
+                tool: Some("result.capture.max_bytes"),
+                python: None,
+                why: "Python gives capture limits in result.capture",
+                inside: None,
+            },
             Param::cli(
                 "--result-schema-file",
                 "a tool call and a Python dict carry a schema of any size; only a shell command \

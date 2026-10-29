@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "name": "SalesPivot",
+  "source_sheet": "Data",
+  "source_range": "A1:B3",
+  "target_sheet": "Summary",
+  "target_cell": "A1",
+  "rows": [
+    "Quarter"
+  ],
+  "columns": [],
+  "data": [
+    {
+      "field": "USD millions",
+      "function": "SUM"
+    }
+  ]
+}

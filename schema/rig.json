@@ -370,6 +370,10 @@
         "purpose": {
           "description": "Deliverable accepts a current-turn result instead of requiring a Git change.\nOmitted for the legacy report-only behavior.",
           "$ref": "#/$defs/ResultPurpose"
+        },
+        "capture": {
+          "description": "Optional producer-bound artifact capture, valid only for required deliverables.",
+          "$ref": "#/$defs/ResultCapture"
         }
       },
       "additionalProperties": false,
@@ -390,6 +394,34 @@
           "type": "string",
           "const": "deliverable"
         }
+      ]
+    },
+    "ResultCapture": {
+      "description": "Bounded files collected from a producer's worktree after provider transfer.",
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "description": "Manifest path relative to the producer's worktree; no symlinks or traversal.",
+          "type": "string"
+        },
+        "max_files": {
+          "description": "Maximum number of files; defaults to 32, at most 1024.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 32
+        },
+        "max_bytes": {
+          "description": "Maximum total captured bytes; defaults to 256 MiB.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 268435456
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "manifest"
       ]
     },
     "Policy": {

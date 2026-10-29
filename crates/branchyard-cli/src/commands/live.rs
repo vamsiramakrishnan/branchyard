@@ -167,6 +167,7 @@ impl Live {
             delegation_server: None,
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
+            session_patch: task.session_patch.clone(),
             seats: None,
             workspace: None,
             actor: None,

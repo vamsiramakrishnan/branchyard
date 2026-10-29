@@ -473,6 +473,16 @@ does not qualify. No Git change, reporting tool, automatic retry, or native
 restart is required. A seat uses `result = { purpose = "deliverable",
 required = true, schema = {...} }` for this contract.
 
+For file deliverables, add `--result-artifacts outputs/artifacts.json`.
+After checking the actual files, use the installed artifact-tools skill's
+`manifest` command to list files below that manifest's directory. Optional
+`--result-artifacts-max-files N` and `--result-artifacts-max-bytes N` narrow
+the collection limits. Collection completes after workspace transfer and
+before result acceptance; failure refuses the deliverable. Published files
+belong to this producing turn. Share them through existing artifact grants
+and handoffs. MCP and SDK contracts use `capture = { manifest =
+"outputs/artifacts.json" }` inside the required deliverable result contract.
+
 Compare and judge can rank valid result-only deliverables. Ordinary report
 metadata does not turn unchanged code into a candidate. Deterministic ranking
 checks structural evidence, cost, and time. Review the evidence yourself.

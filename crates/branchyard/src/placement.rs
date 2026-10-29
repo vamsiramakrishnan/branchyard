@@ -261,6 +261,8 @@ struct Actor {
     /// The private home on this host, and where it is in the actor.
     home: Option<(PathBuf, PathBuf)>,
     released: bool,
+    transfer_error: Option<String>,
+    capture: Option<crate::contract::capture::CopiedCapture>,
 }
 
 impl Actor {
@@ -273,10 +275,17 @@ impl Actor {
             Ok(endpoint) => {
                 if let Some(pushed) = &self.pushed {
                     if let Err(error) = transfer::pull(endpoint.as_ref(), pushed, &self.worktree) {
+                        self.transfer_error = Some(error.to_string());
                         warnings.push(format!(
                             "could not bring the worktree back from {noun} {}: {error}",
                             self.name
                         ));
+                    }
+                    if let Some(capture) = &self.capture {
+                        if let Err(error) = capture.receive(endpoint.as_ref(), &pushed.guest) {
+                            warnings
+                                .push(format!("could not stage declared artifact outbox: {error}"));
+                        }
                     }
                 }
                 if let Some((host, guest)) = &self.home {
@@ -288,10 +297,13 @@ impl Actor {
                     }
                 }
             }
-            Err(error) if self.pushed.is_some() => warnings.push(format!(
-                "could not bring anything back from {noun} {}: {error}",
-                self.name
-            )),
+            Err(error) if self.pushed.is_some() => {
+                self.transfer_error = Some(error.clone());
+                warnings.push(format!(
+                    "could not bring anything back from {noun} {}: {error}",
+                    self.name
+                ));
+            }
             Err(_) => {}
         }
         self.pushed = None;
@@ -597,6 +609,8 @@ impl Placement {
             pushed: None,
             home: None,
             released: false,
+            transfer_error: None,
+            capture: crate::contract::capture::CopiedCapture::for_record(yard, record, fence),
         });
         let fail = |actor: &mut Actor, why: String| -> Result<Placement, String> {
             let warnings = actor.release();
@@ -614,6 +628,11 @@ impl Placement {
         let guest_home = PathBuf::from(&how.home);
         let pushed = (|| -> Result<Pushed, String> {
             let endpoint = actor.provider.guest(&name)?;
+            if let Some(capture) = &actor.capture {
+                capture
+                    .probe(endpoint.as_ref(), &workdir)
+                    .map_err(|error| error.to_string())?;
+            }
             // A resumed or branched sandbox still holds a worktree and a
             // home from before: the worktree's files go (what git ignores,
             // such as what setup installed, stays), and so does the home,
@@ -816,6 +835,14 @@ impl Placement {
         // longer this turn's to reclaim.
         self.service = None;
         said
+    }
+
+    /// Whether copied work failed to return; cleanup warnings alone do not fail capture.
+    pub fn transfer_error(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Substrate(actor) => actor.transfer_error.as_deref(),
+            _ => None,
+        }
     }
 
     fn release_sandbox(&mut self, yard: &Yard, record: &Record, fence: &Fence) -> Vec<Activity> {

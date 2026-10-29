@@ -547,8 +547,15 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             if !connectors.is_empty() {
                 parts.push(format!("connectors {}", connectors.join(", ")));
             }
-            if !files.is_empty() {
-                parts.push(format!("wrote {}", files.join(", ")));
+            let (capabilities, other_files): (Vec<_>, Vec<_>) = files
+                .iter()
+                .map(String::as_str)
+                .partition(|path| path.starts_with(".branchyard/capabilities/"));
+            if !other_files.is_empty() {
+                parts.push(format!("wrote {}", other_files.join(", ")));
+            }
+            if !capabilities.is_empty() {
+                parts.push("document skills: .branchyard/capabilities/INDEX.md".into());
             }
             if !env.is_empty() {
                 parts.push(format!("set {}", env.join(", ")));
@@ -2198,6 +2205,53 @@ mod tests {
             }),
             "sandbox: kept paused for the next turn (substrate by-a-2)"
         );
+    }
+
+    #[test]
+    fn provisioned_document_skills_group_assets_without_hiding_other_configuration() {
+        for (files, written) in [
+            (
+                vec![
+                    ".gemini/settings.json",
+                    ".branchyard/capabilities-extra/config.json",
+                ],
+                "wrote .gemini/settings.json, .branchyard/capabilities-extra/config.json",
+            ),
+            (
+                vec![
+                    ".branchyard/capabilities/INDEX.md",
+                    ".branchyard/capabilities/runtime/document_skills/__init__.py",
+                    ".gemini/settings.json",
+                    ".branchyard/capabilities/skills/pptx/SKILL.md",
+                    ".branchyard/capabilities/skills/gdocs/SKILL.md",
+                ],
+                "wrote .gemini/settings.json; document skills: .branchyard/capabilities/INDEX.md",
+            ),
+            (
+                vec![".branchyard/capabilities/runtime/document_skills/render.py"],
+                "document skills: .branchyard/capabilities/INDEX.md",
+            ),
+        ] {
+            let provisioned = Activity::Provisioned {
+                auth: Some("zai".into()),
+                files: files.iter().map(|path| (*path).to_owned()).collect(),
+                env: vec!["OPENAI_API_KEY".into()],
+                secrets: Vec::new(),
+                unused_secrets: Vec::new(),
+                connectors: Vec::new(),
+                knowledge: Vec::new(),
+                managed: None,
+                permissions: None,
+            };
+            assert_eq!(
+                activity_line(&provisioned, PLAIN).unwrap(),
+                format!("provisioned: auth zai; {written}; set OPENAI_API_KEY")
+            );
+            assert_eq!(
+                serde_json::to_value(&provisioned).unwrap()["provisioned"]["files"],
+                json!(files)
+            );
+        }
     }
 
     #[test]

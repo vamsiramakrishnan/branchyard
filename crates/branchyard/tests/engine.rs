@@ -167,7 +167,13 @@ fn a_turn_without_changes_has_no_candidate() {
     assert_eq!(info.status, BranchStatus::NoChanges);
     assert_eq!(info.candidate, None);
     assert_eq!(branch.diff().unwrap(), "");
-    assert_eq!(text(&branch.events().unwrap()), "echo: just say something");
+    let answer = text(&branch.events().unwrap());
+    assert!(answer.starts_with("echo: "), "{answer}");
+    assert!(
+        answer.contains("/.branchyard/capabilities/INDEX.md"),
+        "{answer}"
+    );
+    assert!(answer.ends_with("\n\njust say something"), "{answer}");
     assert!(matches!(
         f.yard.merge("just-say-something", "main"),
         Err(Error::NoCandidate(name)) if name == "just-say-something"

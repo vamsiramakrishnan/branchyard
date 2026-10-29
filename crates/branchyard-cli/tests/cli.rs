@@ -2079,6 +2079,33 @@ fn example(name: &str) -> String {
 }
 
 #[test]
+fn parallel_deck_rig_preserves_section_ownership_and_file_deliverables() {
+    let repo = Repo::new();
+    let out = repo.by(&["rig", "check", &example("parallel-deck.toml"), "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["root"]["harness"], "antigravity");
+    assert_eq!(plan["root"]["isolated"], true);
+    assert_eq!(
+        plan["root"]["provision"]["secrets"][0]["name"],
+        "GEMINI_API_KEY"
+    );
+    assert_eq!(plan["root"]["result"]["purpose"], "deliverable");
+    assert_eq!(
+        plan["root"]["result"]["capture"]["manifest"],
+        "outputs/artifacts.json"
+    );
+    let section = &plan["seats"]["table"]["section"];
+    assert_eq!(section["harness"], "antigravity");
+    assert_eq!(section["instances"], 3);
+    assert_eq!(section["owns"], serde_json::json!(["outputs"]));
+    assert_eq!(
+        section["result"]["capture"]["manifest"],
+        "outputs/artifacts.json"
+    );
+}
+
+#[test]
 fn rig_check_prints_the_plan_and_names_what_it_refuses() {
     let repo = Repo::new();
     let text = repo.by(&["rig", "check", &example("feature.toml")]);
@@ -3892,7 +3919,7 @@ fn by_wait_after_a_send_waits_for_the_sent_turn() {
     let go = repo.dir.join("go");
     let prompt = [
         "SH by spawn 'SH echo first' --name kid --wait --json".to_owned(),
-        format!("SH by send kid '{}'", held_child(&go, "kid.txt")),
+        format!("SH by send kid '{}' --json", held_child(&go, "kid.txt")),
         "SH by wait kid --timeout 0.3 --json".to_owned(),
         format!("SH touch {}", go.display()),
         "SH by wait kid --json".to_owned(),
@@ -3901,6 +3928,10 @@ fn by_wait_after_a_send_waits_for_the_sent_turn() {
     let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     let said = reply(&repo, "root");
+    let (code, sent) = sh_line_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(sent["name"], "kid", "{said}");
+    assert_eq!(sent["status"]["state"], "running", "{said}");
     let (code, early) = sh_line_json(&said, 2);
     assert_eq!(code, 1, "{said}");
     assert_eq!(early["timed_out"], true, "{said}");

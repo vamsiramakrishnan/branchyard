@@ -480,10 +480,13 @@ fn a_branch_acts_only_on_its_descendants() {
     assert_eq!(rest.next_cursor, rest.total);
     let recent = delegate.events("kid", None, 1).unwrap();
     assert_eq!(recent.next_cursor, recent.total);
-    assert_eq!(
-        delegate.inspect("kid").unwrap().last_message,
-        "echo: say kid"
+    let answer = delegate.inspect("kid").unwrap().last_message;
+    assert!(answer.starts_with("echo: "), "{answer}");
+    assert!(
+        answer.contains("/.branchyard/capabilities/INDEX.md"),
+        "{answer}"
     );
+    assert!(answer.ends_with("\n\nsay kid"), "{answer}");
 }
 
 #[test]

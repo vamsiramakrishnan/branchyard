@@ -33,6 +33,10 @@ impl ProviderKind for RecipeOptions {
         "recipe"
     }
 
+    fn copies_worktree(&self) -> bool {
+        true
+    }
+
     fn label(&self) -> String {
         format!("recipe:{}", self.name)
     }

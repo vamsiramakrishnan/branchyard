@@ -1,13 +1,11 @@
 //! Stand-ins for the three KMS APIs (Cloud KMS `encrypt`/`decrypt`, AWS
 //! KMS `TrentService.Encrypt`/`Decrypt` with SigV4, Key Vault
 //! `wrapkey`/`unwrapkey`) and for the token sources (the GCE metadata
-//! server, Google's OAuth token endpoint checking the service account's
-//! RS256 JWT, AWS IMDSv2, and an Azure managed identity endpoint).
+//! server, Google's OAuth refresh endpoint, AWS IMDSv2, and an Azure
+//! managed identity endpoint).
 
 use branchyard_support::LockExt as _;
 use std::sync::{Arc, Mutex};
-
-use ring::signature::{KeyPair, RsaKeyPair, UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
 
 use super::server::{MockRequest, MockResponse, MockServer};
 use crate::auth::sigv4;
@@ -164,22 +162,14 @@ pub struct MockMetadata {
 }
 
 pub const METADATA_TOKEN: &str = "ya29.from-metadata";
-pub const OAUTH_TOKEN: &str = "ya29.from-service-account";
+pub const OAUTH_TOKEN: &str = "ya29.from-user-account";
 pub const IDENTITY_TOKEN: &str = "eyJ.from-identity";
 pub const IMDS_SESSION: &str = "imds-session-token";
 pub const IDENTITY_HEADER: &str = "identity-secret";
 
 impl MockMetadata {
-    /// `account_key` is the PEM private key whose JWTs the OAuth endpoint
-    /// accepts.
-    #[allow(clippy::expect_used)] // ratchet: branchyard-sync
-    pub fn start(account_key: &str) -> MockMetadata {
-        let der = crate::auth::google::pem_der(account_key).expect("PEM");
-        let public = RsaKeyPair::from_pkcs8(&der)
-            .expect("an RSA key")
-            .public_key()
-            .as_ref()
-            .to_vec();
+    /// Start isolated token endpoints with fake credentials only.
+    pub fn start() -> MockMetadata {
         let handler = Arc::new(
             move |r: &MockRequest| match (r.method.as_str(), r.path.as_str()) {
                 ("GET", "/computeMetadata/v1/instance/service-accounts/default/token") => {
@@ -192,36 +182,19 @@ impl MockMetadata {
                     )
                 }
                 ("POST", "/token") => {
-                    let form = String::from_utf8_lossy(&r.body).into_owned();
-                    let pairs = crate::util::query_pairs(&form);
-                    let grant = pairs
-                        .iter()
-                        .find(|(k, _)| k == "grant_type")
-                        .map(|(_, v)| v.as_str());
-                    let jwt = pairs
-                        .iter()
-                        .find(|(k, _)| k == "assertion")
-                        .map(|(_, v)| v.clone())
-                        .unwrap_or_default();
-                    if grant != Some("urn:ietf:params:oauth:grant-type:jwt-bearer") {
+                    let payload: serde_json::Value = match serde_json::from_slice(&r.body) {
+                        Ok(payload) => payload,
+                        Err(_) => return MockResponse::new(400),
+                    };
+                    if payload["grant_type"] != "refresh_token" {
                         return MockResponse::json(
                             400,
-                            &serde_json::json!({"error": "unsupported_grant_type"}),
-                        );
-                    }
-                    let (input, sig) = jwt.rsplit_once('.').unwrap_or(("", ""));
-                    let ok = UnparsedPublicKey::new(&RSA_PKCS1_2048_8192_SHA256, &public)
-                        .verify(input.as_bytes(), &unb64url(sig).unwrap_or_default())
-                        .is_ok();
-                    if !ok {
-                        return MockResponse::json(
-                            400,
-                            &serde_json::json!({"error": "invalid_grant"}),
+                            &serde_json::json!({"error":"unsupported_grant_type"}),
                         );
                     }
                     MockResponse::json(
                         200,
-                        &serde_json::json!({"access_token": OAUTH_TOKEN, "expires_in": 3599}),
+                        &serde_json::json!({"access_token": OAUTH_TOKEN, "expires_in": 3599, "token_type": "Bearer"}),
                     )
                 }
                 ("PUT", "/latest/api/token") => MockResponse::new(200).body(IMDS_SESSION),

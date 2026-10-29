@@ -371,6 +371,154 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(refused.returncode, 2)
         self.assertEqual(json.loads(refused.stderr)["error"], "destination_exists")
 
+    def test_parallel_deck_installs_the_full_closure_and_runs_without_the_checkout(self):
+        preview = self.run_installer("--skill", "parallel-deck")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertEqual(json.loads(preview.stdout)["skills"], ["artifact-tools", "pptx", "parallel-deck"])
+        self.assertFalse(self.host.exists())
+        applied = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertTrue(json.loads(applied.stdout)["applied"])
+        for name in ("artifact-tools", "pptx", "parallel-deck"):
+            for relative, content in package.inputs(self.plugin / "skills" / name).items():
+                self.assertEqual((self.host / name / relative).read_bytes(), content)
+        launcher = self.host / "artifact-tools/scripts/run.py"
+        outside = self.root / "outside"
+        outside.mkdir()
+        launched = subprocess.run(
+            [sys.executable, "-I", str(launcher), "--help"],
+            cwd=outside,
+            env={**os.environ, "HOME": str(self.root / "launcher-home")},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        self.assertIn("pptx", launched.stdout)
+        cache = self.host / "artifact-tools/scripts/__pycache__"
+        cache.mkdir(exist_ok=True)
+        (cache / "local.pyc").write_bytes(b"not a source file")
+        again = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout)["applied"], False)
+        self.assertTrue(json.loads(again.stdout)["unchanged"])
+        self.assertTrue((cache / "local.pyc").exists())
+
+    def test_dependency_conflict_is_found_before_any_skill_is_written(self):
+        modified = self.host / "pptx"
+        modified.mkdir(parents=True)
+        (modified / "SKILL.md").write_text("my existing skill")
+        refused = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(json.loads(refused.stderr)["error"], "destination_exists")
+        self.assertEqual((modified / "SKILL.md").read_text(), "my existing skill")
+        self.assertFalse((self.host / "artifact-tools").exists())
+        self.assertFalse((self.host / "parallel-deck").exists())
+        forced = self.run_installer("--skill", "parallel-deck", "--apply", "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(
+            (modified / "SKILL.md").read_bytes(),
+            (self.plugin / "skills/pptx/SKILL.md").read_bytes(),
+        )
+        actions = {entry["skill"]: entry["action"] for entry in json.loads(forced.stdout)["installations"]}
+        self.assertEqual(actions, {"artifact-tools": "install", "pptx": "replace", "parallel-deck": "install"})
+
+    def test_missing_dependency_payload_or_catalog_cycle_never_writes(self):
+        skill = self.plugin / "skills/pptx/SKILL.md"
+        original = skill.read_bytes()
+        skill.unlink()
+        refused = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(json.loads(refused.stderr)["error"], "invalid_source")
+        self.assertFalse(self.host.exists())
+        skill.write_bytes(original)
+        catalog = self.plugin / "capabilities.json"
+        data = json.loads(catalog.read_text())
+        next(entry for entry in data["skills"] if entry["id"] == "artifact-tools")["requires"] = ["parallel-deck"]
+        catalog.write_text(json.dumps(data))
+        cyclic = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(cyclic.returncode, 2, cyclic.stderr)
+        self.assertIn("cyclic", json.loads(cyclic.stderr)["message"])
+        self.assertFalse(self.host.exists())
+        next(entry for entry in data["skills"] if entry["id"] == "pptx")["requires"] = ["missing-skill"]
+        catalog.write_text(json.dumps(data))
+        missing = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("unknown dependency", json.loads(missing.stderr)["message"])
+        self.assertFalse(self.host.exists())
+
+    def test_linked_dependencies_are_refused_even_with_force(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("preserve outside")
+        self.host.mkdir()
+        (self.host / "pptx").symlink_to(outside, target_is_directory=True)
+        refused = self.run_installer("--skill", "parallel-deck", "--apply", "--force")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(json.loads(refused.stderr)["error"], "destination_exists")
+        self.assertFalse((self.host / "artifact-tools").exists())
+        self.assertEqual((outside / "SKILL.md").read_text(), "preserve outside")
+        (self.host / "pptx").unlink()
+        (self.plugin / "skills/pptx/linked.txt").symlink_to(outside / "SKILL.md")
+        source_link = self.run_installer("--skill", "parallel-deck", "--apply")
+        self.assertEqual(source_link.returncode, 2, source_link.stderr)
+        self.assertEqual(json.loads(source_link.stderr)["error"], "invalid_source")
+        self.assertFalse((self.host / "artifact-tools").exists())
+
+    def test_byte_changes_are_detected_even_with_identical_size_and_mtime(self):
+        self.assertEqual(self.run_installer("--apply").returncode, 0)
+        path = self.host / "delegate/SKILL.md"
+        original = path.read_bytes()
+        metadata = path.stat()
+        path.write_bytes(b"x" + original[1:])
+        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        refused = self.run_installer("--apply")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(path.read_bytes(), b"x" + original[1:])
+
+    def test_executable_modes_are_preserved_and_source_bytecode_is_not_installed(self):
+        source = self.plugin / "skills/delegate"
+        executable = source / "run.sh"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        (source / "__pycache__").mkdir()
+        (source / "__pycache__/ignored.pyc").write_bytes(b"ignored")
+        installed = self.run_installer("--apply")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual((self.host / "delegate/run.sh").stat().st_mode & 0o777, 0o755)
+        self.assertFalse((self.host / "delegate/__pycache__").exists())
+        self.assertEqual(self.run_installer("--apply").returncode, 0)
+
+    def test_a_symlinked_host_parent_cannot_redirect_installation(self):
+        actual = self.root / "actual"
+        actual.mkdir()
+        self.host.symlink_to(actual, target_is_directory=True)
+        refused = self.run_installer("--skill", "parallel-deck", "--apply", "--force")
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(json.loads(refused.stderr)["error"], "destination_exists")
+        self.assertEqual(list(actual.iterdir()), [])
+
+
+class NativeSkillInstallTests(unittest.TestCase):
+    """Native manifests deliver the complete skill tree into documented host paths."""
+
+    def test_direct_native_destinations_keep_toolkit_and_dependency_payloads_together(self):
+        expected = {
+            "claude-code": "~/.claude/skills",
+            "codex": "~/.agents/skills",
+            "antigravity": "~/.gemini/antigravity-cli/skills",
+        }
+        catalog = json.loads((package.PLUGIN / "capabilities.json").read_text())
+        names = {entry["id"] for entry in catalog["skills"]} | {"setup", "delegate"}
+        for harness, destination in expected.items():
+            with self.subTest(harness=harness):
+                manifest = tomllib.loads((package.PLUGIN / "install" / f"{harness}.toml").read_text())
+                self.assertIn("skills", manifest["provides"])
+                installs = [entry for entry in manifest["file"] if entry["from"] == "skills"]
+                self.assertEqual(installs, [{"from": "skills", "to": destination, "how": "write"}])
+                for name in names:
+                    self.assertTrue((package.PLUGIN / "skills" / name / "SKILL.md").is_file(), name)
+                self.assertTrue((package.PLUGIN / "skills/artifact-tools/scripts/run.py").is_file())
+
 
 class SdkArchiveRuntimeTests(unittest.TestCase):
     """The Python SDK archive, extracted outside the checkout and run

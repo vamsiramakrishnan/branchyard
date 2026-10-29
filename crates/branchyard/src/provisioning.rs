@@ -47,6 +47,9 @@ use branchyard_harness::profiles::Protocol;
 
 /// What provisioning gives the harness.
 pub(crate) struct Provisioned {
+    /// Small discovery notice prepended to task input, including drivers
+    /// that cannot accept standing instructions without a private home.
+    pub capabilities: String,
     pub env: Vec<EnvVar>,
     pub session: Session,
     /// The MCP configuration file for a driver that reads one, as the
@@ -337,6 +340,16 @@ pub(crate) fn prepare(
     let spec = record.provision.clone().unwrap_or_default();
     let (workspace, home) = placement::guest_paths(record);
     let secrets = resolve(&spec.secrets)?;
+    let capability_home = match &record.home {
+        Some(home) => home.clone(),
+        None => crate::capabilities::local_home(state, &record.info.name)?,
+    };
+    let capability_guest = if record.home.is_some() {
+        Path::new(&home)
+    } else {
+        &capability_home
+    };
+    let capabilities = crate::capabilities::stage(&capability_home, capability_guest)?;
     // Branchyard's own server first, then the task's, with the variables
     // they take from secrets. A sandboxed harness gets Branchyard's over
     // HTTP, from the turn's endpoint on this host.
@@ -423,6 +436,7 @@ pub(crate) fn prepare(
         },
     };
     let mut files: Vec<String> = applied.written.into_iter().chain(applied.removed).collect();
+    files.extend(capabilities.written);
     let mut plan_env = plan.env;
     if let Some(connectors) = connectors {
         files.extend(connectors.files.iter().cloned());
@@ -460,6 +474,7 @@ pub(crate) fn prepare(
         })
         .collect();
     Ok(Provisioned {
+        capabilities: capabilities.instruction,
         env: plan_env,
         session: plan.session,
         mcp_config_file,

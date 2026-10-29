@@ -3,3 +3,8 @@
 vendor/** -text -whitespace linguist-vendored
 # Unified patches retain whitespace-only context lines intentionally.
 patches/** whitespace=-blank-at-eol
+
+# The canonical artifact toolkit and capability catalog generate these mirrors.
+plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/** linguist-generated
+plugins/branchyard/skills/artifact-tools/scripts/requirements.lock linguist-generated
+crates/branchyard-provision/src/skills.rs linguist-generated

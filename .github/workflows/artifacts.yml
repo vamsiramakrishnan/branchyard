@@ -1,0 +1,36 @@
+name: Verify document runtime
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: artifacts-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  office:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        python: ['3.9', '3.12']
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: sdk/python
+      SAL_USE_VCLPLUGIN: svp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y libreoffice-writer libreoffice-calc libreoffice-impress python3-uno fonts-liberation fontconfig poppler-utils
+      - run: python -m pip install --require-hashes -r deploy/artifacts-requirements.lock
+      - run: python -m pip install --require-hashes -r deploy/artifacts-test-requirements.lock
+      - run: python -m pip check
+      - name: Require wheel build prerequisites
+        run: python -c "from importlib.metadata import version; assert int(version('setuptools').split('.')[0]) >= 77; version('pip'); version('wheel')"
+      - name: Require the complete runtime before tests can skip missing features
+        run: python -m branchyard_artifacts doctor --require docx,xlsx,pdf,pptx,pdf-create,schema,images,render,pivot,fonts
+      - run: python tests/test_artifacts.py
+      - run: python tests/test_artifacts_distribution.py -v

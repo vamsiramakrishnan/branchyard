@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use branchyard_sync::auth::google::{GoogleAuth, ServiceAccount};
+use branchyard_sync::auth::google::GoogleAuth;
 use branchyard_sync::kms::{AwsKms, AzureKeyVault, GcpKms, Wrapper};
 use branchyard_sync::store::conformance::{check, Options};
 use branchyard_sync::store::file::FileStore;
@@ -230,18 +230,16 @@ fn signatures_and_tokens_are_required() {
     );
 }
 
-const TEST_KEY: &str = include_str!("../src/auth/testdata/rsa-test-key.pem");
-
 #[test]
 fn token_sources_work_against_their_stand_ins() {
-    let meta = MockMetadata::start(TEST_KEY);
+    let meta = MockMetadata::start();
     let host = meta.server.url.trim_start_matches("http://").to_owned();
-    // A service account's JWT, exchanged at its token URI.
-    let auth = GoogleAuth::from_account(ServiceAccount {
-        client_email: "sync@example.iam.gserviceaccount.com".into(),
-        private_key: TEST_KEY.into(),
-        token_uri: format!("{}/token", meta.server.url),
+    // The official authorized-user provider refreshes through its endpoint.
+    let account = serde_json::json!({
+        "type": "authorized_user", "client_id": "fake-client", "client_secret": "fake-secret",
+        "refresh_token": "fake-refresh", "token_uri": format!("{}/token", meta.server.url)
     });
+    let auth = GoogleAuth::from_json(account.clone());
     assert_eq!(
         auth.header(1_000).unwrap().unwrap(),
         format!("Bearer {}", cloud::OAUTH_TOKEN)
@@ -262,15 +260,11 @@ fn token_sources_work_against_their_stand_ins() {
         auth.header(1_000).unwrap().unwrap(),
         format!("Bearer {}", cloud::METADATA_TOKEN)
     );
-    // A GCS store authenticating with the service account's token.
+    // A GCS store authenticating with the official provider's token.
     let g = MockGcs::start("b", Some(cloud::OAUTH_TOKEN), 10);
     let store = g
         .store("b", "", PART)
-        .with_auth(GoogleAuth::from_account(ServiceAccount {
-            client_email: "sync@example.iam.gserviceaccount.com".into(),
-            private_key: TEST_KEY.into(),
-            token_uri: format!("{}/token", meta.server.url),
-        }));
+        .with_auth(GoogleAuth::from_json(account));
     store.put_if_absent("k", b"via a service account").unwrap();
     // AWS IMDSv2, and an S3 store signing with what it returned.
     let creds = branchyard_sync::auth::aws::imds(&meta.server.url).unwrap();

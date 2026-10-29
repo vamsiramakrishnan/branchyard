@@ -3,51 +3,7 @@
 //! the plugin ships without a checkout. A test compares them with the
 //! files on disk.
 
-/// A skill's files, by path relative to the skill's directory.
-pub struct Skill {
-    pub name: &'static str,
-    pub files: &'static [(&'static str, &'static str)],
-}
-
-macro_rules! skill_file {
-    ($skill:literal, $path:literal) => {
-        (
-            $path,
-            include_str!(concat!(
-                "../../../plugins/branchyard/skills/",
-                $skill,
-                "/",
-                $path
-            )),
-        )
-    };
-}
-
-pub const SKILLS: &[Skill] = &[
-    Skill {
-        name: "setup",
-        files: &[
-            skill_file!("setup", "SKILL.md"),
-            skill_file!("setup", "agents/openai.yaml"),
-            skill_file!("setup", "references/deploy-and-plugin.md"),
-            skill_file!("setup", "references/project.md"),
-            skill_file!("setup", "references/protocol.md"),
-            skill_file!("setup", "references/rig.md"),
-            skill_file!("setup", "references/server.md"),
-        ],
-    },
-    Skill {
-        name: "delegate",
-        files: &[
-            skill_file!("delegate", "SKILL.md"),
-            skill_file!("delegate", "agents/openai.yaml"),
-        ],
-    },
-];
-
-pub fn skill(name: &str) -> Option<&'static Skill> {
-    SKILLS.iter().find(|s| s.name == name)
-}
+pub use branchyard_provision::skills::{skill, Skill, SKILLS};
 
 /// A `SKILL.md` needs frontmatter with a `name` and a `description`; other
 /// files need nothing.
@@ -87,6 +43,13 @@ mod tests {
             while let Some(d) = stack.pop() {
                 for entry in std::fs::read_dir(&d).unwrap() {
                     let path = entry.unwrap().path();
+                    if path
+                        .file_name()
+                        .is_some_and(|name| name == "__pycache__" || name == ".DS_Store")
+                        || path.extension().is_some_and(|extension| extension == "pyc")
+                    {
+                        continue;
+                    }
                     if path.is_dir() {
                         stack.push(path);
                     } else {

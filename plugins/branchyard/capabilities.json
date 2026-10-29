@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "skills": [
+    {
+      "id": "artifact-tools",
+      "description": "Find and run Branchyard document tooling, check its runtime, and prepare file manifests for managed artifact capture.",
+      "requires": []
+    },
+    {
+      "id": "docx",
+      "description": "Create, inspect, update and validate editable Word DOCX documents, preserving source files and checking layout when needed.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "xlsx",
+      "description": "Create, inspect, update and validate Excel workbooks, formulas, calculated values and native pivot tables.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "pdf",
+      "description": "Create, extract, overlay and validate PDFs, with rendered checks and explicit limits on document editing.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "pptx",
+      "description": "Create, inspect, update and validate editable PowerPoint decks, including native charts and rendered layout checks.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "google-docs",
+      "description": "Create, read and update native Google Docs through an authorized connector, checking actual document identity and revisions.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "google-sheets",
+      "description": "Create, inspect and update native Google Sheets, including ranges, calculations and pivots supported by the granted connector.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "google-slides",
+      "description": "Create, inspect and update native Google Slides through a granted connector while preserving presentation identity, layouts and permissions.",
+      "requires": [
+        "artifact-tools"
+      ]
+    },
+    {
+      "id": "parallel-deck",
+      "description": "Split a large presentation into independently owned section specifications and assemble checked editable slides with one renderer.",
+      "requires": [
+        "pptx"
+      ]
+    }
+  ]
+}

@@ -52,6 +52,35 @@ use crate::record::{self, Recorder};
 use crate::state::Record;
 use crate::{Activity, BranchStatus, Error, Observer, RecordedEvent, Yard};
 
+pub(crate) mod capture;
+pub(crate) use capture::{collect_artifacts, validate_capture_batch, CAPTURE_STEP};
+
+/// Bounded files collected from a producer's worktree after provider transfer.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResultCapture {
+    /// Manifest path relative to the producer's worktree; no symlinks or traversal.
+    pub manifest: String,
+    /// Maximum number of files; defaults to 32, at most 1024.
+    #[serde(default = "capture::default_max_files")]
+    pub max_files: u32,
+    /// Maximum total captured bytes; defaults to 256 MiB.
+    #[serde(default = "capture::default_max_bytes")]
+    pub max_bytes: u64,
+}
+
+impl ResultCapture {
+    /// Collect the named manifest with the default file and byte limits.
+    pub fn new(manifest: impl Into<String>) -> Self {
+        Self {
+            manifest: manifest.into(),
+            max_files: capture::default_max_files(),
+            max_bytes: capture::default_max_bytes(),
+        }
+    }
+}
+
 /// The keywords a contract's schema checks: the same as a map's schema
 /// (`docs/map.md#schemas`).
 pub const KEYWORDS: &[&str] = crate::json_schema::KEYWORDS;
@@ -114,6 +143,9 @@ pub struct ResultContract {
     /// Omitted for the legacy report-only behavior.
     #[serde(default, skip_serializing_if = "ResultPurpose::is_report")]
     pub purpose: ResultPurpose,
+    /// Optional producer-bound artifact capture, valid only for required deliverables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<ResultCapture>,
 }
 
 impl ResultContract {
@@ -123,6 +155,7 @@ impl ResultContract {
             schema,
             required,
             purpose: ResultPurpose::Report,
+            capture: None,
         };
         contract.check()?;
         Ok(contract)
@@ -134,6 +167,7 @@ impl ResultContract {
             schema,
             required: true,
             purpose: ResultPurpose::Deliverable,
+            capture: None,
         };
         contract.check()?;
         Ok(contract)
@@ -148,6 +182,14 @@ impl ResultContract {
     /// and the keyword (``result.schema uses `pattern`, which the contract
     /// does not support``).
     pub fn check(&self) -> Result<(), Error> {
+        if let Some(capture) = &self.capture {
+            if !self.is_deliverable() || !self.required {
+                return Err(Error::Denied(
+                    "artifact capture requires a required deliverable result".into(),
+                ));
+            }
+            capture::check_config(capture)?;
+        }
         if self.is_deliverable() && !self.required {
             return Err(Error::Denied(
                 "a deliverable result contract must require a result".into(),
@@ -295,6 +337,14 @@ pub fn prompt(prompt: &str, contract: Option<&ResultContract>) -> String {
     if let Some(contract) = contract {
         prompt.push_str("\n\n## Requested result\nKeep your own planning and subagents. End your final reply with one fenced JSON block matching this schema, so earlier progress text stays separate; no Branchyard reporting tool is needed:\n");
         prompt.push_str(&contract.schema.to_string());
+        if let Some(capture) = &contract.capture {
+            prompt.push_str(&format!(
+                "\nBefore finishing, write artifact manifest `{}` with schema_version:1 and files:[{{path,media_type,sha256,name?}}]. \
+                 File paths are relative to that manifest's directory; only regular files beneath it are collected after transfer. \
+                 Limits: {} files and {} bytes total. Keep your final JSON in the requested schema; do not insert artifact metadata.",
+                capture.manifest, capture.max_files, capture.max_bytes
+            ));
+        }
     }
     prompt
 }

@@ -15,7 +15,7 @@
     "branchyard-server": 18,
     "branchyard-setup": 3,
     "branchyard-substrate": 3,
-    "branchyard-sync": 10
+    "branchyard-sync": 9
   },
   "file_wide": [
     "crates/branchyard-bridge/src/client.rs",

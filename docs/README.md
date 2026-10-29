@@ -90,6 +90,10 @@ Why it is built this way. Some pages describe a target rather than what exists; 
 | [Ambient registry](registry.md) | How do the services Branchyard starts or uses announce themselves with capabilities and a lease, get found by what they can do and get reclaimed when their owner stops? |
 | [Harness integration](harness-integration.md) | How do we control sixteen harnesses through ACP and native interfaces? |
 | [Provisioning](provisioning.md) | How is a harness's home prepared before each turn: secrets, MCP servers, instructions, model, effort and telemetry, translated from Scion's provisioners, and what is not ported? |
+| [Artifact toolkit](artifact-toolkit.md) | How do atomic document skills create, revise, render and validate DOCX, XLSX, PDF and PPTX files, and assemble independent slide sections? |
+| [Artifact capture](artifact-capture.md) | How are declared output files collected after a producing turn and published before accepting its deliverable? |
+| [Native identity](identity.md) | How do Google ADC, verified server callers and connector accounts preserve native IAM and upstream permissions? |
+| [Atomic knowledge validation, 29 October 2026](atomic-knowledge-validation-2026-10-29.md) | Which document, source-free harness, WIF, IAM and protected MCP checks actually ran, and what setup friction did they expose? |
 | [Model gateway](model-gateway.md) | How does a harness's model call go through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, budgets and exact cost? |
 | [Egress policy](egress.md) | Which hosts may a branch reach, how is that enforced, and which permission presets name common tool policies? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |

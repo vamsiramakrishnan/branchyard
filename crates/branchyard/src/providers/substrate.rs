@@ -36,6 +36,10 @@ impl ProviderKind for SubstrateOptions {
         "substrate"
     }
 
+    fn copies_worktree(&self) -> bool {
+        true
+    }
+
     /// A Substrate tag belongs to its atespace and is created from with its
     /// template.
     fn key(&self) -> String {

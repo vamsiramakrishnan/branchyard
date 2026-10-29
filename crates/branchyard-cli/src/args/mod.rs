@@ -143,9 +143,11 @@ pub struct TaskArgs {
     /// `by run --deny`: tools the harness is denied outright, stored with
     /// the branch.
     pub deny: Vec<String>,
-    /// `--secret`, `--auth`, `--mcp`, `--model`, `--effort` and
-    /// `--telemetry`; `None` when none was given.
+    /// Full provisioning flags; model/effort-only sends instead use
+    /// [`TaskArgs::session_patch`].
     pub provision: Option<branchyard::Provisioning>,
+    /// Model/effort-only send flags, preserving the branch's stored provisioning.
+    pub session_patch: Option<branchyard::SessionPatch>,
     /// `--instructions FILE`, read when the command runs.
     pub instructions: Option<String>,
     /// `--issue URL|#N|N|linear:KEY|jira:KEY|gitlab:PATH#N`: the issue
@@ -192,6 +194,7 @@ pub struct TaskArgs {
     pub result_required: bool,
     /// The structured result is the deliverable; Git changes are optional.
     pub result_deliverable: bool,
+    pub result_capture: Option<branchyard::ResultCapture>,
     /// `fan --no-files`: use private task storage without project files.
     pub no_files: bool,
     /// `--no-preflight`: do not check, before the branch is created, that

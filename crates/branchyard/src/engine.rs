@@ -346,6 +346,7 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
     let store = turn.yard.store();
     let fence = lease.fence().clone();
     let mut record = turn.record.clone();
+    let _capture_cleanup = crate::contract::capture::staging_cleanup(turn.yard, &fence);
     // A turn recovery did not conclude counted its metered calls in the
     // cost it left; this turn starts from that figure.
     record.metered_from = None;
@@ -412,7 +413,7 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             let driven = drive(&mut recorder, &turn, &mut record, &bounds, &lease);
             graph::unbind(turn.yard, &record);
             let driven = driven?;
-            let driven_held_on = driven.held_on.clone();
+            let park_input = crate::wake::ParkInput::new(&bounds.budget, &driven.held_on);
             conclude(
                 turn.yard,
                 turn.prompt,
@@ -424,18 +425,14 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
             // A delegating turn that ended while its children still run,
             // or whose cut hold they settled in, waits on them; see
             // `crate::wake`.
-            crate::wake::park(
-                turn.yard,
-                &mut record,
-                &mut recorder,
-                &bounds.budget,
-                &driven_held_on,
-            )?;
+            crate::wake::park(turn.yard, &mut record, &mut recorder, &park_input)?;
         }
         Ok(())
     })();
-    let result =
-        result.and_then(|()| crate::contract::capture_native(turn.yard, &record, &mut recorder));
+    let result = result.and_then(|()| {
+        crate::contract::collect_artifacts(turn.yard, &record, &fence)?;
+        crate::contract::capture_native(turn.yard, &record, &mut recorder)
+    });
     let result = match result {
         Ok(()) => {
             crate::wake::remember(turn.yard, &record, turn.options);
@@ -578,7 +575,8 @@ fn drive(
         &store,
         fence,
         STEP_TURN_END,
-        json!({ "submitted": driven.submitted }),
+        json!({ "submitted": driven.submitted,
+            "wake": crate::wake::ParkInput::new(&bounds.budget, &driven.held_on) }),
         &to_value(&driven.end),
     )?;
     Ok(driven)
@@ -1535,7 +1533,8 @@ fn run(
                     })?;
                 }
                 recorder.record(Activity::Prompt(submission.prompt.clone()))?;
-                match session.submit(&submission.prompt) {
+                let prompt = format!("{}\n\n{}", provisioned.capabilities, submission.prompt);
+                match session.submit(&prompt) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(
@@ -1787,6 +1786,17 @@ fn run(
     }
     for activity in placement.release(turn.yard, record, fence) {
         recorder.record(activity)?;
+    }
+    if record
+        .result_contract
+        .as_ref()
+        .is_some_and(|contract| contract.capture.is_some())
+    {
+        if let Some(reason) = placement.transfer_error() {
+            driven.end = End::failed(format!(
+                "artifact capture requires a successful worktree transfer: {reason}"
+            ));
+        }
     }
     // Calls still in flight are given a moment; what the turn's calls
     // cost is the branch's.

@@ -685,23 +685,9 @@ fn by_log_follow_prints_local_events_as_they_are_recorded() {
             .unwrap(),
     );
     let read = || fs::read_to_string(&out).unwrap_or_default();
-    wait::until_with_context(
-        "the first turn",
-        Duration::from_secs(30),
-        || read().contains("echo: first words"),
-        read,
-    );
-    run(&["send", "b", "second words", "--yes"]);
-    wait::until_with_context(
-        "the second turn",
-        Duration::from_secs(30),
-        || read().contains("echo: second words"),
-        read,
-    );
-    // Each reply printed once, whole.
-    assert_eq!(read().matches("echo: first words").count(), 1);
 
-    // With --json, one event object per line.
+    // Follow JSON before the second turn too, so both streams prove that
+    // new events arrive after the initial history has been printed.
     let json_out = dir.0.join("follow.json");
     let _json = Killed(
         command(by_exe(), &repo)
@@ -711,12 +697,50 @@ fn by_log_follow_prints_local_events_as_they_are_recorded() {
             .unwrap(),
     );
     let lines = || fs::read_to_string(&json_out).unwrap_or_default();
+    let echoed = |log: &str, prompt: &str| {
+        log.split("echo: ")
+            .skip(1)
+            .filter(|reply| reply.lines().any(|line| line.trim() == prompt))
+            .count()
+    };
+    let json_replies = || {
+        lines()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| {
+                event["activity"] == "harness" && event["event"]["type"] == "message_delta"
+            })
+            .filter_map(|event| {
+                event["event"]["text"]
+                    .as_str()?
+                    .strip_prefix("echo: ")
+                    .map(|reply| reply.lines().last().unwrap_or_default().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
     wait::until_with_context(
-        "JSON lines",
+        "the first turn",
         Duration::from_secs(30),
-        || lines().contains("second words"),
-        lines,
+        || echoed(&read(), "first words") == 1 && json_replies() == ["first words"],
+        read,
     );
+    assert_eq!(echoed(&read(), "second words"), 0);
+    run(&["send", "b", "second words", "--yes"]);
+    wait::until_with_context(
+        "the second turn",
+        Duration::from_secs(30),
+        || {
+            echoed(&read(), "second words") == 1
+                && json_replies() == ["first words", "second words"]
+        },
+        read,
+    );
+    // Each reply printed once, whole, including a prompt preceded by the
+    // managed capability notice. Prompt activity alone is not a reply.
+    assert_eq!(echoed(&read(), "first words"), 1);
+    assert_eq!(echoed(&read(), "second words"), 1);
+
+    // With --json, one event object per line.
     for line in lines().lines() {
         let event: serde_json::Value = serde_json::from_str(line).unwrap();
         assert!(event["activity"].is_string(), "{line}");

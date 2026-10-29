@@ -142,7 +142,7 @@ impl Work {
         // A new branch acts for the principal that asked for it at the
         // connector gateway; see docs/connectors.md.
         let actor = principal.map(|p| branchyard::connectors::Actor {
-            subject: p.name.clone(),
+            subject: p.connector_subject(),
             tenant: p.tenant.clone(),
         });
         match self {
@@ -369,7 +369,7 @@ impl Executor for AppExecutor {
     fn execute(&self, stored: &StoredOperation, work: &Value) -> Finished {
         let app = &self.0;
         let operation = &stored.operation;
-        if let Err(refused) = admitted_principal_allowed(app, stored) {
+        if let Err(refused) = admitted_principal_allowed(&app.config, stored) {
             return Finished {
                 result: Err(*refused.body),
                 end_cursor: None,
@@ -649,10 +649,29 @@ pub(crate) fn scope_for(kind: OperationKind) -> &'static str {
 /// request would have got here. The worker holds no credential of its
 /// own: it acts as the recorded principal. A record from before tenants
 /// existed was admitted with every scope, in the default tenant.
-fn admitted_principal_allowed(app: &App, stored: &StoredOperation) -> Result<(), ApiError> {
+fn admitted_principal_allowed(
+    config: &crate::config::Config,
+    stored: &StoredOperation,
+) -> Result<(), ApiError> {
     let Some(principal) = &stored.principal else {
         return Ok(());
     };
+    crate::config::check_principal(principal)
+        .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, "principal_invalid", why))?;
+    if matches!(
+        principal.origin,
+        crate::config::AuthenticationOrigin::GoogleIdToken { .. }
+    ) && !config
+        .google_identity
+        .as_ref()
+        .is_some_and(|config| config.still_allows(principal))
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "identity_binding_revoked",
+            "the admitted external identity binding changed or was removed",
+        ));
+    }
     let repo = &stored.operation.repo;
     let scope = scope_for(stored.operation.kind);
     if !principal.allows(scope) {
@@ -663,7 +682,7 @@ fn admitted_principal_allowed(app: &App, stored: &StoredOperation) -> Result<(),
         )
         .detail(serde_json::json!({ "scope": scope })));
     }
-    let policy = app.config.tenant_policy(&principal.tenant);
+    let policy = config.tenant_policy(&principal.tenant);
     if !principal.repo_allowed(&policy, repo) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -865,6 +884,14 @@ pub(crate) fn send_options(
     repo: &RepoState,
     request: &SendRequest,
 ) -> Result<TaskOptions, ApiError> {
+    if let Some(patch) = &request.session_patch {
+        patch.check().map_err(ApiError::bad_request)?;
+        if request.provision.is_some() {
+            return Err(ApiError::bad_request(
+                "session_patch and provision are mutually exclusive",
+            ));
+        }
+    }
     match (request.retry, request.prompt.trim().is_empty()) {
         (true, false) => {
             return Err(ApiError::bad_request(
@@ -893,6 +920,7 @@ pub(crate) fn send_options(
     )?;
     Ok(TaskOptions {
         provision: app.provision(request.provision.clone())?,
+        session_patch: request.session_patch.clone(),
         ..app.options(
             repo,
             budget,
@@ -1123,6 +1151,60 @@ pub(crate) fn delegator(yard: &Yard, name: &str) -> Result<String, branchyard::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_external_work_rechecks_binding_after_durable_round_trip() {
+        use crate::config::{
+            AuthenticationOrigin, Config, GoogleIdTokenConfig, GoogleIdentityBinding, Principal,
+        };
+        let mut principal = Principal::default_for("display");
+        let binding = GoogleIdentityBinding {
+            issuer: "https://accounts.google.com".into(),
+            subject: "external-subject".into(),
+            principal: principal.clone(),
+        };
+        let mut config = Config::new(std::path::PathBuf::new());
+        config.google_identity = Some(GoogleIdTokenConfig {
+            audience: "server".into(),
+            bindings: vec![binding],
+        });
+        principal.origin = AuthenticationOrigin::GoogleIdToken {
+            issuer: "https://accounts.google.com".into(),
+            subject: "external-subject".into(),
+            audience: "server".into(),
+        };
+        let stored: StoredOperation = serde_json::from_value(serde_json::json!({
+            "operation":{"id":"queued", "repo":"app", "kind":"task", "state":"queued", "branches":[], "cursor":0, "created_at_ms":0},
+            "principal":principal, "tenant":"default"
+        })).unwrap();
+        let durable: StoredOperation =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert!(admitted_principal_allowed(&config, &durable).is_ok());
+        let policies = [("display".to_owned(), "bounded".to_owned())]
+            .into_iter()
+            .collect();
+        let expanded = config.actor_policy(&policies);
+        assert_eq!(expanded[&principal.connector_subject()], "bounded");
+        config.google_identity.as_mut().unwrap().bindings[0]
+            .principal
+            .scopes
+            .remove("run");
+        assert_eq!(
+            admitted_principal_allowed(&config, &durable)
+                .unwrap_err()
+                .body
+                .code,
+            "identity_binding_revoked"
+        );
+        config.google_identity = None;
+        assert_eq!(
+            admitted_principal_allowed(&config, &durable)
+                .unwrap_err()
+                .body
+                .code,
+            "identity_binding_revoked"
+        );
+    }
 
     #[test]
     fn descriptions_round_trip_and_name_their_kind() {

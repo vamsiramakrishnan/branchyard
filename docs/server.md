@@ -25,7 +25,7 @@ by serve --config .branchyard/server.json --check   # load and validate it; serv
 
 [`by init server`](setup.md) asks for the listen address and TLS, SQLite or PostgreSQL, tenants and their quotas, scopes, providers, delegation, secrets by reference and a webhook, and checks what it writes with the same loader and validation `--check` runs. `--check` builds and validates the configuration as serving would and exits: it binds nothing, opens no store and connects to no database, and where serving would create a default token it only says so. It does refuse what the build cannot serve: a `database` on a build without the `postgres` feature fails with the command that adds it ([modes](modes.md#postgres)).
 
-A server given no credential makes a token at `<data dir>/token` the first time, and every start logs that path (`token_file`) so a client knows what to pass; `by init server`'s tokens are in the `tokens/` directory beside its file instead, and its summary lists them.
+A server given no static credential or Google identity binding makes a token at `<data dir>/token` the first time, and every start logs that path (`token_file`) so a client knows what to pass; `by init server`'s tokens are in the `tokens/` directory beside its file instead, and its summary lists them.
 
 Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped there under TLS, what requests may do, operations and webhooks; everything after `by serve` is the server's, so its `--repo` and `--token-file` are these, not `by`'s global ones):
 
@@ -128,7 +128,9 @@ The grace period bounds the whole shutdown, counted from the signal: connections
 
 ## Identity and scopes
 
-Every route except `GET /healthz`, `GET /.well-known/jwks.json` (public keys, [connectors](#connectors)) and `POST /v1/triggers/{id}/fire` (a [trigger](triggers.md)'s webhook, authenticated by its own HMAC signature instead) needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. The presented token is **hashed (SHA-256) and compared against every configured credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
+Google-only ID-token admission can also map exact verified issuer/subject identities to this principal policy. See [native identity](identity.md) for configuration, durable provenance, queued binding rechecks and the separate upstream connector account boundary.
+
+Every route except `GET /healthz`, `GET /.well-known/jwks.json` (public keys, [connectors](#connectors)) and `POST /v1/triggers/{id}/fire` (a [trigger](triggers.md)'s webhook, authenticated by its own HMAC signature instead) needs `Authorization: Bearer <token>`, including unknown routes, so routes cannot be probed anonymously. A presented static token is **hashed (SHA-256) and compared against every configured static credential's hash** in time that depends only on lengths; the verifier holds hashes, never a plaintext token, and neither tokens nor headers are ever logged. A missing or wrong token gets `401 unauthorized` with `WWW-Authenticate: Bearer`.
 
 **A request's identity comes only from its verified credential, never from anything the request itself says** — there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant` (1 to 128 characters, no `/`), a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
 

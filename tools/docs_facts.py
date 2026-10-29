@@ -248,6 +248,7 @@ def compute():
         "runtime": runtime_facts(),
         "profiles": profile_facts(),
         "cli": {"exit_codes": exit_facts()},
+        "document_skills": json.loads((ROOT / "plugins/branchyard/capabilities.json").read_text())["skills"],
     }
 
 
@@ -292,6 +293,14 @@ def regions(facts):
     vendor, tests, derived = facts["vendor"], facts["tests"], facts["derivatives"]
     by_crate = [f"{count['tests']} in `{name}`" for name, count in tests["by_crate"].items() if count["tests"]]
     return {
+        "document.skills": "\n\n| Skill | Purpose | Requires |\n|---|---|---|\n"
+        + "\n".join(
+            f"| `{item['id']}` | {item['description']} | "
+            + (", ".join(f"`{name}`" for name in item["requires"]) or "none")
+            + " |"
+            for item in facts["document_skills"]
+        )
+        + "\n\n",
         "vendor.files": str(vendor["files"]),
         "vendor.sources": join_and([f"{n} from {s}" for s, n in vendor["by_source"].items()]),
         "vendor.scion": str(vendor["by_source"]["scion"]),

@@ -146,6 +146,7 @@ fn run_takes_every_task_option() {
             unapproved_tools: false,
             deny: Vec::new(),
             provision: None,
+            session_patch: None,
             instructions: None,
             issue: None,
             pr: None,
@@ -166,6 +167,7 @@ fn run_takes_every_task_option() {
             result_schema_file: None,
             result_required: false,
             result_deliverable: false,
+            result_capture: None,
             no_files: false,
             no_preflight: false,
         }
@@ -2514,4 +2516,70 @@ fn no_files_is_a_fan_option_without_duplicating_task_new_or_run_flags() {
             .contains("cannot be used with")
     );
     assert!(help("fan").contains("--no-files"));
+}
+
+#[test]
+fn result_capture_flags_require_a_schema_and_deliverable_and_keep_explicit_limits() {
+    for command in ["run work", "fan work --harness codex"] {
+        let task = task(&format!("{command} --result-schema '{{}}' --result-deliverable --result-artifacts outputs/artifacts.json --result-artifacts-max-files 4 --result-artifacts-max-bytes 4096"));
+        let capture = task.result_capture.unwrap();
+        assert_eq!(capture.manifest, "outputs/artifacts.json");
+        assert_eq!((capture.max_files, capture.max_bytes), (4, 4096));
+    }
+    let Command::Spawn { spawn, .. } = parse_str("spawn work --result-schema '{}' --result-deliverable --result-artifacts outputs/artifacts.json").unwrap() else { panic!("spawn"); };
+    assert_eq!(spawn.result_capture.as_ref().unwrap().max_files, 32);
+    for flags in [
+        "--result-artifacts outputs/artifacts.json",
+        "--result-deliverable --result-artifacts outputs/artifacts.json",
+        "--result-artifacts-max-files 3",
+    ] {
+        assert!(parse_str(&format!("run work {flags}")).is_err(), "{flags}");
+    }
+}
+
+#[test]
+fn send_session_settings_patch_without_replacing_explicit_provisioning() {
+    for flags in [
+        "--model m",
+        "--effort low",
+        "--model m --effort high --yes --allow-unapproved-tools",
+    ] {
+        let options = task(&format!("send b more {flags}"));
+        assert!(options.provision.is_none(), "{flags}");
+        assert!(
+            options
+                .session_patch
+                .as_ref()
+                .is_some_and(|patch| patch.check().is_ok()),
+            "{flags}"
+        );
+    }
+    for flags in [
+        "--model m --secret GEMINI_API_KEY",
+        "--effort low --auth api-key",
+        "--model m --instructions standing.md",
+        "--effort high --connector github:read",
+    ] {
+        let options = task(&format!("send b more {flags}"));
+        assert!(options.session_patch.is_none(), "{flags}");
+        assert!(options.provision.is_some(), "{flags}");
+    }
+    assert!(task("send b more --yes").session_patch.is_none());
+    assert_eq!(
+        task("run work --model m")
+            .provision
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("m")
+    );
+    let Command::Plan {
+        action: PlanAction::Approve { task, .. },
+        ..
+    } = parse_str("plan approve b --model m").unwrap()
+    else {
+        panic!("plan approve");
+    };
+    assert!(task.session_patch.is_none());
+    assert_eq!(task.provision.as_ref().unwrap().model.as_deref(), Some("m"));
 }

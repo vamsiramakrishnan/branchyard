@@ -19,6 +19,8 @@ testing = []
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
+google-cloud-auth = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "net", "sync"] }
 base64 = { workspace = true }
 hex = { workspace = true }
 blake3 = { workspace = true }
@@ -37,6 +39,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }
 branchyard-support = { path = "../branchyard-support", features = ["testing"] }
 branchyard-sync = { path = ".", features = ["testing"] }
 tempfile = { workspace = true }

@@ -319,6 +319,26 @@ class Requests(ServerCase):
         body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
         self.assertEqual(body, {"prompt": "more", "budget": {"max_usd": 1}})
 
+    def test_session_patch_is_explicit_and_does_not_merge_replacement_provisioning(self):
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, self.op("op-patch", "queued")))
+        patch = {"model": "m", "effort": "low"}
+        self.app.send("b", "more", session_patch=patch)
+        body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
+        self.assertEqual(body["session_patch"], patch)
+        self.assertNotIn("provision", body)
+        for invalid in [{}, {"model": " "}, {"model": None}, {"effort": True}, {"effort": []}, {"secrets": []}]:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.app.send("b", "more", session_patch=invalid)
+        for replacement in [{"provision": {}}, {"provision": {"secrets": []}}, {"connectors": []}]:
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                self.app.send("b", "more", session_patch=patch, **replacement)
+        self.assertEqual(len(self.requests("POST", f"{REPO}/branches/b/send")), 1)
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, self.op("op-replace", "queued")))
+        self.app.send("b", "revoke", provision={"secrets": [], "mcp_servers": []})
+        replacement = self.requests("POST", f"{REPO}/branches/b/send")[-1][3]
+        self.assertEqual(replacement["provision"], {"secrets": [], "mcp_servers": []})
+        self.assertNotIn("session_patch", replacement)
+
     def test_spawn_asks_for_the_childs_grant_in_the_object_form(self):
         self.fake.answer("POST", f"{REPO}/branches/p/spawn", (202, self.op("op4", "queued", "kid", kind="spawn")))
         self.app.spawn("p", "work", name="kid", connectors=["github:read:issues.list"], max_depth=0)
@@ -1757,6 +1777,32 @@ class ModuleSpawnAndReport(unittest.TestCase):
                     bm.spawn("Research", result=contract)
             run.assert_not_called()
 
+    def test_spawn_passes_explicit_capture_path_and_limits_without_changing_schema(self):
+        schema = {"type": "object", "additionalProperties": False}
+        result = {
+            "schema": schema,
+            "required": True,
+            "purpose": "deliverable",
+            "capture": {"manifest": "outputs/artifacts.json", "max_files": 4, "max_bytes": 4096},
+        }
+        seen, _ = self.run_by(lambda: bm.spawn("Create a report", result=result), self.SPAWNED)
+        args = seen[0][0]
+        self.assertEqual(args[args.index("--result-artifacts") + 1], "outputs/artifacts.json")
+        self.assertEqual(args[args.index("--result-artifacts-max-files") + 1], "4")
+        self.assertEqual(args[args.index("--result-artifacts-max-bytes") + 1], "4096")
+        self.assertEqual(json.loads(args[args.index("--result-schema") + 1]), schema)
+        with mock.patch.object(bm, "_run") as run:
+            for capture in [
+                {},
+                {"manifest": ""},
+                {"manifest": "x", "max_files": True},
+                {"manifest": "x", "max_bytes": 0},
+                {"manifest": "x", "actor": "other"},
+            ]:
+                with self.subTest(capture=capture), self.assertRaises(ValueError):
+                    bm.spawn("Create a report", result={**result, "capture": capture})
+            run.assert_not_called()
+
     def test_handoff_builds_one_cli_request_and_keeps_the_frozen_payload(self):
         expected = HANDOFF_MESSAGE["handoff"]["version"]
         seen, sent = self.run_by(
@@ -2096,6 +2142,28 @@ class OneApi(ServerCase):
         self.tmp.cleanup()
         super().tearDown()
 
+    def test_operator_session_patch_reaches_http_and_is_refused_inside_a_harness(self):
+        queued = self.op("patch-one-api", "queued")
+        self.fake.answer("POST", f"{REPO}/branches/b/send", (202, queued))
+        self.fake.answer(
+            "GET",
+            "/v1/operations/patch-one-api",
+            (200, {**queued, "state": "succeeded", "result": {"branches": [{**KID_INFO, "name": "b"}]}}),
+        )
+        outside = bc.connect(self.app, branch="lead")
+        patch = {"effort": "low"}
+        self.assertEqual(outside.send("b", "more", session_patch=patch).name, "b")
+        body = self.requests("POST", f"{REPO}/branches/b/send")[0][3]
+        self.assertEqual(body["session_patch"], patch)
+        with mock.patch.dict(os.environ, {"BRANCHYARD_DELEGATION": "token"}):
+            inside = bc.connect()
+            with self.assertRaises(bc.DeniedError):
+                inside.send("b", "more", session_patch=patch)
+        with mock.patch.object(bm, "_run") as run:
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'session_patch'"):
+                bm.send("b", "more", session_patch=patch)
+            run.assert_not_called()
+
     def inside(self) -> list[Any]:
         answers: dict[str, Any] = {
             "spawn": {"body": KID_INFO},
@@ -2254,6 +2322,14 @@ class OneApi(ServerCase):
             ours = list(inspect.signature(getattr(bc.Delegator, name)).parameters.values())[1:]
             # `**options` is the backend's own spawn: not part of the portable signature.
             ours = [p for p in ours if p.kind is not inspect.Parameter.VAR_KEYWORD]
+            if name == "send":
+                # The operator facade can patch a session; the harness-only API cannot.
+                patch = [p for p in ours if p.name == "session_patch"]
+                self.assertEqual(
+                    [(p.name, p.kind, p.default) for p in patch],
+                    [("session_patch", inspect.Parameter.KEYWORD_ONLY, None)],
+                )
+                ours = [p for p in ours if p.name != "session_patch"]
             self.assertEqual(
                 [(p.name, p.kind, p.default) for p in ours], [(p.name, p.kind, p.default) for p in theirs], name
             )

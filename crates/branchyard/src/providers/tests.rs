@@ -202,28 +202,31 @@ fn each_variant_serializes_under_its_own_name() {
     // No provider at all is a local harness.
     assert_eq!(of(None).name(), "local");
     assert!(!of(None).sandboxed());
+    assert!(!of(None).copies_worktree());
 }
 
 #[test]
 fn names_keys_and_kinds() {
     let fixture = fixture();
     let expected = [
-        ("local", "local", false, "sandbox"),
-        ("microsandbox", "microsandbox", true, "sandbox"),
+        ("local", "local", false, false, "sandbox"),
+        ("microsandbox", "microsandbox", true, false, "sandbox"),
         (
             "substrate",
             "substrate:http://127.0.0.1:9/default/by",
             true,
+            true,
             "sandbox",
         ),
-        ("recipe", "recipe:lab", true, "recipe_machine"),
+        ("recipe", "recipe:lab", true, true, "recipe_machine"),
     ];
     for (good, _) in samples(&fixture) {
-        let (name, key, sandboxed, service) = expected[index(&good)];
+        let (name, key, sandboxed, copied, service) = expected[index(&good)];
         let kind = good.kind();
         assert_eq!(kind.name(), name);
         assert_eq!(kind.key(), key);
         assert_eq!(kind.sandboxed(), sandboxed);
+        assert_eq!(kind.copies_worktree(), copied);
         assert_eq!(kind.service_kind(), service);
         assert_eq!(kind.confines_egress(), !sandboxed);
         assert_eq!(placement::sandboxed(Some(&good)), sandboxed);

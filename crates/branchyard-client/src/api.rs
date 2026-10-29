@@ -378,6 +378,10 @@ pub struct SendRequest {
     /// runs, refused unless it allows client commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<Provisioning>,
+    /// Change only model/effort while preserving stored provisioning.
+    /// Mutually exclusive with `provision`; an empty patch is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_patch: Option<branchyard::SessionPatch>,
     /// Worker labels the operation needs: only a worker started with every
     /// one of them (`by worker --label gpu`) claims it. See
     /// `docs/server.md#worker-labels`.

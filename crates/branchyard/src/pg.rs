@@ -2982,6 +2982,60 @@ fn identities_from(rows: &[Row]) -> Result<Vec<Identity>, Error> {
         .collect()
 }
 
+impl Postgres {
+    fn insert_artifact(&self, tx: &mut Transaction<'_>, new: &NewArtifact) -> R<ArtifactRow> {
+        let now = to_db("now_ms", now_ms())?;
+        let ancestry = encode("ancestry", &new.ancestry)?;
+        let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
+        let labels = encode("labels", &new.labels)?;
+        let seq: i64 = tx
+            .query_one(
+                "INSERT INTO by_artifacts (repo, id, digest, size, name, media_type, \
+             publisher, ancestry, turn, created_ms, labels, publisher_incarnation, \
+             ancestry_incarnations) \
+             VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING seq",
+                &[
+                    &self.repo,
+                    &new.digest,
+                    &to_db("size", new.size)?,
+                    &new.name,
+                    &new.media_type,
+                    &new.publisher_branch,
+                    &ancestry,
+                    &to_db("turn", new.turn)?,
+                    &now,
+                    &labels,
+                    &new.publisher_incarnation,
+                    &ancestry_incarnations,
+                ],
+            )
+            .map_err(db("artifact"))?
+            .get(0);
+        let id = format!("art{seq}");
+        tx.execute(
+            "UPDATE by_artifacts SET id = $1 WHERE repo = $2 AND seq = $3",
+            &[&id, &self.repo, &seq],
+        )
+        .map_err(db("artifact"))?;
+        Ok(ArtifactRow {
+            artifact: ArtifactRef {
+                id,
+                digest: new.digest.clone(),
+                size: new.size,
+                name: new.name.clone(),
+                media_type: new.media_type.clone(),
+                publisher_branch: new.publisher_branch.clone(),
+                turn: new.turn,
+                created_at: from_db("now", now)? / 1000,
+                labels: new.labels.clone(),
+            },
+            ancestry: new.ancestry.clone(),
+            publisher_incarnation: Some(new.publisher_incarnation),
+            ancestry_incarnations: new.ancestry_incarnations.clone(),
+        })
+    }
+}
+
 impl StorageBackend for Postgres {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
         let rows = self.query(|c| {
@@ -2995,56 +3049,52 @@ impl StorageBackend for Postgres {
     }
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {
+        self.tx(true, |tx| self.insert_artifact(tx, new))
+    }
+
+    fn capture_artifacts(
+        &self,
+        fence: &Fence,
+        manifest_digest: &str,
+        artifacts: &[NewArtifact],
+    ) -> Result<Vec<ArtifactRef>, Error> {
+        crate::contract::validate_capture_batch(fence, manifest_digest, artifacts)?;
         self.tx(true, |tx| {
+            self.check(tx, fence)?;
+            let row = tx.query_one("SELECT turn, expires_ms FROM by_leases WHERE repo = $1 AND branch = $2", &[&self.repo, &fence.branch])
+                .map_err(db("capture lease"))?;
+            if from_db("expires_ms", row.get(1))? <= now_ms() {
+                return Err(fenced(fence, "expired before capture").into());
+            }
+            let cancelled: bool = tx.query_one("SELECT EXISTS(SELECT 1 FROM by_cancels WHERE incarnation = $1 AND turn = $2)",
+                &[&fence.incarnation, &to_db("turn", fence.turn)?]).map_err(db("capture cancellation"))?.get(0);
+            if from_db("turn", row.get(0))? != fence.turn || self.incarnation(tx, &fence.branch)? != Some(fence.incarnation) || cancelled {
+                return Err(Error::Denied("capture producer was cancelled, replaced or changed turn".into()).into());
+            }
+            let intent = serde_json::json!({"manifest_sha256": manifest_digest});
+            let prior = tx.query_opt("SELECT intent, outcome FROM by_steps WHERE incarnation = $1 AND turn = $2 AND step = $3",
+                &[&fence.incarnation, &to_db("turn", fence.turn)?, &crate::contract::CAPTURE_STEP]).map_err(db("capture receipt"))?;
+            if let Some(row) = prior {
+                if decode::<Value>("capture intent", &row.get::<_, String>(0))? != intent {
+                    return Err(Error::Denied("capture manifest changed after publication".into()).into());
+                }
+                return match row.get::<_, Option<String>>(1) {
+                    Some(text) => decode("capture receipt", &text).map_err(Into::into),
+                    None => Err(Error::State("capture receipt has no completed outcome".into()).into()),
+                };
+            }
+            if artifacts.is_empty() {
+                return Err(Error::Denied("capture needs at least one artifact".into()).into());
+            }
+            let published = artifacts.iter().map(|new| self.insert_artifact(tx, new).map(|row| row.artifact))
+                .collect::<R<Vec<_>>>()?;
             let now = to_db("now_ms", now_ms())?;
-            let ancestry = encode("ancestry", &new.ancestry)?;
-            let ancestry_incarnations = encode("ancestry", &new.ancestry_incarnations)?;
-            let labels = encode("labels", &new.labels)?;
-            let seq: i64 = tx
-                .query_one(
-                    "INSERT INTO by_artifacts (repo, id, digest, size, name, media_type, \
-                     publisher, ancestry, turn, created_ms, labels, publisher_incarnation, \
-                     ancestry_incarnations) \
-                     VALUES ($1, '', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING seq",
-                    &[
-                        &self.repo,
-                        &new.digest,
-                        &to_db("size", new.size)?,
-                        &new.name,
-                        &new.media_type,
-                        &new.publisher_branch,
-                        &ancestry,
-                        &to_db("turn", new.turn)?,
-                        &now,
-                        &labels,
-                        &new.publisher_incarnation,
-                        &ancestry_incarnations,
-                    ],
-                )
-                .map_err(db("artifact"))?
-                .get(0);
-            let id = format!("art{seq}");
-            tx.execute(
-                "UPDATE by_artifacts SET id = $1 WHERE repo = $2 AND seq = $3",
-                &[&id, &self.repo, &seq],
-            )
-            .map_err(db("artifact"))?;
-            Ok(ArtifactRow {
-                artifact: ArtifactRef {
-                    id,
-                    digest: new.digest.clone(),
-                    size: new.size,
-                    name: new.name.clone(),
-                    media_type: new.media_type.clone(),
-                    publisher_branch: new.publisher_branch.clone(),
-                    turn: new.turn,
-                    created_at: from_db("now", now)? / 1000,
-                    labels: new.labels.clone(),
-                },
-                ancestry: new.ancestry.clone(),
-                publisher_incarnation: Some(new.publisher_incarnation),
-                ancestry_incarnations: new.ancestry_incarnations.clone(),
-            })
+            tx.execute("INSERT INTO by_steps (incarnation, turn, step, branch, generation, intent, outcome, started_ms, finished_ms) \
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)", &[&fence.incarnation, &to_db("turn", fence.turn)?,
+                &crate::contract::CAPTURE_STEP, &fence.branch, &to_db("generation", fence.generation)?,
+                &encode("capture intent", &intent)?, &encode("capture receipt", &published)?, &now])
+                .map_err(db("capture receipt"))?;
+            Ok(published)
         })
     }
 

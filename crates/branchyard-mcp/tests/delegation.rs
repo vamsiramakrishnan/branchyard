@@ -340,11 +340,14 @@ fn cancel_stops_a_running_child_and_its_subtree() {
     assert_eq!(result(&said, "cancel"), json!({"cancelled": ["kid"]}));
     assert!(said.contains("mcp wait: interrupted"), "{said}");
     // A cancelled child can be continued.
-    assert_eq!(
-        result(&said, "inspect")["last_message"],
-        "echo: say again",
+    let inspected = result(&said, "inspect");
+    let answer = inspected["last_message"].as_str().unwrap();
+    assert!(answer.starts_with("echo: "), "{said}");
+    assert!(
+        answer.contains("/.branchyard/capabilities/INDEX.md"),
         "{said}"
     );
+    assert!(answer.ends_with("\n\nsay again"), "{said}");
 }
 
 #[test]

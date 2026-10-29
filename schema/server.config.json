@@ -42,6 +42,16 @@
         "$ref": "#/$defs/FileCredential"
       }
     },
+    "google_identity": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GoogleIdTokenConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "tenants": {
       "type": "object",
       "additionalProperties": {
@@ -377,6 +387,144 @@
       "required": [
         "token_sha256",
         "tenant"
+      ]
+    },
+    "GoogleIdTokenConfig": {
+      "description": "Google-only ID-token admission, independent of Google API access tokens.",
+      "type": "object",
+      "properties": {
+        "audience": {
+          "description": "Exact audience identifying this Branchyard server.",
+          "type": "string"
+        },
+        "bindings": {
+          "description": "The only external identities admitted by this server.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/GoogleIdentityBinding"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "audience",
+        "bindings"
+      ]
+    },
+    "GoogleIdentityBinding": {
+      "description": "An exact external identity mapped to existing server authorization policy.",
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "description": "Exact Google issuer, including its scheme when present.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "Exact Google subject identifier. No wildcard or email matching.",
+          "type": "string"
+        },
+        "principal": {
+          "description": "Operator-controlled tenant, scopes and repository policy.",
+          "$ref": "#/$defs/Principal"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "issuer",
+        "subject",
+        "principal"
+      ]
+    },
+    "Principal": {
+      "description": "Who a verified bearer token acts as: a tenant, a subject name, the\nscopes it holds, and, optionally, a narrower repository allowlist than\nits tenant's. Requests never carry a `tenant_id`; a principal's tenant\ncomes only from the credential that authenticated it. See\n`docs/server.md#identity-and-scopes`.",
+      "type": "object",
+      "properties": {
+        "origin": {
+          "description": "Authenticated origin, defaulting to static for older records.",
+          "$ref": "#/$defs/AuthenticationOrigin",
+          "default": {
+            "kind": "configured"
+          }
+        },
+        "name": {
+          "description": "The subject this credential names, such as an operator or a CI\nsystem; distinct from the tenant. Used for idempotency scoping and\naudit, and appears in `Debug` and logs (never the token itself).",
+          "type": "string"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "repos": {
+          "description": "`None` allows every repository its tenant allows.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        }
+      },
+      "required": [
+        "name",
+        "tenant"
+      ]
+    },
+    "AuthenticationOrigin": {
+      "description": "How a principal authenticated, persisted with queued work without its bearer.",
+      "oneOf": [
+        {
+          "description": "A configured or paired static credential. Never an external user assertion.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "configured"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A Google-signed ID token matched an exact operator-configured binding.",
+          "type": "object",
+          "properties": {
+            "issuer": {
+              "description": "The verified Google issuer.",
+              "type": "string"
+            },
+            "subject": {
+              "description": "The verified external subject, never a display name or email.",
+              "type": "string"
+            },
+            "audience": {
+              "description": "The server audience against which the token was verified.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "google_id_token"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "issuer",
+            "subject",
+            "audience"
+          ]
+        }
       ]
     },
     "FileTenantPolicy": {

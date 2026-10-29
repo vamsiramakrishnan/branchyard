@@ -772,8 +772,12 @@ def spawn(
             if reviewer.get(key) is not None:
                 flags += [flag, str(reviewer[key])]
     if result is not None:
-        if not isinstance(result, dict) or "schema" not in result or not set(result) <= {"schema", "required", "purpose"}:
-            raise ValueError('result must contain schema and optional required/purpose')
+        if (
+            not isinstance(result, dict)
+            or "schema" not in result
+            or not set(result) <= {"schema", "required", "purpose", "capture"}
+        ):
+            raise ValueError("result must contain schema and optional required/purpose/capture")
         purpose = result.get("purpose", "report")
         if not isinstance(purpose, str) or purpose not in {"report", "deliverable"}:
             raise ValueError("result purpose must be report or deliverable")
@@ -786,6 +790,24 @@ def spawn(
             flags.append("--result-required")
         if purpose == "deliverable":
             flags.append("--result-deliverable")
+        if "capture" in result:
+            capture = result["capture"]
+            if purpose != "deliverable" or not isinstance(capture, dict) or "manifest" not in capture:
+                raise ValueError("capture needs a required deliverable and a manifest")
+            if not set(capture) <= {"manifest", "max_files", "max_bytes"}:
+                raise ValueError("capture contains unknown fields")
+            if not isinstance(capture["manifest"], str) or not capture["manifest"]:
+                raise ValueError("capture manifest must be a nonempty relative path")
+            flags += ["--result-artifacts", capture["manifest"]]
+            for key, flag in [
+                ("max_files", "--result-artifacts-max-files"),
+                ("max_bytes", "--result-artifacts-max-bytes"),
+            ]:
+                if key in capture:
+                    value = capture[key]
+                    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                        raise ValueError("capture " + key + " must be a positive integer")
+                    flags += [flag, str(value)]
     # On stdin, so a prompt of any length fits: a command-line argument is
     # limited to 128 KiB on Linux.
     return _make(Spawned, _run(["spawn", *flags, "--prompt-file", "-"], stdin=prompt))
@@ -914,6 +936,8 @@ def send(branch: str, prompt: Optional[str] = None, retry: bool = False) -> Sent
     turn that was cut off when the engine running it stopped (its recovery
     note says so); a child whose harness never recorded a session starts a
     fresh one that begins with every prompt it was given.
+    The child keeps its existing provisioning. Model and effort edits are
+    available through the outside-harness operator client, branchyard_client.
     """
     if retry:
         if prompt is not None:

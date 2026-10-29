@@ -1,0 +1,130 @@
+{
+  "date": "2026-10-29",
+  "evidence": "live",
+  "harness": {
+    "name": "AGY",
+    "version": "1.4.9",
+    "model": "gemini-3.8-flash-low"
+  },
+  "provider": "native SSH on existing GCE worker",
+  "edition": "editorially reviewed v3",
+  "candidate": "a640fb5db3",
+  "result": {
+    "file": "outputs/adoption.pptx",
+    "slides": 60,
+    "verification": "outputs/verification_report.txt"
+  },
+  "artifacts": [
+    {
+      "id": "art25",
+      "path": "adoption.pdf",
+      "bytes": 112852,
+      "blake3": "ad1408a95aa9e14c7ad978175b6ce199aeb430e1cb123c22f1751a7d1665437c",
+      "sha256": "9a0b94b915e210f601ac49c4ec7fe2f19b7eae420d9d30dfcc2b1d4fd7e99d95",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "adoption.pdf"
+      }
+    },
+    {
+      "id": "art26",
+      "path": "adoption.pptx",
+      "bytes": 239356,
+      "blake3": "dbe0e3aad5e744e81154996f3ef33151dafe6ba206e20f4a147182ad9f22fab2",
+      "sha256": "b36870fb768d842fec5a6be93de7d12b7111e0fa20e2fbfa39646b2bf6b124d3",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "adoption.pptx"
+      }
+    },
+    {
+      "id": "art27",
+      "path": "deck.json",
+      "bytes": 2399,
+      "blake3": "a7deb90ac5bdf72b75d87f6f72f6c5db1ba6596b9f26723dbc1ee36872f4ff7e",
+      "sha256": "ddb1e027fb4c4932b689868a0af9cf0c1d5d02594049511b89812b18dd52b7eb",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "deck.json"
+      }
+    },
+    {
+      "id": "art28",
+      "path": "sections/delivery.json",
+      "bytes": 21035,
+      "blake3": "21c7ff80594380e4003bd81784347057afff5b38eb202ae05a4318ed97c4d9f3",
+      "sha256": "f3f9f68943f0f0920a30a67677523c6f43d098cfd3e8cdb91ed409117fc34691",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "sections/delivery.json"
+      }
+    },
+    {
+      "id": "art29",
+      "path": "sections/economics.json",
+      "bytes": 15786,
+      "blake3": "7ff538f716c0407d174c4dc1d84e4de10b0215d7b3f5d9dc9b934da3448f8c78",
+      "sha256": "e3625d16f943928a88dc4aadbb972790ff05ca285f56f85d3ce3d545fd6d19cd",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "sections/economics.json"
+      }
+    },
+    {
+      "id": "art30",
+      "path": "sections/governance.json",
+      "bytes": 20661,
+      "blake3": "2090c9021af681054dfc802f66b7e5dde50e93df5a3dc3f1ab21dbf38be9fde2",
+      "sha256": "50f3ee94460fe3c596df8f138989bc06ba1a180897347ecc66560c49e863302c",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "sections/governance.json"
+      }
+    },
+    {
+      "id": "art31",
+      "path": "verification_report.txt",
+      "bytes": 4564,
+      "blake3": "d6ad1b68711840b9c0195ac16e28a098627fcb8773ef9b5cab04e744e2a0c1c4",
+      "sha256": "7c91505a5d59794e86e7ec17286087439b4f63a0bcb786040d10357e0a043ec1",
+      "producer": "final-deck",
+      "turn": 4,
+      "labels": {
+        "capture.engine_turn": "4",
+        "capture.manifest": "outputs/artifacts.json",
+        "capture.manifest_sha256": "2b921c220b8e41899623e4ee2a1c59041e05c4f458c80869345da3b61ffdbb4f",
+        "capture.path": "verification_report.txt"
+      }
+    }
+  ],
+  "not_done": [
+    "unassisted initial rig completion",
+    "actual model dollar cost",
+    "human Google Workspace OAuth",
+    "cross-provider Office qualification"
+  ]
+}

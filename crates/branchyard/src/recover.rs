@@ -143,6 +143,9 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         return Ok(None);
     };
     let lease = Lease::new(store.clone(), fence.clone())?;
+    let mut previous_fence = fence.clone();
+    previous_fence.generation = row.generation;
+    let _capture_cleanup = crate::contract::capture::staging_cleanup(yard, &previous_fence);
     let mut record = match store.read(&row.branch) {
         Ok(record) => record,
         Err(Error::UnknownBranch(_)) => return Ok(None),
@@ -274,11 +277,49 @@ fn lease(yard: &Yard, row: &LeaseRow, why: &str) -> Result<Option<Recovery>, Err
         live_cost: None,
         held_on: Vec::new(),
     };
-    if let Err(error) = engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)
-    {
+    let finished = (|| {
+        engine::conclude(yard, &prompt, &fence, &mut record, &mut recorder, driven)?;
+        if let Some(input) = step(STEP_TURN_END).and_then(|step| step.intent.get("wake")) {
+            let input = serde_json::from_value::<crate::wake::ParkInput>(input.clone())
+                .map_err(|error| Error::State(format!("recover turn wake policy: {error}")))?;
+            crate::wake::park(yard, &mut record, &mut recorder, &input)?;
+        } else if !cut_off
+            && record
+                .result_contract
+                .as_ref()
+                .is_some_and(|contract| contract.capture.is_some())
+            && record.grant.as_ref().is_some_and(|grant| grant.can_spawn())
+        {
+            return Err(Error::Denied("recovery cannot determine a captured managed lead's final turn: its journal has no wake policy; retry the task".into()));
+        }
+        Ok(())
+    })();
+    if let Err(error) = finished {
         record.info.status = BranchStatus::Failed {
             reason: format!("recovery could not finish the turn: {error}"),
         };
+    }
+    if record
+        .result_contract
+        .as_ref()
+        .is_some_and(|contract| contract.capture.is_some())
+        && matches!(
+            record.info.status,
+            BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
+        )
+    {
+        let receipt = step(crate::contract::CAPTURE_STEP).and_then(|step| step.outcome.as_ref());
+        let captured = if step(placement::STEP_SANDBOX).is_some() && receipt.is_none() {
+            Err(Error::Denied("artifact recovery has no completed provider-transfer capture receipt; retry the task".into()))
+        } else {
+            crate::contract::collect_artifacts(yard, &record, &fence)
+                .and_then(|_| crate::contract::capture_native(yard, &record, &mut recorder))
+        };
+        if let Err(error) = captured {
+            record.info.status = BranchStatus::Failed {
+                reason: error.to_string(),
+            };
+        }
     }
     // The cut-off turn's prompt, for `by send --retry`.
     if cut_off {

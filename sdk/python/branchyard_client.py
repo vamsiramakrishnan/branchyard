@@ -1890,6 +1890,7 @@ class Repo:
         check: Optional[Sequence[str]] = None,
         connectors: Optional[Grants] = None,
         provision: Optional[JSON] = None,
+        session_patch: Optional[JSON] = None,
         delegation: Optional[JSON] = None,
         allow_delegation: bool = False,
         priority: Optional[int] = None,
@@ -1899,7 +1900,11 @@ class Repo:
         """`POST .../send`: another turn on `branch`'s session. A send that
         names no `connectors` keeps the branch's grant; one that does is
         narrowed to it for a delegated child. `409 branch_busy`
-        (`BranchBusyError`) while another operation holds the branch."""
+        (`BranchBusyError`) while another operation holds the branch.
+        `session_patch={"model": ..., "effort": ...}` changes only those
+        settings and preserves stored provisioning. It cannot accompany
+        `provision` or `connectors`, which remain replacement requests."""
+        patch = _session_patch(session_patch, provision is not None or connectors is not None)
         body: JSON = {
             "prompt": prompt,
             "retry": retry,
@@ -1907,6 +1912,7 @@ class Repo:
             "policy": policy,
             "check": list(check) if check is not None else None,
             "provision": _provision(provision, connectors),
+            "session_patch": patch,
             "delegation": delegation,
             "allow_delegation": allow_delegation,
             "priority": priority,
@@ -2032,6 +2038,9 @@ class Repo:
         contract, `{"schema": {...}, "required": bool}`: the child reports a
         JSON value matching the schema, and `inspection.result` reads it
         back; a schema keyword outside the contract's subset is refused.
+        A required deliverable may add capture={manifest, max_files, max_bytes}
+        to collect bounded regular files after provider transfer. The receipt
+        and artifacts remain separate from the native result value.
         `bindings` is a list of `{"scratch", "access"}` or a dict from
         scratch area to `read_only` or `exclusive_write`. `owns` are the
         paths the child owns, `land` leaves it to the engine to land, and
@@ -2586,6 +2595,26 @@ def _provision(provision: Optional[JSON], connectors: Optional[Grants]) -> Optio
     merged = dict(provision or {})
     merged["connectors"] = grants_json(connectors)
     return merged
+
+
+def _session_patch(patch: Optional[JSON], replacing: bool = False) -> Optional[JSON]:
+    """Validate operator session edits without treating empty grants as omissions."""
+    if patch is None:
+        return None
+    if replacing:
+        raise ValueError("session_patch and provision/connectors are mutually exclusive")
+    if not isinstance(patch, dict) or not patch or not set(patch) <= {"model", "effort"}:
+        raise ValueError("session_patch needs only model or effort")
+    clean = {key: value for key, value in patch.items() if value is not None}
+    if not clean:
+        raise ValueError("session_patch needs a model or effort")
+    if "model" in clean and (not isinstance(clean["model"], str) or not clean["model"].strip()):
+        raise ValueError("session_patch model must not be blank")
+    if "effort" in clean and (
+        not isinstance(clean["effort"], str) or clean["effort"] not in {"low", "medium", "high", "xhigh"}
+    ):
+        raise ValueError("session_patch effort must be low, medium, high or xhigh")
+    return clean
 
 
 def _delta_text(event: JSON) -> str:
@@ -3212,16 +3241,22 @@ class Delegator:
         )
         return self._done(op).result_branches[0]
 
-    def send(self, branch: str, prompt: Optional[str] = None, retry: bool = False) -> BranchInfo:
+    def send(
+        self, branch: str, prompt: Optional[str] = None, retry: bool = False, *, session_patch: Optional[JSON] = None
+    ) -> BranchInfo:
         """`branch`'s next turn with `prompt`, or with `retry` its cut-off
         one again; its `BranchInfo` (inside, `name` and `status` only)."""
         if self.inside:
+            if session_patch is not None:
+                raise DeniedError("denied", "session_patch is an operator send option; a child keeps its provisioning")
             return BranchInfo(self._by("send", branch, prompt, retry=retry))
         if retry and prompt is not None:
             raise DeniedError("denied", "retry submits the cut-off turn's own prompt; give no prompt")
         if not retry and prompt is None:
             raise DeniedError("denied", "send needs a prompt, or retry=True")
-        return self._done(self._http().send(branch, prompt, retry=retry)).result_branches[0]
+        return self._done(self._http().send(branch, prompt, retry=retry, session_patch=session_patch)).result_branches[
+            0
+        ]
 
     def steer(self, branch: str, text: str) -> Steer:
         """`text` into `branch`'s running turn, without interrupting it."""

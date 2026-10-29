@@ -37,6 +37,33 @@ In [`engine::run`](../crates/branchyard/src/engine.rs) and [`provisioning`](../c
 
 A send provisions again with the branch's stored request unless it gives a new one; a fork inherits its parent's unless it gives one; a delegated child inherits its parent's unless its seat gives one (see `docs/rigs.md`).
 
+On `by send`, giving only `--model`, `--effort`, or both edits those session
+settings and keeps the stored credential sources, authentication method, MCP
+servers and other provisioning. Permission and budget flags do not turn that
+edit into a provisioning replacement. Secret values are still read from their
+stored sources before each turn. Adding another provisioning flag, such as
+`--secret`, `--auth`, `--mcp` or `--instructions`, supplies a replacement request
+instead; repeat the provisioning that the branch should keep.
+
+Operator HTTP sends use `"session_patch": {"model": "MODEL", "effort": "low"}`
+for the same edit. Either setting may be omitted. Rust uses
+`TaskOptions::session_patch` with `Some(SessionPatch { ... })`; Python uses
+`repo.send(branch, prompt, session_patch={...})` or the outside-harness
+`connect(...).send` equivalent. A patch cannot accompany `provision` or connector
+replacement options. An empty patch, an unknown field or a blank model is
+refused. Patches are supported only by sends; they are refused for new tasks,
+forks and reincarnations, and inside-harness sends retain their existing scope.
+The harness-only `branchyard.send` function exposes the delegated arguments
+only; use the outside-harness `branchyard_client` operator client for a patch.
+
+Explicit `provision` requests keep their replacement behavior. In particular,
+`"provision": {"secrets": [], "mcp_servers": []}` clears those requested secret
+sources and servers. Native credential files already cached in the private home
+follow the existing cleanup rules described below. After a branch explicitly
+selects a model and runs a turn, a send cannot change that model. A session patch
+adds no fallback harness or conversation restart and copies no credential
+values into the stored request.
+
 ## Harnesses
 
 Scion's nine provisioners map onto Branchyard's harness IDs through [`branchyard_controls::harness`](../crates/branchyard-controls/src/harness.rs). Seven have Branchyard profiles and are translated; a test fails if a vendored Scion provisioner is neither translated nor explained.

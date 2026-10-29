@@ -192,6 +192,70 @@ fn local(root: &Path, args: &[&str]) -> Output {
     command(BY, root).args(with_agent(args)).output().unwrap()
 }
 
+fn assert_json_send_outcome(prompt: &str, state: &str, exit: i32) {
+    let dir = Dir::new();
+    let here = dir.repo("here");
+    let there = dir.repo("there");
+    let server = Served::start(&dir.0, &[("app", &there)], &["--allow-client-commands"]);
+    let both = |args: &[&str]| {
+        let remote_args = with_agent(args);
+        [
+            ("local", local(&here, args)),
+            (
+                "remote",
+                server.by(
+                    &dir.0,
+                    &remote_args.iter().map(String::as_str).collect::<Vec<_>>(),
+                ),
+            ),
+        ]
+    };
+    for (mode, output) in both(&["run", "WHOAMI", "--name", "follow", "--yes", "--json"]) {
+        assert!(output.status.success(), "{mode}: {}", text(&output.stderr));
+    }
+    for (mode, output) in both(&["send", "follow", prompt, "--yes", "--json"]) {
+        // Parsing the entire stream also rejects a second error JSON after Sent.
+        let sent: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(sent.as_object().unwrap().len(), 2, "{mode}: {sent}");
+        assert_eq!(sent["name"], "follow", "{mode}: {sent}");
+        assert_eq!(sent["status"]["state"], state, "{mode}: {sent}");
+        if prompt.starts_with("SH ") {
+            assert!(
+                sent["status"]["reason"]
+                    .as_str()
+                    .unwrap()
+                    .contains("snapshot failed"),
+                "{mode}: {sent}"
+            );
+        }
+        assert_eq!(
+            output.status.code(),
+            Some(exit),
+            "{mode}: {sent}\n{}",
+            text(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn json_send_reports_success_with_one_sent_object() {
+    assert_json_send_outcome("WHOAMI", "no_changes", 0);
+}
+
+#[test]
+fn json_send_reports_harness_failure_with_one_sent_object() {
+    assert_json_send_outcome("EXIT", "failed", 1);
+}
+
+#[test]
+fn json_send_reports_snapshot_failure_with_one_sent_object() {
+    assert_json_send_outcome(
+        "SH touch \"$(git rev-parse --git-path index.lock)\"",
+        "failed",
+        1,
+    );
+}
+
 #[test]
 fn remote_contracted_native_answers_survive_run_and_fan_without_git_changes() {
     let dir = Dir::new();

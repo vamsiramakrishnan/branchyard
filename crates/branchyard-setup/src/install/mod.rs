@@ -27,7 +27,7 @@
 pub mod merge;
 mod yaml;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -547,7 +547,7 @@ pub fn summary_from(bundle: Bundle, manifest: &Manifest, kept: &[Kept]) -> Strin
                 .iter()
                 .any(|k| k.harness == manifest.harness && k.key == f.unless_set)
     };
-    let mut skills = 0;
+    let mut skills = BTreeSet::new();
     let mut commands = 0;
     let mut hooks = 0;
     let mut status_line = manifest.provides.iter().any(|p| p == "statusline");
@@ -560,8 +560,16 @@ pub fn summary_from(bundle: Bundle, manifest: &Manifest, kept: &[Kept]) -> Strin
             }
             continue;
         }
-        if f.from.starts_with("skills/") {
-            skills += 1;
+        if f.from.trim_end_matches('/') == "skills" || f.from.starts_with("skills/") {
+            let prefix = format!("{}/", f.from.trim_end_matches('/'));
+            for (path, _) in bundle.0 {
+                if *path != f.from && !path.starts_with(&prefix) {
+                    continue;
+                }
+                if let Some(root) = path.strip_suffix("/SKILL.md") {
+                    skills.insert(root);
+                }
+            }
             continue;
         }
         if f.from.split('/').any(|part| part == "commands") {
@@ -578,8 +586,8 @@ pub fn summary_from(bundle: Bundle, manifest: &Manifest, kept: &[Kept]) -> Strin
         }
     }
     let mut parts: Vec<String> = Vec::new();
-    if skills > 0 {
-        parts.push(counted(skills, "skill"));
+    if !skills.is_empty() {
+        parts.push(counted(skills.len(), "skill"));
     }
     if commands > 0 {
         parts.push(counted(commands, "command"));
