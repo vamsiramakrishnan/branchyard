@@ -242,6 +242,24 @@ a lost creation receipt, a replacement bucket and invalid or foreign receipts.
 Not done: this exact revised helper has not provisioned another live deployment;
 the live command record is `/home/user/branchyard-console-work-20261029/gke-state/commands.jsonl`.
 
+Live native-bridge evidence, 29 October 2026: a fresh private GKE Standard
+`1.37.1-gke.2097000` cluster ran the pinned Substrate source on one
+`c3-standard-4` node with a 100 GB boot disk and an explicit 10 GiB evaluation
+database. Branchyard CLI `0.3.0` candidates ran
+`by substrate check --smoke --harness agy --json` from the operator machine and
+an existing GCE validation host. The command created a disposable gVisor Actor,
+put and retrieved the same 29 bytes through its bridge, executed
+`agy --version` with result `1.4.9`, and destroyed the Actor. An independent
+rerun passed, and a native API query afterward found no Actors in the
+test atespace. TLS hostname verification passed over the private GCE connection.
+The [dated run record](evidence/substrate-gke-2026-10-29.json) includes image
+digests, ownership, scoped IAM, the 500 GiB database-default correction and the
+worker-capacity recovery after resetting that fresh database. The environment
+is retained for acceptance. Not done: these checks called no model; PTY,
+retained pause/resume, console model execution and final infrastructure cleanup
+remain separate checks. MicroVM and Agentic Compute Engine were not tested in
+this deployment.
+
 ## Remove a test deployment
 
 Keep the redacted run records before deleting a temporary deployment. Read its
