@@ -1,4 +1,5 @@
 //! Real local PTYs and fake-provider workspace interaction; no model calls.
+#![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod common;
 
 use std::io::Write as _;
@@ -12,7 +13,7 @@ use branchyard::{
 };
 use branchyard_runtime::LocalProvider;
 use branchyard_sandbox::fake::{FakeOp, FakeProvider};
-use branchyard_sandbox::{Process as _, SandboxState};
+use branchyard_sandbox::{Operation, Process as _, SandboxState};
 use branchyard_testkit::{wait, MockHttp, Response};
 use common::Fixture;
 
@@ -431,4 +432,68 @@ fn helper_stdout_eof_does_not_kill_work_still_waiting_for_input() {
         std::fs::read(worktree.join("helper-done")).unwrap(),
         b"finished"
     );
+}
+
+#[test]
+fn a_replaced_lease_cannot_control_its_claimed_allocation() {
+    let f = Fixture::new();
+    let provider = remote(&f, "fenced");
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER replace_runtime_lease AFTER DELETE ON sandboxes WHEN OLD.branch = 'fenced' AND OLD.kind = 'kept' BEGIN UPDATE leases SET generation = generation + 1 WHERE branch = 'fenced'; END;").unwrap();
+    let before = provider.ops().len();
+    assert!(matches!(
+        f.yard
+            .workspace_runtime_action("fenced", RuntimeAction::Resume, "lease-replaced"),
+        Err(Error::Fenced(_))
+    ));
+    assert_eq!(provider.ops().len(), before);
+    let retained: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sandboxes WHERE branch = 'fenced' AND kind = 'kept'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 0);
+}
+
+#[test]
+fn failed_provider_actions_restore_the_owned_allocation_for_explicit_retry() {
+    let f = Fixture::new();
+    let provider = remote(&f, "retry");
+    provider.set_failing(Operation::Resume, true);
+    assert!(f.yard.workspace_runtime("retry").is_err());
+    assert_eq!(
+        f.yard.workspace_runtime_state("retry").unwrap().state,
+        "paused"
+    );
+    assert!(f
+        .yard
+        .workspace_runtime_action("retry", RuntimeAction::Resume, "retry-resume")
+        .is_err());
+    provider.set_failing(Operation::Resume, false);
+    assert_eq!(
+        f.yard
+            .workspace_runtime_action("retry", RuntimeAction::Resume, "retry-resume")
+            .unwrap()
+            .state,
+        "running"
+    );
+    f.yard.workspace_runtime("retry").unwrap().close().unwrap();
+}
+
+#[test]
+fn inspection_does_not_advertise_an_old_branch_incarnations_allocation() {
+    let f = Fixture::new();
+    remote(&f, "incarnation");
+    let db = rusqlite::Connection::open(f.root.join(".branchyard/state.db")).unwrap();
+    db.execute(
+        "UPDATE sandboxes SET incarnation = 0 WHERE branch = 'incarnation' AND kind = 'kept'",
+        [],
+    )
+    .unwrap();
+    let state = f.yard.workspace_runtime_state("incarnation").unwrap();
+    assert_eq!(state.state, "absent");
+    assert!(state.runtime.allocation.is_none());
+    assert!(!state.can_pause && !state.can_resume && !state.can_destroy);
 }

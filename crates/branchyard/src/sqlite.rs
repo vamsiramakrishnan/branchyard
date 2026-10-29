@@ -2179,26 +2179,38 @@ fn sandbox_rows(
     Ok(found)
 }
 
-impl SandboxBackend for Sqlite {
-    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
-        self.tx(true, |tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO sandboxes \
+fn write_sandbox(conn: &Connection, row: &SandboxRow) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO sandboxes \
                  (branch, incarnation, kind, provider, name, turn, detail, used_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    row.branch,
-                    row.incarnation,
-                    row.kind.as_str(),
-                    row.provider,
-                    row.name,
-                    row.turn.map(i64::from),
-                    row.detail,
-                    to_db("used_ms", row.used_ms)?
-                ],
-            )
-            .map_err(|e| db("sandbox", e))?;
-            Ok(())
+        params![
+            row.branch,
+            row.incarnation,
+            row.kind.as_str(),
+            row.provider,
+            row.name,
+            row.turn.map(i64::from),
+            row.detail,
+            to_db("used_ms", row.used_ms)?
+        ],
+    )
+    .map_err(|e| db("sandbox", e))?;
+    Ok(())
+}
+
+impl SandboxBackend for Sqlite {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| write_sandbox(tx, row))
+    }
+
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            check(tx, fence)?;
+            if row.incarnation != fence.incarnation || row.branch != fence.branch {
+                return Err(Error::Fenced(fence.branch.clone()));
+            }
+            write_sandbox(tx, row)
         })
     }
 

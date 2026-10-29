@@ -574,9 +574,14 @@ pub(crate) fn acquire_retained(
         })
     })();
     if result.is_err() {
-        store.sandboxes().put_sandbox(&taken).map_err(|error| {
-            format!("could not restore the retained allocation record after failed access: {error}")
-        })?;
+        store
+            .sandboxes()
+            .put_sandbox_fenced(&taken, wanted.fence)
+            .map_err(|error| {
+                format!(
+                    "could not restore the retained allocation record after failed access: {error}"
+                )
+            })?;
     }
     result
 }

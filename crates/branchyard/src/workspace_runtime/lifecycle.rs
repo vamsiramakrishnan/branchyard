@@ -113,12 +113,23 @@ impl Yard {
         kind.check(self)?;
         let provider = kind.open(self).map_err(Error::State)?;
         let caps = provider.capabilities();
+        let incarnation = store
+            .storage()
+            .identities()?
+            .into_iter()
+            .find(|identity| identity.name == branch)
+            .ok_or_else(|| Error::UnknownBranch(branch.into()))?
+            .incarnation;
         let row = store
             .sandboxes()
             .sandboxes(branch)?
             .into_iter()
             .rev()
-            .find(|row| row.kind == SandboxKind::Kept && row.provider == kind.key());
+            .find(|row| {
+                row.kind == SandboxKind::Kept
+                    && row.provider == kind.key()
+                    && row.incarnation == incarnation
+            });
         let state = if let Some(row) = row {
             let state = observed(provider.as_ref(), &row.name)?;
             info.allocation = Some(row.name);
@@ -249,6 +260,9 @@ impl Yard {
                     .into(),
             ));
         }
+        store
+            .backend()
+            .renew(lease.fence(), crate::state::LEASE_TTL)?;
         let acted = match action {
             RuntimeAction::Pause => provider.pause(&row.name),
             RuntimeAction::Suspend => provider.stop(&row.name),
@@ -258,7 +272,9 @@ impl Yard {
         if action != RuntimeAction::Destroy || acted.is_err() {
             let mut retained = row.clone();
             retained.used_ms = now_ms();
-            store.sandboxes().put_sandbox(&retained)?;
+            store
+                .sandboxes()
+                .put_sandbox_fenced(&retained, lease.fence())?;
         }
         acted.map_err(|error| Error::State(error.to_string()))?;
         let state = observed(provider.as_ref(), &row.name)?;

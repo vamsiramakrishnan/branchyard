@@ -2730,30 +2730,42 @@ fn sandbox_row(r: &Row) -> Result<SandboxRow, Error> {
     })
 }
 
-impl SandboxBackend for Postgres {
-    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
-        self.tx(true, |tx| {
-            tx.execute(
-                "INSERT INTO by_sandboxes \
+fn write_sandbox(tx: &mut Transaction<'_>, repo: &str, row: &SandboxRow) -> R<()> {
+    tx.execute(
+        "INSERT INTO by_sandboxes \
                  (repo, branch, incarnation, kind, provider, name, turn, detail, used_ms) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
                  ON CONFLICT (repo, branch, kind, name) DO UPDATE SET \
                  incarnation = EXCLUDED.incarnation, provider = EXCLUDED.provider, \
                  turn = EXCLUDED.turn, detail = EXCLUDED.detail, used_ms = EXCLUDED.used_ms",
-                &[
-                    &self.repo,
-                    &row.branch,
-                    &row.incarnation,
-                    &row.kind.as_str(),
-                    &row.provider,
-                    &row.name,
-                    &row.turn.map(i64::from),
-                    &row.detail,
-                    &to_db("used_ms", row.used_ms)?,
-                ],
-            )
-            .map_err(db("sandbox"))?;
-            Ok(())
+        &[
+            &repo,
+            &row.branch,
+            &row.incarnation,
+            &row.kind.as_str(),
+            &row.provider,
+            &row.name,
+            &row.turn.map(i64::from),
+            &row.detail,
+            &to_db("used_ms", row.used_ms)?,
+        ],
+    )
+    .map_err(db("sandbox"))?;
+    Ok(())
+}
+
+impl SandboxBackend for Postgres {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| write_sandbox(tx, &self.repo, row))
+    }
+
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            self.check(tx, fence)?;
+            if row.incarnation != fence.incarnation || row.branch != fence.branch {
+                return Err(Error::Fenced(fence.branch.clone()).into());
+            }
+            write_sandbox(tx, &self.repo, row)
         })
     }
 

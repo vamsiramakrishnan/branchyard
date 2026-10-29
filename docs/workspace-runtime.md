@@ -35,6 +35,11 @@ for reconciliation. It does not steal a cleanup owner's allocation or guess
 that a missing row permits replay. The original allocation remains named in
 the operation intent for inspection.
 
+The engine checks the current lease immediately before provider effects.
+Restoring a claimed allocation row checks the branch incarnation and lease
+generation in the same database transaction. A replaced lease cannot publish
+an old allocation into the current branch's retained state.
+
 | Action | Provider operation | Retained data |
 |---|---|---|
 | `Pause` | Pause on the current node | Provider memory and disk remain |

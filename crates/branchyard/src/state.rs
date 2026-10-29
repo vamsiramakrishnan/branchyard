@@ -771,6 +771,8 @@ pub(crate) struct SandboxRow {
 pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     /// Insert or replace the row for (`branch`, `kind`, `name`).
     fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error>;
+    /// Restore an interactive allocation only while its branch fence still holds.
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error>;
     /// Every row of `branch`, oldest first.
     fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error>;
     /// Every row of `kind` in the store whose provider is `provider`, least

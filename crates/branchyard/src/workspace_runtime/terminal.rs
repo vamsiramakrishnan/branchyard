@@ -64,6 +64,7 @@ struct Output {
     start: u64,
     ready: bool,
     closed: bool,
+    finished: bool,
     error: Option<String>,
 }
 
@@ -158,10 +159,19 @@ impl Inner {
         let (output, _) = self.changed.wait_timeout_while_recovering(
             output,
             Duration::from_secs(2),
-            |output| !output.closed,
+            |output| !output.finished,
             "terminal close",
         );
         drop(output);
+        if let Some(service) = self
+            .pty_service
+            .lock_recovering("terminal PTY service")
+            .as_ref()
+        {
+            if let Some(reclaim) = service.service().reclaim {
+                crate::services::reclaim_process(&reclaim);
+            }
+        }
         let process = self.process.lock_recovering("terminal process").take();
         if let Some(mut process) = process {
             if !matches!(process.try_wait(), Ok(Some(_))) {
@@ -349,6 +359,8 @@ fn read_output(stdout: Box<dyn io::Read + Send>, inner: &Inner) -> Result<(), Er
             .take((MAX_FRAME + 1) as u64)
             .read_until(b'\n', &mut frame)?;
         if read == 0 {
+            inner.output.lock_recovering("terminal output").finished = true;
+            inner.changed.notify_all();
             return Ok(());
         }
         if frame.len() > MAX_FRAME || frame.last() != Some(&b'\n') {
@@ -367,7 +379,10 @@ fn read_output(stdout: Box<dyn io::Read + Send>, inner: &Inner) -> Result<(), Er
                 }
                 output.ready = true;
             }
-            Frame::Closed => output.closed = true,
+            Frame::Closed => {
+                output.closed = true;
+                output.finished = true;
+            }
             Frame::Output { data } => {
                 let bytes = STANDARD
                     .decode(data)
