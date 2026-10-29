@@ -280,6 +280,8 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos/{repo}/branches/{b}/artifacts` | Every artifact `b` may read | `{"artifacts": [ArtifactRef]}` |
 | `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}` | Artifact `id`'s provenance, checked against `b`'s grant | `ArtifactRef` |
 | `GET /v1/repos/{repo}/branches/{b}/artifacts/{id}/content` | Its bytes, with a digest header | streamed bytes |
+| `GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview` | Derive an authorized, bounded document or table preview; see [document previews](artifact-previews.md) | preview JSON or a structured readiness error |
+| `GET /v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview/assets/{asset}` | Read a derived PNG after checking the original artifact's current grant | PNG bytes |
 | `POST /v1/repos/{repo}/branches/{b}/artifacts/{id}/share` | Share it with `{"to": "BRANCH"}` | `{"ok": true}` |
 | `POST /v1/repos/{repo}/branches/{b}/scratch` | Create `{"name": "NAME"}`, owned by `b` | `ScratchArea` |
 | `GET /v1/repos/{repo}/branches/{b}/scratch` | Every scratch area `b` may reach | `{"areas": [ScratchArea]}` |

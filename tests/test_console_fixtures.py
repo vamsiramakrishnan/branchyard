@@ -74,7 +74,7 @@ class ConsoleFixturesTest(unittest.TestCase):
         import docx
 
         document = docx.Document(str(self.out / "backlog_report.docx"))
-        styles = [paragraph.style.name for paragraph in document.paragraphs]
+        styles = [paragraph.style.name for paragraph in document.paragraphs if paragraph.style is not None]
         self.assertIn("Heading 1", styles)
         self.assertIn("Heading 2", styles)
         texts = [paragraph.text for paragraph in document.paragraphs]

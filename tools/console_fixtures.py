@@ -39,7 +39,7 @@ TICKETS: list[dict[str, str]] = [
         "ticket_id": "00451",
         "summary": "Dashboard load regression",
         "severity": "high",
-        "notes": '=SUM(A1:A2) is not a formula, just reported text',
+        "notes": "=SUM(A1:A2) is not a formula, just reported text",
     },
     {
         "ticket_id": "00452",

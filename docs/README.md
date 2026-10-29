@@ -24,6 +24,8 @@ How to do one thing.
 |---|---|
 | [Cooperative teams](cooperative-teams.md) | How do I coordinate native code and knowledge workers, validate results, and relay frozen handoffs? |
 | [Knowledge and design skills](knowledge-skills.md) | How do I discover skills progressively, capture evidence, analyze tables and check designed artifacts using established libraries? |
+| [Document previews](artifact-previews.md) | How do bounded CSV, Excel, Word and slide previews preserve the original and enforce its read permissions? |
+| [Workspace runtime controls](workspace-runtime.md) | How do terminals and lifecycle actions reach the owning worker and retained provider allocation? |
 | [Watching branches](watch.md) | How do I watch every branch live with `by watch`, act on one with a key, and get told when a branch needs me or ends? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |
@@ -94,6 +96,8 @@ Why it is built this way. Some pages describe a target rather than what exists; 
 | [Provisioning](provisioning.md) | How is a harness's home prepared before each turn: secrets, MCP servers, instructions, model, effort and telemetry, translated from Scion's provisioners, and what is not ported? |
 | [Artifact toolkit](artifact-toolkit.md) | How do atomic document skills create, revise, render and validate DOCX, XLSX, PDF and PPTX files, and assemble independent slide sections? |
 | [Artifact capture](artifact-capture.md) | How are declared output files collected after a producing turn and published before accepting its deliverable? |
+| [Preview component](artifact-preview-component.md) | How does the console embed authenticated document previews and dispose requests and image URLs? |
+| [Console fixtures](examples/console-fixtures.md) | How do I generate deterministic documents and tables for console checks? |
 | [Native identity](identity.md) | How do Google ADC, verified server callers and connector accounts preserve native IAM and upstream permissions? |
 | [Atomic knowledge validation, 29 October 2026](atomic-knowledge-validation-2026-10-29.md) | Which document, source-free harness, WIF, IAM and protected MCP checks actually ran, and what setup friction did they expose? |
 | [Model gateway](model-gateway.md) | How does a harness's model call go through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, budgets and exact cost? |
