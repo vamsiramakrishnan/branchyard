@@ -98,6 +98,21 @@ def checked_file(root: Path, ref: dict[str, Any]) -> Path:
 
 
 @contextmanager
+def output_directory(out: Path) -> Iterator[Path]:
+    """Publish a complete new bundle; parallel workers must use distinct destinations."""
+    out = Path(out)
+    if out.exists() or out.is_symlink():
+        raise ArtifactError("Output directory already exists; choose a new destination")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="." + out.name + "-", dir=out.parent) as temporary:
+        staged = Path(temporary)
+        yield staged
+        if out.exists() or out.is_symlink():
+            raise ArtifactError("Output destination appeared during the operation")
+        os.rename(staged, out)
+
+
+@contextmanager
 def output_file(out: Path) -> Iterator[Path]:
     """Replace the destination only after the entire operation succeeds."""
     out = Path(out)

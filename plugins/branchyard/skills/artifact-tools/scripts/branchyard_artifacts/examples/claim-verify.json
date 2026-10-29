@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {"path": "evidence/report/index.json", "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}
+  ],
+  "claims": [
+    {
+      "id": "finding",
+      "text": "Replace with the claim being checked",
+      "evidence": [{"source_id": "report", "locator": "line:1", "quote": "Replace with an exact quotation"}]
+    }
+  ]
+}

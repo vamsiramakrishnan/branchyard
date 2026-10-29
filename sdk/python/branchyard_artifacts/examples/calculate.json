@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "variables": {
+    "work_hours": {"value": 552, "unit": "hour"},
+    "hourly_rate": {"value": 75, "unit": "USD / hour"},
+    "platform_cost": {"value": 10240, "unit": "USD"}
+  },
+  "expression": "work_hours * hourly_rate - platform_cost",
+  "unit": "USD",
+  "currency_basis": {"code": "USD", "basis": "Illustrative nominal USD; no exchange-rate conversion"},
+  "assumptions": ["Released labor capacity is not automatically a cash saving"]
+}

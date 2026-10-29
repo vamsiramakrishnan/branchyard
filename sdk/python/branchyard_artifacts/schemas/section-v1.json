@@ -269,11 +269,46 @@
                 "url": {
                   "type": "string",
                   "pattern": "^https?://[^\\s]+$"
+                },
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "locator": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "sha256",
+                    "locator"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
-                "label",
-                "url"
+                "label"
+              ],
+              "oneOf": [
+                {
+                  "required": [
+                    "url"
+                  ]
+                },
+                {
+                  "required": [
+                    "source"
+                  ]
+                }
               ],
               "additionalProperties": false
             }

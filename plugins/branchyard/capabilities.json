@@ -3,64 +3,220 @@
   "skills": [
     {
       "id": "artifact-tools",
-      "description": "Find and run Branchyard document tooling, check its runtime, and prepare file manifests for managed artifact capture.",
-      "requires": []
+      "description": "Find and run knowledge artifact tools, check dependencies, prepare the runtime and capture output files.",
+      "requires": [],
+      "topic": "runtime"
     },
     {
       "id": "docx",
       "description": "Create, inspect, update and validate editable Word DOCX documents, preserving source files and checking layout when needed.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "xlsx",
       "description": "Create, inspect, update and validate Excel workbooks, formulas, calculated values and native pivot tables.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "pdf",
       "description": "Create, extract, overlay and validate PDFs, with rendered checks and explicit limits on document editing.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "pptx",
       "description": "Create, inspect, update and validate editable PowerPoint decks, including native charts and rendered layout checks.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "google-docs",
       "description": "Create, read and update native Google Docs through an authorized connector, checking actual document identity and revisions.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "google-sheets",
       "description": "Create, inspect and update native Google Sheets, including ranges, calculations and pivots supported by the granted connector.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "google-slides",
       "description": "Create, inspect and update native Google Slides through a granted connector while preserving presentation identity, layouts and permissions.",
       "requires": [
         "artifact-tools"
-      ]
+      ],
+      "topic": "documents"
     },
     {
       "id": "parallel-deck",
       "description": "Split a large presentation into independently owned section specifications and assemble checked editable slides with one renderer.",
       "requires": [
         "pptx"
+      ],
+      "topic": "workflows"
+    },
+    {
+      "id": "source-capture",
+      "description": "Snapshot retrieved local sources with origin metadata, exact hashes and page, paragraph or cell anchors for later evidence checks.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/source-capture.json",
+          "description": "source-capture request example"
+        }
       ]
+    },
+    {
+      "id": "table-extract",
+      "description": "Extract local PDF, DOCX and XLSX tables into reviewable records with source hashes and page, table or sheet locations.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge"
+    },
+    {
+      "id": "data-clean",
+      "description": "Normalize local CSV data with explicit trim, null, type and duplicate policies while preserving identifiers and recording changes.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/data-clean.json",
+          "description": "data-clean request example"
+        }
+      ]
+    },
+    {
+      "id": "calculate",
+      "description": "Evaluate reproducible arithmetic with named quantities, explicit units and assumptions using Pint, recording inputs and results.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/calculate.json",
+          "description": "calculate request example"
+        }
+      ]
+    },
+    {
+      "id": "claim-verify",
+      "description": "Check source hashes, reproduced extraction anchors and exact quotations while keeping factual support and semantic review explicit.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/claim-verify.json",
+          "description": "claim-verify request example"
+        }
+      ]
+    },
+    {
+      "id": "inspect-layout",
+      "description": "Render document pages and presentation slides into inspectable previews, keeping rendering distinct from visual review.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "knowledge"
+    },
+    {
+      "id": "visual-design",
+      "description": "Apply coherent visual hierarchy, typography, spacing and color to reports, presentations and other knowledge artifacts.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "design",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/docx.json",
+          "description": "docx request example"
+        },
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/deck.json",
+          "description": "deck request example"
+        },
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/section.json",
+          "description": "section request example"
+        }
+      ]
+    },
+    {
+      "id": "chart-design",
+      "description": "Choose truthful chart encodings with explicit units, uncertainty and source data, using editable charts where supported.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "design",
+      "resources": [
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/deck.json",
+          "description": "deck request example"
+        },
+        {
+          "path": "../artifact-tools/scripts/branchyard_artifacts/examples/section.json",
+          "description": "section request example"
+        }
+      ]
+    },
+    {
+      "id": "diagram-design",
+      "description": "Create editable process, relationship and system diagrams using Mermaid or established drawing tools.",
+      "requires": [
+        "artifact-tools"
+      ],
+      "topic": "design"
+    }
+  ],
+  "topics": [
+    {
+      "id": "documents",
+      "title": "Documents",
+      "description": "Read, create and update local or connected artifacts."
+    },
+    {
+      "id": "knowledge",
+      "title": "Evidence and analysis",
+      "description": "Capture sources, extract tables, clean data, calculate and verify claims."
+    },
+    {
+      "id": "design",
+      "title": "Design",
+      "description": "Compose readable pages, truthful charts and editable diagrams."
+    },
+    {
+      "id": "workflows",
+      "title": "Composed workflows",
+      "description": "Coordinate section ownership and assemble deliverables."
+    },
+    {
+      "id": "runtime",
+      "title": "Tools and runtime",
+      "description": "Inspect dependencies, prepare tools and capture outputs."
     }
   ]
 }

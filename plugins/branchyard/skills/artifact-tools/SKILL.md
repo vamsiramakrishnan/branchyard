@@ -1,6 +1,6 @@
 ---
 name: artifact-tools
-description: "Find and run Branchyard document tooling, check its runtime, and prepare file manifests for managed artifact capture."
+description: "Find and run knowledge artifact tools, check dependencies, prepare the runtime and capture output files."
 ---
 # Artifact tools
 

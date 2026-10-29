@@ -48,7 +48,8 @@ class PackagingTests(unittest.TestCase):
 
         locked = {normalize(name): version for name, version in re.findall(r"^([\w-]+)==([^\s]+)", lock, re.M)}
         for pin in project["project"]["optional-dependencies"]["artifacts"]:
-            name, version = pin.split("==")
+            # These are deliberately exact pins; wheel building validates marker syntax.
+            name, version = pin.partition(";")[0].strip().split("==")
             self.assertEqual(locked[normalize(name)], version)
         self.assertGreater(lock.count("--hash=sha256:"), len(locked))
         image = (ROOT / "deploy/Dockerfile.artifacts").read_text()
@@ -56,6 +57,21 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("python3-uno", image)
         self.assertIn("fonts-dejavu-core", image)
         self.assertIn("poppler-utils", image)
+
+    @unittest.skipUnless(sys.version_info >= (3, 11), "bare Python needs the stdlib TOML reader")
+    def test_pin_checks_need_no_optional_site_packages(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-S",
+                __file__,
+                "PackagingTests.test_base_has_no_dependencies_and_artifact_pins_match_the_hashed_lock",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_every_package_module_parses_as_python39_and_every_example_is_versioned(self):
         for path in PACKAGE.glob("*.py"):

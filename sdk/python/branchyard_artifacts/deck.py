@@ -94,6 +94,9 @@ def _section(path: Path, design: dict[str, Any] | None = None) -> tuple[dict[str
         if key in seen:
             raise ArtifactError("Duplicate slide ID: " + key)
         seen.add(key)
+        for citation in slide["citations"]:
+            if "source" in citation:
+                checked_file(path.parent, citation["source"])
         if design and font:
             margin = design["margin_in"]
             if not text_fits(slide["title"], design["width_in"] - 2 * margin, 0.75, design["title_font_size_pt"], font):

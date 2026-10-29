@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-29",
+  "evidence": "hermetic synthetic fixtures with actual local libraries and CLI/native renderers; no provider calls",
+  "python39": {
+    "version": "3.9.25",
+    "evidence": [
+      "Ran 16 tests in 1.429s",
+      "OK"
+    ],
+    "analysis": [
+      "Ran 19 tests in 4.013s",
+      "OK (skipped=3)"
+    ],
+    "cli": [
+      "Ran 6 tests in 1.331s",
+      "OK"
+    ],
+    "artifacts": [
+      "Ran 20 tests in 10.732s",
+      "OK"
+    ],
+    "wheel": [
+      "Ran 4 tests in 2.105s",
+      "OK"
+    ],
+    "pdf_table_tests": "3 explicit skips: patched PDF table parser requires Python >=3.10"
+  },
+  "python312": {
+    "version": "3.12.3",
+    "evidence": [
+      "Ran 16 tests in 0.466s",
+      "OK"
+    ],
+    "analysis": [
+      "Ran 19 tests in 2.318s",
+      "OK"
+    ]
+  },
+  "forward_workflow": {
+    "all_six_operations": "passed",
+    "copied_source_free_launcher": "passed",
+    "citation_mutations": "rejected",
+    "local_deck_citation": "verified file SHA and locator retained in notes",
+    "bar_chart_baseline": 0,
+    "series_values": [
+      10350,
+      10240
+    ],
+    "calculated_net_capacity_value_usd_per_month": 110,
+    "visual_review": "actual source PDF and corrected deck preview inspected",
+    "diagram_renderer": "unavailable; editable Mermaid source retained"
+  },
+  "discovery": {
+    "catalog_skills": 18,
+    "root_index_bytes": 723,
+    "largest_topic_index_bytes": 1209,
+    "largest_skill_index_bytes": 990
+  },
+  "not_done": [
+    "new-skill live model qualification",
+    "OCR",
+    "automatic factual entailment",
+    "Google Workspace human OAuth consent"
+  ]
+}

@@ -1,4 +1,4 @@
-//! Source-free document skills for every task, independent of delegation.
+//! Source-free skills with progressive discovery for every task, independent of delegation.
 
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
@@ -17,7 +17,6 @@ struct Catalog {
 #[derive(Deserialize)]
 struct Capability {
     id: String,
-    description: String,
 }
 
 #[derive(Debug)]
@@ -56,7 +55,6 @@ pub(crate) fn stage(host: &Path, guest: &Path) -> Result<Staged, String> {
     let catalog: Catalog = serde_json::from_str(skills::CAPABILITIES)
         .map_err(|e| format!("invalid embedded capabilities: {e}"))?;
     let mut plan = Plan::default();
-    let mut index = String::from("# Document capabilities\n\nRead the skill for the requested format. These skills support your own planning and delegation.\n\n");
     for capability in catalog.skills {
         let skill = skills::skill(&capability.id)
             .ok_or_else(|| format!("embedded skill {} is missing", capability.id))?;
@@ -68,24 +66,28 @@ pub(crate) fn stage(host: &Path, guest: &Path) -> Result<Staged, String> {
                 Edit::Put((*content).into()),
             );
         }
-        index.push_str(&format!(
-            "- {}: {}\n  Skill: {}\n",
-            skill.name,
-            capability.description,
-            guest.join(&directory).join("SKILL.md").display()
-        ));
     }
-    index.push_str(&format!(
-        "\nToolkit: python3 {}\nRun doctor before choosing a format operation. Read artifact-tools for runtime setup and manifests. Google operations require the granted connector and its upstream account permissions.\n",
-        branchyard_recipe::quote(&guest.join(DIRECTORY).join("artifact-tools/scripts/run.py").display().to_string())
-    ));
     let index_path = format!("{DIRECTORY}/INDEX.md");
-    plan.edit(&index_path, false, Edit::Put(index));
+    plan.edit(&index_path, false, Edit::Put(skills::INDEX.into()));
+    if !skills::UPSTREAM_LOCK.is_empty() {
+        plan.edit(
+            &format!("{DIRECTORY}/upstream.lock.json"),
+            false,
+            Edit::Put(skills::UPSTREAM_LOCK.into()),
+        );
+    }
+    for (path, content) in skills::TOPIC_INDEXES {
+        plan.edit(
+            &format!("{DIRECTORY}/{path}"),
+            false,
+            Edit::Put((*content).into()),
+        );
+    }
     let applied = apply::apply(&plan, host)
         .map_err(|e| format!("could not install document capabilities: {e}"))?;
     Ok(Staged {
         instruction: format!(
-            "Document skills and tooling are available. When working with documents, spreadsheets, PDFs or presentations, read {} and load the relevant skill. Keep your native planning and subagents.",
+            "Skills and tooling are available. Read {} and load only the relevant topic and skill. Keep your native planning and subagents.",
             guest.join(index_path).display()
         ),
         written: applied.written,
@@ -105,18 +107,47 @@ mod tests {
         assert!(first
             .instruction
             .contains("/guest/home/.branchyard/capabilities/INDEX.md"));
-        let index = std::fs::read_to_string(host.path().join(DIRECTORY).join("INDEX.md")).unwrap();
-        for id in [
-            "docx",
-            "xlsx",
-            "pdf",
-            "pptx",
-            "google-docs",
-            "google-sheets",
-            "google-slides",
-            "parallel-deck",
-        ] {
-            assert!(index.contains(&format!("/guest/home/{DIRECTORY}/{id}/SKILL.md")));
+        let root = host.path().join(DIRECTORY);
+        let index = std::fs::read_to_string(root.join("INDEX.md")).unwrap();
+        assert_eq!(index, skills::INDEX);
+        assert!(index.len() <= 4096);
+        assert!(first.instruction.len() < 512);
+        assert!(!first.instruction.contains("SKILL.md"));
+        for (path, content) in skills::TOPIC_INDEXES {
+            assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), *content);
+        }
+        let catalog: Catalog = serde_json::from_str(skills::CAPABILITIES).unwrap();
+        for capability in catalog.skills {
+            let directory = root.join(capability.id);
+            assert!(directory.join("INDEX.md").is_file());
+            assert!(directory.join("SKILL.md").is_file());
+        }
+        let mut directories = vec![root.clone()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.file_name().is_some_and(|name| name == "INDEX.md") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    assert!(text.len() <= 8192);
+                    for line in text.lines() {
+                        let Some((_, target)) = line.split_once("](") else {
+                            continue;
+                        };
+                        let relative = target.split_once(')').unwrap().0;
+                        assert!(!Path::new(relative).is_absolute());
+                        let resolved = path
+                            .parent()
+                            .unwrap()
+                            .join(relative)
+                            .canonicalize()
+                            .unwrap();
+                        assert!(resolved.starts_with(root.canonicalize().unwrap()));
+                        assert!(resolved.is_file(), "{} links to {relative}", path.display());
+                    }
+                }
+            }
         }
         assert!(!index.contains(&host.path().display().to_string()));
         let helper = host

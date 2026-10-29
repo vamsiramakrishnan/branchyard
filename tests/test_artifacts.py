@@ -53,6 +53,28 @@ class WorkspaceCase(unittest.TestCase):
 
 
 class FileTests(WorkspaceCase):
+    def test_bundle_publication_is_complete_and_preserves_existing_destinations(self):
+        out = self.root / "bundle"
+        with self.assertRaisesRegex(RuntimeError, "stop"), common.output_directory(out) as staged:
+            (staged / "partial").write_text("unfinished")
+            self.assertFalse(out.exists())
+            raise RuntimeError("stop")
+        self.assertEqual(list(self.root.iterdir()), [])
+        with common.output_directory(out) as staged:
+            (staged / "receipt.json").write_text("complete")
+            self.assertFalse(out.exists())
+        self.assertEqual((out / "receipt.json").read_text(), "complete")
+        with self.assertRaisesRegex(ArtifactError, "already exists"), common.output_directory(out):
+            pass
+        linked = self.root / "linked"
+        linked.symlink_to(self.root / "absent")
+        with self.assertRaisesRegex(ArtifactError, "already exists"), common.output_directory(linked):
+            pass
+        raced = self.root / "appeared"
+        with self.assertRaisesRegex(ArtifactError, "appeared"), common.output_directory(raced):
+            raced.mkdir()
+        self.assertEqual(list(raced.iterdir()), [])
+
     def test_atomic_writer_preserves_previous_output_on_failure(self):
         out = self.root / "report.pdf"
         out.write_bytes(b"original")
@@ -331,6 +353,114 @@ class DeckTests(WorkspaceCase):
                     self.assertTrue(chart.plots[0].data_labels.show_category_name)
                 else:
                     self.assertEqual(chart.value_axis.tick_labels.number_format, "0.0")
+
+    def test_bar_and_column_axes_include_zero_for_positive_negative_and_mixed_values(self):
+        _, plan = self.section_files()
+        section_path = self.root / plan["sections"][0]["path"]
+        section = common.load_json(section_path)
+        cases = [
+            ("positive", [10350, 10240, 10300], 0, None),
+            ("negative", [-5, -4, -1], -5, 0),
+            ("mixed", [-3, 5, 1], -9, None),
+            ("zero", [0, 0, 0], 0, None),
+        ]
+        for kind in ["column", "bar", "line"]:
+            for label, values, minimum, maximum in cases:
+                with self.subTest(kind=kind, values=values):
+                    chart_spec = section["slides"][0]["elements"][0]
+                    chart_spec["chart_type"] = kind
+                    chart_spec["series"] = [{"name": "Measured", "values": values}]
+                    if label == "mixed":
+                        chart_spec["series"].append({"name": "Comparison", "values": [-9, 2, 0]})
+                    section_path.write_text(json.dumps(section))
+                    plan["sections"][0]["sha256"] = common.digest(section_path)
+                    out = self.root / (kind + "-" + label + ".pptx")
+                    deck.assemble(self.spec(plan), out)
+                    presentation = common.library("pptx").Presentation(out)
+                    chart = next(shape.chart for shape in presentation.slides[0].shapes if shape.has_chart)
+                    self.assertEqual(list(chart.series[0].values), values)
+                    self.assertEqual(chart.value_axis.minimum_scale, None if kind == "line" else minimum)
+                    self.assertEqual(chart.value_axis.maximum_scale, None if kind == "line" else maximum)
+
+    def test_local_citation_checks_section_relative_source_and_preserves_evidence_in_notes(self):
+        path, plan = self.section_files()
+        section_path = self.root / plan["sections"][0]["path"]
+        source = section_path.parent / "evidence/report.txt"
+        source.parent.mkdir()
+        source.write_text("Annual source\nThe measured value is 12.\n")
+        section = common.load_json(section_path)
+        section["slides"][0]["citations"] = [
+            {"label": "Web evidence", "url": "https://example.com/source"},
+            {
+                "label": "Local evidence",
+                "source": {"path": "evidence/report.txt", "sha256": common.digest(source), "locator": "lines 1-2"},
+            },
+        ]
+        section_path.write_text(json.dumps(section))
+        plan["sections"][0]["sha256"] = common.digest(section_path)
+        self.spec(plan, path.name)
+        self.assertEqual(deck.validate_section(section_path)["status"], "passed")
+        self.assertEqual(deck.validate_section(section_path, path)["status"], "passed")
+        out = self.root / "cited.pptx"
+        deck.assemble(path, out)
+        notes = pptx.read(out)["slides"][0]["notes"]
+        for text in [
+            "Web evidence: https://example.com/source",
+            "Local evidence",
+            "evidence/report.txt",
+            "lines 1-2",
+            common.digest(source),
+        ]:
+            self.assertIn(text, notes)
+        accepted = out.read_bytes()
+        source.write_text("Changed source bytes")
+        for supplied_deck in [None, path]:
+            with self.subTest(deck=supplied_deck), self.assertRaisesRegex(ArtifactError, "SHA-256"):
+                deck.validate_section(section_path, supplied_deck)
+        with self.assertRaisesRegex(ArtifactError, "SHA-256"):
+            deck.assemble(path, out)
+        self.assertEqual(out.read_bytes(), accepted)
+
+    def test_local_citation_refuses_bad_hash_escape_missing_link_and_ambiguous_schema(self):
+        path, plan = self.section_files()
+        section_path = self.root / plan["sections"][0]["path"]
+        source = section_path.parent / "source.txt"
+        source.write_text("Captured source evidence")
+        (section_path.parent / "link.txt").symlink_to(source)
+        original = common.load_json(section_path)
+        base = {
+            "label": "Local source",
+            "source": {"path": "source.txt", "sha256": common.digest(source), "locator": "line 1"},
+        }
+        cases = []
+        for update in [
+            {"sha256": "0" * 64},
+            {"path": "../source.txt"},
+            {"path": str(source)},
+            {"path": "missing.txt"},
+            {"path": "link.txt"},
+            {"locator": "   "},
+            {"execute": "forbidden"},
+        ]:
+            citation = copy.deepcopy(base)
+            citation["source"].update(update)
+            cases.append(citation)
+        cases.extend([{**base, "url": "https://example.com/source"}, {"label": "No source"}])
+        out = self.root / "protected.pptx"
+        out.write_bytes(b"previous accepted deck")
+        for citation in cases:
+            with self.subTest(citation=citation):
+                section = copy.deepcopy(original)
+                section["slides"][0]["citations"] = [citation]
+                section_path.write_text(json.dumps(section))
+                plan["sections"][0]["sha256"] = common.digest(section_path)
+                self.spec(plan, path.name)
+                for supplied_deck in [None, path]:
+                    with self.assertRaises(ArtifactError):
+                        deck.validate_section(section_path, supplied_deck)
+                with self.assertRaises(ArtifactError):
+                    deck.assemble(path, out)
+                self.assertEqual(out.read_bytes(), b"previous accepted deck")
 
     def test_exact_inventory_digest_design_geometry_and_text_fail_before_replacement(self):
         path, plan = self.section_files()

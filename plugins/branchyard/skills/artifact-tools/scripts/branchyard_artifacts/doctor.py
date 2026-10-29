@@ -33,6 +33,9 @@ def doctor(required: list[str] | None = None) -> dict[str, Any]:
         "pdf-create": ("reportlab", "reportlab"),
         "schema": ("jsonschema", "jsonschema"),
         "images": ("PIL", "Pillow"),
+        "pdf-tables": ("pdfplumber", "pdfplumber"),
+        "data-clean": ("pandas", "pandas"),
+        "calculate": ("pint", "Pint"),
     }
     capabilities: dict[str, Any] = {}
     for name, (module, distribution) in modules.items():

@@ -54,7 +54,7 @@ tracing-subscriber = { workspace = true }
 tower-http = { version = "0.6.11", features = ["trace", "tracing"] }
 schemars = { workspace = true, optional = true }
 backon = { workspace = true, features = ["tokio-sleep"] }
-branchyard-setup = { version = "0.1.1", path = "../branchyard-setup" }
+branchyard-setup = { version = "0.2.0", path = "../branchyard-setup" }
 # `sync`: served repositories replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 # Cron schedules in a time zone (docs/triggers.md). Already in Cargo.lock.
