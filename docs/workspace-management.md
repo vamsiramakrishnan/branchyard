@@ -219,3 +219,18 @@ completeness failure; the parent integration supplies its separate schema fix.
 See the [standard-server verification record](evidence/console-services-2026-10-29.json).
 Not done in this record: merged schema regeneration, PostgreSQL, the UI, live
 forge publication, cloud execution or model calls.
+
+
+Live evidence, 29 October 2026: `by` and server 0.3.0 ran AGY 1.4.10 with
+`gemini-3.8-flash-low` on GCE. Two writers ran concurrently in separate local
+worktrees and published XLSX, DOCX and PPTX files from an immutable CSV source.
+Authenticated previews, including workbook print preview, passed. A follow-up
+kept its native conversation, produced a valid current-turn result, and added a
+sensitivity worksheet. Stale output acceptance was refused; current outputs were
+accepted and retained through restart and archive/restore. A read-only manager
+credential inspected artifacts through MCP. A native LibreOffice recalculation
+matched the independently computed workbook NPVs. The
+[dated knowledge-work record](evidence/console-live-knowledge-2026-10-29.json)
+contains binary versions, digests, source preservation and setup friction.
+Not done: Substrate model/file qualification, browser review of every generated
+page, other model combinations, connector consent, billing or production load.

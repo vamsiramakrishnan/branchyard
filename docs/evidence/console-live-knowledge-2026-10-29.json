@@ -1,0 +1,233 @@
+{
+  "date": "2026-10-29T12:35:33.449789+00:00",
+  "evidence": "live native AGY model turns and authenticated console HTTP on GCE",
+  "status": "passed",
+  "provider": "local process on the GCE host, with separate native Git worktrees",
+  "source_context": {
+    "policy": "acc37689",
+    "concurrent_admission": "7bbbd515",
+    "discovery": "bf0fbf5e"
+  },
+  "binaries": {
+    "by": {
+      "sha256": "3380b6ba59b948ab25917b4e1267863def6196b7b53445ba7703aa74d5a4cea7",
+      "version": "by 0.3.0"
+    },
+    "branchyard-server": {
+      "sha256": "668073b6e34d4768aa78dc0b008dd9edd9e025a68ea8e8100c0659720517edde",
+      "version": "branchyard-server 0.3.0"
+    },
+    "agy": {
+      "sha256": "49287151de19bb36578125fbd46ee3fa47e96c0b6d29d5e2439a4e4e0880fa5d",
+      "version": "1.4.10"
+    }
+  },
+  "model": "gemini-3.8-flash-low",
+  "main_native_turns": 3,
+  "workspace_id": "01M63TH5WQ3X8TNPXFBB8868VZ",
+  "concurrent_running_observed": true,
+  "admission": "Both simultaneous starts returned 200 without a client retry on this fixed candidate.",
+  "source": {
+    "id": "01M63TH658JKA4K8CE7Z22EYE5",
+    "sha256": "51bbb08961daec8e4776781c775251cae988a94f8e1de22c28b23fa23a981355",
+    "bytes": 201,
+    "original_preserved": true
+  },
+  "sessions": [
+    {
+      "id": "s-01m63th67v6m6q7cekk4k569kb",
+      "name": "Decision brief",
+      "native_session": "f1566d93-69a4-4372-94f8-d6ed372b010d",
+      "turns": 1,
+      "result_event": 73,
+      "result_error": null
+    },
+    {
+      "id": "s-01m63th68akmwyqh8yyzfzs78b",
+      "name": "Cost model",
+      "native_session": "125563f5-4c3e-4036-9b4e-c106a6fe71ff",
+      "turns": 2,
+      "result_event": 239,
+      "result_error": null
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "art1",
+      "name": "cost-benefit.xlsx",
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "producer": "s-01m63th68akmwyqh8yyzfzs78b",
+      "turn": 1,
+      "bytes": 9796,
+      "sha256": "07c219a33a6ae31eb26c5cd8e232e50379c7f9f20a6b3ed54231babdb32e495c",
+      "preview_kind": "table",
+      "png_bytes": null,
+      "print_png_bytes": 137604
+    },
+    {
+      "id": "art2",
+      "name": "decision-brief.docx",
+      "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "producer": "s-01m63th67v6m6q7cekk4k569kb",
+      "turn": 1,
+      "bytes": 38493,
+      "sha256": "a04eb662131fb87fa5c223df5ad8b8ec3fee36c9eaaf24686b2f2eb2fbeb3432",
+      "preview_kind": "pages",
+      "png_bytes": 409403,
+      "print_png_bytes": null
+    },
+    {
+      "id": "art3",
+      "name": "decision-slides.pptx",
+      "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "producer": "s-01m63th67v6m6q7cekk4k569kb",
+      "turn": 1,
+      "bytes": 35802,
+      "sha256": "e43b15c7644b82d19a1274d0900536756accf6d80c74566bd581ab93a70ccfc9",
+      "preview_kind": "pages",
+      "png_bytes": 81786,
+      "print_png_bytes": null
+    },
+    {
+      "id": "art4",
+      "name": "cost-benefit.xlsx",
+      "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "producer": "s-01m63th68akmwyqh8yyzfzs78b",
+      "turn": 2,
+      "bytes": 11451,
+      "sha256": "3f40262f7a93b366fa04b51b289eb4de81e1a48c0976aead36d36aa9061c955a",
+      "preview_kind": "table",
+      "png_bytes": null,
+      "print_png_bytes": 137604
+    }
+  ],
+  "continuation": {
+    "native_session_before": "125563f5-4c3e-4036-9b4e-c106a6fe71ff",
+    "native_session_after": "125563f5-4c3e-4036-9b4e-c106a6fe71ff",
+    "turn": 2,
+    "valid_current_result": true
+  },
+  "queued_acceptance_guard": {
+    "status": 409,
+    "response": {
+      "error": {
+        "code": "producer_busy",
+        "message": "wait for the artifact producer's queued or running operation before accepting its output"
+      }
+    }
+  },
+  "stale_acceptance_guard": {
+    "status": 409,
+    "response": {
+      "error": {
+        "code": "deliverable_not_current",
+        "message": "acceptance requires a completed producer with valid current-turn output and current-turn artifacts"
+      }
+    }
+  },
+  "accepted": {
+    "workspace_id": "01M63TH5WQ3X8TNPXFBB8868VZ",
+    "revision": 7,
+    "artifacts": [
+      "art2",
+      "art3",
+      "art4"
+    ],
+    "code_integration": "independent"
+  },
+  "manager_mcp": {
+    "scope": [
+      "read"
+    ],
+    "workspace_role": "viewer",
+    "initialize_succeeded": true,
+    "artifact_lookup_succeeded": true
+  },
+  "restart_persistence": {
+    "sources": 1,
+    "accepted": 3,
+    "native_sessions": [
+      "f1566d93-69a4-4372-94f8-d6ed372b010d",
+      "125563f5-4c3e-4036-9b4e-c106a6fe71ff"
+    ]
+  },
+  "lifecycle": [
+    {
+      "action": "archive",
+      "operation_id": "op_df85e3325938432181189fed",
+      "state": "archived",
+      "sources_preserved": true,
+      "accepted_preserved": true,
+      "native_sessions_preserved": true
+    },
+    {
+      "action": "restore",
+      "operation_id": "op_6c987f292a6641fca6bdfd74",
+      "state": "ready",
+      "sources_preserved": true,
+      "accepted_preserved": true,
+      "native_sessions_preserved": true
+    }
+  ],
+  "workbook_recalculation": {
+    "renderer": "pinned networkless, read-only container with bounded tmpfs and no host mounts; canonical native helper and LibreOffice",
+    "image": "sha256:1e07f11555c27b5c5a0ca92576774b8a90f1754b7d0f97a8bec95fe5cd68dd03",
+    "sheet_names": [
+      "Executive Summary",
+      "Cash Flow Projections",
+      "Source Data & Assumptions",
+      "Sensitivity"
+    ],
+    "expected_npvs": [
+      26656.454808718183,
+      34119.03673220545
+    ],
+    "closest_absolute_errors": [
+      1.8189894035458565e-11,
+      5.093170329928398e-11
+    ],
+    "computed_values_match": true,
+    "original_download_sha256_unchanged": true
+  },
+  "native_event_records": {
+    "brief-protocol.json": {
+      "bytes": 22586,
+      "sha256": "6b17aab986daa4a174f957a137968c2b4844cefff68b302cddf019a548acad6d"
+    },
+    "cost-protocol.json": {
+      "bytes": 50979,
+      "sha256": "045467f26a7df3b28cb29fc2b53736fb3bbb46b1cd276619e48544219235c2ac"
+    }
+  },
+  "credential_file_scan": {
+    "scope": "owned files below64MiB",
+    "matches": []
+  },
+  "cleanup": "The owned 8799 server stopped after acceptance. The old protected services and credentials were not used. Artifacts and native session records remain in the owned validation directory.",
+  "friction": [
+    {
+      "problem": "System Python lacked venv, ensurepip and pip.",
+      "resolution": "Used trusted uv 0.10.3 to create an owned venv; installed the repository hash-pinned authoring dependencies and a locally built SDK 0.3.0 wheel without global changes."
+    },
+    {
+      "problem": "Concurrent session admission surfaced an internal metadata CAS conflict.",
+      "resolution": "Bounded server revalidation retries preserve the original idempotency key; this final run admitted both starts directly."
+    },
+    {
+      "problem": "Continuation reset the original allowed tool policy to default deny.",
+      "resolution": "Retained validated typed policy; default and legacy missing policy remain deny."
+    },
+    {
+      "problem": "The validation driver omitted the archive request revision.",
+      "resolution": "Read and supplied the current revision; archive/restore then passed without model replay."
+    }
+  ],
+  "not_done": [
+    "Substrate model/file capture qualification; a separate run reached a native network failure and is recorded separately",
+    "Browser review of every generated page and slide",
+    "Other model/harness combinations",
+    "Google connector consent or WIF identity inheritance",
+    "Provider billing and full API request accounting",
+    "Production load qualification"
+  ]
+}
