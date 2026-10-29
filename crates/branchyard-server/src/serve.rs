@@ -1174,6 +1174,7 @@ mod shutdown_lines {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::fd::AsFd;
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
@@ -1196,9 +1197,18 @@ mod tests {
         );
         let live = bind_unix(&path).err().unwrap();
         assert!(live.contains("already listens"), "{live}");
+        // Forked helpers can retain a CLOEXEC duplicate until exec. Dropping
+        // this process's listener does not make that inherited listener stale.
+        let inherited = listener.as_fd().try_clone_to_owned().unwrap();
         drop(listener);
-        // The file a stopped server left is replaced.
-        assert!(bind_unix(&path).is_ok());
+        let live = bind_unix(&path).err().unwrap();
+        assert!(live.contains("already listens"), "{live}");
+        drop(inherited);
+        // Other tests may be between fork and exec when we close our handles.
+        // Wait for their inherited descriptors before replacing the stale file.
+        let replacement =
+            branchyard_testkit::wait::until("stale Unix socket rebind", || bind_unix(&path));
+        drop(replacement);
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "not a socket").unwrap();
         assert!(bind_unix(&path).err().unwrap().contains("not a socket"));

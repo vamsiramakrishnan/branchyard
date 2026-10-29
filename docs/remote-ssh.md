@@ -40,6 +40,13 @@ The server runs as your user on the host, with **no isolation** beyond it, like 
 
 ## Tested
 
+Hermetic on 29 October 2026: a local fork probe confirmed that a child can retain
+a Unix listener until exec even when its descriptor is close-on-exec. The server
+unit test checks that a duplicated live listener remains protected after the
+parent handle closes, then waits for stale-socket replacement. The directory and
+regular-file refusals remain checked. Record: [socket teardown evidence](evidence/unix-socket-teardown-2026-10-29.json).
+Not done: this fork probe on other operating systems.
+
 `crates/branchyard-cli/tests/remote_ssh.rs` runs the whole path hermetically, with `crates/branchyard-recipe/tests/fixtures/fake-ssh` in place of `ssh`: a Python stand-in that runs each "remote" command here in a session of its own with a separate remote `HOME`, keeps a control master as a background process, and implements `-O check|forward|exit` with a small Unix socket proxy. The test checks the master starts once and is reused, the remote directory, run directory, token and socket modes, that the token reached no argv, `by run` with the fake ACP agent, `ls`, `log` and `diff` through the forward, the server reused by pid, `by remote ssh status` (text and JSON), `stop`, and a restart that keeps the branches; and the refusals (an unknown host, a missing directory, an option-shaped host, `--token-file`). `crates/branchyard-server` tests `--listen-unix`'s private-directory rule and stale-socket replacement; `branchyard-client` parses `unix:` endpoints.
 
 Live on 28 October 2026: the workstation's real SSH client reached OpenSSH 9.6p1 on GCE with strict host-key checking. `by --remote ssh://…` started its control master and remote Unix-socket server, ran Antigravity `agy` 1.4.8 through write, check, diff and merge, and reported the connection up and server running. `by remote ssh stop` then reported the server stopped and connection closed; a separate SSH command confirmed the server socket was gone. Record: `logs/agy-backends/ssh-server` in the [remote validation record](remote-validation-2026-10-28.md). Not done: the ten-minute idle expiry, reconnect after transport loss, or alternative remote login shells in this live run.

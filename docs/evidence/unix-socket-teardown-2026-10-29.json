@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-29",
+  "scope": "hermetic local Unix descriptor lifetime; no model or cloud calls",
+  "source_base": "80fefafba80efd40ecb512509ac3a32f1121baec",
+  "original_full_library_failure": "assertion failed: bind_unix(&path).is_ok() after dropping the parent listener",
+  "diagnostic_rerun": {
+    "command": "cargo test -p branchyard-server --lib --locked --offline",
+    "passed": 255,
+    "failed": 0,
+    "ignored": 1
+  },
+  "deterministic_fork_probe": {
+    "close_on_exec": true,
+    "parent_dropped_child_retains_listener": true,
+    "after_child_close_errno": 111,
+    "after_child_close_error": "Connection refused",
+    "stale_rebind": "passed"
+  },
+  "production_changed": false,
+  "regression": "serve::tests::unix_sockets_need_a_private_directory_and_replace_only_stale_ones",
+  "after_fix": {
+    "command": "cargo test -p branchyard-server --lib --locked --offline",
+    "passed": 255,
+    "failed": 0,
+    "ignored": 1
+  },
+  "not_done": ["fork probe on other operating systems"]
+}
