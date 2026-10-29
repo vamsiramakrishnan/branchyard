@@ -1,7 +1,7 @@
 //! Socket-free HTTP and durable worker regressions, using only the fake agent.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -104,11 +104,6 @@ struct Fixture {
 
 impl Fixture {
     fn new(start: bool) -> Self {
-        static HERMETIC: Once = Once::new();
-        HERMETIC.call_once(|| {
-            std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
-            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
-        });
         let scratch = branchyard_testkit::Scratch::new("console-inprocess");
         let mut config = Config::new(scratch.path().join("data"));
         config.managed_knowledge.enabled = true;
