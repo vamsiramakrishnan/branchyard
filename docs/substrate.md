@@ -1,8 +1,20 @@
 # Agent Substrate
 
-[Agent Substrate](https://github.com/agent-substrate/substrate) runs many mostly idle sandboxes ("actors") on fewer warm Kubernetes pods ("workers"). It suspends an idle actor to object storage and resumes it on any free worker. Branchyard uses it as an optional sandbox provider that runs harnesses: `by run --provider substrate` gives each turn its own actor. The provider is **unqualified**: it has run only against the in-process fake described below, never against a cluster, and stays unqualified until it passes the runtime gates in the [implementation plan](implementation-plan.md) and the steps in [live testing](testing-live.md#6-agent-substrate-cluster).
+[Agent Substrate](https://github.com/agent-substrate/substrate) runs many mostly idle sandboxes ("actors") on fewer warm Kubernetes pods ("workers"). It suspends an idle actor to object storage and resumes it on any free worker. Branchyard uses it as an optional sandbox provider that runs harnesses: `by run --provider substrate` gives each turn its own actor. The provider has scoped live evidence and remains unqualified for the full runtime gates in the [implementation plan](implementation-plan.md) and [live testing](testing-live.md#6-agent-substrate-cluster).
 
-Reviewed at Substrate revision `1d7ca8ced056192a1801d6565251adcaab3eb0c9`. Only the API contract is vendored: [`ateapi.proto`](../vendor/substrate/pkg/proto/ateapipb/ateapi.proto), unmodified. The adapter also follows this revision's router header, default actor port, API bearer authentication and per-actor egress policy contracts. These runtime components were read from upstream source; cluster qualification must still confirm their behavior.
+Reviewed at Substrate revision `1d7ca8ced056192a1801d6565251adcaab3eb0c9`. Only the API contract is vendored: [`ateapi.proto`](../vendor/substrate/pkg/proto/ateapipb/ateapi.proto), unmodified. The adapter also follows this revision's router header, default actor port, API bearer authentication and per-actor egress policy contracts. These runtime components were read from upstream source. Live memory snapshots, retained sessions and crash recovery still need qualification.
+
+Live evidence, 29 October 2026: a GCE console server 0.3.0 ran AGY 1.4.9
+with `gemini-3.8-flash-low` in a real GKE Substrate gVisor Actor. The native
+prompt linked a copied input index, and the first tool opened it. The session
+read its immutable CSV, generated and captured a summary, and published a valid
+current-turn result. Authenticated download, table preview and acceptance
+passed; the source original remained unchanged. With default destroy-on-exit,
+the runtime reported no retained allocation and refused a terminal without a
+local fallback. The [dated model record](evidence/console-substrate-model-2026-10-29.json)
+contains binary and artifact hashes, exact limits and setup friction. Not done:
+retained-allocation PTY, pause/suspend/resume, memory tags, crash recovery,
+Substrate continuation, other models or production load.
 
 ## Division of responsibility
 

@@ -241,5 +241,14 @@ credential inspected artifacts through MCP. A native LibreOffice recalculation
 matched the independently computed workbook NPVs. The
 [dated knowledge-work record](evidence/console-live-knowledge-2026-10-29.json)
 contains binary versions, digests, source preservation and setup friction.
-Not done: Substrate model/file qualification, browser review of every generated
+Not done in that local-provider record: Substrate model/file qualification, browser review of every generated
 page, other model combinations, connector consent, billing or production load.
+
+Live evidence, 29 October 2026: the console also ran one AGY 1.4.9
+`gemini-3.8-flash-low` session in a real Substrate gVisor Actor on GKE. It read
+its copied input index and CSV, captured a correct summary, and passed download,
+preview and current-revision acceptance. The
+[Substrate model record](evidence/console-substrate-model-2026-10-29.json)
+records the earlier egress and input-copy failures, their fixes and the final
+binary hashes. Not done: real retained-allocation terminals, memory lifecycle,
+Substrate continuation, other model combinations or production load.
