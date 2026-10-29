@@ -479,7 +479,7 @@ async fn configured_remote_runtime_actions_keep_native_state_and_durable_results
     case.fixture.app.repos["code"]
         .yard
         .use_sandbox_provider(provider.clone());
-    let backend = Provider::Microsandbox(SandboxOptions {
+    let backend = Provider::microsandbox(SandboxOptions {
         image: "fixture:1".into(),
         keep: SandboxKeep::Pause,
         ..SandboxOptions::default()
@@ -546,7 +546,7 @@ async fn configured_remote_runtime_actions_keep_native_state_and_durable_results
             .count(),
         1
     );
-    let (status,error)=f.json(Method::POST,&format!("/v1/workspaces/{wid}/sessions"),OWNER,Some("denied-provider"),json!({"name":"Denied","prompt":"say hello","harness":"codex-acp","access":"writer","provider":Provider::Substrate(branchyard::SubstrateOptions::default())})).await;
+    let (status,error)=f.json(Method::POST,&format!("/v1/workspaces/{wid}/sessions"),OWNER,Some("denied-provider"),json!({"name":"Denied","prompt":"say hello","harness":"codex-acp","access":"writer","provider":Provider::substrate(branchyard::SubstrateOptions::default())})).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
     assert_eq!(error["error"]["code"], "provider_not_allowed");
     let (status,error)=f.json(Method::POST,&format!("/v1/workspaces/{wid}/sessions"),OWNER,Some("denied-ack"),json!({"name":"Unapproved","prompt":"say hello","harness":"antigravity","access":"writer","unapproved_tools":true})).await;

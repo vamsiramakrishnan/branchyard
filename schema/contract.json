@@ -43394,7 +43394,7 @@
         },
         "available": {
           "type": "boolean",
-          "description": "The executable was found on `PATH`."
+          "description": "The executable was found on `PATH`, or an admitted server command is executable."
         },
         "qualification": {
           "type": [
@@ -43444,7 +43444,7 @@
             },
             "available": {
               "type": "boolean",
-              "description": "The executable was found on `PATH`."
+              "description": "The executable was found on `PATH`, or an admitted server command is executable."
             },
             "qualification": {
               "type": [

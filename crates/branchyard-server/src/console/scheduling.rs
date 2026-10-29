@@ -81,7 +81,7 @@ fn named_requirements(
     command: Option<&[String]>,
     provider: Option<&branchyard::Provider>,
 ) -> Vec<String> {
-    if command.is_some() || !matches!(provider, None | Some(branchyard::Provider::Local)) {
+    if command.is_some() || !branchyard::Provider::is_local(provider) {
         return Vec::new();
     }
     let ids = named
@@ -129,6 +129,11 @@ mod tests {
         .is_empty());
         assert!(
             named_requirements(&registry, "other-repo", &["codex".into()], None, None).is_empty()
+        );
+        let remote = branchyard::Provider::substrate(branchyard::SubstrateOptions::default());
+        assert!(
+            named_requirements(&registry, "managed", &["codex".into()], None, Some(&remote))
+                .is_empty()
         );
         assert!(named_requirements(
             &registry,
