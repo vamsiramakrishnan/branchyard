@@ -212,9 +212,9 @@ class ArtifactAssetTests(unittest.TestCase):
         self.assertIn(
             "[Upstream sources and licenses](upstream.lock.json)", (self.plugin / "skills/INDEX.md").read_text()
         )
-        self.assertIn(
-            "pub const UPSTREAM_LOCK: &str = include_str!",
+        self.assertRegex(
             (self.root / "crates/branchyard-provision/src/skills.rs").read_text(),
+            r"pub const UPSTREAM_LOCK: &str =\s*include_str!",
         )
         reference.write_text("Changed guide\n")
         with self.assertRaisesRegex(ValueError, "installed_sha256 mismatch"):

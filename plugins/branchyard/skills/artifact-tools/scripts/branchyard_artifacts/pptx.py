@@ -134,6 +134,11 @@ def render_deck(deck: DeckInput, out: Path) -> dict[str, Any]:
                         series.format.fill.fore_color.rgb = color
                         series.format.fill.fore_color.brightness = min(series_index * 0.2, 0.6)
                 if element["chart_type"] != "pie":
+                    if element["chart_type"] in {"bar", "column"}:
+                        values = [value for series in element["series"] for value in series["values"]]
+                        chart.value_axis.minimum_scale = min(0, min(values))
+                        if min(values) < 0 and max(values) <= 0:
+                            chart.value_axis.maximum_scale = 0
                     chart.value_axis.tick_labels.number_format = element["number_format"]
                     chart.value_axis.has_title = True
                     chart.value_axis.axis_title.text_frame.text = element["unit"]
@@ -154,9 +159,22 @@ def render_deck(deck: DeckInput, out: Path) -> dict[str, Any]:
             design,
             design["footer_font_size_pt"],
         )
-        slide.notes_slide.notes_text_frame.text = (
-            item.key + "\n" + "\n".join(cite["label"] + ": " + cite["url"] for cite in spec["citations"])
-        )
+        citations = []
+        for citation in spec["citations"]:
+            if "url" in citation:
+                citations.append(citation["label"] + ": " + citation["url"])
+            else:
+                source = citation["source"]
+                citations.append(
+                    citation["label"]
+                    + ": "
+                    + source["path"]
+                    + "; locator: "
+                    + source["locator"]
+                    + "; SHA-256: "
+                    + source["sha256"]
+                )
+        slide.notes_slide.notes_text_frame.text = item.key + "\n" + "\n".join(citations)
     with output_file(out) as staged:
         presentation.save(str(staged))
         canonical_zip(staged)

@@ -18,3 +18,10 @@ typing_extensions==4.15.0
 et_xmlfile==2.0.0
 wheel==0.46.1
 packaging==25.0
+pdfplumber==0.11.9 ; python_version >= '3.10'
+pandas==2.3.3
+numpy==1.26.4 ; python_version < '3.13'
+numpy==2.2.6 ; python_version >= '3.13'
+Pint==0.24.4
+flexparser==0.4
+flexcache==0.3

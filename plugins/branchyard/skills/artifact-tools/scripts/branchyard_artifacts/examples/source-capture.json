@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "file": "report.txt",
+  "source_id": "report",
+  "origin": {
+    "uri": "https://example.org/report",
+    "retrieved_at": "2026-10-29T00:00:00Z",
+    "title": "Replace with the source's actual title and retrieval metadata"
+  }
+}

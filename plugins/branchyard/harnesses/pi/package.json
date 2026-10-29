@@ -1,6 +1,6 @@
 {
   "name": "branchyard-pi",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "Tells a Pi or Oh My Pi session which of the repository's Branchyard branches finished, failed, are blocked or ask. Silent without by on PATH.",
   "license": "Apache-2.0",

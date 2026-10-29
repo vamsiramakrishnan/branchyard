@@ -13,6 +13,8 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from packaging.requirements import Requirement
+
 tomllib = importlib.import_module("tomllib" if sys.version_info >= (3, 11) else "tomli")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,8 +50,9 @@ class PackagingTests(unittest.TestCase):
 
         locked = {normalize(name): version for name, version in re.findall(r"^([\w-]+)==([^\s]+)", lock, re.M)}
         for pin in project["project"]["optional-dependencies"]["artifacts"]:
-            name, version = pin.split("==")
-            self.assertEqual(locked[normalize(name)], version)
+            requirement = Requirement(pin)
+            version = next(iter(requirement.specifier)).version
+            self.assertEqual(locked[normalize(requirement.name)], version)
         self.assertGreater(lock.count("--hash=sha256:"), len(locked))
         image = (ROOT / "deploy/Dockerfile.artifacts").read_text()
         self.assertIn("--require-hashes", image)

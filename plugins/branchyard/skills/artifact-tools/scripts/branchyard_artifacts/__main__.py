@@ -20,6 +20,12 @@ def parser() -> argparse.ArgumentParser:
     manifest = commands.add_parser("manifest", help="Hash named outputs for after-transfer collection; never publish")
     manifest.add_argument("files", type=Path, nargs="+")
     manifest.add_argument("--out", type=Path, required=True)
+    knowledge = commands.add_parser("knowledge", help="Capture evidence, transform tables and check deliverables")
+    operations = knowledge.add_subparsers(dest="action", required=True)
+    for action in ["source-capture", "table-extract", "data-clean", "calculate", "claim-verify", "inspect-layout"]:
+        operation = operations.add_parser(action)
+        operation.add_argument("file", type=Path)
+        operation.add_argument("--out", type=Path, required=True)
     deck = commands.add_parser("deck", help="Validate independent sections and render one editable deck")
     actions = deck.add_subparsers(dest="action", required=True)
     section = actions.add_parser("section-check")
@@ -59,6 +65,22 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         from .manifest import create
 
         return create(args.files, args.out)
+    if args.format == "knowledge":
+        if args.action in {"source-capture", "claim-verify"}:
+            from .evidence import capture, verify_claims
+
+            return (capture if args.action == "source-capture" else verify_claims)(args.file, args.out)
+        if args.action == "table-extract":
+            from .tables import extract
+
+            return extract(args.file, args.out)
+        if args.action in {"data-clean", "calculate"}:
+            from .analysis import calculate, clean
+
+            return (clean if args.action == "data-clean" else calculate)(args.file, args.out)
+        from .native import render
+
+        return render(args.file, args.out)
     if args.format == "deck":
         from .deck import assemble, validate_section
 

@@ -5,13 +5,17 @@ has its own module and request format. The package shares file checks, atomic
 writes and the versioned section/deck contracts. It does not run a model or
 replace a harness's planning or native subagents.
 
+The [knowledge and design guide](knowledge-skills.md) covers source snapshots,
+table extraction, explicit data cleaning, unit-aware calculation, citation
+integrity and visual review, with progressively loaded design guidance.
+
 ## Installed skills and runtime
 
 <!-- fact:document.skills -->
 
 | Skill | Purpose | Requires |
 |---|---|---|
-| `artifact-tools` | Find and run Branchyard document tooling, check its runtime, and prepare file manifests for managed artifact capture. | none |
+| `artifact-tools` | Find and run knowledge artifact tools, check dependencies, prepare the runtime and capture output files. | none |
 | `docx` | Create, inspect, update and validate editable Word DOCX documents, preserving source files and checking layout when needed. | `artifact-tools` |
 | `xlsx` | Create, inspect, update and validate Excel workbooks, formulas, calculated values and native pivot tables. | `artifact-tools` |
 | `pdf` | Create, extract, overlay and validate PDFs, with rendered checks and explicit limits on document editing. | `artifact-tools` |
@@ -20,18 +24,29 @@ replace a harness's planning or native subagents.
 | `google-sheets` | Create, inspect and update native Google Sheets, including ranges, calculations and pivots supported by the granted connector. | `artifact-tools` |
 | `google-slides` | Create, inspect and update native Google Slides through a granted connector while preserving presentation identity, layouts and permissions. | `artifact-tools` |
 | `parallel-deck` | Split a large presentation into independently owned section specifications and assemble checked editable slides with one renderer. | `pptx` |
+| `source-capture` | Snapshot retrieved local sources with origin metadata, exact hashes and page, paragraph or cell anchors for later evidence checks. | `artifact-tools` |
+| `table-extract` | Extract local PDF, DOCX and XLSX tables into reviewable records with source hashes and page, table or sheet locations. | `artifact-tools` |
+| `data-clean` | Normalize local CSV data with explicit trim, null, type and duplicate policies while preserving identifiers and recording changes. | `artifact-tools` |
+| `calculate` | Evaluate reproducible arithmetic with named quantities, explicit units and assumptions using Pint, recording inputs and results. | `artifact-tools` |
+| `claim-verify` | Check source hashes, reproduced extraction anchors and exact quotations while keeping factual support and semantic review explicit. | `artifact-tools` |
+| `inspect-layout` | Render document pages and presentation slides into inspectable previews, keeping rendering distinct from visual review. | `artifact-tools` |
+| `visual-design` | Apply coherent visual hierarchy, typography, spacing and color to reports, presentations and other knowledge artifacts. | `artifact-tools` |
+| `chart-design` | Choose truthful chart encodings with explicit units, uncertainty and source data, using editable charts where supported. | `artifact-tools` |
+| `diagram-design` | Create editable process, relationship and system diagrams using Mermaid or established drawing tools. | `artifact-tools` |
 
 <!-- /fact -->
 
-`by init plugin` installs the format skills for the selected native harness.
+`by init plugin` installs the canonical skills for the selected native harness.
 The standalone skill installer resolves dependencies: installing `parallel-deck`
 also installs `pptx` and `artifact-tools`, after checking all destinations for
 conflicts. The toolkit payload is embedded in the CLI; no source checkout is
 needed for managed tasks.
 
 Every task, including a leaf without delegation rights, receives a small
-capabilities-index notice. Its index names the actual guest-visible skill and
-tool paths. Assets are staged before a sandbox is created or its home is
+capabilities-index notice. The root `INDEX.md` routes to topic indexes, then
+individual skill folders and their references, examples and tools. Paths are
+relative inside the installed tree; the prompt carries only the root pointer.
+Assets are staged before a sandbox is created or its home is
 transferred. Local tasks without private homes use a separate per-branch cache
 under the yard state directory; Branchyard does not change the user's global
 skill installation to provision a task. Each harness keeps its own planning,
@@ -68,9 +83,11 @@ docker run --rm -v "$PWD:/work" branchyard-artifacts doctor --require render,piv
 
 The Python runtime dependencies use a checked-in hash lock at
 `deploy/artifacts-requirements.lock`. `deploy/artifacts-requirements.in` also
-pins transitive libraries compatible with Python 3.9. Regenerate the lock with
-`pip-compile --generate-hashes --no-emit-index-url --no-emit-trusted-host
---output-file deploy/artifacts-requirements.lock deploy/artifacts-requirements.in`.
+pins compatible transitive libraries and conditional dependencies. Regenerate
+the universal lock with `uv pip compile --python-version 3.9 --universal
+--generate-hashes deploy/artifacts-requirements.in
+-o deploy/artifacts-requirements.lock`. Patched PDF table extraction requires
+Python 3.10 or newer; it is explicitly unavailable on 3.9.
 The image installs LibreOffice, its system Python UNO bridge, fonts and Poppler.
 Operating-system packages still follow the Debian image's package repository.
 Building this image is an explicit installation step.
@@ -144,6 +161,15 @@ alignment and unintended overlap. A structural or rasterization pass does not
 substitute for that review.
 
 ## Independent sections and one deck assembler
+
+Charts can cite a web source with `{ "label": "Source", "url": "https://…" }`
+or local evidence with `{ "label": "Captured report", "source": {
+"path": "evidence/report/source.pdf", "sha256": "<SHA-256>", "locator": "page:1"
+} }`. Use exactly one form. Local paths are relative to the section file and
+must stay beneath it; validation checks the actual file and digest. Speaker
+notes retain the path, digest and locator. Citation identity does not itself
+establish that a claim follows from the source. Bar and column axes include zero;
+line charts retain their usual automatic scale.
 
 Read the installed contracts with
 `python3 -m branchyard_artifacts deck schema section` or `deck schema deck`.

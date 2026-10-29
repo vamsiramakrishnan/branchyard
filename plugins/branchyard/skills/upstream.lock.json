@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-29",
+  "sources": [
+    {
+      "id": "inspect-layout",
+      "repository": "openai/skills",
+      "revision": "49f948faa9258a0c61caceaf225e179651397431",
+      "path": "skills/.curated/pdf/SKILL.md",
+      "license": "Apache-2.0",
+      "license_path": "skills/.curated/pdf/LICENSE.txt",
+      "installed_path": "inspect-layout/references/upstream-pdf.md",
+      "installed_license_path": "inspect-layout/references/LICENSE.upstream.txt",
+      "modifications": "Upstream reference text with added source and license footer; Branchyard controls runtime and authorization.",
+      "source_sha256": "d108cf2b36355ab37eb5962933f4d09785ec002f3105c506129320209306b9d2",
+      "installed_sha256": "c665a9d9996dae27f3b94be8acfd8fc67a0bb1f2cac845d37ab5d80e7ee71384",
+      "license_sha256": "4dd13869245e356246a5b770723247bbb80a8f07a181d1d3d873a1734297cdb9"
+    },
+    {
+      "id": "data-clean",
+      "repository": "K-Dense-AI/scientific-agent-skills",
+      "revision": "5f2bc0341354fd5590aef76a533ada1e1e5b4e62",
+      "path": "skills/exploratory-data-analysis/SKILL.md",
+      "license": "MIT",
+      "license_path": "LICENSE.md",
+      "installed_path": "data-clean/references/data-quality.md",
+      "installed_license_path": "data-clean/references/LICENSE.k-dense.txt",
+      "modifications": "Adapted into a short CSV quality guide; no upstream scripts or dependency snapshots copied.",
+      "source_sha256": "955c4cefa49106dd03b55cbd62603bab2d2fb678e627dd452ba62040c7128484",
+      "installed_sha256": "99ca1e63b907825b9162f3725b76fe3cb3324b4bcaa49abcc6244bf455cea462",
+      "license_sha256": "0207337e5ae2b28c15c647054fafaddafb159be533f9723825d7a5aa2610f21d"
+    },
+    {
+      "id": "claim-verify",
+      "repository": "K-Dense-AI/scientific-agent-skills",
+      "revision": "5f2bc0341354fd5590aef76a533ada1e1e5b4e62",
+      "path": "skills/scientific-critical-thinking/SKILL.md",
+      "license": "MIT",
+      "license_path": "LICENSE.md",
+      "installed_path": "claim-verify/references/evidence-review.md",
+      "installed_license_path": "claim-verify/references/LICENSE.k-dense.txt",
+      "modifications": "Adapted into a compact cross-domain appraisal guide; clinical frameworks and optional external tools omitted.",
+      "source_sha256": "563af70571b7dcd6a96bf2e303bedfdcba623b4e9f082d58f04aacbc961fdae4",
+      "installed_sha256": "e58dafed644d35d1b7c127526aff75e1f382b861039fa01b211dbdaece36a7e4",
+      "license_sha256": "0207337e5ae2b28c15c647054fafaddafb159be533f9723825d7a5aa2610f21d"
+    },
+    {
+      "id": "calculate",
+      "repository": "K-Dense-AI/scientific-agent-skills",
+      "revision": "5f2bc0341354fd5590aef76a533ada1e1e5b4e62",
+      "path": "skills/uncertainty-and-units/SKILL.md",
+      "license": "MIT",
+      "license_path": "LICENSE.md",
+      "installed_path": "calculate/references/units.md",
+      "installed_license_path": "calculate/references/LICENSE.k-dense.txt",
+      "modifications": "Adapted to simple arithmetic and unit checking; no metrology tooling or dependency pins copied.",
+      "source_sha256": "caaafa079a4eaac6012717bcf705dec0417b5434f5dbd1af934a3a36ad375722",
+      "installed_sha256": "bbfceb0d0d9ef55c473f2dea11ef04afaaa5425c561ee01c8d148b064a1bde21",
+      "license_sha256": "0207337e5ae2b28c15c647054fafaddafb159be533f9723825d7a5aa2610f21d"
+    },
+    {
+      "id": "chart-design",
+      "repository": "K-Dense-AI/scientific-agent-skills",
+      "revision": "5f2bc0341354fd5590aef76a533ada1e1e5b4e62",
+      "path": "skills/scientific-visualization/SKILL.md",
+      "license": "MIT",
+      "license_path": "LICENSE.md",
+      "installed_path": "chart-design/references/charts.md",
+      "installed_license_path": "chart-design/references/LICENSE.k-dense.txt",
+      "modifications": "Adapted to cross-domain chart decisions and existing editable deck renderer; scientific publisher rules omitted.",
+      "source_sha256": "8cbde7cdc10d959cf72cfd08335cc8ce996247eee6ebdb900eb64a4cb0ff34a3",
+      "installed_sha256": "4b4a5d7bb3af9f891f02cf280e8e69e38f9cb55decd3f534aeffe0a34c6cc6b4",
+      "license_sha256": "0207337e5ae2b28c15c647054fafaddafb159be533f9723825d7a5aa2610f21d"
+    },
+    {
+      "id": "visual-design",
+      "repository": "anthropics/skills",
+      "revision": "ca45fc496a3436251f191354091d557da31c15b5",
+      "path": "skills/canvas-design/SKILL.md",
+      "license": "Apache-2.0",
+      "license_path": "skills/canvas-design/LICENSE.txt",
+      "installed_path": "visual-design/references/composition.md",
+      "installed_license_path": "visual-design/references/LICENSE.upstream.txt",
+      "modifications": "Adapted to knowledge-document composition; no font assets or art-manifesto instructions copied.",
+      "source_sha256": "a1f288079624402f30682753c1d43920b6664785698d21d3e7aa197450a6448b",
+      "installed_sha256": "233df394ec0e4c9d3ba4c72db92961e8787399173141d81681765979374166f3",
+      "license_sha256": "14099b9c79d031b9d4b32c736a4e20f2b941f52dd79500532d62d26dd716110c"
+    }
+  ]
+}

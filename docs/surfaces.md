@@ -103,6 +103,12 @@ A harness in a rig fills a seat with `by spawn --seat`, `branchyard.spawn(seat=.
 
 ## Artifacts and scratch areas
 
+Knowledge and design skills run through the optional Python artifact toolkit,
+not new server routes or delegation permissions. The installed folder index
+progressively routes to source capture, tables, cleaning, calculations, claim
+checks, layout inspection and design guidance. See [knowledge skills](knowledge-skills.md)
+for commands, provenance contracts, runtime requirements and review limits.
+
 See [storage](storage.md). Reads follow the delegation tree: a branch reads what it or its ancestors or descendants published or own; a sibling needs an explicit share. Every surface reaches them now: local mode, delegation (`by`, Python, `Delegate`, MCP, inside or outside a harness with `--branch`), `by --remote` (always `--branch`, since there is no harness to delegate as), the server's HTTP API and `branchyard-client`.
 
 | Operation | SDK | by | by --remote | HTTP | client | delegation |

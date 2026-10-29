@@ -9,25 +9,49 @@ pub struct Skill {
     pub files: &'static [(&'static str, &'static str)],
 }
 
-/// The document capability metadata and dependency graph.
+/// The capability metadata and dependency graph.
 pub const CAPABILITIES: &str = include_str!("../../../plugins/branchyard/capabilities.json");
+
+/// Compact entry point shared by native installation and managed tasks.
+pub const INDEX: &str = include_str!("../../../plugins/branchyard/skills/INDEX.md");
+
+/// Pinned upstream source and license record, empty when no files are reused.
+pub const UPSTREAM_LOCK: &str =
+    include_str!("../../../plugins/branchyard/skills/upstream.lock.json");
+
+/// Topic index paths relative to the installed skills directory, with their contents.
+#[rustfmt::skip]
+pub const TOPIC_INDEXES: &[(&str, &str)] = &[
+    ("topics/design/INDEX.md", include_str!("../../../plugins/branchyard/skills/topics/design/INDEX.md")),
+    ("topics/documents/INDEX.md", include_str!("../../../plugins/branchyard/skills/topics/documents/INDEX.md")),
+    ("topics/knowledge/INDEX.md", include_str!("../../../plugins/branchyard/skills/topics/knowledge/INDEX.md")),
+    ("topics/runtime/INDEX.md", include_str!("../../../plugins/branchyard/skills/topics/runtime/INDEX.md")),
+    ("topics/workflows/INDEX.md", include_str!("../../../plugins/branchyard/skills/topics/workflows/INDEX.md")),
+];
 
 /// Every shipped skill, including setup and delegation.
 #[rustfmt::skip]
 pub const SKILLS: &[Skill] = &[
     Skill { name: "artifact-tools", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/artifact-tools/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/artifact-tools/SKILL.md")),
         ("scripts/branchyard_artifacts/__init__.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/__init__.py")),
         ("scripts/branchyard_artifacts/__main__.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/__main__.py")),
+        ("scripts/branchyard_artifacts/analysis.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/analysis.py")),
         ("scripts/branchyard_artifacts/common.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/common.py")),
         ("scripts/branchyard_artifacts/deck.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/deck.py")),
         ("scripts/branchyard_artifacts/doctor.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/doctor.py")),
         ("scripts/branchyard_artifacts/docx.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/docx.py")),
+        ("scripts/branchyard_artifacts/evidence.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/evidence.py")),
+        ("scripts/branchyard_artifacts/examples/calculate.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/calculate.json")),
+        ("scripts/branchyard_artifacts/examples/claim-verify.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/claim-verify.json")),
+        ("scripts/branchyard_artifacts/examples/data-clean.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/data-clean.json")),
         ("scripts/branchyard_artifacts/examples/deck.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/deck.json")),
         ("scripts/branchyard_artifacts/examples/docx.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/docx.json")),
         ("scripts/branchyard_artifacts/examples/pdf.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/pdf.json")),
         ("scripts/branchyard_artifacts/examples/pivot.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/pivot.json")),
         ("scripts/branchyard_artifacts/examples/section.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/section.json")),
+        ("scripts/branchyard_artifacts/examples/source-capture.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/source-capture.json")),
         ("scripts/branchyard_artifacts/examples/xlsx.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/examples/xlsx.json")),
         ("scripts/branchyard_artifacts/manifest.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/manifest.py")),
         ("scripts/branchyard_artifacts/native.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/native.py")),
@@ -35,37 +59,82 @@ pub const SKILLS: &[Skill] = &[
         ("scripts/branchyard_artifacts/pptx.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/pptx.py")),
         ("scripts/branchyard_artifacts/schemas/deck-v1.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/schemas/deck-v1.json")),
         ("scripts/branchyard_artifacts/schemas/section-v1.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/schemas/section-v1.json")),
+        ("scripts/branchyard_artifacts/tables.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/tables.py")),
         ("scripts/branchyard_artifacts/uno_backend.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/uno_backend.py")),
         ("scripts/branchyard_artifacts/xlsx.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/xlsx.py")),
         ("scripts/requirements.lock", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/requirements.lock")),
         ("scripts/run.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/run.py")),
     ] },
+    Skill { name: "calculate", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/calculate/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/calculate/SKILL.md")),
+        ("references/LICENSE.k-dense.txt", include_str!("../../../plugins/branchyard/skills/calculate/references/LICENSE.k-dense.txt")),
+        ("references/units.md", include_str!("../../../plugins/branchyard/skills/calculate/references/units.md")),
+    ] },
+    Skill { name: "chart-design", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/chart-design/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/chart-design/SKILL.md")),
+        ("references/LICENSE.k-dense.txt", include_str!("../../../plugins/branchyard/skills/chart-design/references/LICENSE.k-dense.txt")),
+        ("references/charts.md", include_str!("../../../plugins/branchyard/skills/chart-design/references/charts.md")),
+    ] },
+    Skill { name: "claim-verify", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/claim-verify/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/claim-verify/SKILL.md")),
+        ("references/LICENSE.k-dense.txt", include_str!("../../../plugins/branchyard/skills/claim-verify/references/LICENSE.k-dense.txt")),
+        ("references/evidence-review.md", include_str!("../../../plugins/branchyard/skills/claim-verify/references/evidence-review.md")),
+    ] },
+    Skill { name: "data-clean", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/data-clean/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/data-clean/SKILL.md")),
+        ("references/LICENSE.k-dense.txt", include_str!("../../../plugins/branchyard/skills/data-clean/references/LICENSE.k-dense.txt")),
+        ("references/data-quality.md", include_str!("../../../plugins/branchyard/skills/data-clean/references/data-quality.md")),
+    ] },
     Skill { name: "delegate", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/delegate/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/delegate/SKILL.md")),
         ("agents/openai.yaml", include_str!("../../../plugins/branchyard/skills/delegate/agents/openai.yaml")),
     ] },
+    Skill { name: "diagram-design", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/diagram-design/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/diagram-design/SKILL.md")),
+        ("references/diagrams.md", include_str!("../../../plugins/branchyard/skills/diagram-design/references/diagrams.md")),
+    ] },
     Skill { name: "docx", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/docx/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/docx/SKILL.md")),
     ] },
     Skill { name: "google-docs", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/google-docs/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/google-docs/SKILL.md")),
     ] },
     Skill { name: "google-sheets", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/google-sheets/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/google-sheets/SKILL.md")),
     ] },
     Skill { name: "google-slides", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/google-slides/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/google-slides/SKILL.md")),
     ] },
+    Skill { name: "inspect-layout", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/inspect-layout/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/inspect-layout/SKILL.md")),
+        ("references/LICENSE.upstream.txt", include_str!("../../../plugins/branchyard/skills/inspect-layout/references/LICENSE.upstream.txt")),
+        ("references/upstream-pdf.md", include_str!("../../../plugins/branchyard/skills/inspect-layout/references/upstream-pdf.md")),
+    ] },
     Skill { name: "parallel-deck", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/parallel-deck/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/parallel-deck/SKILL.md")),
     ] },
     Skill { name: "pdf", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/pdf/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/pdf/SKILL.md")),
     ] },
     Skill { name: "pptx", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/pptx/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/pptx/SKILL.md")),
     ] },
     Skill { name: "setup", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/setup/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/setup/SKILL.md")),
         ("agents/openai.yaml", include_str!("../../../plugins/branchyard/skills/setup/agents/openai.yaml")),
         ("references/deploy-and-plugin.md", include_str!("../../../plugins/branchyard/skills/setup/references/deploy-and-plugin.md")),
@@ -74,7 +143,22 @@ pub const SKILLS: &[Skill] = &[
         ("references/rig.md", include_str!("../../../plugins/branchyard/skills/setup/references/rig.md")),
         ("references/server.md", include_str!("../../../plugins/branchyard/skills/setup/references/server.md")),
     ] },
+    Skill { name: "source-capture", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/source-capture/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/source-capture/SKILL.md")),
+    ] },
+    Skill { name: "table-extract", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/table-extract/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/table-extract/SKILL.md")),
+    ] },
+    Skill { name: "visual-design", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/visual-design/INDEX.md")),
+        ("SKILL.md", include_str!("../../../plugins/branchyard/skills/visual-design/SKILL.md")),
+        ("references/LICENSE.upstream.txt", include_str!("../../../plugins/branchyard/skills/visual-design/references/LICENSE.upstream.txt")),
+        ("references/composition.md", include_str!("../../../plugins/branchyard/skills/visual-design/references/composition.md")),
+    ] },
     Skill { name: "xlsx", files: &[
+        ("INDEX.md", include_str!("../../../plugins/branchyard/skills/xlsx/INDEX.md")),
         ("SKILL.md", include_str!("../../../plugins/branchyard/skills/xlsx/SKILL.md")),
     ] },
 ];

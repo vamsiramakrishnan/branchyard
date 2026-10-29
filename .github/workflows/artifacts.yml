@@ -33,4 +33,12 @@ jobs:
       - name: Require the complete runtime before tests can skip missing features
         run: python -m branchyard_artifacts doctor --require docx,xlsx,pdf,pptx,pdf-create,schema,images,render,pivot,fonts
       - run: python tests/test_artifacts.py
+      - name: Require knowledge libraries
+        run: python -m branchyard_artifacts doctor --require data-clean,calculate
+      - name: Require patched PDF extraction on Python 3.10 and newer
+        if: matrix.python != '3.9'
+        run: python -m branchyard_artifacts doctor --require pdf-tables
+      - run: python tests/test_knowledge_evidence.py -v
+      - run: python tests/test_knowledge_analysis.py -v
+      - run: python tests/test_knowledge_cli.py -v
       - run: python tests/test_artifacts_distribution.py -v

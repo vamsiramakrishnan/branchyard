@@ -112,7 +112,7 @@ def navigation(plugin: Path, catalog: dict[str, Any], boundary: Path) -> dict[Pa
     indexes: dict[Path, str] = {}
 
     def index(path: Path, lines: list[str], budget: int = DETAIL_INDEX_BUDGET) -> None:
-        body = "\n".join(lines) + "\n"
+        body = "\n".join(lines).rstrip() + "\n"
         if len(body.encode("utf-8")) > budget:
             raise ValueError(f"discovery index exceeds {budget} byte budget: {path.relative_to(plugin)}")
         indexes[path] = body
@@ -285,7 +285,8 @@ def synchronize(root: Path, *, write: bool) -> list[str]:
     ]
     upstream_lock = plugin / "skills/upstream.lock.json"
     code.append(
-        'pub const UPSTREAM_LOCK: &str = include_str!("../../../plugins/branchyard/skills/upstream.lock.json");\n\n'
+        "pub const UPSTREAM_LOCK: &str =\n"
+        '    include_str!("../../../plugins/branchyard/skills/upstream.lock.json");\n\n'
         if upstream_lock.is_file()
         else 'pub const UPSTREAM_LOCK: &str = "";\n\n'
     )
