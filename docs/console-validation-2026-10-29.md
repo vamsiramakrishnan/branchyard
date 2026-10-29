@@ -8,7 +8,7 @@ component guide and the deterministic fixture guide. Publication is pending.
 
 Hermetic verification on the integrated tree passed the companion HTTP suite
 with nine tests, the desktop browser test, the workspace browser test, and the
-server library suite with 252 passed and one existing ignored test. The
+server library suite with 255 passed and one existing ignored test. The
 companion library filter passed 19 tests. Browser previews use explicit fake
 metadata and PNG responses. Fake agents produce the captured files; original
 bytes, downloads, session continuation and acceptance use the real server.
@@ -25,7 +25,7 @@ remained running. See the [converter record](evidence/console-document-gce-2026-
 Not done in that record: a model turn, a browser workflow, GKE conversion or
 production load testing.
 
-The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. GKE model acceptance and publication remain in progress.
+The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. The corrected GKE/Substrate model workflow also passed; final cloud cleanup and publication remain in progress.
 The GKE check has exercised the native Control API, an actor, a
 byte-preserving file round trip and AGY 1.4.9's version command using the 0.3.0
 CLI. That model-free smoke check does not qualify a model workflow. Live model
@@ -37,7 +37,7 @@ An initial live console run on GKE created an actor and copied its inputs,
 but AGY's model request failed before any response, usage or tool call. Worker
 atunnel logs show the egress gateway returning `403 Forbidden: actor certificate
 has no ActorIdentity`. The native actor was destroyed after the failure;
-there was no local fallback and no artifact acceptance. A compatible upstream gateway image restored verified TLS in the same model-free actor. A subsequent model run executed commands but did not finish its deliverable before its deadline while searching for the selected input. A per-session input index and a direct first-prompt hint are being implemented. Not done: a completed GKE model deliverable.
+there was no local fallback and no artifact acceptance. A compatible upstream gateway image restored verified TLS in the same model-free actor. A later bounded run exposed missing input discovery and an upload ordering bug. After both fixes, AGY 1.4.9 with `gemini-3.8-flash-low` completed a native turn in about 33 seconds and five tools. It read the guest input index first, verified the copied source, produced a CSV with the expected totals, and passed capture, authenticated preview, download and acceptance. See the [live Substrate record](evidence/console-substrate-model-2026-10-29.json). Not done: retained-allocation terminals, pause/resume, live microVM installation or other model combinations.
 
 ## Friction found during setup
 
@@ -61,7 +61,8 @@ there was no local fallback and no artifact acceptance. A compatible upstream ga
 | Concurrent session admission returned an internal revision conflict | Workspace and tenant-quota compare-and-set updates competed | Retry rolled-back admission conflicts with the same request key after revalidating access, state and quota. The synchronized regression now passes on the integrated source. |
 | An AGY follow-up lost its original tool permissions | Console continuation rebuilt the default-deny policy instead of retaining the session policy | Persist and reapply the validated session policy while preserving current operator and caller checks. Command-requiring allow, deny, legacy-session and reviewer regressions now pass. The stale-result guard refused acceptance after the incomplete turn. |
 | Manager archive and restore requests were refused | The manager's lifecycle body omitted the workspace revision required by the server | Require an unsigned revision in the typed manager action and MCP schema, forward it exactly and return stale conflicts without automatic retries. |
-| A remote model searched capability files instead of finding its selected CSV | Input paths were only in standing configuration, and staged source names were opaque IDs | Add a bounded per-attempt input index and its exact relative path in the initial native prompt. Preserve source grants, immutable bytes and digest algorithms; do not inline source contents or the full catalog. This fix is being verified. |
+| A remote model searched capability files instead of finding its selected CSV | Input paths were only in standing configuration, and staged source names were opaque IDs | Add a bounded per-attempt input index and its exact relative path in the initial native prompt. Preserve source grants, immutable bytes and digest algorithms; do not inline source contents or the full catalog. The local, copied fake-provider and real GKE model checks now pass. |
+| Copied guests could not open selected inputs | The initial worktree upload ran before workspace input copies were staged | Stage validated workspace copies before the initial upload. The copied-provider regression reads and hashes the granted bytes, and the real GKE model reads the same index and source. |
 
 ## Remaining product gaps
 
