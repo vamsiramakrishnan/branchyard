@@ -6246,6 +6246,17 @@
               ],
               "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
             },
+            "session_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+            },
             "require_labels": {
               "type": "array",
               "items": {
@@ -6910,6 +6921,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",
@@ -7128,6 +7164,17 @@
               ],
               "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
             },
+            "session_patch": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SessionPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+            },
             "require_labels": {
               "type": "array",
               "items": {
@@ -7792,6 +7839,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",
@@ -12419,6 +12491,17 @@
           ],
           "description": "What to provision in the harness's home, like\n[`branchyard::TaskOptions::provision`]. Secrets are named only: the\nserver's operator decides where each comes from, and one the server\ndoes not define is refused. MCP servers are commands the server\nruns, refused unless it allows client commands."
         },
+        "session_patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionPatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Change only model/effort while preserving stored provisioning.\nMutually exclusive with `provision`; an empty patch is refused."
+        },
         "require_labels": {
           "type": "array",
           "items": {
@@ -13085,6 +13168,31 @@
             }
           ],
           "description": "What a tool or an operation resolves to."
+        },
+        "SessionPatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model to select, subject to the existing session's model restriction."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Effort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning effort for the next turn."
+            }
+          },
+          "description": "A send's model and reasoning-effort edits, preserving all other provisioning.\nThis is distinct from replacing the branch's complete [`Provisioning`]."
         },
         "Feedback": {
           "type": "object",

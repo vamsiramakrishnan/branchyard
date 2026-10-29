@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-29",
+  "evidence": "live",
+  "source_commit": "fa14363d",
+  "harness": "AGY 1.4.9",
+  "model": "gemini-3.8-flash-low",
+  "operation": "model-only by send continuation",
+  "credential_flags_supplied": false,
+  "observed_provisioning": {
+    "auth": "api-key",
+    "environment_names": [
+      "GEMINI_API_KEY"
+    ]
+  },
+  "native_result": {
+    "status": "ready"
+  },
+  "branch_status": "no_changes",
+  "binaries": {
+    "by-real": "5f1099e4f4efbcf91bf860a0165eb5419121876e96e985a6f0823e812dca4a87",
+    "branchyard-server": "76eda359a704c2ce7a7da5d7f126d25ca9d9eca9735945f9baa9b9c78371f6a4"
+  },
+  "existing_listeners_after": {
+    "8787": true,
+    "5432": true
+  },
+  "not_done": [
+    "AGY OAuth",
+    "cross-model conversation change"
+  ]
+}

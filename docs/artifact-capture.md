@@ -164,5 +164,7 @@ authority. Shared-mount fake sandbox tests exercise the post-harness boundary.
 Fake-SSH recipe tests exercise ignored copied outboxes, transfer limits, digest
 and symlink rejection, prerequisite checks and staging cleanup, including a
 managed lead's later wake. Process-crash tests verify recovery parks before
-capture and preserves the turn's wake limits. Not done: real provider
-qualification, cloud services or model runs.
+capture and preserves the turn's wake limits. Not done in those suites: real
+providers, cloud services or model calls.
+
+Live evidence, 2026-10-29: AGY 1.4.9 with `gemini-3.8-flash-low` wrote ignored nested files over a real SSH recipe on GCE. A no-change required deliverable published only the declared file, returned its exact bytes through ordinary artifact get, and recorded the producer-bound receipt. Ignored directories were not restored to the controller worktree. The owned job and credential launcher were removed and existing services preserved. See the [dated record](atomic-knowledge-validation-2026-10-29.md). Not done: copied-provider Office/PDF generation, live Substrate or Microsandbox capture, or a process-crash capture qualification on a real provider.

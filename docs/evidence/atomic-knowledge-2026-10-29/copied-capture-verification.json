@@ -1,0 +1,12 @@
+{
+  "payload_sha256": "66485b25bb42036b28a657a3057b9e8e12795f2ad9319f57e1956fe32c89b595",
+  "no_changes": true,
+  "no_candidate": true,
+  "one_submitted_turn": true,
+  "native_result": true,
+  "result_complete": true,
+  "producer": true,
+  "nested_capture": true,
+  "no_ignored_worktree_writes": true,
+  "remote_exclusions_existed": true
+}

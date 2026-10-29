@@ -1,0 +1,2117 @@
+{
+  "technical_checks_passed": true,
+  "checks": [
+    {
+      "name": "Exact sixty-slide source inventory and order",
+      "passed": true
+    },
+    {
+      "name": "Exactly three twenty-slide sections",
+      "passed": true
+    },
+    {
+      "name": "Every section SHA256 matches deck manifest",
+      "passed": true
+    },
+    {
+      "name": "Every slide cites supplied illustrative brief",
+      "passed": true
+    },
+    {
+      "name": "Native capture has exactly seven expected unique files",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: adoption.pdf",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: adoption.pptx",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: deck.json",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: sections/delivery.json",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: sections/economics.json",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: sections/governance.json",
+      "passed": true
+    },
+    {
+      "name": "Native capture size and BLAKE3: verification_report.txt",
+      "passed": true
+    },
+    {
+      "name": "Output files match exact capture inventory",
+      "passed": true
+    },
+    {
+      "name": "Preserved v1 files remain byte-identical",
+      "passed": true
+    },
+    {
+      "name": "Independent supplied-case arithmetic",
+      "passed": true
+    },
+    {
+      "name": "Actual PowerPoint has sixty slides",
+      "passed": true
+    },
+    {
+      "name": "Actual PDF has sixty pages",
+      "passed": true
+    },
+    {
+      "name": "Actual deck dimensions match brief",
+      "passed": true
+    },
+    {
+      "name": "Every PDF page has slide dimensions",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide01: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide02: editable table matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide03: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide04: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide05: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide06: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide07: editable table matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide08: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide09: editable table matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide10: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide11: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide12: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide13: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide14: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide15: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide16: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide17: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: native editable chart",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: embedded workbook matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: categories and series count match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: native chart series matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: chart values match independent arithmetic",
+      "passed": true
+    },
+    {
+      "name": "economics/slide18: explicit title units and number format match source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide19: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "economics/slide20: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide01: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide02: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide03: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide04: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide05: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide06: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide07: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide08: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide09: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide10: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide11: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide12: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide13: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide14: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide15: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide16: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide17: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide18: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide19: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "delivery/slide20: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide01: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide02: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide03: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide04: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide05: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide06: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide07: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide08: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide09: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide10: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide11: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide12: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide13: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide14: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide15: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide16: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide17: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide18: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide19: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: native title and notes identity",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: actual source URL in notes",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: PDF title and citation visible as text",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: exact native shape inventory",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: actual body geometry and reserved margins",
+      "passed": true
+    },
+    {
+      "name": "governance/slide20: actual text matches source",
+      "passed": true
+    },
+    {
+      "name": "Exactly ten chart XML parts and ten embedded workbooks",
+      "passed": true
+    },
+    {
+      "name": "Source saved-hours table matches arithmetic",
+      "passed": true
+    },
+    {
+      "name": "Source cost table matches supplied investment",
+      "passed": true
+    },
+    {
+      "name": "Narrative arithmetic and capacity caveat retained",
+      "passed": true
+    },
+    {
+      "name": "Requested three label revisions present",
+      "passed": true
+    },
+    {
+      "name": "economics: native capture exactly matches reviewed source content",
+      "passed": true
+    },
+    {
+      "name": "economics: native capture preserves reviewed source bytes",
+      "passed": true
+    },
+    {
+      "name": "delivery: native capture exactly matches reviewed source content",
+      "passed": true
+    },
+    {
+      "name": "delivery: native capture preserves reviewed source bytes",
+      "passed": true
+    },
+    {
+      "name": "governance: native capture exactly matches reviewed source content",
+      "passed": true
+    },
+    {
+      "name": "governance: native capture preserves reviewed source bytes",
+      "passed": true
+    },
+    {
+      "name": "Distinct reviewed delivery and governance bodies",
+      "passed": true
+    },
+    {
+      "name": "Two independent assemblies equal each other and captured PPTX bytes",
+      "passed": true
+    }
+  ],
+  "inventory": [
+    {
+      "path": "adoption.pdf",
+      "size": 112852,
+      "sha256": "9a0b94b915e210f601ac49c4ec7fe2f19b7eae420d9d30dfcc2b1d4fd7e99d95",
+      "blake3": "ad1408a95aa9e14c7ad978175b6ce199aeb430e1cb123c22f1751a7d1665437c",
+      "artifact_id": "art25"
+    },
+    {
+      "path": "adoption.pptx",
+      "size": 239356,
+      "sha256": "b36870fb768d842fec5a6be93de7d12b7111e0fa20e2fbfa39646b2bf6b124d3",
+      "blake3": "dbe0e3aad5e744e81154996f3ef33151dafe6ba206e20f4a147182ad9f22fab2",
+      "artifact_id": "art26"
+    },
+    {
+      "path": "deck.json",
+      "size": 2399,
+      "sha256": "ddb1e027fb4c4932b689868a0af9cf0c1d5d02594049511b89812b18dd52b7eb",
+      "blake3": "a7deb90ac5bdf72b75d87f6f72f6c5db1ba6596b9f26723dbc1ee36872f4ff7e",
+      "artifact_id": "art27"
+    },
+    {
+      "path": "sections/delivery.json",
+      "size": 21035,
+      "sha256": "f3f9f68943f0f0920a30a67677523c6f43d098cfd3e8cdb91ed409117fc34691",
+      "blake3": "21c7ff80594380e4003bd81784347057afff5b38eb202ae05a4318ed97c4d9f3",
+      "artifact_id": "art28"
+    },
+    {
+      "path": "sections/economics.json",
+      "size": 15786,
+      "sha256": "e3625d16f943928a88dc4aadbb972790ff05ca285f56f85d3ce3d545fd6d19cd",
+      "blake3": "7ff538f716c0407d174c4dc1d84e4de10b0215d7b3f5d9dc9b934da3448f8c78",
+      "artifact_id": "art29"
+    },
+    {
+      "path": "sections/governance.json",
+      "size": 20661,
+      "sha256": "50f3ee94460fe3c596df8f138989bc06ba1a180897347ecc66560c49e863302c",
+      "blake3": "2090c9021af681054dfc802f66b7e5dde50e93df5a3dc3f1ab21dbf38be9fde2",
+      "artifact_id": "art30"
+    },
+    {
+      "path": "verification_report.txt",
+      "size": 4564,
+      "sha256": "7c91505a5d59794e86e7ec17286087439b4f63a0bcb786040d10357e0a043ec1",
+      "blake3": "d6ad1b68711840b9c0195ac16e28a098627fcb8773ef9b5cab04e744e2a0c1c4",
+      "artifact_id": "art31"
+    }
+  ],
+  "arithmetic": {
+    "paid_hours": 1920,
+    "baseline_hours": 1560.0,
+    "saved_hours_by_type": [
+      251.99999999999997,
+      192.0,
+      108.0
+    ],
+    "saved_hours": 552.0,
+    "gross_capacity_value": 41400.0,
+    "variable_cost": 6240,
+    "monthly_full_net": 31160.0,
+    "monthly_net": [
+      4790.0,
+      13580.0,
+      22370.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0,
+      31160.0
+    ],
+    "initial_cost": 26000,
+    "year_net_after_initial": 295180.0,
+    "cumulative_net": [
+      -21210.0,
+      -7630.0,
+      14740.0,
+      45900.0,
+      77060.0,
+      108220.0,
+      139380.0,
+      170540.0,
+      201700.0,
+      232860.0,
+      264020.0,
+      295180.0
+    ],
+    "break_even_month": 3,
+    "sensitivity_hours": [
+      312.0,
+      468.0,
+      624.0
+    ],
+    "sensitivity_gross": [
+      23400.0,
+      35100.0,
+      46800.0
+    ],
+    "sensitivity_net": [
+      13160.0,
+      24860.0,
+      36560.0
+    ]
+  },
+  "native_charts": [
+    {
+      "slide": 3,
+      "id": "economics/slide03",
+      "title": "Workload Volume (Artifacts/month)",
+      "categories": [
+        "Documents",
+        "Spreadsheets",
+        "Slide Decks"
+      ],
+      "series": [
+        {
+          "name": "Volume",
+          "values": [
+            480,
+            240,
+            120
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet1.xlsx"
+    },
+    {
+      "slide": 4,
+      "id": "economics/slide04",
+      "title": "Hands-on Time (Hours/artifact)",
+      "categories": [
+        "Documents",
+        "Spreadsheets",
+        "Slide Decks"
+      ],
+      "series": [
+        {
+          "name": "Hours",
+          "values": [
+            1.5,
+            2.0,
+            3.0
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet2.xlsx"
+    },
+    {
+      "slide": 6,
+      "id": "economics/slide06",
+      "title": "Savings (Percentage)",
+      "categories": [
+        "Documents",
+        "Spreadsheets",
+        "Slide Decks"
+      ],
+      "series": [
+        {
+          "name": "Target Savings",
+          "values": [
+            0.35,
+            0.4,
+            0.3
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet3.xlsx"
+    },
+    {
+      "slide": 8,
+      "id": "economics/slide08",
+      "title": "Adoption Ramp (Percentage)",
+      "categories": [
+        "Month 1",
+        "Month 2",
+        "Month 3",
+        "Month 4-12"
+      ],
+      "series": [
+        {
+          "name": "Adoption",
+          "values": [
+            0.25,
+            0.5,
+            0.75,
+            1.0
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet4.xlsx"
+    },
+    {
+      "slide": 10,
+      "id": "economics/slide10",
+      "title": "Variable unit cost (USD/artifact)",
+      "categories": [
+        "Documents",
+        "Spreadsheets",
+        "Slide Decks"
+      ],
+      "series": [
+        {
+          "name": "Cost per artifact",
+          "values": [
+            6,
+            8,
+            12
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet5.xlsx"
+    },
+    {
+      "slide": 12,
+      "id": "economics/slide12",
+      "title": "Net Capacity Value at Full Adoption (USD)",
+      "categories": [
+        "Value"
+      ],
+      "series": [
+        {
+          "name": "Net Value",
+          "values": [
+            31160
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet6.xlsx"
+    },
+    {
+      "slide": 13,
+      "id": "economics/slide13",
+      "title": "Monthly Net (USD)",
+      "categories": [
+        "Month 1",
+        "Month 2",
+        "Month 3",
+        "Month 4-12"
+      ],
+      "series": [
+        {
+          "name": "Net Value",
+          "values": [
+            4790,
+            13580,
+            22370,
+            31160
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet7.xlsx"
+    },
+    {
+      "slide": 16,
+      "id": "economics/slide16",
+      "title": "Released Hours (Hours)",
+      "categories": [
+        "20%",
+        "30%",
+        "40%"
+      ],
+      "series": [
+        {
+          "name": "Hours",
+          "values": [
+            312,
+            468,
+            624
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet8.xlsx"
+    },
+    {
+      "slide": 17,
+      "id": "economics/slide17",
+      "title": "Gross Capacity Value (USD)",
+      "categories": [
+        "20%",
+        "30%",
+        "40%"
+      ],
+      "series": [
+        {
+          "name": "Value",
+          "values": [
+            23400,
+            35100,
+            46800
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet9.xlsx"
+    },
+    {
+      "slide": 18,
+      "id": "economics/slide18",
+      "title": "Full Net Capacity Value (USD)",
+      "categories": [
+        "20%",
+        "30%",
+        "40%"
+      ],
+      "series": [
+        {
+          "name": "Net Value",
+          "values": [
+            13160,
+            24860,
+            36560
+          ]
+        }
+      ],
+      "workbook": "/ppt/embeddings/Microsoft_Excel_Sheet10.xlsx"
+    }
+  ],
+  "deterministic_reassembly": {
+    "status": "passed",
+    "first_sha256": "b36870fb768d842fec5a6be93de7d12b7111e0fa20e2fbfa39646b2bf6b124d3",
+    "second_sha256": "b36870fb768d842fec5a6be93de7d12b7111e0fa20e2fbfa39646b2bf6b124d3",
+    "captured_sha256": "b36870fb768d842fec5a6be93de7d12b7111e0fa20e2fbfa39646b2bf6b124d3"
+  },
+  "content_review": {
+    "reviewed_proposal_matched": true,
+    "exact_duplicate_slide_pairs": [],
+    "known_defects": [],
+    "visual_record": "verification/visual-v3.json",
+    "limits": [
+      "Development-build demonstration with explicit operator/editorial intervention, not an independently verified business forecast.",
+      "Interactive Microsoft Office roundtrip and live human Workspace OAuth were not performed."
+    ]
+  },
+  "method": "Direct python-pptx, openpyxl, OOXML ZIP, pypdf, SHA256 and BLAKE3 inspection; agent verification_report.txt not used as proof.",
+  "library_versions": {
+    "python-pptx": "1.0.2",
+    "openpyxl": "3.1.5",
+    "pypdf": "6.6.0"
+  }
+}
