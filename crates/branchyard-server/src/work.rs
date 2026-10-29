@@ -37,6 +37,9 @@ pub enum Work {
     /// Durable workspace command using native task/attempt execution.
     Console {
         command: crate::console::ConsoleWork,
+        /// Captured credential reference; no bearer token is stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<crate::companion::Verified>,
     },
     /// `POST /v1/repos/{repo}/tasks`.
     Task { request: TaskRequest },
@@ -384,8 +387,19 @@ impl Executor for AppExecutor {
                 end_cursor: None,
             };
         }
-        if let Ok(Work::Console { command }) = serde_json::from_value::<Work>(work.clone()) {
-            return crate::console::execute(app, stored, command);
+        if let Ok(Work::Console {
+            command,
+            credential,
+        }) = serde_json::from_value::<Work>(work.clone())
+        {
+            let Some(principal) = stored.principal.clone() else {
+                return Finished {
+                    result: Err(*ApiError::unauthorized().body),
+                    end_cursor: None,
+                };
+            };
+            let caller = crate::api::Caller::authenticated(principal, credential);
+            return crate::console::execute(app, stored, command, caller);
         }
         // Membership may have changed while this operation waited in the queue.
         // The durable admitting principal, never the worker identity, must still
@@ -395,7 +409,7 @@ impl Executor for AppExecutor {
         });
         if let Err(refused) = crate::console::auth::authorize_operation(
             app,
-            &crate::api::Caller(principal),
+            &crate::api::Caller::new(principal),
             operation,
             scope_for(operation.kind),
         ) {
@@ -1316,5 +1330,45 @@ mod tests {
         assert_eq!(request.depends_on, ["lib"]);
         assert_eq!(request.after, branchyard::After::Integrated);
         assert_eq!(request.bindings[0].access, branchyard::Access::ReadOnly);
+    }
+}
+
+#[cfg(test)]
+mod captured_credentials {
+    use super::*;
+
+    #[test]
+    fn console_queue_round_trip_retains_exact_credential_without_changing_subject() {
+        let principal = crate::config::Principal::default_for("alice");
+        let verified = crate::companion::Verified {
+            token_sha256: crate::config::sha256_hex(b"inert-test-credential"),
+            expires_at_ms: Some(123_456),
+        };
+        let caller = crate::api::Caller::authenticated(principal.clone(), Some(verified.clone()));
+        assert_eq!(
+            caller.idempotency_scope(),
+            crate::api::Caller::new(principal).idempotency_scope()
+        );
+        assert_eq!(caller.verified(), Some(&verified));
+        let work = Work::Console {
+            command: crate::console::ConsoleWork::Initialize {
+                workspace_id: "workspace-test".into(),
+            },
+            credential: caller.verified().cloned(),
+        };
+        let encoded = serde_json::to_string(&work).unwrap();
+        assert!(!encoded.contains("inert-test-credential"));
+        assert_eq!(serde_json::from_str::<Work>(&encoded).unwrap(), work);
+        let legacy = serde_json::json!({
+            "kind":"console",
+            "command":{"action":"initialize","workspace_id":"workspace-test"}
+        });
+        assert!(matches!(
+            serde_json::from_value::<Work>(legacy).unwrap(),
+            Work::Console {
+                credential: None,
+                ..
+            }
+        ));
     }
 }

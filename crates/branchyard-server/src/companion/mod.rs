@@ -160,7 +160,7 @@ impl Companion {
 
 /// How the caller authenticated, beside its [`Caller`]: the hash of its
 /// token, and for a paired token when it expires.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Verified {
     pub token_sha256: String,
     pub expires_at_ms: Option<u64>,

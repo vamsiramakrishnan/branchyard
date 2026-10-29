@@ -83,6 +83,7 @@ impl crate::ops::Executor for ReservedFakeAgentPorts {
                     session_id,
                     ..
                 },
+            ..
         }) = serde_json::from_value::<crate::work::Work>(work.clone())
         {
             if let Err(error) = self.reserve(&workspace_id, &session_id) {
@@ -606,7 +607,7 @@ async fn queued_initialization_rechecks_revoked_owner_before_filesystem_effects(
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(super::auth::authorize_workspace(
         &fixture.app,
-        &Caller(Principal::default_for("owner")),
+        &Caller::new(Principal::default_for("owner")),
         wid,
         "read"
     )
@@ -658,7 +659,7 @@ async fn legacy_artifacts_check_publisher_and_streams_close_after_revocation() {
         )
         .unwrap();
     yard.share_artifact("foreign", &artifact.id, "own").unwrap();
-    let owner = Caller(Principal::default_for("owner"));
+    let owner = Caller::new(Principal::default_for("owner"));
     let make = |collection, id, body| super::insert(super::new(collection, id, &owner, body));
     fixture
         .app
@@ -705,7 +706,7 @@ async fn legacy_artifacts_check_publisher_and_streams_close_after_revocation() {
     merger.scopes = ["merge".to_owned()].into_iter().collect();
     assert!(super::auth::authorize_legacy(
         &fixture.app,
-        &Caller(merger),
+        &Caller::new(merger),
         &Method::POST,
         "/v1/repos/app/branches/own/merge"
     )
@@ -852,7 +853,8 @@ async fn cancellation_of_a_queued_session_is_durable_before_its_branch_exists() 
             if matches!(
                 serde_json::from_value::<crate::work::Work>(work.clone()),
                 Ok(crate::work::Work::Console {
-                    command: super::ConsoleWork::Start { .. }
+                    command: super::ConsoleWork::Start { .. },
+                    ..
                 })
             ) {
                 self.started.send(()).unwrap();
@@ -942,7 +944,7 @@ async fn an_old_delayed_cancel_never_cancels_an_explicitly_resumed_turn() {
             operation: &crate::store::StoredOperation,
             work: &Value,
         ) -> crate::ops::Finished {
-            let cancel = matches!(serde_json::from_value::<crate::work::Work>(work.clone()), Ok(crate::work::Work::Console {command:super::ConsoleWork::Control{control,..}}) if control == "cancel");
+            let cancel = matches!(serde_json::from_value::<crate::work::Work>(work.clone()), Ok(crate::work::Work::Console {command:super::ConsoleWork::Control{control,..},..}) if control == "cancel");
             if cancel && !self.gated.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 self.started.send(()).unwrap();
                 use branchyard_support::LockExt as _;
@@ -1225,7 +1227,7 @@ async fn initialization_completion_preserves_concurrent_sources_and_rejects_new_
     let original = super::new(
         Collection::Workspaces,
         "completion",
-        &Caller(Principal::default_for("owner")),
+        &Caller::new(Principal::default_for("owner")),
         json!({"id":"completion","state":"pending","_operation_id":"initializing","_source_bytes":0}),
     );
     fixture
@@ -1465,7 +1467,7 @@ async fn presence_is_attributed_bounded_and_expiring_without_waiting() {
         .console_mutate(&[super::insert(super::new(
             Collection::Presence,
             &format!("{workspace}:expired"),
-            &Caller(Principal::default_for("owner")),
+            &Caller::new(Principal::default_for("owner")),
             json!({"workspace_id":workspace,"subject":"expired","expires_at_ms":0}),
         ))])
         .unwrap();

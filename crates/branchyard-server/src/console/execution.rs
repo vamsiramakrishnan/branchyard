@@ -10,16 +10,13 @@ use crate::store::StoredOperation;
 use branchyard_client::api::OperationResult;
 
 /// Execute through the existing fenced registry; no console command replays a turn.
-pub(crate) fn execute(app: &App, stored: &StoredOperation, command: ConsoleWork) -> Finished {
+pub(crate) fn execute(
+    app: &App,
+    stored: &StoredOperation,
+    command: ConsoleWork,
+    caller: Caller,
+) -> Finished {
     let run = || -> Result<OperationResult, ApiError> {
-        let principal = stored.principal.clone().ok_or_else(|| {
-            ApiError::new(
-                StatusCode::FORBIDDEN,
-                "identity_required",
-                "console work requires an admitted identity",
-            )
-        })?;
-        let caller = Caller(principal);
         let required = if let ConsoleWork::Start { session_id, .. }
         | ConsoleWork::Send { session_id, .. }
         | ConsoleWork::Control { session_id, .. } = &command

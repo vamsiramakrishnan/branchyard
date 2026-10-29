@@ -49,7 +49,7 @@ struct Case {
 fn caller() -> Caller {
     let mut principal = Principal::default_for("operator");
     principal.tenant = "tenant-a".into();
-    Caller(principal)
+    Caller::new(principal)
 }
 
 impl Case {

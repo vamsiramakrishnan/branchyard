@@ -358,7 +358,11 @@ pub(super) fn admit(
         priority: crate::api::admitted_priority(&policy, None, 0)?,
         trace: crate::api::incoming_trace(headers),
     };
-    let value = crate::work::Work::Console { command }.to_value()?;
+    let value = crate::work::Work::Console {
+        command,
+        credential: caller.verified().cloned(),
+    }
+    .to_value()?;
     let (operation, _) = app.registry.submit_console(new, value, &mutations)?;
     operation_value(app, &operation)
 }
@@ -855,15 +859,15 @@ mod tests {
             revision: 1,
             body: json!({"subject":principal.connector_subject()}),
         };
-        assert!(session_subject(&session, &Caller(principal.clone())).is_ok());
+        assert!(session_subject(&session, &Caller::new(principal.clone())).is_ok());
         assert!(session_subject(
             &session,
-            &Caller(principal.delegated_to("second-device".into()))
+            &Caller::new(principal.delegated_to("second-device".into()))
         )
         .is_ok());
         assert!(session_subject(
             &session,
-            &Caller(crate::config::Principal::default_for("another-editor"))
+            &Caller::new(crate::config::Principal::default_for("another-editor"))
         )
         .is_err());
     }

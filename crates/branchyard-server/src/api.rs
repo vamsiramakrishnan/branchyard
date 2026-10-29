@@ -83,9 +83,27 @@ pub(crate) type Shared = Arc<App>;
 /// Requests never carry a `tenant_id`; every caller's tenant comes only
 /// from here. See `docs/server.md#identity-and-scopes`.
 #[derive(Clone)]
-pub struct Caller(pub Principal);
+pub struct Caller(pub Principal, Option<crate::companion::Verified>);
 
 impl Caller {
+    /// Construct an internal caller without a captured transport credential.
+    pub fn new(principal: Principal) -> Self {
+        Self(principal, None)
+    }
+
+    /// Retain the verified credential beside its stable subject identity.
+    pub(crate) fn authenticated(
+        principal: Principal,
+        verified: Option<crate::companion::Verified>,
+    ) -> Self {
+        Self(principal, verified)
+    }
+
+    /// The exact credential verified at this action's admission, when present.
+    pub(crate) fn verified(&self) -> Option<&crate::companion::Verified> {
+        self.1.as_ref()
+    }
+
     /// The subject name recorded for idempotency, audit and the operation
     /// registry's `busy` messages.
     pub fn name(&self) -> &str {
@@ -1123,7 +1141,7 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
             if read && !principal.allows("read") {
                 return scope_required("read").into_response();
             }
-            let caller = Caller(principal);
+            let caller = Caller::authenticated(principal, verified.clone());
             let path = request.uri().path().to_owned();
             if let Err(error) =
                 crate::console::auth::authorize_legacy(&app, &caller, request.method(), &path)

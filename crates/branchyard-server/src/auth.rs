@@ -265,10 +265,10 @@ mod tests {
         assert!(!serialized.contains(&token));
         let restored: Principal = serde_json::from_str(&serialized).unwrap();
         assert_eq!(restored, admitted);
-        let caller = crate::api::Caller(restored);
+        let caller = crate::api::Caller::new(restored);
         assert_ne!(
             caller.idempotency_scope(),
-            crate::api::Caller(config.bindings[0].principal.clone()).idempotency_scope()
+            crate::api::Caller::new(config.bindings[0].principal.clone()).idempotency_scope()
         );
         let mut changed = config.clone();
         changed.bindings[0].principal.scopes.insert("admin".into());

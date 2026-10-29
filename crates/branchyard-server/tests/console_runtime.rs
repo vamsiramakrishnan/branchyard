@@ -47,7 +47,7 @@ fn options(allow: bool, capacity: usize) -> RuntimeGatewayOptions {
 fn principal(name: &str) -> Caller {
     let mut principal = Principal::default_for(name);
     principal.tenant = "tenant-a".into();
-    Caller(principal)
+    Caller::new(principal)
 }
 
 impl Case {

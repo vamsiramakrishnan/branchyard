@@ -750,6 +750,11 @@ helper refuses a different tenant, broader scopes or broader repository grants.
 Operator-issued CLI links without an authenticated issuing identity create explicit
 standalone principals; their generated names do not assert a shared human identity.
 
+Console queue records retain the admitted credential's SHA-256 reference and
+expiry beside the stable subject identity. They contain no bearer token. Device
+credentials keep the issuing subject for idempotency and session ownership;
+credential references identify the exact device grant independently.
+
 Admission also creates a resource binding keyed by the generated operation ID.
 Initial session metadata stores that `operation_id`; workspace allocation intent
 stores its initialization operation internally. Views can therefore distinguish
