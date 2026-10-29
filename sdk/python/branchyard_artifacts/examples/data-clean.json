@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "input": {"path": "sales.csv"},
+  "trim": ["region", "amount"],
+  "null_tokens": ["missing"],
+  "types": {"amount": "number"},
+  "deduplicate": {"columns": ["account_id"], "keep": "first"}
+}
