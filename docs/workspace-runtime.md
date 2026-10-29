@@ -96,3 +96,63 @@ write-method proxying are not supported by this relay.
 
 The HTTP authorization, routing and origin configuration are integration
 responsibilities. The core handle does not grant a browser caller authority.
+
+## HTTP gateway integration
+
+`branchyard_server::console_runtime::RuntimeGateway` supplies the terminal HTTP
+adapters without depending on the console's storage implementation. Its resolver
+receives the authenticated `Caller`, workspace and session IDs, and the requested
+access. It must read current credential validity, tenant policy, workspace role,
+session binding and operator shell policy before returning a `Yard` and branch.
+The gateway separately enforces `read` or `run` scope. Terminals require an
+editor grant and the operator's `allow_client_commands` setting.
+
+Mount `console_runtime::router(gateway)` behind the existing authentication
+middleware. The router also refuses a missing authenticated caller. Call
+`gateway.close_all()` during graceful shutdown. The resolver runs again during
+every terminal request and from the running PTY's authority callback. A changed
+session-to-branch binding closes its old terminal. Another editor cannot reuse
+the creator's terminal handle; they can open their own after its writer lease
+ends.
+
+For example, open a terminal with `POST
+/v1/workspaces/WORKSPACE/sessions/SESSION/terminals`, an `Idempotency-Key` header
+and `{"rows":24,"columns":80}`. The executable, Python interpreter, environment
+and working directory come from operator configuration and the owning runtime.
+Unknown body fields are refused. A repeated opening request returns the same
+handle while its bounded process-local record remains. It can report `opening`
+while another identical request is starting the PTY.
+
+Input uses `POST .../terminals/ID/input` with
+`{"sequence":1,"data":"ZWNobyBoZWxsbwo="}`. `data` is standard base64 and
+decodes to at most 16 KiB. Sequences start at one. Retrying the last identical
+sequence acknowledges it without writing it again. Reusing a sequence with
+different bytes or skipping a sequence fails. If a write has an unknown outcome,
+the terminal closes; inspect the workspace before explicitly opening another.
+The service does not replay shell input after an interrupted write.
+
+Read `GET .../terminals/ID/output?after=0` for base64 output and a byte cursor.
+The response identifies its encoding, closed state and any buffer truncation.
+`POST .../resize` accepts rows and columns, and `POST .../close` is idempotent.
+Successful terminal responses use `Cache-Control: private, no-store`.
+
+Terminal capacity includes pending starts and retained closed records. Idle
+terminals expire, and closed records can be evicted when capacity is needed.
+Handles, opening-request bindings, sequence acknowledgements and replay buffers
+are ephemeral. After eviction or server restart, an old handle returns
+`410 terminal_lost`. Opening a new terminal requires an explicit client action;
+no shell or input is replayed. The existing process registry handles reclamation
+after a crash.
+
+The runtime status response reports provider state, owner-host readiness,
+resource capabilities and terminal policy. Readiness is a hint; opening still
+checks the actual branch lease and provider. Source originals and accepted
+deliverables remain independent of resource lifecycle changes.
+
+Lifecycle HTTP requests require an `Idempotency-Key` and an injected durable
+queue callback. They return the admitted operation. Without that callback the
+route reports `runtime_control_unavailable`. The worker passes its durable
+operation ID to `execute_lifecycle`, which rechecks authority before invoking the
+core provider action. The gateway does not create another execution queue or
+call a provider from the request handler. Active app HTTP relays still require
+the embedding server's separate preview origin.
