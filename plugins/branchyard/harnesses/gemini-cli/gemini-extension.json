@@ -1,5 +1,5 @@
 {
   "name": "branchyard",
   "version": "0.2.0",
-  "description": "Branchyard for Gemini CLI: /setup, /status and /wait commands, and hooks that tell a session when the repository's Branchyard branches finish, fail, block or ask. Requires the by CLI."
+  "description": "Use /setup, /status and /wait for Branchyard code and knowledge tasks. Hooks report finished, failed or blocked branches and requests for input. Requires the by CLI."
 }

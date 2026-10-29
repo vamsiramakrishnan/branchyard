@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "branchyard"
 version = "0.2.0"
-description = "Branchyard from Python: branchyard inside a harness (by --json), branchyard_client over by serve's HTTP API"
+description = "Run and coordinate agent tasks from Python, with optional tools for documents, data and evidence."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"

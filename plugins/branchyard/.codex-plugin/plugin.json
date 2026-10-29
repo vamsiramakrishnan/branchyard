@@ -1,14 +1,14 @@
 {
   "name": "branchyard",
-  "description": "Set up Branchyard by interview (branchyard.toml, servers, rigs, deployments) and delegate work to child branches: spawn, watch, integrate and cancel children within your envelope.",
+  "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI.",
   "version": "0.2.0",
   "license": "Apache-2.0",
   "skills": "./skills/",
   "hooks": "./harnesses/codex/hooks.json",
   "interface": {
     "displayName": "Branchyard",
-    "shortDescription": "Set up Branchyard; delegate work to child branches",
-    "longDescription": "Set up Branchyard by interview: the setup skill drives `by init --json`, asks you each question and writes only validated, diffed configuration after you agree (branchyard.toml, server configurations with hashed credentials, rigs, deployments). Delegate parts of a coding task to child branches: spawn a child on its own git branch and harness, watch its status and cost, integrate its validated result, and cancel it. Requires an installed `by` CLI; delegation runs on a Branchyard branch (BRANCHYARD_BRANCH set).",
+    "shortDescription": "Delegate code and knowledge work. Review results.",
+    "longDescription": "Set up a repository with guided configuration. Delegate code and knowledge tasks to separate branches, follow progress and review what comes back. Use document, data and evidence skills to produce and check artifacts. Requires the by CLI; delegation runs from a Branchyard-managed session. Optional artifact tools need their documented dependencies.",
     "developerName": "Branchyard contributors",
     "category": "Developer Tools",
     "capabilities": [

@@ -2,7 +2,7 @@
   "name": "branchyard",
   "displayName": "Branchyard",
   "version": "0.2.0",
-  "description": "Set up Branchyard by interview and delegate work to child branches; commands for status and waiting, and a session-start hook that tells a session which of the repository's branches finished, failed, are blocked or ask. Requires the by CLI.",
+  "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI.",
   "author": {
     "name": "Branchyard contributors"
   },
