@@ -6,7 +6,7 @@
 
 > **Desktop console, 29 October 2026.** Tested hermetically: `tests/companion_browser.rs` drives the three-pane page in Chrome Headless Shell 156 through Playwright 1.64.1 against a real server and the fake agent, at 1280 and 1440 pixels and at 320 and 390, in light and dark. Not done: a real phone, Safari or Firefox, a screen reader, and a branch whose conversation is longer than the fake agent's two turns.
 
-> **Knowledge workspace integration, 29 October 2026.** The desktop and workspace branches are merged into the integration branch. The browser test uses a real server, fake agents and deterministic source documents. Preview metadata and PNG responses are intercepted explicitly so this check needs no native converter. It exercises session creation, steering, cancellation, resumption, immutable downloads, output acceptance, preview rendering and disposal, and viewer restrictions. Separate HTTP tests verify preview authorization and conversion boundaries. Final combined verification is in progress. Not done in this browser record: a live model, native Office conversion, cloud execution, a real phone, Safari, Firefox or a screen reader.
+> **Knowledge workspace integration, 29 October 2026.** The desktop and workspace branches are merged into the integration branch. The browser test uses a real server, fake agents and deterministic source documents. Preview metadata and PNG responses are intercepted explicitly so this check needs no native converter. It exercises session creation, steering, cancellation, resumption, immutable downloads, output acceptance, preview rendering and disposal, and viewer restrictions. Separate HTTP tests verify preview authorization and conversion boundaries. The integrated desktop and workspace browser tests passed, including the viewer restrictions and a reviewer starting and continuing its own read-only session. Not done in this browser record: a live model, native Office conversion, cloud execution, a real phone, Safari, Firefox or a screen reader.
 
 ## Setting it up
 
@@ -128,7 +128,7 @@ A workspace uses the same three panes as a branch:
 - **Outputs** lists the workspace's artifacts with their format, size, session and turn. Ticking outputs offers **Accept N selected** (`POST …/finalize` with the revision and the IDs, confirmed first). Accepted outputs are marked and cannot be ticked again. The server decides what may be accepted: an output must come from its session's latest finished turn. Clicking an output's name mounts [the preview component](artifact-preview-component.md) under the list, with **Download original** (`…/artifacts/{id}/content`). The component fetches authenticated metadata from `…/artifacts/{id}/preview` and PNG assets from its `/assets/{asset}` route. Table cells stay inert. If the server lacks a configured isolated converter, the inspector shows the setup instructions and keeps the original available for download. An older server that answers `404 no such route` gets a compatibility notice. One preview is live at a time. Changing the route, the tab, the output or the source, or signing out, disposes it and aborts its requests.
 - **Details** shows the workspace's facts, the capabilities it lacks with their reasons, its sessions and its members.
 
-Workspace actions also respect the current membership and `capabilities.can_run`, beyond the token scopes. Viewers can read and download but cannot upload, start sessions or accept outputs.
+Workspace actions also respect the current membership and `capabilities.can_run`, beyond the token scopes. Viewers can read and download but cannot upload, start sessions or accept outputs. Reviewer members use `capabilities.can_comment` to start and continue read-only review sessions; writer actions remain unavailable.
 
 Every write that names a revision (an upload, an acceptance, a lifecycle action) reads the workspace's current revision. When the server answers `409 revision_conflict`, the page reloads the workspace, says so, and asks you to try again; it never repeats a write by itself. Managed workspaces have no event stream. While a workspace is being set up, a session runs, or an operation started from the page is pending, the page reads the workspace and the open session's new messages every 1.5 seconds, and stops once everything has settled. A read that fails is reported in the strip and the next waits longer, up to 30 seconds; a workspace that answers 403 or 404 is no longer read. Each session keeps its own draft in the message box.
 
@@ -143,12 +143,10 @@ The page and the server notice the same things `by watch` does, each once: a per
 - Pairing codes and tokens are in the operation store's database; there is no expiry sweep beyond the codes a new link removes, so `token list` keeps old rows.
 - No push retry: a nudge that fails is logged, and the page shows the state when opened.
 - A server that cannot build its HTTP client (no readable trust roots, say) starts with push off and says so in its log; the page and pairing still work.
-- No preview of a workspace output: the server has no `GET /v1/workspaces/{workspace}/artifacts/{artifact}/preview`, so the inspector says so and offers the original.
-- A token that reaches no repository gets no harness list (`GET /v1/harnesses` answers `500` "no repositories"); the session form then takes a typed harness name.
 - A source's title travels in a header, which carries ASCII only: the page drops accents and writes `_` for any other character outside it.
 - Workspaces are polled, not streamed.
 - The messages API does not tell a steer from a prompt and carries no tool calls, so a session's conversation shows neither a "Steered" label nor folded tool calls.
-- Not offered for workspaces: comments, presence, membership changes, a reviewer's frozen candidate, a model or effort choice, and a repository project's diff and merge.
+- Not offered for workspaces: comments, presence, membership changes, a reviewer's frozen candidate, an effort choice or remote execution preset, and a repository project's diff and merge.
 
 ## Code and tests
 

@@ -8,7 +8,7 @@ component guide and the deterministic fixture guide. Publication is pending.
 
 Hermetic verification on the integrated tree passed the companion HTTP suite
 with nine tests, the desktop browser test, the workspace browser test, and the
-server library suite with 247 passed and one existing ignored test. The
+server library suite with 252 passed and one existing ignored test. The
 companion library filter passed 19 tests. Browser previews use explicit fake
 metadata and PNG responses. Fake agents produce the captured files; original
 bytes, downloads, session continuation and acceptance use the real server.
@@ -25,7 +25,7 @@ remained running. See the [converter record](evidence/console-document-gce-2026-
 Not done in that record: a model turn, a browser workflow, GKE conversion or
 production load testing.
 
-The final source, schema, PostgreSQL and release checks are still in progress.
+The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. Final live model acceptance and publication remain in progress.
 The current GKE check has exercised the native Control API, an actor, a
 byte-preserving file round trip and AGY 1.4.9's version command using the 0.3.0
 CLI. That model-free smoke check does not qualify a model workflow. Live model
@@ -51,8 +51,8 @@ preview access is unavailable.
 | Bucket creation rejected `--labels` | The installed gcloud required a separate label update | Create, retain the exact creation receipt, then update labels. Refuse to adopt an ambiguous pre-existing bucket. |
 | The evaluation database allocated 500 GiB | The pinned upstream database manifest has a separate PVC | Use the supported smaller evaluation override, record PVC/PV identities and verify disk reclamation during cleanup. |
 | A Ready Substrate worker had no scheduling capacity after replacing the empty database | Upstream reports worker capacity once at process startup | Replace only the owned worker Pod after verifying its UID and empty assignment state; confirm capacity registration before retrying. |
-| Concurrent session admission returned an internal revision conflict | Workspace and tenant-quota compare-and-set updates competed | A bounded retry fix and its synchronized regression are being verified. Reuse the same request key when reconciling an uncertain submission. |
-| An AGY follow-up lost its original tool permissions | Console continuation rebuilt the default-deny policy instead of retaining the session policy | Persist and reapply the validated session policy while preserving current operator and caller checks. A command-requiring continuation regression is being added. The stale-result guard refused acceptance after the incomplete turn. |
+| Concurrent session admission returned an internal revision conflict | Workspace and tenant-quota compare-and-set updates competed | Retry rolled-back admission conflicts with the same request key after revalidating access, state and quota. The synchronized regression now passes on the integrated source. |
+| An AGY follow-up lost its original tool permissions | Console continuation rebuilt the default-deny policy instead of retaining the session policy | Persist and reapply the validated session policy while preserving current operator and caller checks. Command-requiring allow, deny, legacy-session and reviewer regressions now pass. The stale-result guard refused acceptance after the incomplete turn. |
 
 ## Remaining product gaps
 

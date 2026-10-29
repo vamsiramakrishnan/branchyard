@@ -1960,12 +1960,23 @@
       (!ws.current_role || ['owner', 'editor'].includes(ws.current_role));
   }
 
+  function workspaceCanComment(v) {
+    const ws = v.workspace;
+    const caps = ws.capabilities || {};
+    return can('run') && !v.gone && caps.can_comment !== false &&
+      (!ws.current_role || ['owner', 'editor', 'reviewer'].includes(ws.current_role));
+  }
+
+  function sessionCanContinue(v, s) {
+    return s && s.access === 'reviewer' ? workspaceCanComment(v) : workspaceCanRun(v);
+  }
+
   function sessionComposer(v, s) {
     const info = s && sessionStatus(s);
     const st = info && info.status.state;
     const mode = st === 'running' ? SESSION_COMPOSER.steer : st === 'interrupted' ? SESSION_COMPOSER.resume : SESSION_COMPOSER.send;
     let why = null;
-    if (!workspaceCanRun(v)) why = 'this workspace does not permit starting or continuing sessions';
+    if (!sessionCanContinue(v, s)) why = 'this workspace does not permit continuing this session';
     else if (!s) why = 'start a session first';
     else if (!['ready', 'running'].includes(v.workspace.state)) why = `the workspace is ${workspaceStateText(v.workspace)}`;
     else if (unstarted(s)) why = `${s.name} did not start${s.error ? `: ${s.error.message}` : ''}`;
@@ -1982,7 +1993,7 @@
   const WORKSPACE_MENU = [
     {
       label: 'Cancel turn', danger: true, run: (v, s) => cancelSession(v, s),
-      when: (v, s) => (s && sessionActive(s) && workspaceCanRun(v) ? null : false),
+      when: (v, s) => (s && sessionActive(s) && sessionCanContinue(v, s) ? null : false),
     },
     {
       label: 'Archive', run: (v) => lifecycle(v, 'archive'),
@@ -2158,7 +2169,7 @@
     }
     v.session = chosen ? chosen.id : null;
     if (v.composing || !chosen) {
-      v.composing = !chosen && workspaceCanRun(v) && v.workspace.state === 'ready';
+      v.composing = !chosen && (workspaceCanRun(v) || workspaceCanComment(v)) && v.workspace.state === 'ready';
       v.drawn.convo = null;
     }
     drawWorkspace(v);
@@ -2314,7 +2325,7 @@
 
   function drawSessions(v) {
     const sessions = sessionsOf(v);
-    const signature = JSON.stringify([sessions.map((s) => [s.id, s.name, sessionLane(s), sessionText(s)]), v.session, v.composing, workspaceCanRun(v)]);
+    const signature = JSON.stringify([sessions.map((s) => [s.id, s.name, sessionLane(s), sessionText(s)]), v.session, v.composing, workspaceCanRun(v), workspaceCanComment(v)]);
     if (signature === v.drawn.sessions) return;
     v.drawn.sessions = signature;
     fill($('sessions'), sessions.map((s) => h('a', {
@@ -2322,7 +2333,7 @@
       'aria-current': s.id === v.session && !v.composing ? 'page' : null,
       onclick: () => { if (v.composing) { v.composing = false; v.drawn.convo = null; drawWorkspace(v); } },
     }, dot(sessionLane(s)), h('span', { class: 'session-name', text: s.name }))),
-    workspaceCanRun(v) ? h('button', {
+    workspaceCanRun(v) || workspaceCanComment(v) ? h('button', {
       type: 'button', class: 'ghost new-session', id: 'new-session', 'aria-pressed': String(v.composing), text: '+ Session',
       onclick: () => { v.composing = true; v.drawn.convo = null; drawWorkspace(v); openSessionForm(v); },
     }) : null);
@@ -2341,7 +2352,7 @@
     v.drawn.convo = signature;
     const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
     if (!s) {
-      fill(box, h('p', { class: 'muted', text: workspaceCanRun(v) ? 'No sessions yet. Start one with + Session.' : 'No sessions yet.' }));
+      fill(box, h('p', { class: 'muted', text: workspaceCanRun(v) || workspaceCanComment(v) ? 'No sessions yet. Start one with + Session.' : 'No sessions yet.' }));
       return;
     }
     const working = sessionActive(s);
@@ -2636,6 +2647,8 @@
     const access = h('select', { id: ids.access },
       h('option', { value: 'writer', text: 'Writer: works in its own copy' }),
       h('option', { value: 'reviewer', text: 'Reviewer: reads outputs you choose' }));
+    if (!workspaceCanRun(v)) { access.value = 'reviewer'; access.disabled = true; }
+    const canStart = () => access.value === 'reviewer' ? workspaceCanComment(v) : workspaceCanRun(v);
     const prompt = h('textarea', { id: ids.prompt, rows: '5', placeholder: 'What should this session do?' });
     const model = h('input', { id: ids.model, type: 'text', autocomplete: 'off', placeholder: 'Harness default' });
     const checkbox = (label, checked, value) => {
@@ -2656,7 +2669,7 @@
     let start = null;
     let submitting = false;
     v.syncForm = () => {
-      if (start) start.disabled = submitting || v.workspace.state !== 'ready' || !workspaceCanRun(v);
+      if (start) start.disabled = submitting || v.workspace.state !== 'ready' || !canStart();
       const sources = (v.workspace.sources || []).map((src) => [src.id, src.title]);
       const outputs = (v.artifacts || []).map((a) => [a.id, a.name]);
       const signature = JSON.stringify([sources, outputs]);
@@ -2671,14 +2684,21 @@
     const acknowledgement = checkbox('I accept tools without per-tool approval', false);
     const error = h('p', { class: 'error', role: 'alert' });
     const ready = v.workspace.state === 'ready';
-    start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready || !workspaceCanRun(v) });
+    start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready || !canStart() });
     const cancel = h('button', {
       type: 'button', text: 'Cancel',
       onclick: () => { v.composing = false; v.drawn.convo = null; drawWorkspace(v); $('composer-text').focus(); },
     });
     access.addEventListener('change', () => {
       outputsBox.hidden = access.value !== 'reviewer';
-      collect.hidden = access.value === 'reviewer';
+      const reviewing = access.value === 'reviewer';
+      collect.hidden = reviewing;
+      for (const control of [allow, acknowledgement]) {
+        const input = control.querySelector('input');
+        input.disabled = reviewing;
+        if (reviewing) input.checked = false;
+      }
+      v.syncForm();
     });
     start.addEventListener('click', async () => {
       const body = { name: name.value.trim(), prompt: prompt.value.trim(), harness: harness.value.trim(), access: access.value };
@@ -2727,6 +2747,7 @@
       ready ? null : h('p', { class: 'hint', text: `The workspace is ${workspaceStateText(v.workspace)}; sessions start once it is ready.` }),
       h('div', { class: 'row form-actions' }, start, cancel),
       error));
+    access.dispatchEvent(new Event('change'));
     name.focus();
     let listed = null;
     let why = null;
