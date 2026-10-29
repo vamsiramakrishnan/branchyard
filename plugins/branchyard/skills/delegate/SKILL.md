@@ -28,8 +28,10 @@ check before its candidate is integrated.
 
 The workspace manager creates code or knowledge projects, starts and continues
 native sessions, inspects sources and immutable outputs, accepts deliverables,
-and observes queued operations. Its discovery lists the available tools. Reuse
-one `idempotency_key` when retrying one intended mutation. The ordinary server
+and observes queued operations. Its discovery lists the available tools.
+For repository-free knowledge work, an operator starts `by serve --app --knowledge`.
+This opt-in retains configured storage and quotas; it does not change your grant.
+Reuse one `idempotency_key` when retrying one intended mutation. The ordinary server
 scopes and workspace membership still apply. Never pass the operator token to a
 managed agent. `BRANCHYARD_MANAGER_TOKEN` is reserved and removed from harness
 environments, including inherited environments and explicit keep or set rules.

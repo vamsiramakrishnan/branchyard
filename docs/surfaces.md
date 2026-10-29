@@ -226,6 +226,13 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 
 ## Changed with the clap command line
 
+An operator can launch a repository-free console with `by serve --app --knowledge`.
+The same `--knowledge` opt-in is available to `branchyard-server` and `by worker`;
+workers still need their existing database configuration. Without an explicit
+repository or configuration, this mode stores state in the launch directory's
+`.branchyard/server` and managed work in its `knowledge/` directory. Configured
+roots and quotas retain their values. Managed knowledge remains disabled by default.
+
 Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See [command line](cli.md).
 
 | Surface | Before | Now |

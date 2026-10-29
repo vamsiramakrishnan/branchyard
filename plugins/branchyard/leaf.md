@@ -63,6 +63,8 @@ The external workspace manager, `by mcp manager --url URL --token-file FILE`,
 is an operator command and refuses managed turns. Its separate HTTP credential
 does not expand your branch's permissions. Use your branch-scoped tools here.
 The operator-only `BRANCHYARD_MANAGER_TOKEN` is never forwarded to harnesses.
+An operator starts a repository-free console with `by serve --app --knowledge`.
+This opt-in keeps configured storage and quotas and does not expand your grant.
 That manager bounds its JSON responses and returns an explicit error for large
 results. Keep large documents in artifacts and return a focused answer here.
 

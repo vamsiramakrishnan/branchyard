@@ -1652,6 +1652,14 @@ fn watch_and_serve() {
     assert_eq!(call("run serve"), None);
     assert_eq!(call("help merge"), None);
     assert_eq!(call(""), None);
+    assert_eq!(
+        call("serve --app --knowledge").unwrap().args,
+        ["--app", "--knowledge"]
+    );
+    assert_eq!(
+        call("worker --knowledge").unwrap().args,
+        ["--worker", "--knowledge"]
+    );
 }
 
 #[test]

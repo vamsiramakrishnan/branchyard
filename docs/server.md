@@ -9,6 +9,7 @@
 ```sh
 cd path/to/repo
 by serve                      # serves this repository as its directory name on 127.0.0.1:8421
+by serve --app --knowledge     # repository-free knowledge console; no JSON configuration needed
 # branchyard-server: created a token in .branchyard/server/token; clients pass --token-file with it
 
 by --remote http://127.0.0.1:8421 --token-file .branchyard/server/token ls   # or [remote] token_file in branchyard.toml
@@ -35,7 +36,8 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--check` | Load and validate the configuration and flags as serving would, print warnings, exit; writes nothing |
 | `--listen ADDR` | `IP:port`; default `127.0.0.1:8421`. Port 0 picks one; the server prints `listening on URL` to stdout |
 | `--repo NAME=PATH` | Serve the repository at `PATH` as `NAME` (repeatable). Default: the repository containing the current directory, named after its directory |
-| `--data-dir DIR` | Operation registry and activity feeds. Default: `.branchyard/server` in the first repository |
+| `--data-dir DIR` | Operation registry and activity feeds. Default: `.branchyard/server` in the first repository, or the launch directory with `--knowledge` and no repositories |
+| `--knowledge` | Enable managed knowledge projects without a user repository. Storage defaults to `data_dir/knowledge`; configured roots and quotas remain in effect. Disabled unless this flag or `managed_knowledge.enabled` enables it |
 | `--token-file FILE` | Accept the token on the first line of `FILE` (repeatable). Default: `DATA-DIR/token`, created with mode 600 if missing |
 | `--tls-cert FILE`, `--tls-key FILE` | PEM certificate chain and key; serve HTTPS |
 | `--insecure-bind` | Allow plain HTTP on a non-loopback address; prints a loud warning |

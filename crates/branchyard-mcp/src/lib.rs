@@ -97,6 +97,7 @@ An operator can use by compute gce --project PROJECT --zone ZONE --name NAME --t
 to review an offline JSON plan; --apply provisions the VM and its dedicated IAP TCP 22 firewall rule. \
 Add --internal-ip to omit an external address. This operator command refuses harness sessions and --remote. \
 An external operator can run by mcp manager --url URL --token-file FILE, with optional --ca-file FILE, to manage authorized code and knowledge workspaces. \
+For a repository-free console, an operator runs by serve --app --knowledge; this keeps configured storage and quotas and does not expand your grant. \
 BRANCHYARD_MANAGER_TOKEN is reserved for that operator and is never forwarded to native harnesses. \
 Manager tool outputs have a bounded JSON budget, with explicit errors for oversized responses; use focused previews or compute for large documents. \
 That separate manager uses an HTTP principal; it is not added to this branch-scoped delegation server.";

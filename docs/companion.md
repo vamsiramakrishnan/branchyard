@@ -8,6 +8,12 @@
 
 ## Setting it up
 
+For a knowledge console without a repository, run `by serve --app --knowledge`
+from the directory where you want its local state. It uses `.branchyard/server`
+there, with managed work under `knowledge/`. `--data-dir` or the server
+configuration can choose another location. The flag keeps configured knowledge
+quotas and does not enable terminal execution or broaden token permissions.
+
 ```sh
 by serve --app                       # or "app": true in the configuration
 by serve token new --link --scopes read,run --ttl 8h
