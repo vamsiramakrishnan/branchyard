@@ -98,6 +98,12 @@ fn the_page_pairs_follows_the_stream_and_sends() {
     assert!(op.state.is_terminal());
     writeln!(stdin, "go").unwrap();
     expect("SEEN first");
+    expect("FILTERED");
+    let background = "review-quarterly-research-evidence-and-customer-interviews-for-final-report";
+    let op = run(&server.client(), &task("WRITE c.txt=3", background));
+    assert!(op.state.is_terminal());
+    writeln!(stdin, "refresh").unwrap();
+    expect("FILTER PRESERVED");
     expect("SENT");
     expect("DONE");
     assert!(child.wait().unwrap().success());

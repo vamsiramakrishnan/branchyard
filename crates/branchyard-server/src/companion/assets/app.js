@@ -23,6 +23,7 @@
     stream: null,
     backoff: 1000,
     loaded: false,
+    branchError: null,
     seen: new Set(),
     statusSeen: new Map(),
     permissions: [],
@@ -72,6 +73,7 @@
 
   function main(...children) {
     const m = $('main');
+    m.removeAttribute('aria-busy');
     m.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
   }
 
@@ -196,7 +198,7 @@
 
   function badge(info) {
     const s = statusOf(info);
-    return h('span', { class: `badge s-${s.key}`, text: s.text.length > 60 ? `${s.text.slice(0, 59)}…` : s.text });
+    return h('span', { class: `badge s-${s.key}`, text: s.text });
   }
 
   // When each action applies: the rules of `by watch`'s action registry.
@@ -321,9 +323,14 @@
     const id = nextId('token');
     const error = h('p', { class: 'error', role: 'alert', text: message || '' });
     const input = h('input', { id, type: 'password', autocomplete: 'off', spellcheck: 'false', required: true });
+    const connect = h('button', { type: 'button', text: 'Connect to server', onclick: () => submit() });
     const submit = async () => {
       const token = input.value.trim();
-      if (!token) return;
+      if (!token) { input.focus(); input.reportValidity(); return; }
+      if (connect.disabled) return;
+      connect.disabled = true;
+      connect.textContent = 'Connecting…';
+      error.textContent = '';
       state.token = token;
       try {
         await start();
@@ -331,16 +338,23 @@
       } catch (e) {
         state.token = null;
         error.textContent = e.status === 401 ? 'That token is not accepted.' : e.message;
+        connect.disabled = false;
+        connect.textContent = 'Connect to server';
       }
     };
     input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submit(); });
     main(
-      h('h1', { text: 'Sign in' }),
-      h('p', {}, 'Open a pairing link from ', h('code', { text: 'by serve token new --link' }),
-        ' on this device, or paste a token. It is kept for this tab only and sent only to this server.'),
-      h('div', { class: 'panel' },
-        h('label', { class: 'block', for: id, text: 'Token' }), input,
-        h('div', { class: 'row' }, h('button', { type: 'button', onclick: submit, text: 'Sign in' }))),
+      h('div', { class: 'page-heading' },
+        h('div', {}, h('h1', { text: 'Connect to Branchyard' }),
+          h('p', { class: 'lede', text: 'Follow your tasks and review their branches from this browser.' }))),
+      h('section', { class: 'panel connect-panel', 'aria-label': 'Connect to your server' },
+        h('h2', { text: 'Open a pairing link' }),
+        h('p', {}, 'On the machine running your server, run ', h('code', { text: 'by serve token new --link' }),
+          '. Open the printed link on this device.'),
+        h('h2', { text: 'Or use a server token' }),
+        h('label', { class: 'block', for: id, text: 'Server token' }), input,
+        h('p', { class: 'hint', text: 'Kept only in this browser tab and sent only to this server.' }),
+        h('div', { class: 'row form-actions' }, connect)),
       error,
     );
     focusHeading();
@@ -395,6 +409,7 @@
     state.branches = new Map();
     state.cursor = null;
     state.loaded = false;
+    state.branchError = null;
     state.permissions = [];
     state.inbox = [];
     state.approvals = [];
@@ -405,7 +420,17 @@
   }
 
   async function loadBranches() {
-    const { branches } = await api('GET', `${repoPath()}/branches`);
+    state.branchError = null;
+    if (state.route.name === 'branches') renderBranches();
+    let branches;
+    try {
+      ({ branches } = await api('GET', `${repoPath()}/branches`));
+    } catch (e) {
+      if (e.status === 401) throw e;
+      state.branchError = e.message;
+      if (state.route.name === 'branches') renderBranches();
+      return;
+    }
     state.branches = new Map(branches.map((b) => [b.name, b]));
     state.loaded = true;
     refreshInbox();
@@ -591,25 +616,63 @@
     const all = Array.from(state.branches.values());
     const rank = (b) => ({ running: 0, waiting: 1 }[b.status.state] ?? 2);
     all.sort((x, y) => rank(x) - rank(y) || y.created_at - x.created_at);
-    const shown = all.filter((b) => !filterText || b.name.includes(filterText) || (b.prompt || '').toLowerCase().includes(filterText.toLowerCase()));
-    const searchId = nextId('filter');
+    const matches = (b) => {
+      const needle = filterText.trim().toLowerCase();
+      return !needle || b.name.toLowerCase().includes(needle) || (b.prompt || '').toLowerCase().includes(needle);
+    };
+    const searchId = 'branch-filter';
+    const previous = document.activeElement;
+    const selection = previous && previous.id === searchId
+      ? [previous.selectionStart, previous.selectionEnd, previous.selectionDirection] : null;
     const search = h('input', { id: searchId, type: 'search', value: filterText, placeholder: 'Filter by name or prompt' });
+    const count = h('p', { id: 'branch-count', class: 'result-count', role: 'status', 'aria-live': 'polite' });
+    const list = h('ul', { class: 'list branch-list', id: 'branch-list', 'aria-label': 'Branches' });
+    const empty = h('section', { class: 'empty-state', id: 'branch-empty' });
+    const update = () => {
+      const shown = all.filter(matches);
+      list.replaceChildren(...branchItems(shown));
+      count.textContent = filterText.trim()
+        ? `Showing ${shown.length} of ${all.length} branches`
+        : `${all.length} branch${all.length === 1 ? '' : 'es'}`;
+      empty.hidden = !!shown.length;
+      if (!shown.length && all.length) {
+        empty.replaceChildren(h('h2', { text: 'No matching branches' }),
+          h('p', { class: 'muted', text: 'Try another name or a word from the prompt.' }),
+          h('button', { type: 'button', class: 'secondary', text: 'Clear search', onclick: () => {
+            filterText = ''; search.value = ''; update(); search.focus();
+          } }));
+      } else if (!all.length) {
+        empty.hidden = !!state.branchError;
+        empty.replaceChildren(
+          h('h2', { text: state.loaded ? 'No branches yet.' : 'Loading branches…' }),
+          h('p', { class: 'muted', text: state.loaded
+            ? can('run') ? 'Start a task to create its own branch. Its progress and results will appear here.'
+              : 'Branches started from the CLI or another browser will appear here. This token has read access.'
+            : 'Getting the latest work from your server.' }));
+        if (!state.loaded) empty.setAttribute('role', 'status');
+      }
+    };
     search.addEventListener('input', () => {
       filterText = search.value;
-      const list = $('branch-list');
-      if (list) list.replaceChildren(...branchItems(all.filter((b) => !filterText || b.name.includes(filterText) || (b.prompt || '').toLowerCase().includes(filterText.toLowerCase()))));
+      update();
     });
-    const focused = document.activeElement && document.activeElement.type === 'search';
     main(
-      h('h1', { text: `Branches in ${state.repo}` }),
-      h('div', { class: 'toolbar' },
-        h('label', { for: searchId, class: 'visually-hidden', text: 'Filter branches' }), search,
+      h('div', { class: 'page-heading' },
+        h('div', {}, h('h1', { text: `Branches in ${state.repo}` }),
+          h('p', { class: 'lede', text: 'Follow running tasks, review results, and send the next step.' })),
         can('run') ? h('a', { class: 'button', href: '#/new', text: 'New task' }) : null),
-      state.loaded ? null : h('p', { class: 'muted', text: 'Loading…' }),
-      state.loaded && !all.length ? h('p', { class: 'muted', text: 'No branches yet.' }) : null,
-      h('ul', { class: 'list', id: 'branch-list', 'aria-label': 'Branches' }, branchItems(shown)),
+      all.length ? h('div', { class: 'toolbar' },
+        h('label', { for: searchId, class: 'visually-hidden', text: 'Filter branches' }), search,
+        count) : null,
+      state.branchError ? h('section', { class: 'panel error-state', role: 'alert' },
+        h('h2', { text: state.loaded ? 'Could not refresh branches' : 'Could not load branches' }),
+        h('p', { text: state.branchError }),
+        h('p', { class: 'hint', text: 'Check that the server is reachable and this token can read the repository, then retry. Your token stays in this tab.' }),
+        h('button', { type: 'button', class: 'secondary', text: 'Retry loading branches', onclick: loadBranches })) : null,
+      empty, list,
     );
-    if (focused) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+    update();
+    if (selection) { search.focus({ preventScroll: true }); search.setSelectionRange(...selection); }
   }
 
   function branchItems(list) {
@@ -626,7 +689,7 @@
         h('a', { href: `#/b/${enc(state.repo)}/${enc(b.name)}` },
           h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: b.name }), badge(b)),
           h('div', { class: 'item-meta', text: meta }),
-          b.prompt ? h('div', { class: 'item-meta', text: b.prompt.length > 140 ? `${b.prompt.slice(0, 139)}…` : b.prompt }) : null));
+          b.prompt ? h('div', { class: 'item-prompt', text: b.prompt.length > 140 ? `${b.prompt.slice(0, 139)}…` : b.prompt }) : null));
     });
   }
 
@@ -944,7 +1007,7 @@
     const allow = h('input', { type: 'checkbox', id: allowId });
     const error = h('p', { class: 'error', role: 'alert' });
     const go = h('button', {
-      type: 'button', text: 'Start', disabled: !can('run'),
+      type: 'button', text: 'Start task', disabled: !can('run'),
       onclick: async () => {
         const prompt = area.value.trim();
         if (!prompt) { area.focus(); return; }

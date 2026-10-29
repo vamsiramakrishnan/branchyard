@@ -80,6 +80,16 @@ with `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame
 
 `by watch`'s local-only rows (copy path, pull requests, open, rewind, try, browse, stop ports) and `review` (an editor) are not offered.
 
+### Finding work
+
+The branch list puts running and waiting work first. **New task** opens the task form; **Start task** submits it. A token without `run` scope can follow work started elsewhere.
+
+Filter branch names or prompt text without matching case. The result count follows the filter. When nothing matches, **Clear search** restores the list and keeps keyboard focus in the search field. Live updates preserve the text selection while you edit a filter. Long branch names and complete status reasons wrap within their cards.
+
+An empty repository explains how its first branch appears. Loading has a separate state. A failed list request shows **Retry loading branches** and retains any previously loaded branches; it does not report an empty repository. Retrying uses the current tab's token.
+
+On narrow screens, the navigation uses two rows so every section remains visible. Buttons, links and fields have visible keyboard focus. The page follows the device's light or dark preference and reduced-motion setting.
+
 **Permission requests are shown, not answered,** unless an approval asks. A server decides each tool request at once with the policy its task or send carried (`deny` by default; there is no remote `ask`), so there is nothing pending to approve. An [approval](effects.md#approvals) that says `ask` (a principal's or the administrator's, for a tool or a connector call) is different: the turn waits, and the Approvals view answers it. The inbox lists the requests seen while the page is open with their decision, and Send and Fork have an "Allow every tool" box (`policy: {"mode": "allow"}`, like `--yes`) for a branch that needs what was denied.
 
 ### Notifications
@@ -97,3 +107,5 @@ The page and the server notice the same things `by watch` does, each once: a per
 ## Code and tests
 
 [`companion/`](../crates/branchyard-server/src/companion/mod.rs) in `branchyard-server`: routes and authentication hooks (`mod.rs`), the store on SQLite and PostgreSQL (`store.rs`, following `store.rs`'s catalog-first, one-step-per-transaction DDL under the advisory lock), pairing links and `token list`/`revoke` (`link.rs`), Web Push (`push.rs`; two servers' followers over one store sending each notice once, on SQLite in its unit tests and on PostgreSQL in `tests/postgres.rs`), the QR encoder (`qr.rs`, checked against matrices from an independent encoder made by [`tools/qr_crosscheck.js`](../tools/qr_crosscheck.js)), and the page (`assets/`). Wire types are `branchyard_client::companion`, in [`schema/contract.json`](../schema/contract.json). Tests: [`tests/companion.rs`](../crates/branchyard-server/tests/companion.rs) and [`tests/companion_browser.rs`](../crates/branchyard-server/tests/companion_browser.rs) (Playwright and Chromium; skipped, saying so, when Node or the Playwright module is missing).
+
+The browser regression covers invalid-token recovery, empty and loading states, a failed list request and retry, case-insensitive filtering, no-match recovery, preserved keyboard selection during a real event-stream update, and narrow-screen navigation with a long branch name. It continues through the original follow-up and diff workflow with the fake agent. Chromium also needs its system libraries; use Playwright's `install --with-deps chromium` when preparing the browser. `BY_TEST_PLAYWRIGHT` names the installed module directory, `PLAYWRIGHT_BROWSERS_PATH` its browser directory, and optional `BY_SCREENSHOTS` an existing output directory.
