@@ -203,6 +203,25 @@ let browser = null;
     const capture = session.getByRole('checkbox', { name: 'Collect outputs (outputs/artifacts.json)', exact: true });
     if (!(await capture.isChecked())) throw new Error('an outputs project does not collect outputs by default');
     await capture.setChecked(collect);
+    if (collect) {
+      await session.getByText('Tool approval compatibility', { exact: true }).click();
+      const acknowledgement = session.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true });
+      if (await acknowledgement.isChecked()) throw new Error('tool acknowledgement starts enabled');
+      const model = session.getByLabel('Model (optional)', { exact: true });
+      await model.fill('knowledge-model');
+      await acknowledgement.check();
+      const sessionRoute = `**/v1/workspaces/${ws}/sessions`;
+      await page.route(sessionRoute, async (route) => {
+        const body = route.request().postDataJSON();
+        if (body.model !== 'knowledge-model' || body.unapproved_tools !== true) throw new Error('model or explicit tool acknowledgement was lost');
+        await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'provider_not_allowed', message: 'Fixture operator refused this request.' } }) });
+      });
+      await session.getByRole('button', { name: 'Start session', exact: true }).click();
+      await session.getByRole('alert').filter({ hasText: 'Fixture operator refused this request.' }).waitFor();
+      await page.unroute(sessionRoute);
+      await model.fill('');
+      await acknowledgement.uncheck();
+    }
     if (shots && collect) await page.screenshot({ path: `${shots}/session-form.png` });
     const before = hash();
     await session.getByRole('button', { name: 'Start session', exact: true }).click();
@@ -289,7 +308,46 @@ let browser = null;
     await preview.waitFor({ state: 'detached' });
     await page.getByRole('button', { name: 'Download original', exact: true }).waitFor();
   };
+  // Conversion stays hermetic: intercept only preview metadata and PNGs.
+  // Server-side preview authorization and isolation have separate HTTP tests.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  const authenticate = (route) => {
+    if (!/^Bearer .+/.test(route.request().headers().authorization || '')) throw new Error('preview fetch omitted its bearer token');
+  };
+  await page.route(PREVIEW, (route) => {
+    authenticate(route);
+    const pathname = new URL(route.request().url()).pathname;
+    const name = [CSV, XLSX, DOCX, PPTX].find((n) => previewPath(n) === pathname);
+    if (!name) throw new Error(`unexpected preview route ${pathname}`);
+    const data = [CSV, XLSX].includes(name)
+      ? { status: 'passed', kind: 'table', format: format(name).toLowerCase(), columns: ['Evidence'], rows: [['=1+1']], offset: 0, next_offset: null }
+      : { status: 'passed', kind: 'pages', format: format(name).toLowerCase(), image: 'page-1.png', page: 1, pages: 1, width: 1, height: 1 };
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+  });
+  const assets = '**/artifacts/*/preview/assets/*';
+  await page.route(assets, (route) => {
+    authenticate(route);
+    return route.fulfill({ status: 200, contentType: 'image/png', body: png });
+  });
+  for (const name of [CSV, XLSX, DOCX, PPTX]) {
+    await outputName(name).click();
+    if ([CSV, XLSX].includes(name)) await preview.getByRole('cell', { name: '=1+1', exact: true }).waitFor();
+    else {
+      const image = preview.getByRole('img', { name: 'Page 1 of 1', exact: true });
+      await image.waitFor();
+      await image.evaluate((img) => img.complete && img.naturalWidth > 0 ? Promise.resolve() : new Promise((resolve, reject) => {
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', () => reject(new Error('fake preview PNG did not load')), { once: true });
+      }));
+    }
+  }
+  await page.unroute(PREVIEW);
+  await page.unroute(assets);
+  // Preserve the older-server fallback as an explicit compatibility case.
+  const missingPreview = (route) => route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: { code: 'not_found', message: 'no such route' } }) });
+  await page.route(PREVIEW, missingPreview);
   for (const name of [CSV, XLSX, DOCX, PPTX]) await previewMissing(name);
+  await page.unroute(PREVIEW, missingPreview);
 
   // Never answered, so each preview stays in flight until the page abandons it.
   await page.route(PREVIEW, () => {});
@@ -307,6 +365,7 @@ let browser = null;
   await titled('Backlog review').waitFor();
   await abandon(XLSX, () => page.locator('#tab-sources').click(), 'switching to Sources');
   await page.unroute(PREVIEW);
+  await page.route(PREVIEW, missingPreview);
   say('OUTPUTS');
 
   await page.locator('#tab-outputs').click();
@@ -333,6 +392,26 @@ let browser = null;
   const want = [artifact[CSV], artifact[XLSX]].sort();
   if (JSON.stringify(accepted) !== JSON.stringify(want)) throw new Error(`the server accepted ${JSON.stringify(accepted)}, not ${JSON.stringify(want)}`);
   say('ACCEPTED');
+
+  const workspaceRoute = `**/v1/workspaces/${ws}`;
+  await page.route(workspaceRoute, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    body.current_role = 'viewer';
+    body.capabilities.can_run = false;
+    await route.fulfill({ response, json: body });
+  });
+  await page.reload();
+  await titled('Backlog review').waitFor();
+  if (!(await page.getByRole('button', { name: 'Upload sources', exact: true }).isDisabled())) throw new Error('a viewer can upload sources');
+  if (await page.getByRole('button', { name: '+ Session', exact: true }).count()) throw new Error('a viewer is offered a new session');
+  if (!(await page.locator('#composer-go').isDisabled())) throw new Error('a viewer can continue a session');
+  await page.locator('#tab-outputs').click();
+  await choose(DOCX).waitFor();
+  if (!(await choose(DOCX).isDisabled())) throw new Error('a viewer can select an output for acceptance');
+  await page.unroute(workspaceRoute);
+  await page.reload();
+  await titled('Backlog review').waitFor();
 
   await menu.click();
   const sleep = strip.getByRole('button', { name: /^Sleep/ });

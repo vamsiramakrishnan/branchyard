@@ -2,8 +2,8 @@
 //! server with managed knowledge on: a knowledge-only token loads the
 //! console, a paired browser creates a project and a workspace, uploads
 //! sources, runs two fake-agent sessions (one steered, cancelled and
-//! resumed), finds four captured outputs whose previews the server does not
-//! serve, downloads and accepts them, and the branch routes still work
+//! resumed), finds four captured outputs, renders intercepted table and PNG previews,
+//! downloads and accepts the actual immutable originals, and the branch routes still work
 //! beside it. Driven by Playwright (`console_workspace_browser.js`) with
 //! documents from `tools/console_fixtures.py`; skipped, saying so, when
 //! Node or Playwright's module is not installed. `BY_TEST_PLAYWRIGHT`

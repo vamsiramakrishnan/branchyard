@@ -1953,17 +1953,24 @@
     },
   };
 
+  function workspaceCanRun(v) {
+    const ws = v.workspace;
+    const caps = ws.capabilities || {};
+    return can('run') && !v.gone && caps.can_run !== false &&
+      (!ws.current_role || ['owner', 'editor'].includes(ws.current_role));
+  }
+
   function sessionComposer(v, s) {
     const info = s && sessionStatus(s);
     const st = info && info.status.state;
     const mode = st === 'running' ? SESSION_COMPOSER.steer : st === 'interrupted' ? SESSION_COMPOSER.resume : SESSION_COMPOSER.send;
     let why = null;
-    if (!can('run')) why = 'this token lacks the run scope';
+    if (!workspaceCanRun(v)) why = 'this workspace does not permit starting or continuing sessions';
     else if (!s) why = 'start a session first';
     else if (!['ready', 'running'].includes(v.workspace.state)) why = `the workspace is ${workspaceStateText(v.workspace)}`;
     else if (unstarted(s)) why = `${s.name} did not start${s.error ? `: ${s.error.message}` : ''}`;
     else if (!info) why = `${s.name} is starting; its first turn has not begun`;
-    else if (state.me.subject && s.subject && s.subject !== state.me.subject) why = `only ${s.subject} can continue ${s.name}`;
+    else if ((v.workspace.current_subject || state.me.subject) && s.subject && s.subject !== (v.workspace.current_subject || state.me.subject)) why = `only ${s.subject} can continue ${s.name}`;
     else why = mode.rule(info);
     return { mode, why };
   }
@@ -1975,22 +1982,22 @@
   const WORKSPACE_MENU = [
     {
       label: 'Cancel turn', danger: true, run: (v, s) => cancelSession(v, s),
-      when: (v, s) => (s && sessionActive(s) && can('run') ? null : false),
+      when: (v, s) => (s && sessionActive(s) && workspaceCanRun(v) ? null : false),
     },
     {
       label: 'Archive', run: (v) => lifecycle(v, 'archive'),
-      when: (v) => (v.workspace.state === 'ready' && can('run') ? null : false),
+      when: (v) => (v.workspace.state === 'ready' && workspaceCanRun(v) ? null : false),
     },
     {
       label: 'Restore', run: (v) => lifecycle(v, 'restore'),
-      when: (v) => (['archived', 'failed', 'interrupted'].includes(v.workspace.state) && can('run') ? null : false),
+      when: (v) => (['archived', 'failed', 'interrupted'].includes(v.workspace.state) && workspaceCanRun(v) ? null : false),
     },
     { label: 'Sleep', run: (v) => lifecycle(v, 'sleep'), when: (v) => capability(v, 'sleep') },
   ];
 
   function capability(v, name) {
     const c = (v.workspace.capabilities || {})[name];
-    if (!c || v.workspace.state !== 'ready' || !can('run')) return false;
+    if (!c || v.workspace.state !== 'ready' || !workspaceCanRun(v)) return false;
     return c.available ? null : c.reason || 'not available';
   }
 
@@ -2107,7 +2114,7 @@
       ev.preventDefault();
       drop.classList.remove('over');
       const picked = Array.from((ev.dataTransfer && ev.dataTransfer.files) || []);
-      if (picked.length && can('run')) uploadSources(v, picked);
+      if (picked.length && workspaceCanRun(v)) uploadSources(v, picked);
     });
     main(h('div', { class: 'branch workspace', id: 'workspace' },
       h('section', { class: 'focus', 'aria-label': 'Conversation' },
@@ -2119,8 +2126,8 @@
         tablist(INSPECTOR, () => v.tab, (tab) => selectWorkspaceTab(v, tab)),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-sources', 'aria-labelledby': 'tab-sources' },
           h('div', { class: 'panel-tools' },
-            h('button', { type: 'button', id: 'upload-sources', text: 'Upload sources', disabled: !can('run'), onclick: () => files.click() }),
-            files, can('run') ? drop : null),
+            h('button', { type: 'button', id: 'upload-sources', text: 'Upload sources', disabled: !workspaceCanRun(v), onclick: () => files.click() }),
+            files, workspaceCanRun(v) ? drop : null),
           h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' })),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
           h('div', { id: 'outputs-list' }),
@@ -2151,7 +2158,7 @@
     }
     v.session = chosen ? chosen.id : null;
     if (v.composing || !chosen) {
-      v.composing = !chosen && can('run') && v.workspace.state === 'ready';
+      v.composing = !chosen && workspaceCanRun(v) && v.workspace.state === 'ready';
       v.drawn.convo = null;
     }
     drawWorkspace(v);
@@ -2255,6 +2262,9 @@
     drawStrip(v);
     drawSessions(v);
     if (v.composing && v.syncForm) v.syncForm();
+    $('upload-sources').disabled = !workspaceCanRun(v);
+    const drop = $('source-drop');
+    if (drop) drop.hidden = !workspaceCanRun(v);
     drawConversation(v);
     applySessionComposer(v);
     drawSources(v);
@@ -2278,7 +2288,7 @@
     const focused = strip.contains(document.activeElement) && document.activeElement.id;
     let action = null;
     if (v.busy) action = h('button', { type: 'button', class: 'primary', disabled: true, text: v.busy });
-    else if (n) action = h('button', { type: 'button', class: 'primary', id: 'accept', text: `Accept ${n} selected`, disabled: !can('run'), onclick: () => acceptSelected(v) });
+    else if (n) action = h('button', { type: 'button', class: 'primary', id: 'accept', text: `Accept ${n} selected`, disabled: !workspaceCanRun(v), onclick: () => acceptSelected(v) });
     fill(strip,
       h('a', { class: 'back', href: `#/p/${enc(ws.project_id)}`, text: '‹ Workspaces' }),
       h('div', { class: 'strip-title' }, h('h1', { tabindex: '-1', text: ws.title }),
@@ -2304,7 +2314,7 @@
 
   function drawSessions(v) {
     const sessions = sessionsOf(v);
-    const signature = JSON.stringify([sessions.map((s) => [s.id, s.name, sessionLane(s), sessionText(s)]), v.session, v.composing]);
+    const signature = JSON.stringify([sessions.map((s) => [s.id, s.name, sessionLane(s), sessionText(s)]), v.session, v.composing, workspaceCanRun(v)]);
     if (signature === v.drawn.sessions) return;
     v.drawn.sessions = signature;
     fill($('sessions'), sessions.map((s) => h('a', {
@@ -2312,7 +2322,7 @@
       'aria-current': s.id === v.session && !v.composing ? 'page' : null,
       onclick: () => { if (v.composing) { v.composing = false; v.drawn.convo = null; drawWorkspace(v); } },
     }, dot(sessionLane(s)), h('span', { class: 'session-name', text: s.name }))),
-    can('run') ? h('button', {
+    workspaceCanRun(v) ? h('button', {
       type: 'button', class: 'ghost new-session', id: 'new-session', 'aria-pressed': String(v.composing), text: '+ Session',
       onclick: () => { v.composing = true; v.drawn.convo = null; drawWorkspace(v); openSessionForm(v); },
     }) : null);
@@ -2331,7 +2341,7 @@
     v.drawn.convo = signature;
     const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
     if (!s) {
-      fill(box, h('p', { class: 'muted', text: can('run') ? 'No sessions yet. Start one with + Session.' : 'No sessions yet.' }));
+      fill(box, h('p', { class: 'muted', text: workspaceCanRun(v) ? 'No sessions yet. Start one with + Session.' : 'No sessions yet.' }));
       return;
     }
     const working = sessionActive(s);
@@ -2517,13 +2527,13 @@
     const accepted = new Set((v.workspace.accepted_deliverables || []).map((a) => a.artifact_id));
     const all = v.artifacts || [];
     $('outputs-count').textContent = all.length ? String(all.length) : '';
-    const signature = JSON.stringify([all.map((a) => a.id), Array.from(accepted), v.artifactsError, v.artifacts === null]);
+    const signature = JSON.stringify([all.map((a) => a.id), Array.from(accepted), v.artifactsError, v.artifacts === null, workspaceCanRun(v)]);
     if (signature === v.drawn.outputs) return;
     v.drawn.outputs = signature;
     const names = new Map((v.workspace.sessions || []).map((s) => [s.branch, s.name]));
     const row = (a) => {
       const done = accepted.has(a.id);
-      const box = h('input', { type: 'checkbox', 'aria-label': `Select ${a.name}`, checked: done || v.selected.has(a.id), disabled: done || !can('run') });
+      const box = h('input', { type: 'checkbox', 'aria-label': `Select ${a.name}`, checked: done || v.selected.has(a.id), disabled: done || !workspaceCanRun(v) });
       box.addEventListener('change', () => {
         if (box.checked) v.selected.add(a.id); else v.selected.delete(a.id);
         drawStrip(v);
@@ -2619,7 +2629,7 @@
   async function openSessionForm(v) {
     const box = $('convo');
     if (!box || box.querySelector('#session-form')) return;
-    const ids = { name: nextId('session'), harness: nextId('harness'), access: nextId('access'), prompt: nextId('first') };
+    const ids = { name: nextId('session'), harness: nextId('harness'), access: nextId('access'), prompt: nextId('first'), model: nextId('model') };
     const name = h('input', { id: ids.name, type: 'text', autocomplete: 'off', placeholder: 'For example: Analyst' });
     let harness = h('select', { id: ids.harness, disabled: true }, h('option', { value: '', text: 'Loading…' }));
     const harnessSlot = h('div', {}, h('label', { class: 'block', for: ids.harness, text: 'Harness' }), harness);
@@ -2627,6 +2637,7 @@
       h('option', { value: 'writer', text: 'Writer: works in its own copy' }),
       h('option', { value: 'reviewer', text: 'Reviewer: reads outputs you choose' }));
     const prompt = h('textarea', { id: ids.prompt, rows: '5', placeholder: 'What should this session do?' });
+    const model = h('input', { id: ids.model, type: 'text', autocomplete: 'off', placeholder: 'Harness default' });
     const checkbox = (label, checked, value) => {
       const input = h('input', { type: 'checkbox', checked, value });
       return h('label', { class: 'toggle' }, input, h('span', { text: label }));
@@ -2642,7 +2653,10 @@
         : h('p', { class: 'hint', text: empty }));
     };
     let synced = null;
+    let start = null;
+    let submitting = false;
     v.syncForm = () => {
+      if (start) start.disabled = submitting || v.workspace.state !== 'ready' || !workspaceCanRun(v);
       const sources = (v.workspace.sources || []).map((src) => [src.id, src.title]);
       const outputs = (v.artifacts || []).map((a) => [a.id, a.name]);
       const signature = JSON.stringify([sources, outputs]);
@@ -2654,9 +2668,10 @@
     v.syncForm();
     const collect = checkbox(`Collect outputs (${OUTPUT_MANIFEST})`, v.workspace.result_mode !== 'code');
     const allow = checkbox('Allow every tool', false);
+    const acknowledgement = checkbox('I accept tools without per-tool approval', false);
     const error = h('p', { class: 'error', role: 'alert' });
     const ready = v.workspace.state === 'ready';
-    const start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready });
+    start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready || !workspaceCanRun(v) });
     const cancel = h('button', {
       type: 'button', text: 'Cancel',
       onclick: () => { v.composing = false; v.drawn.convo = null; drawWorkspace(v); $('composer-text').focus(); },
@@ -2676,7 +2691,10 @@
         if (!body.artifacts.length) { error.textContent = 'Choose at least one output to review.'; return; }
       } else if (collect.querySelector('input').checked) body.result_contract = OUTPUT_CONTRACT;
       if (allow.querySelector('input').checked) body.policy = { mode: 'allow' };
-      start.disabled = true;
+      if (acknowledgement.querySelector('input').checked) body.unapproved_tools = true;
+      if (model.value.trim()) body.model = model.value.trim();
+      submitting = true;
+      v.syncForm();
       error.textContent = '';
       let op = null;
       try {
@@ -2685,7 +2703,7 @@
         error.textContent = e.message;
       }
       if (wsView !== v) return;
-      if (!op) { start.disabled = false; return; }
+      if (!op) { submitting = false; v.syncForm(); return; }
       toast('Session started.');
       v.composing = false;
       v.drawn.convo = null;
@@ -2698,10 +2716,13 @@
       h('label', { class: 'block', for: ids.name, text: 'Session name' }), name,
       h('div', { class: 'form-grid' }, harnessSlot,
         h('div', {}, h('label', { class: 'block', for: ids.access, text: 'Access' }), access)),
+      h('label', { class: 'block', for: ids.model, text: 'Model (optional)' }), model,
       h('label', { class: 'block', for: ids.prompt, text: 'First prompt' }), prompt,
       sourcesBox,
       outputsBox,
       h('div', { class: 'row choices-row' }, collect, allow),
+      h('details', {}, h('summary', { text: 'Tool approval compatibility' }), acknowledgement,
+        h('p', { class: 'hint', text: 'AGY and some other harnesses cannot enforce per-tool approvals. Acknowledge this only when you accept that behavior. The server must also permit it; reviewers remain read-only.' })),
       h('p', { class: 'hint', text: `Collect outputs asks the session to list its result files in ${OUTPUT_MANIFEST} and end with a JSON summary; the server publishes those files as outputs you can preview and accept.` }),
       ready ? null : h('p', { class: 'hint', text: `The workspace is ${workspaceStateText(v.workspace)}; sessions start once it is ready.` }),
       h('div', { class: 'row form-actions' }, start, cancel),
@@ -2717,7 +2738,7 @@
     if (!harness.isConnected) return;
     const usable = (listed || []).filter((x) => x.available);
     if (usable.length) {
-      fill(harness, usable.map((x) => h('option', { value: x.harness, text: x.harness })));
+      fill(harness, usable.map((x) => h('option', { value: x.default ? x.harness : x.profile, text: x.default ? x.harness : `${x.harness} (${x.profile})` })));
       harness.disabled = false;
     } else {
       const typed = h('input', { id: ids.harness, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'A harness this server runs' });
