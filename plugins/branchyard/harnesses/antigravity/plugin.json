@@ -1,5 +1,5 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "branchyard",
-  "description": "Tell an Antigravity conversation which of the repository's Branchyard branches finished, failed, are blocked or ask. Requires the by CLI."
+  "description": "Get Branchyard branch updates in Antigravity: finished or failed work, blocked tasks and requests for input. Requires the by CLI."
 }

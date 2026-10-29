@@ -4,14 +4,14 @@
     "name": "Branchyard contributors"
   },
   "metadata": {
-    "description": "Branchyard's Cursor plugin, from this repository.",
-    "version": "0.2.0"
+    "description": "Branchyard for Cursor: guided setup, delegation and artifact skills.",
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "branchyard",
       "source": "./plugins/branchyard",
-      "description": "Set up Branchyard by interview and delegate work to child branches; a session-start hook that tells a session when its branches finish. Requires the by CLI."
+      "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI."
     }
   ]
 }

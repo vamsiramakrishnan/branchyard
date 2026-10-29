@@ -284,8 +284,7 @@ pub fn unset_blank_env() {
 #[command(
     name = "by",
     version,
-    about = "Delegate coding work to agent harnesses on git branches, and merge only validated \
-             results.",
+    about = "Run agent tasks on Git branches. Review changes and collect artifacts.",
     after_help = GENERAL_AFTER_HELP,
     // Commands without a `display_order` go under "Other commands".
     next_display_order = None,

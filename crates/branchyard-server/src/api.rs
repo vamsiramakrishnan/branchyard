@@ -1360,8 +1360,8 @@ fn unknown_operation(what: String) -> ApiError {
     )
 }
 
-/// An operation only its own tenant may read: another tenant's, like an
-/// unknown ID, is `404`, so a principal cannot tell the two apart.
+/// An operation visible within the caller's tenant and current repository
+/// allowlists. Anything outside that scope reads as an unknown ID.
 ///
 /// With `?wait=SECONDS`, a long poll: the answer comes once the operation
 /// is terminal or that long has passed, at most [`MAX_WAIT`], and is the
@@ -1375,12 +1375,25 @@ async fn operation(
 ) -> Result<Json<Operation>, ApiError> {
     let wait = operation_wait(query.as_deref())?;
     let registry = app.registry.clone();
+    let policy = app.tenant_policy(&caller);
     let found = {
         let id = id.clone();
         let tenant = caller.tenant().to_owned();
-        blocking(move || match wait {
-            Some(timeout) => registry.wait_for_tenant(&id, &tenant, timeout),
-            None => registry.get_for_tenant(&id, &tenant),
+        blocking(move || {
+            let found = registry
+                .get_for_tenant(&id, &tenant)?
+                .filter(|op| caller.0.repo_allowed(&policy, &op.repo));
+            // Authorize before waiting: an inaccessible running operation
+            // must read like an unknown ID without revealing its timing.
+            if found.is_none() {
+                return Ok(None);
+            }
+            match wait {
+                Some(timeout) => registry
+                    .wait_for_tenant(&id, &tenant, timeout)
+                    .map(|found| found.filter(|op| caller.0.repo_allowed(&policy, &op.repo))),
+                None => Ok(found),
+            }
         })
         .await??
     };
@@ -1428,10 +1441,15 @@ async fn operation_by_key(
         .filter(|k| !k.is_empty())
         .ok_or_else(|| ApiError::bad_request("give idempotency_key"))?;
     let registry = app.registry.clone();
+    let policy = app.tenant_policy(&caller);
     let found = {
         let key = key.clone();
-        blocking(move || registry.by_key(&caller.idempotency_scope(), &key, caller.tenant()))
-            .await??
+        blocking(move || {
+            registry
+                .by_key(&caller.idempotency_scope(), &key, caller.tenant())
+                .map(|found| found.filter(|op| caller.0.repo_allowed(&policy, &op.repo)))
+        })
+        .await??
     };
     found
         .map(Json)

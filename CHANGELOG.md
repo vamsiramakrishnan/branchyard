@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 - 2026-10-29
+
+Operation lookups recheck the caller's current repository grants, including
+idempotency-key reconciliation and waiting requests. A tenant match alone does
+not expose an operation from another repository.
+
+The README now follows installation, an AGY task, review and merge, document
+work and remote setup. Package descriptions cover coding and knowledge work.
+A shared vector icon, wordmarks and sharing card give the CLI's companion and
+repository a consistent identity. The CLI lists readiness with setup and doctor.
+
+The companion keeps search focus during updates, distinguishes loading, empty,
+failed and filtered lists, and keeps full status reasons and navigation usable
+on small screens.
+
 ## 0.2.0 - 2026-10-29
 
 Branchyard now supports cooperative harness teams for coding and knowledge work,
