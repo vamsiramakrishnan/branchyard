@@ -524,7 +524,10 @@ fn unless_set_is_for_a_top_level_json_merge_only() {
 #[test]
 fn summary_counts_distinct_skill_roots_without_treating_payloads_as_hook_places() {
     let bundle = Bundle(&[
+        ("skills/INDEX.md", "topic discovery"),
+        ("skills/topics/design/INDEX.md", "design skill discovery"),
         ("skills/pptx/SKILL.md", "presentation skill"),
+        ("skills/pptx/INDEX.md", "presentation resource discovery"),
         ("skills/pptx/scripts/run.py", "print('pptx')"),
         ("skills/artifact-tools/SKILL.md", "toolkit skill"),
         ("skills/artifact-tools/runtime.lock.json", "{}"),
