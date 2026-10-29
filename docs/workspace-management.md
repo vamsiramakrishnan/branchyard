@@ -84,6 +84,36 @@ capture failures and malformed output after a possible publication report
 to replay a push automatically. Native checked merging remains the existing
 engine operation, separate from creating a PR.
 
+### PR gateway callbacks
+
+`console_pr_gateway::router` mounts session-scoped PR observation, publication and
+refresh handlers behind the server's ordinary authentication. GET reads cached
+state. POST publication accepts only `title`, `base` and `draft`. POST refresh
+requires `{}`. Request JSON is bounded to 4 KiB. Observation and worker results
+are bounded to 2 MiB, with explicit errors rather than truncated JSON.
+
+`PrGateway` requires a resolver that checks current caller revocation, scope,
+tenant, repository policy, workspace membership and native session binding.
+`PrAccess::Inspect`, `Refresh` and `Publish` require read, run and merge scope
+respectively. Each returned `AuthorizedBranch` must retain a live authorization
+callback for that required access and its resolved binding. Paths and executables
+come from operator state. Missing queue configuration fails explicitly.
+
+The queue callback must atomically reauthorize and persist the full `PrCommand`
+with ordinary idempotency. Bind the key to caller, workspace and session, and use
+`PrCommand::request_identity()` for comparison. That identity excludes the
+server-derived branch and candidate so a retry can recover its original
+operation even after the candidate moves. Persist the full command for execution.
+An interrupted operation stays interrupted on a repeated key.
+
+The claimed worker holds its existing fenced claim and branch lock while calling
+`PrGateway::execute`. Publication compares the admitted branch and commit before
+forge work. Target movement produces `workspace_binding_changed` or
+`stale_candidate`. Both `PrCompleted` and `PrExecutionError` retain the operation
+ID. An error with `error.unknown_effect` must become an interrupted or uncertain
+outcome; it must not be automatically replayed. Refresh and publication run only
+inside that worker callback, never on an HTTP request task.
+
 ## Verification
 
 Hermetic verification on 29 October 2026 passed the client route/idempotency
@@ -103,3 +133,12 @@ MCP stdio, and the shipped skill, projection and command-surface checks. The CLI
 argument, help and reference checks passed, along with production Clippy,
 rustdoc and the fast Python gate. The verification record states the exact
 source scopes. Not done: live model, cloud or forge calls in this followup.
+
+This gateway slice was verified hermetically on 29 October 2026 with the real
+Axum router, engine candidates, injected authorization and queue callbacks, and
+fake forge executables. Router and worker checks, service regressions, focused
+Clippy and rustdoc passed. The fast gate identified the new PR routes as missing
+SDK parity coverage, assigned to the separate SDK slice. All other fast steps
+passed. See the [gateway verification record](evidence/console-pr-gateway-2026-10-29.json).
+Not done: central queue and authentication wiring, integrated SDK route parity,
+or live forge, cloud and model calls for this gateway slice.

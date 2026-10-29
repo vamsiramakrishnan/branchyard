@@ -44,6 +44,11 @@ pub struct AuthorizedBranch {
 }
 
 impl AuthorizedBranch {
+    /// Compare server-resolved bindings without exposing their host paths.
+    pub(crate) fn same_binding(&self, other: &Self) -> bool {
+        self.branch == other.branch && self.yard.root() == other.yard.root()
+    }
+
     /// Bind a server-resolved yard/branch after checking the required authority.
     pub fn checked(
         yard: Yard,
@@ -103,7 +108,7 @@ pub struct Service {
 }
 
 /// Safe publication choices; bypasses and force pushes are deliberately absent.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Publish {
     /// Optional plain-text PR title.
@@ -113,6 +118,19 @@ pub struct Publish {
     /// Create a draft PR.
     #[serde(default)]
     pub draft: bool,
+}
+
+impl Publish {
+    /// Validate publication choices before queue admission or process creation.
+    pub fn validate(&self) -> Result<(), Error> {
+        if let Some(title) = &self.title {
+            bounded_text(title, "title", 500)?;
+        }
+        if let Some(base) = &self.base {
+            bounded_text(base, "base", 256)?;
+        }
+        Ok(())
+    }
 }
 
 /// Existing durable PR and CI observations, read from engine events.
@@ -247,13 +265,12 @@ impl Service {
         request: &Publish,
     ) -> Result<Value, Error> {
         context.recheck(Action::Publish)?;
+        request.validate()?;
         let mut args = vec!["pr".into(), "--json".into()];
         if let Some(title) = &request.title {
-            bounded_text(title, "title", 500)?;
             args.push(format!("--title={title}"));
         }
         if let Some(base) = &request.base {
-            bounded_text(base, "base", 256)?;
             args.push(format!("--base={base}"));
         }
         if request.draft {

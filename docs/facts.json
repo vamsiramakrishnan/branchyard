@@ -65,11 +65,11 @@
     }
   },
   "tests": {
-    "total": 2941,
+    "total": 3020,
     "ignored": 34,
     "by_crate": {
       "branchyard": {
-        "tests": 943,
+        "tests": 952,
         "ignored": 17
       },
       "branchyard-bridge": {
@@ -81,7 +81,7 @@
         "ignored": 3
       },
       "branchyard-client": {
-        "tests": 24,
+        "tests": 29,
         "ignored": 0
       },
       "branchyard-config": {
@@ -129,7 +129,7 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 317,
+        "tests": 382,
         "ignored": 1
       },
       "branchyard-setup": {
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 93,
+    "route_count": 119,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -181,6 +181,8 @@
       "/v1/inventory",
       "/v1/operations",
       "/v1/operations/{id}",
+      "/v1/projects",
+      "/v1/projects/{project}",
       "/v1/repos",
       "/v1/repos/{repo}/approvals",
       "/v1/repos/{repo}/approvals/{id}/allow",
@@ -257,7 +259,31 @@
       "/v1/triggers/{t}/fire/{token}",
       "/v1/triggers/{t}/runs",
       "/v1/triggers/{t}/secret",
-      "/v1/triggers/{t}/test"
+      "/v1/triggers/{t}/test",
+      "/v1/workspaces",
+      "/v1/workspaces/{workspace}",
+      "/v1/workspaces/{workspace}/actions/{action}",
+      "/v1/workspaces/{workspace}/artifacts",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/content",
+      "/v1/workspaces/{workspace}/comments",
+      "/v1/workspaces/{workspace}/finalize",
+      "/v1/workspaces/{workspace}/members",
+      "/v1/workspaces/{workspace}/members/{subject}",
+      "/v1/workspaces/{workspace}/presence",
+      "/v1/workspaces/{workspace}/sessions",
+      "/v1/workspaces/{workspace}/sessions/{session}/cancel",
+      "/v1/workspaces/{workspace}/sessions/{session}/messages",
+      "/v1/workspaces/{workspace}/sessions/{session}/pr",
+      "/v1/workspaces/{workspace}/sessions/{session}/pr/refresh",
+      "/v1/workspaces/{workspace}/sessions/{session}/runtime",
+      "/v1/workspaces/{workspace}/sessions/{session}/runtime/actions/{action}",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/input",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/output",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/resize",
+      "/v1/workspaces/{workspace}/sources",
+      "/v1/workspaces/{workspace}/sources/{source}/content"
     ]
   },
   "runtime": {

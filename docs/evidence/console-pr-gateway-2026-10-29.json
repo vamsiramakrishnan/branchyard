@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-29",
+  "evidence": "hermetic",
+  "models_called": false,
+  "records": [
+    {
+      "log": "management-pr-gateway-verified.log",
+      "status": "passed",
+      "scope": "final 9 router/claimed-worker tests and 5 PR service tests; server library and focused test Clippy; server rustdoc with warnings denied",
+      "sha256": "6ece63e0a95b438893c0e4725da9f73f737810f221b3aef41e1e9090c2709b20",
+      "test_summaries": [
+        {
+          "passed": 9,
+          "failed": 0
+        },
+        {
+          "passed": 5,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-pr-gateway-fast.log",
+      "status": "integration_dependency",
+      "scope": "fast gate stopped at SDK RouteParity: two new PR patterns await the separately owned SDK integration; preceding steps passed",
+      "sha256": "2e16b63d56c2d4521066c3471fcee446c5b0b3f8c3b5c6cbc1d9dc16ed9d0f46",
+      "test_summaries": []
+    },
+    {
+      "log": "management-pr-gateway-fast-remaining.log",
+      "status": "passed",
+      "scope": "remaining fast steps after SDK parity: SDK examples, check runner, hooks, plugin compatibility/configuration, agent text drift and harness identities",
+      "sha256": "ce3733f0c42bf9fd5a3b388ab73efde588737aad129c3131d265d2d1d631635f",
+      "test_summaries": []
+    }
+  ],
+  "not_done": [
+    "central App/authentication/ConsoleWork queue integration",
+    "integrated SDK route parity until the independent SDK slice is merged",
+    "live GitHub publication, real cloud or model calls"
+  ]
+}

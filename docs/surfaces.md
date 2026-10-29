@@ -19,6 +19,13 @@ The external manager bounds each tool's text and structured JSON payload to
 cursors. Artifact previews default to 25 rows. Narrow the preview or request a
 focused calculation instead of loading a large document into the lead's context.
 
+The PR gateway exposes `GET /v1/workspaces/{workspace}/sessions/{session}/pr`
+for cached PR/check observations. `POST /v1/workspaces/{workspace}/sessions/{session}/pr`
+accepts optional `title`, `base` and `draft`; `POST /v1/workspaces/{workspace}/sessions/{session}/pr/refresh`
+accepts `{}`. Both POST routes require `Idempotency-Key` and return the existing
+durable operation envelope with status 202. The embedding server supplies live
+console authorization and queue callbacks. See [workspace management](workspace-management.md).
+
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
 ## Branch operations

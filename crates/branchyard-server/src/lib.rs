@@ -74,6 +74,7 @@ mod console;
 pub use console::ConsoleWork;
 pub mod connectors;
 pub mod console_pr;
+pub mod console_pr_gateway;
 pub mod console_runtime;
 pub mod console_store;
 pub mod effects_routes;
