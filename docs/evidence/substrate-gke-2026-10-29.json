@@ -2,7 +2,7 @@
   "date": "2026-10-29",
   "evidence": "live",
   "scope": "Fresh private GKE Standard deployment, native Substrate Control authentication, bridge template, disposable Actor file transfer/basic exec, and private GCE connection.",
-  "status": "native_ready_retained_for_acceptance",
+  "status": "console_model_passed_and_owned_infrastructure_deleted",
   "versions": {
     "branchyard_cli": "0.3.0 candidate",
     "harness": {
@@ -377,29 +377,218 @@
     "google_service_account_keys_created": false,
     "normal_operator_adc_reused": true,
     "new_bridge_signer_and_native_connection_files_private": true,
-    "credential_values_printed_or_committed": false
+    "credential_values_printed_or_committed": false,
+    "scope": "Setup and model-free network qualification; model credential handling is recorded separately."
   },
   "cleanup": {
-    "status": "retained_for_root_model_and_pty_acceptance",
+    "status": "all_owned_resources_verified_absent",
+    "verified_at_utc": "2026-10-29T13:40:43.775528+00:00",
+    "full_cleanup_run": true,
     "old500Gi_database_disk": "verified_absent",
-    "replacement10Gi_database_disk": "retained_and_uid_recorded",
-    "ssh_reverse_forwards": "running_and_pid_start_time_recorded",
-    "full_cleanup_run": false,
-    "owned_cleanup_order": [
-      "After Actor acceptance, destroy only its Actors and preserve outputs.",
-      "Remove only the exactly marked remote native connection directory and stop its PID/start-time-fenced SSH master.",
-      "While Kubernetes is alive, UID-fence the recorded database controller/PVC/PV and verify the exact CSI Compute disk is absent.",
-      "Stop matching owned local API/router forwards.",
-      "Delete only the ownership-labeled cluster, Artifact Registry repository and snapshot bucket.",
-      "Remove only the dedicated node account role binding, then delete the dedicated node account."
+    "replacement10Gi_database_disk": "verified_absent",
+    "ssh_reverse_forwards": "stopped_and_remote_listeners_verified_absent",
+    "remote_marked_connection_directory": "verified_absent",
+    "native_actors_before_cleanup": "none_across_all_atespaces",
+    "native_actor_check_utc": "2026-10-29T13:29:52Z",
+    "absence_checks": [
+      {
+        "resource": "cluster",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "container",
+          "clusters",
+          "describe",
+          "by-console-20261029-b1",
+          "--zone=us-central1-a",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "registry",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "artifacts",
+          "repositories",
+          "describe",
+          "by-console-20261029-b1",
+          "--location=us-central1",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "snapshot_bucket",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "storage",
+          "buckets",
+          "describe",
+          "gs://vital-octagon-19612-by-console-20261029-b1-snapshots",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "node",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "compute",
+          "instances",
+          "describe",
+          "gke-by-console-20261029--default-pool-0b264ea6-452r",
+          "--zone=us-central1-a",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "node_boot_disk",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "compute",
+          "disks",
+          "describe",
+          "gke-by-console-20261029--default-pool-0b264ea6-452r",
+          "--zone=us-central1-a",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "node_service_account",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "iam",
+          "service-accounts",
+          "list",
+          "--project=vital-octagon-19612",
+          "--filter=email=by-by-console-2026102-3c9a5b10@vital-octagon-19612.iam.gserviceaccount.com",
+          "--format=json",
+          "--quiet"
+        ],
+        "result": "empty project-scoped exact-email list",
+        "note": "Post-delete describe returned PERMISSION_DENIED or it may not exist; no permission error was treated as absence."
+      },
+      {
+        "resource": "database_disk_500Gi",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "compute",
+          "disks",
+          "describe",
+          "pvc-2f497fce-4a50-427b-ad69-b2b063991d3d",
+          "--zone=us-central1-a",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "database_disk_10Gi",
+        "state": "absent",
+        "command": [
+          "gcloud",
+          "compute",
+          "disks",
+          "describe",
+          "pvc-f233cf58-af5c-4156-81be-5042bd739a60",
+          "--zone=us-central1-a",
+          "--project=vital-octagon-19612",
+          "--quiet",
+          "--format=json"
+        ],
+        "result": "NOT_FOUND"
+      },
+      {
+        "resource": "dedicated_node_account_project_iam_memberships",
+        "state": "absent"
+      },
+      {
+        "resource": "owned_local_and_ssh_forwards",
+        "state": "stopped"
+      },
+      {
+        "resource": "gce_scoped_connection_and_listeners",
+        "state": "absent",
+        "verification": {
+          "remote_connection_directory": "absent",
+          "owned_loopback_listeners": "absent"
+        }
+      }
     ],
-    "unowned_network_nat_services_and_credentials_preserved": true
+    "storage_ledger": [
+      {
+        "cluster": "by-console-20261029-b1",
+        "namespace": "ate-system",
+        "claim": "data-postgres-0",
+        "claim_uid": "2f497fce-4a50-427b-ad69-b2b063991d3d",
+        "pv": "pvc-2f497fce-4a50-427b-ad69-b2b063991d3d",
+        "pv_uid": "1ecb2afd-0327-425b-bc0d-e4f8c675ff83",
+        "disk": "projects/vital-octagon-19612/zones/us-central1-a/disks/pvc-2f497fce-4a50-427b-ad69-b2b063991d3d",
+        "storage_class": "standard-rwo",
+        "requested": "500Gi",
+        "capacity": "500Gi",
+        "reclaim_policy": "Delete",
+        "controller": "statefulset/postgres",
+        "controller_uid": "e6809a1f-eea2-43c3-b932-bb1a53f9490d",
+        "deleted": true
+      },
+      {
+        "cluster": "by-console-20261029-b1",
+        "namespace": "ate-system",
+        "claim": "data-postgres-0",
+        "claim_uid": "f233cf58-af5c-4156-81be-5042bd739a60",
+        "pv": "pvc-f233cf58-af5c-4156-81be-5042bd739a60",
+        "pv_uid": "a85dacdd-d693-48c6-8493-3d29ad20801d",
+        "disk": "projects/vital-octagon-19612/zones/us-central1-a/disks/pvc-f233cf58-af5c-4156-81be-5042bd739a60",
+        "storage_class": "standard-rwo",
+        "requested": "10Gi",
+        "capacity": "10Gi",
+        "reclaim_policy": "Delete",
+        "controller": "statefulset/postgres",
+        "controller_uid": "3d7eafbb-d84f-4d28-ae64-73f629f92d82",
+        "deleted": true
+      }
+    ],
+    "unowned_network_nat_services_and_credentials_preserved": true,
+    "local_connection_credentials_removed": true,
+    "retry_friction": "The active Conda Python lacked pidfd APIs. After remote connection and database cleanup, the guarded entrypoint resumed with system Python 3.12.3 and exact process-identity fencing.",
+    "known_local_connection_files_verified_absent": [
+      "bridge.key",
+      "control.token",
+      "control-ca.pem",
+      "kubeconfig",
+      "docker/config.json"
+    ],
+    "idempotent_repeat": {
+      "exit_code": 0,
+      "cloud_mutations": 0,
+      "result": "Owned connection already absent; all exact cloud lookups empty or not found."
+    }
   },
   "not_done": [
-    "No model was called by these setup and native smoke checks.",
-    "PTY, retained pause/resume and console model execution are separate acceptance work.",
+    "Interactive PTY and retained Actor pause/resume/suspend were not qualified in this deployment.",
     "MicroVM runtime and Agentic Compute Engine were not qualified in this deployment.",
-    "Full temporary infrastructure cleanup is pending acceptance."
+    "The revised installer helper has not provisioned a second live cluster; its native overlay/build and hermetic retry behavior were checked separately."
   ],
   "network_egress_compatibility": {
     "date": "2026-10-29",
@@ -639,6 +828,100 @@
     "not_done": [
       "These model-free network probes do not qualify model execution or the complete console workflow.",
       "The revised installer helper has not provisioned a second live cluster."
+    ]
+  },
+  "console_model_acceptance": {
+    "date": "2026-10-29",
+    "evidence": "live",
+    "status": "passed",
+    "completed_at_utc": "2026-10-29T13:29:01Z",
+    "source_context": "7bd810bd",
+    "input_discovery_fix": "cf0592ce",
+    "harness": "antigravity",
+    "actor_image": "ghcr.io/vamsiramakrishnan/branchyard-agy@sha256:46e177cc5e874614a04cbe2b06b6df374ab50296557f27ef77246f609dbc158d",
+    "actor_harness_version": "1.4.9",
+    "model": "gemini-3.8-flash-low",
+    "cli_version": "by 0.3.0",
+    "cli_sha256": "17761de4fca9538114ad18f3cbd2f2accd6b9ba535b6225c2a6462dfcdb9dd6b",
+    "server_version": "branchyard-server 0.3.0",
+    "server_sha256": "91b3da87cb9f02bb2bf6804f41bbea72fa979a01784c9c423e2b564c67d3196f",
+    "host_agy_version": "1.4.10",
+    "host_agy_version_is_actor_version": false,
+    "workspace_id": "01M63XHZ35R88P9224MYDV48QY",
+    "session_id": "s-01m63xhzbzwwe9yywky16mzf2p",
+    "native_session": "8f5328a0-6097-47fa-b679-099ddc7a1adb",
+    "deliverable_completion_status": "no_changes",
+    "result": {
+      "answer": "WorkflowAutomation: 15000, ManagedAgent: 21000, TOTAL: 36000"
+    },
+    "artifact_id": "art1",
+    "artifact_name": "annual-net-summary.csv",
+    "artifact_independent_check": {
+      "date": "2026-10-29",
+      "downloaded_csv_sha256": "3025a1480e72b073fcf66a5d5937a3ce3e1a3e3e0f6f2f8ea79c1ade2caf48d8",
+      "bytes": 86,
+      "computed_values": {
+        "WorkflowAutomation": 15000,
+        "ManagedAgent": 21000,
+        "TOTAL": 36000
+      },
+      "preview_matches_downloaded_bytes": true,
+      "index_sha256": "2894ec7c205707750235dc6f1967b59ff0162e8265513a2a210d82dd169f1a2d",
+      "index_matches_native_record": true,
+      "model_acceptance_report_status": "passed",
+      "source_sha256": "22a42a6c95e4ec0a0d838ce10ac39f29c95b8a0bdab895f2dd582964414e9882",
+      "source_original_preserved_as_reported": true
+    },
+    "runtime_after_default_destroy": {
+      "state": "absent",
+      "retained_allocation": null,
+      "terminal_available": false,
+      "terminal_request_http_status": 422,
+      "terminal_error_code": "unsupported"
+    },
+    "original_model_report_sha256": "d5eb9304ff59640edc1ec975acf7ec09a07e96c4bbefcd3cca499c1a3951574b",
+    "related_evidence": "docs/evidence/console-substrate-model-2026-10-29.json",
+    "native_pre_infrastructure_cleanup": {
+      "actors": [],
+      "observed_at_utc": "2026-10-29T13:29:52Z",
+      "workers": [
+        {
+          "labels": {
+            "branchyard-deployment": "by-console-20261029-b1",
+            "branchyard-runtime": "gvisor",
+            "workload": "branchyard"
+          },
+          "name": "994038ee-7129-44b9-92ff-f52633d81fd1",
+          "pod": "console-gvisor-7b578b4497-7qrkm",
+          "sandbox_class": "gvisor",
+          "status": {
+            "state": 1,
+            "capacity": {
+              "resources": {
+                "limits": [
+                  {
+                    "name": "cpu",
+                    "quantity": "2"
+                  },
+                  {
+                    "name": "memory",
+                    "quantity": "4Gi"
+                  }
+                ]
+              },
+              "actors": 1000
+            }
+          }
+        }
+      ]
+    },
+    "model_server_stopped": {
+      "exit_code": 0,
+      "evidence": "runtime owner reported orderly shutdown before teardown-ready signal"
+    },
+    "not_done": [
+      "No interactive PTY was run against a retained Substrate allocation.",
+      "Retained Actor pause/resume/suspend were not qualified by this default-destroy trial."
     ]
   }
 }

@@ -289,11 +289,10 @@ rerun passed, and a native API query afterward found no Actors in the
 test atespace. TLS hostname verification passed over the private GCE connection.
 The [dated run record](evidence/substrate-gke-2026-10-29.json) includes image
 digests, ownership, scoped IAM, the 500 GiB database-default correction and the
-worker-capacity recovery after resetting that fresh database. The environment
-is retained for acceptance. Not done: these checks called no model; PTY,
-retained pause/resume, console model execution and final infrastructure cleanup
-remain separate checks. MicroVM and Agentic Compute Engine were not tested in
-this deployment.
+worker-capacity recovery after resetting that fresh database. The later console
+model run and resource deletion are recorded below. Not done:
+this native smoke called no model. Interactive PTY, retained pause/resume,
+MicroVM and Agentic Compute Engine were not tested in this deployment.
 
 Hermetic and local rendering evidence, 29 October 2026: the helper's 26 tests
 passed, including the optional agentgateway export, offline plan, Docker-free
@@ -311,6 +310,22 @@ Google hosts afterward. The Actor was destroyed, and a native API query confirme
 no Actors remained. The [run record](evidence/substrate-gke-2026-10-29.json) contains
 the identity mismatch and before/after results. Not done: the revised helper has
 not provisioned another cluster; these network checks do not qualify a model turn.
+
+Live console and cleanup evidence, 29 October 2026: Branchyard CLI and server
+`0.3.0` completed a knowledge session without a repository on Substrate, using
+native AGY in the immutable Actor image. The model produced `annual-net-summary.csv`;
+its download and in-system table preview returned 15,000, 21,000 and total 36,000.
+An independent check verified the CSV bytes, arithmetic, preview rows and input
+INDEX hash. Native API inspection at 13:29:52 UTC found no Actors across all
+atespaces and no worker allocation. After preserving outputs, owned-only cleanup
+removed the temporary cluster, both database disks, node and boot disk, registry,
+snapshot bucket, dedicated service account and its project IAM membership.
+Private forwards and the marked connection files were also removed. The
+[final run record](evidence/substrate-gke-2026-10-29.json) contains exact names,
+UIDs, checks and deletion results. Not done: interactive PTY and retained Actor
+pause/resume/suspend were not qualified; the default-destroy run returned an
+explicit unsupported response when a terminal was requested afterward. MicroVM
+and Agentic Compute Engine were not tested in this deployment.
 
 ## Remove a test deployment
 
