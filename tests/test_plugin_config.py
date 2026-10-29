@@ -191,7 +191,19 @@ class InstallManifests(unittest.TestCase):
                 self.assertTrue(set(manifest["provides"]) <= {"hooks", "commands", "skills", "statusline"})
                 self.assertTrue(manifest["file"])
                 for entry in manifest["file"]:
-                    self.assertTrue((PLUGIN / entry["from"]).is_file(), entry["from"])
+                    source = PLUGIN / entry["from"]
+                    self.assertTrue(source.resolve().is_relative_to(PLUGIN.resolve()), entry["from"])
+                    self.assertFalse(source.is_symlink(), entry["from"])
+                    if source.is_dir():
+                        self.assertEqual(entry["how"], "write")
+                        payload = list(source.rglob("*"))
+                        self.assertTrue(any(path.is_file() for path in payload), entry["from"])
+                        for path in payload:
+                            self.assertFalse(path.is_symlink(), str(path))
+                            self.assertTrue(path.is_file() or path.is_dir(), str(path))
+                            self.assertTrue(path.resolve().is_relative_to(source.resolve()), str(path))
+                    else:
+                        self.assertTrue(source.is_file(), entry["from"])
                     self.assertTrue(entry["to"].startswith(("~/", "{project}/")), entry["to"])
                     self.assertIn(entry["how"], {"write", "merge-json", "merge-toml", "merge-yaml"})
                     suffix = {"merge-json": ".json", "merge-yaml": ".yaml", "merge-toml": ".toml"}
