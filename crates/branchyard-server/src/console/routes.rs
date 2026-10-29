@@ -412,9 +412,14 @@ async fn messages(
         };
         messages.push(json!({"id":format!("{sid}:{index}"),"role":role,"text":text,"time":event.at_ms,"at_ms":event.at_ms}));
     }
-    Ok(Json(
-        json!({"messages":messages,"next_cursor":next.to_string()}),
-    ))
+    let mut response = json!({"messages":messages,"next_cursor":next.to_string()});
+    if workspace.body["repo"] == MANAGED_REPO {
+        auth::redact_paths(
+            &mut response,
+            &super::runtime::managed_root(&app)?.to_string_lossy(),
+        );
+    }
+    Ok(Json(response))
 }
 async fn send(
     State(app): State<Shared>,

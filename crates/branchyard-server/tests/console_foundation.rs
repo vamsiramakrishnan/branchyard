@@ -154,6 +154,139 @@ fn knowledge_project_needs_no_repository_and_replays_allocation_across_restart()
 }
 
 #[test]
+fn messages_redact_only_managed_storage_without_rewriting_native_events() {
+    for (kind, configured_root) in [
+        ("knowledge", true),
+        ("knowledge", false),
+        ("repository", true),
+    ] {
+        let f = Fixture::new();
+        let mut config = config(&f, false);
+        let managed = if configured_root {
+            let root = f.dir.join("operator-private-storage");
+            config.managed_knowledge.root = Some(root.clone());
+            root
+        } else {
+            config.data_dir.join("knowledge")
+        };
+        // Repository message reads must not depend on managed storage being enabled.
+        config.managed_knowledge.enabled = kind == "knowledge";
+        let server = Server::start(config);
+        let source = if kind == "knowledge" {
+            json!({"kind":"knowledge"})
+        } else {
+            json!({"kind":"repository","repo":"app"})
+        };
+        let p = project(&server, source, "message-project");
+        let (wid, _) = workspace(&server, &p, "message-workspace");
+        let prompt = json!({
+            "nested":[{"path":managed.join("source.csv")}],
+            "unrelated":"/customer/source.csv",
+            "repeated":managed,
+        })
+        .to_string();
+        let (status, started) = send(
+            &server,
+            &format!("/v1/workspaces/{wid}/sessions"),
+            TOKEN,
+            "message-writer",
+            json!({"name":"Path writer","prompt":prompt,"harness":"gemini-cli","access":"writer"}),
+        );
+        assert_eq!(status, 200, "{started}");
+        let finished = await_operation(&server.client(), started["id"].as_str().unwrap());
+        assert_eq!(finished.state, OperationState::Succeeded, "{finished:?}");
+        let sid = started["session_id"].as_str().unwrap();
+        let task = detail(&server, &wid)["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let native_root = if kind == "knowledge" {
+            managed.join("tasks").join(task).join("work")
+        } else {
+            f.root.clone()
+        };
+        let native = branchyard::Yard::open(&native_root).unwrap();
+        let branch = native.branch(sid).unwrap();
+        let events = branch.events().unwrap();
+        let original_assistant = events
+            .iter()
+            .find_map(|event| match &event.activity {
+                branchyard::Activity::Harness(branchyard::Event::MessageDelta { text, .. }) => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(original_assistant.ends_with(&prompt));
+        let before = serde_json::to_value(&events).unwrap();
+        let connection =
+            rusqlite::Connection::open(native_root.join(".branchyard/state.db")).unwrap();
+        let stored_bytes = || {
+            connection
+                .prepare("SELECT activity FROM events ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let original_bytes = stored_bytes();
+        assert!(original_bytes
+            .iter()
+            .any(|bytes| bytes.contains(managed.to_str().unwrap())));
+        let path = format!("/v1/workspaces/{wid}/sessions/{sid}/messages");
+        let (status, response) = read(&server, &path, TOKEN);
+        assert_eq!(status, 200, "{response}");
+        let messages = response["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{response}");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        let expected = if kind == "knowledge" {
+            prompt.replace(managed.to_str().unwrap(), "<managed-storage>")
+        } else {
+            prompt.clone()
+        };
+        assert_eq!(messages[0]["text"], expected);
+        let expected_assistant = if kind == "knowledge" {
+            original_assistant.replace(managed.to_str().unwrap(), "<managed-storage>")
+        } else {
+            original_assistant.to_owned()
+        };
+        assert_eq!(messages[1]["text"], expected_assistant);
+        let nested: Value = serde_json::from_str(messages[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(nested["unrelated"], "/customer/source.csv");
+        let native_events = before.as_array().unwrap();
+        assert_eq!(response["next_cursor"], native_events.len().to_string());
+        let user_index = messages[0]["id"]
+            .as_str()
+            .unwrap()
+            .strip_prefix(&format!("{sid}:"))
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert_eq!(messages[0]["time"], native_events[user_index]["at_ms"]);
+        assert_eq!(messages[0]["at_ms"], messages[0]["time"]);
+        let (status, continued) = read(&server, &format!("{path}?after={}", user_index + 1), TOKEN);
+        assert_eq!(status, 200, "{continued}");
+        assert_eq!(continued["messages"], json!([messages[1]]));
+        assert_eq!(continued["next_cursor"], response["next_cursor"]);
+        let (status, exhausted) = read(
+            &server,
+            &format!("{path}?after={}", response["next_cursor"].as_str().unwrap()),
+            TOKEN,
+        );
+        assert_eq!(status, 200, "{exhausted}");
+        assert_eq!(exhausted["messages"], json!([]));
+        assert_eq!(exhausted["next_cursor"], response["next_cursor"]);
+        assert_eq!(
+            serde_json::to_value(branch.events().unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(stored_bytes(), original_bytes);
+    }
+}
+
+#[test]
 fn source_originals_are_available_before_sessions_and_revision_checked() {
     let f = Fixture::new();
     let mut config = config(&f, true);

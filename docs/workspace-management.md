@@ -71,6 +71,14 @@ and names are untrusted metadata encoded as JSON strings. The index contains no
 source contents and has a 64 KiB limit. It travels through the same workspace
 copy step as the immutable input bytes, including to copied remote worktrees.
 
+Session message responses for managed knowledge workspaces replace the operator's
+configured storage root with `<managed-storage>` in user and assistant text,
+including paths inside nested JSON text. This also applies to the default root
+under the server data directory. Message roles, IDs, timestamps and continuation
+cursors stay unchanged. Redaction happens when the HTTP response is built;
+native events and their stored text retain their original bytes. Repository
+workspace messages retain their original text.
+
 Work continues on the server if this MCP client disconnects. Inspect the returned
 operation ID; a long-poll response that is still nonterminal means work continues.
 Observing an operation does not cancel it. Cancellation is an explicit request
