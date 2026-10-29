@@ -89,6 +89,68 @@ Table previews accept `sheet`, `offset` and `limit`. Image requests must repeat 
 server binds each image to its original artifact and options. The preview record reports conversion readiness;
 these methods use the server's renderer and preserve its permission and availability errors.
 
+## Knowledge workspaces
+
+An operator can enable managed knowledge projects on the server. These projects need no user repository or
+client filesystem path. Workspace initialization and native sessions use the existing durable operation queue:
+
+```python
+project = client.create_project("Quarterly review", key="quarterly-project")
+allocation = client.create_workspace(project.id, "Cost review", key="quarterly-workspace")
+client.wait(allocation, check=True)
+workspace_id = allocation.workspace_id
+
+current = client.workspace(workspace_id)
+source = client.upload_workspace_source(
+    workspace_id, b"quarter,cost\nQ1,100\nQ2,120\n", "Inputs.csv",
+    media_type="text/csv", revision=current.revision, key="quarterly-input",
+)
+run = client.start_workspace_session(
+    workspace_id, "Analysis", "Analyze the supplied costs and return your conclusions as JSON.",
+    harness="codex", sources=[source.id], policy={"preset": "edit-worktree"},
+    result_contract={"schema": {"type": "object"}, "required": True}, key="quarterly-analysis",
+)
+client.wait(run, check=True)
+print(client.workspace_sessions(workspace_id))
+```
+
+The returned operations retain `workspace_id` and, when applicable, `session_id`. Keep each idempotency key when
+retrying its request. `workspace_messages(workspace_id, session_id, after=cursor)` returns native messages and the
+next cursor. Sending, steering and explicitly resuming use `send_workspace_message`; the server retains control
+of harness installation, provider placement, native authentication and permissions.
+
+Source uploads send original bytes with `X-Source-Title`, `X-Workspace-Revision` and the declared media type.
+`read_workspace_source` and `read_workspace_artifact` return authenticated bytes. Source and artifact preview
+methods use the same bounded options as repository previews:
+
+```python
+table = client.preview_workspace_source(workspace_id, source.id, view="table", limit=25)
+print(table)
+
+artifacts = client.workspace_artifacts(workspace_id)
+if artifacts:
+    preview = client.preview_workspace_artifact(workspace_id, artifacts[0].id, view="pages", page=1)
+    if preview.get("image"):
+        image_bytes = client.read_workspace_artifact_preview_asset(
+            workspace_id, artifacts[0].id, preview.image, view="pages", page=1,
+        )
+```
+
+Accepting deliverables with `finalize_workspace` requires current-turn provenance and the current workspace
+revision. Code integration remains independent. Membership changes, comments and workspace lifecycle intents
+also carry a revision; read the workspace again after a stale-revision error. Presence is advisory and does not
+hold a writer lease. Subjects and comment authors come from verified server identity.
+
+`workspace_runtime` reports owner-host readiness and provider capabilities. An authorized editor can open a
+workspace terminal when the branch is idle and the operator has enabled shell access. Terminal output exposes
+exact decoded bytes as `TerminalOutput.data_bytes`. Input uses explicit sequences starting at one; retry only
+the last identical frame. A lost handle or uncertain input raises the server's error. The SDK never opens a new
+shell or replays input automatically after a restart. Closing the terminal releases its writer lease.
+
+Repository projects can inspect, publish and refresh a session's pull request through the workspace PR methods.
+Publication requires the server's merge grant and forge policy; forge credentials stay with the worker. Resource
+lifecycle operations preserve source originals and accepted deliverables, and never submit a model turn.
+
 ## Where to go next
 
 - [docs/sdk.md](https://github.com/vamsiramakrishnan/branchyard/blob/main/docs/sdk.md): the whole client, its errors,

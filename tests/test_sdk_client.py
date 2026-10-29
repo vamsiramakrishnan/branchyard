@@ -7,6 +7,7 @@ wire is checked without a real server. The real server is covered by
 Run: `python tests/test_sdk_client.py`.
 """
 
+import base64
 import contextlib
 import inspect
 import json
@@ -20,6 +21,7 @@ import unittest
 import urllib.error
 from collections import deque
 from collections.abc import Callable
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
@@ -713,6 +715,496 @@ class Artifacts(ServerCase):
         self.assertEqual(first[3], b"data")
         self.assertEqual(parse_qs(urlsplit(second[1]).query), {"name": ["y.csv"], "media_type": ["text/csv"]})
         self.assertEqual(second[2]["content-type"], "application/octet-stream")
+
+
+class WorkspaceRequests(unittest.TestCase):
+    """Exact wire requests against the existing transport boundary; no server."""
+
+    def setUp(self) -> None:
+        self.client = bc.Client("http://127.0.0.1:9", TOKEN)
+
+    def assert_request(self, call: Callable[[], Any], answer: Any, *args: Any, **options: Any) -> Any:
+        response = dict(answer) if isinstance(answer, dict) else answer
+        with mock.patch.object(self.client, "request", return_value=response) as stub:
+            result = call()
+            stub.assert_called_once_with(*args, **options)
+        return result
+
+    @staticmethod
+    def operation() -> dict[str, Any]:
+        return {
+            "id": "op1",
+            "repo": "managed",
+            "kind": "workspace",
+            "state": "queued",
+            "branches": ["s1"],
+            "cursor": 0,
+            "created_at_ms": 1,
+            "workspace_id": "w1",
+            "session_id": "s1",
+        }
+
+    def test_project_creation_and_lists_use_source_grants_without_host_paths(self):
+        c = self.client
+        project = {"id": "p1", "name": "Research", "source": {"kind": "knowledge"}, "result_mode": "artifacts"}
+        result = self.assert_request(
+            lambda: c.create_project("Research", key="create-project"),
+            project,
+            "POST",
+            "/v1/projects",
+            {"name": "Research", "source": {"kind": "knowledge"}, "result_mode": "artifacts"},
+            key="create-project",
+            query=None,
+        )
+        self.assertIsInstance(result, bc.Record)
+        self.assertEqual(result.raw, project)
+        source = {"kind": "repository", "repo": "registered-repo"}
+        self.assert_request(
+            lambda: c.create_project("Code", source=source, result_mode="mixed", key="repo-project"),
+            project,
+            "POST",
+            "/v1/projects",
+            {"name": "Code", "source": source, "result_mode": "mixed"},
+            key="repo-project",
+            query=None,
+        )
+        result = self.assert_request(c.projects, {"projects": [project]}, "GET", "/v1/projects", query=None)
+        self.assertEqual(result, [project])
+        self.assertIsInstance(result[0], bc.Record)
+        self.assert_request(lambda: c.project("p /one"), project, "GET", "/v1/projects/p%20%2Fone", query=None)
+        workspace = {"id": "w1", "revision": 0, "sources": [], "accepted_deliverables": []}
+        self.assert_request(
+            lambda: c.workspaces("p & one"),
+            {"workspaces": [workspace]},
+            "GET",
+            "/v1/workspaces",
+            query={"project": "p & one"},
+        )
+        result = self.assert_request(
+            lambda: c.workspace("w /one"), workspace, "GET", "/v1/workspaces/w%20%2Fone", query=None
+        )
+        self.assertEqual(result.revision, 0)
+        created = self.assert_request(
+            lambda: c.create_workspace("p1", "Brief", key="reserve"),
+            self.operation(),
+            "POST",
+            "/v1/workspaces",
+            {"project_id": "p1", "title": "Brief"},
+            key="reserve",
+            query=None,
+        )
+        self.assertIsInstance(created, bc.Operation)
+        self.assertEqual((created.id, created.workspace_id, created.session_id), ("op1", "w1", "s1"))
+
+    def test_session_admission_preserves_explicit_inputs_and_result_schema_nulls(self):
+        c = self.client
+        session = {"id": "s1", "workspace_id": "w1", "native_session": "native-1", "result": None, "result_event": 7}
+        result = self.assert_request(
+            lambda: c.workspace_sessions("w1"), {"sessions": [session]}, "GET", "/v1/workspaces/w1/sessions", query=None
+        )
+        self.assertIn("result", result[0])
+        self.assertIsNone(result[0].result)
+        contract = {"schema": {"const": None}, "required": True}
+        policy = {"preset": "read-only"}
+        provision = {"secrets": [{"name": "OPERATOR_KNOWN"}]}
+        body = {
+            "name": "Review",
+            "prompt": "Check evidence",
+            "harness": "codex",
+            "model": "configured-model",
+            "effort": "high",
+            "policy": policy,
+            "provision": provision,
+            "result_contract": contract,
+            "access": "reviewer",
+            "sources": [],
+            "artifacts": ["a1"],
+            "candidate": "immutable-commit",
+        }
+        admitted = self.assert_request(
+            lambda: c.start_workspace_session(
+                "w1",
+                "Review",
+                "Check evidence",
+                harness="codex",
+                model="configured-model",
+                effort="high",
+                policy=policy,
+                provision=provision,
+                result_contract=contract,
+                access="reviewer",
+                sources=[],
+                artifacts=["a1"],
+                candidate="immutable-commit",
+                key="start",
+            ),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/sessions",
+            body,
+            key="start",
+            query=None,
+        )
+        self.assertEqual(admitted.workspace_id, "w1")
+        self.assert_request(
+            lambda: c.start_workspace_session("w1", "Writer", "Draft", harness="agy", key="minimal"),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/sessions",
+            {"name": "Writer", "prompt": "Draft", "harness": "agy", "access": "writer"},
+            key="minimal",
+            query=None,
+        )
+
+    def test_native_messages_cancellation_lifecycle_and_acceptance_keep_their_contracts(self):
+        c = self.client
+        page = {"messages": [{"id": "s1:4", "role": "assistant", "text": "Evidence", "time": 12}], "next_cursor": "5"}
+        result = self.assert_request(
+            lambda: c.workspace_messages("w1", "s1", "2+3/4"),
+            page,
+            "GET",
+            "/v1/workspaces/w1/sessions/s1/messages",
+            query={"after": "2+3/4"},
+        )
+        self.assertEqual(result.next_cursor, "5")
+        self.assertEqual(result.messages[0]["text"], "Evidence")
+        for action in [None, "send", "steer", "resume"]:
+            body = {"prompt": "Continue"}
+            if action is not None:
+                body["action"] = action
+            self.assert_request(
+                partial(c.send_workspace_message, "w1", "s1", "Continue", action=action, key="send"),
+                self.operation(),
+                "POST",
+                "/v1/workspaces/w1/sessions/s1/messages",
+                body,
+                key="send",
+                query=None,
+            )
+        self.assert_request(
+            lambda: c.cancel_workspace_session("w1", "s1", key="cancel"),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/sessions/s1/cancel",
+            {},
+            key="cancel",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.workspace_action("w1", "archive", revision=4, key="archive"),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/actions/archive",
+            {"revision": 4},
+            key="archive",
+            query=None,
+        )
+        accepted = {"workspace_id": "w1", "revision": 5, "artifacts": ["deck"], "code_integration": "independent"}
+        result = self.assert_request(
+            lambda: c.finalize_workspace("w1", ["deck"], revision=4, key="accept"),
+            accepted,
+            "POST",
+            "/v1/workspaces/w1/finalize",
+            {"revision": 4, "artifacts": ["deck"]},
+            key="accept",
+            query=None,
+        )
+        self.assertEqual(result.code_integration, "independent")
+
+    def test_collaboration_sends_revisions_but_never_client_authorship(self):
+        c = self.client
+        member = {"workspace_id": "w1", "subject": "verified/subject", "role": "reviewer"}
+        self.assert_request(
+            lambda: c.workspace_members("w1"), {"members": [member]}, "GET", "/v1/workspaces/w1/members", query=None
+        )
+        self.assert_request(
+            lambda: c.workspace_member("w1", "verified/subject"),
+            member,
+            "GET",
+            "/v1/workspaces/w1/members/verified%2Fsubject",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.set_workspace_member("w1", "verified/subject", "reviewer", revision=0, key="member"),
+            member,
+            "POST",
+            "/v1/workspaces/w1/members/verified%2Fsubject",
+            {"revision": 0, "role": "reviewer"},
+            key="member",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.remove_workspace_member("w1", "verified/subject", revision=1, key="remove"),
+            {"removed": True},
+            "DELETE",
+            "/v1/workspaces/w1/members/verified%2Fsubject",
+            {"revision": 1},
+            key="remove",
+        )
+        comment = {"id": "c1", "subject": "verified/subject", "credential": "paired-device", "text": "Check total"}
+        self.assert_request(
+            lambda: c.workspace_comments("w1"), {"comments": [comment]}, "GET", "/v1/workspaces/w1/comments", query=None
+        )
+        result = self.assert_request(
+            lambda: c.add_workspace_comment("w1", "Check total", revision=2, key="comment"),
+            comment,
+            "POST",
+            "/v1/workspaces/w1/comments",
+            {"revision": 2, "text": "Check total"},
+            key="comment",
+            query=None,
+        )
+        self.assertEqual(result.subject, "verified/subject")
+        self.assert_request(
+            lambda: c.workspace_presence("w1"),
+            {"presence": [{"subject": "verified/subject", "expires_at_ms": 99}]},
+            "GET",
+            "/v1/workspaces/w1/presence",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.touch_workspace_presence("w1", ttl_seconds=120, key="presence"),
+            {"expires_at_ms": 99},
+            "POST",
+            "/v1/workspaces/w1/presence",
+            {"ttl_seconds": 120},
+            key="presence",
+            query=None,
+        )
+
+    def test_sources_and_artifacts_keep_original_bytes_and_upload_headers(self):
+        c = self.client
+        original = b"\x00original\xff"
+        source = {"id": "src1", "digest": "abc", "size_bytes": len(original)}
+        self.assert_request(
+            lambda: c.workspace_sources("w1"), {"sources": [source]}, "GET", "/v1/workspaces/w1/sources", query=None
+        )
+        result = self.assert_request(
+            lambda: c.upload_workspace_source(
+                "w1", original, "Quarterly source", revision=7, media_type="text/csv", key="upload"
+            ),
+            source,
+            "POST",
+            "/v1/workspaces/w1/sources",
+            original,
+            key="upload",
+            headers={"X-Source-Title": "Quarterly source", "X-Workspace-Revision": "7", "Content-Type": "text/csv"},
+        )
+        self.assertEqual(result.digest, "abc")
+        self.assertEqual(
+            self.assert_request(
+                lambda: c.read_workspace_source("w /one", "src/one"),
+                (200, {}, original),
+                "GET",
+                "/v1/workspaces/w%20%2Fone/sources/src%2Fone/content",
+                raw=True,
+            ),
+            original,
+        )
+        artifact = {"id": "a1", "name": "Report.docx", "publisher_branch": "s1", "turn": 2}
+        self.assert_request(
+            lambda: c.workspace_artifacts("w1"),
+            {"artifacts": [artifact]},
+            "GET",
+            "/v1/workspaces/w1/artifacts",
+            query=None,
+        )
+        self.assertEqual(
+            self.assert_request(
+                lambda: c.read_workspace_artifact("w1", "a/one"),
+                (200, {}, original),
+                "GET",
+                "/v1/workspaces/w1/artifacts/a%2Fone/content",
+                raw=True,
+            ),
+            original,
+        )
+
+    def test_workspace_preview_aliases_preserve_options_and_raw_asset_bytes(self):
+        c = self.client
+        query = {"view": "pages", "page": 3, "sheet": None, "offset": None, "limit": None}
+        manifest = {"status": "passed", "kind": "pages", "image": "page-3.png", "page": 3}
+        for kind, preview, asset in [
+            ("sources", c.preview_workspace_source, c.read_workspace_source_preview_asset),
+            ("artifacts", c.preview_workspace_artifact, c.read_workspace_artifact_preview_asset),
+        ]:
+            path = f"/v1/workspaces/w%2Fone/{kind}/a%2Fone/preview"
+            result = self.assert_request(
+                partial(preview, "w/one", "a/one", view="pages", page=3), manifest, "GET", path, query=query
+            )
+            self.assertEqual(result.image, "page-3.png")
+            image = b"\x89PNG\x00\xff"
+            result = self.assert_request(
+                partial(asset, "w/one", "a/one", "page-3.png", view="pages", page=3),
+                (200, {}, image),
+                "GET",
+                f"{path}/assets/page-3.png",
+                query=query,
+                raw=True,
+            )
+            self.assertEqual(result, image)
+        query = {"view": "table", "page": None, "sheet": "Costs & risks", "offset": 0, "limit": 50}
+        self.assert_request(
+            lambda: c.preview_workspace_artifact("w1", "a1", view="table", sheet="Costs & risks", offset=0, limit=50),
+            {"kind": "table", "rows": []},
+            "GET",
+            "/v1/workspaces/w1/artifacts/a1/preview",
+            query=query,
+        )
+
+    def test_runtime_terminal_and_forge_operations_use_only_the_bound_session(self):
+        c = self.client
+        prefix = "/v1/workspaces/w%2Fone/sessions/s%2Fone"
+        self.assert_request(
+            lambda: c.workspace_runtime("w/one", "s/one"),
+            {"state": "unavailable", "terminal_available": False},
+            "GET",
+            f"{prefix}/runtime",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.control_workspace_runtime("w/one", "s/one", "resume", key="wake"),
+            self.operation(),
+            "POST",
+            f"{prefix}/runtime/actions/resume",
+            {},
+            key="wake",
+            query=None,
+        )
+        handle = self.assert_request(
+            lambda: c.open_workspace_terminal("w/one", "s/one", rows=37, columns=91, key="terminal"),
+            {"id": "t/one", "persistent": False},
+            "POST",
+            f"{prefix}/terminals",
+            {"rows": 37, "columns": 91},
+            key="terminal",
+            query=None,
+        )
+        self.assertFalse(handle.persistent)
+        terminal = f"{prefix}/terminals/t%2Fone"
+        data = b"\x1b[32mhello\xff"
+        page = {
+            "cursor": len(data),
+            "data": base64.b64encode(data).decode("ascii"),
+            "encoding": "base64",
+            "truncated": False,
+            "closed": False,
+            "error": None,
+        }
+        result = self.assert_request(
+            lambda: c.workspace_terminal_output("w/one", "s/one", "t/one", after=0, limit=64),
+            page,
+            "GET",
+            f"{terminal}/output",
+            query={"after": 0, "limit": 64},
+        )
+        self.assertIsInstance(result, bc.TerminalOutput)
+        self.assertEqual(result.data_bytes, data)
+        self.assert_request(
+            lambda: c.write_workspace_terminal("w/one", "s/one", "t/one", b"echo hello\n", sequence=1),
+            {"sequence": 1, "next_sequence": 2},
+            "POST",
+            f"{terminal}/input",
+            {"sequence": 1, "data": "ZWNobyBoZWxsbwo="},
+            key=None,
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.resize_workspace_terminal("w/one", "s/one", "t/one", 24, 80),
+            {"ok": True},
+            "POST",
+            f"{terminal}/resize",
+            {"rows": 24, "columns": 80},
+            key=None,
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.close_workspace_terminal("w/one", "s/one", "t/one"),
+            {"ok": True},
+            "POST",
+            f"{terminal}/close",
+            {},
+            key=None,
+            query=None,
+        )
+        snapshot = {"branch": "s1", "candidate": "commit-1", "pull_request": None, "forge": {"available": False}}
+        self.assert_request(
+            lambda: c.workspace_pull_request("w/one", "s/one"), snapshot, "GET", f"{prefix}/pr", query=None
+        )
+        self.assert_request(
+            lambda: c.publish_workspace_pull_request("w/one", "s/one", title="Review", base="main", key="publish"),
+            self.operation(),
+            "POST",
+            f"{prefix}/pr",
+            {"title": "Review", "base": "main", "draft": False},
+            key="publish",
+            query=None,
+        )
+        self.assert_request(
+            lambda: c.refresh_workspace_pull_request("w/one", "s/one", key="refresh"),
+            self.operation(),
+            "POST",
+            f"{prefix}/pr/refresh",
+            {},
+            key="refresh",
+            query=None,
+        )
+
+    def test_lost_or_denied_terminals_are_never_reopened_or_replayed(self):
+        for code in ["terminal_lost", "terminal_input_uncertain", "denied"]:
+            error = bc.error_for(410 if code == "terminal_lost" else 403, _error(code))
+            with mock.patch.object(self.client, "request", side_effect=error) as stub:
+                with self.assertRaises(bc.BranchyardError) as raised:
+                    self.client.write_workspace_terminal("w1", "s1", "t1", b"important write\n", sequence=2)
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual(stub.call_count, 1)
+                self.assertTrue(stub.call_args.args[1].endswith("/terminals/t1/input"))
+
+    def test_queued_metadata_replay_and_generated_keys_remain_available(self):
+        answer = {**self.operation(), "_replayed": True}
+        with mock.patch.object(bc, "new_key", return_value="generated-key"):
+            operation = self.assert_request(
+                lambda: self.client.create_workspace("p1", "Brief"),
+                answer,
+                "POST",
+                "/v1/workspaces",
+                {"project_id": "p1", "title": "Brief"},
+                key="generated-key",
+                query=None,
+            )
+        self.assertTrue(operation.replayed)
+        self.assertEqual(operation.workspace_id, "w1")
+        self.assertNotIn("_replayed", operation.raw)
+        self.assertRaises(
+            ValueError, getattr, bc.TerminalOutput({"encoding": "utf8", "data": "not base64"}), "data_bytes"
+        )
+        self.assertRaises(ValueError, getattr, bc.TerminalOutput({"encoding": "base64", "data": "!bad"}), "data_bytes")
+
+
+class WorkspaceTransport(ServerCase):
+    def test_source_upload_download_and_revision_delete_use_authenticated_http(self):
+        source = "/v1/workspaces/w1/sources"
+        original = b"name,value\noriginal,\xff\n"
+        self.fake.answer("POST", source, (200, {"id": "src1", "size_bytes": len(original)}))
+        self.client.upload_workspace_source(
+            "w1", original, "Input.csv", revision=3, media_type="text/csv", key="source-once"
+        )
+        ((_, _, headers, body),) = self.requests("POST", source)
+        self.assertEqual(body, original)
+        self.assertEqual(headers["authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(headers["x-source-title"], "Input.csv")
+        self.assertEqual(headers["x-workspace-revision"], "3")
+        self.assertEqual(headers["content-type"], "text/csv")
+        self.assertEqual(headers["idempotency-key"], "source-once")
+        self.fake.answer("GET", f"{source}/src1/content", (200, original))
+        self.assertEqual(self.client.read_workspace_source("w1", "src1"), original)
+        membership = "/v1/workspaces/w1/members/verified%2Fsubject"
+        self.fake.answer("DELETE", membership, (200, {"removed": True}))
+        self.client.remove_workspace_member("w1", "verified/subject", revision=4, key="remove-once")
+        ((_, _, headers, body),) = self.requests("DELETE", membership)
+        self.assertEqual(body, {"revision": 4})
+        self.assertEqual(headers["authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(headers["idempotency-key"], "remove-once")
 
 
 class Records(unittest.TestCase):
@@ -2580,6 +3072,74 @@ class OneErrorHierarchy(unittest.TestCase):
 # server's sources by `tools/docs_facts.py`) is either reached by a method of
 # the HTTP client, called here, or excused with the reason it is not.
 COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
+    "/v1/projects": [lambda c, _r: c.projects(), lambda c, _r: c.create_project("Research")],
+    "/v1/projects/{project}": [lambda c, _r: c.project("p1")],
+    "/v1/workspaces": [lambda c, _r: c.workspaces(), lambda c, _r: c.create_workspace("p1", "Brief")],
+    "/v1/workspaces/{workspace}": [lambda c, _r: c.workspace("w1")],
+    "/v1/workspaces/{workspace}/sessions": [
+        lambda c, _r: c.workspace_sessions("w1"),
+        lambda c, _r: c.start_workspace_session("w1", "Draft", "Write", harness="codex"),
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/messages": [
+        lambda c, _r: c.workspace_messages("w1", "s1"),
+        lambda c, _r: c.send_workspace_message("w1", "s1", "Continue"),
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/cancel": [lambda c, _r: c.cancel_workspace_session("w1", "s1")],
+    "/v1/workspaces/{workspace}/actions/{action}": [lambda c, _r: c.workspace_action("w1", "archive", revision=1)],
+    "/v1/workspaces/{workspace}/finalize": [lambda c, _r: c.finalize_workspace("w1", ["a1"], revision=1)],
+    "/v1/workspaces/{workspace}/members": [lambda c, _r: c.workspace_members("w1")],
+    "/v1/workspaces/{workspace}/members/{subject}": [
+        lambda c, _r: c.workspace_member("w1", "subject"),
+        lambda c, _r: c.set_workspace_member("w1", "subject", "reviewer", revision=1),
+        lambda c, _r: c.remove_workspace_member("w1", "subject", revision=1),
+    ],
+    "/v1/workspaces/{workspace}/comments": [
+        lambda c, _r: c.workspace_comments("w1"),
+        lambda c, _r: c.add_workspace_comment("w1", "Review", revision=1),
+    ],
+    "/v1/workspaces/{workspace}/presence": [
+        lambda c, _r: c.workspace_presence("w1"),
+        lambda c, _r: c.touch_workspace_presence("w1"),
+    ],
+    "/v1/workspaces/{workspace}/sources": [
+        lambda c, _r: c.workspace_sources("w1"),
+        lambda c, _r: c.upload_workspace_source("w1", b"source", "Source", revision=1),
+    ],
+    "/v1/workspaces/{workspace}/sources/{source}/content": [lambda c, _r: c.read_workspace_source("w1", "source")],
+    "/v1/workspaces/{workspace}/sources/{source}/preview": [lambda c, _r: c.preview_workspace_source("w1", "source")],
+    "/v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}": [
+        lambda c, _r: c.read_workspace_source_preview_asset("w1", "source", "page-1.png")
+    ],
+    "/v1/workspaces/{workspace}/artifacts": [lambda c, _r: c.workspace_artifacts("w1")],
+    "/v1/workspaces/{workspace}/artifacts/{artifact}/content": [lambda c, _r: c.read_workspace_artifact("w1", "a1")],
+    "/v1/workspaces/{workspace}/artifacts/{artifact}/preview": [lambda c, _r: c.preview_workspace_artifact("w1", "a1")],
+    "/v1/workspaces/{workspace}/artifacts/{artifact}/preview/assets/{asset}": [
+        lambda c, _r: c.read_workspace_artifact_preview_asset("w1", "a1", "page-1.png")
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/runtime": [lambda c, _r: c.workspace_runtime("w1", "s1")],
+    "/v1/workspaces/{workspace}/sessions/{session}/runtime/actions/{action}": [
+        lambda c, _r: c.control_workspace_runtime("w1", "s1", "pause")
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/terminals": [lambda c, _r: c.open_workspace_terminal("w1", "s1")],
+    "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/output": [
+        lambda c, _r: c.workspace_terminal_output("w1", "s1", "t1")
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/input": [
+        lambda c, _r: c.write_workspace_terminal("w1", "s1", "t1", b"echo hello\n", sequence=1)
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/resize": [
+        lambda c, _r: c.resize_workspace_terminal("w1", "s1", "t1", 24, 80)
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close": [
+        lambda c, _r: c.close_workspace_terminal("w1", "s1", "t1")
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/pr": [
+        lambda c, _r: c.workspace_pull_request("w1", "s1"),
+        lambda c, _r: c.publish_workspace_pull_request("w1", "s1"),
+    ],
+    "/v1/workspaces/{workspace}/sessions/{session}/pr/refresh": [
+        lambda c, _r: c.refresh_workspace_pull_request("w1", "s1")
+    ],
     "/healthz": [lambda c, _r: c.healthy()],
     "/v1/app/me": [lambda c, _r: c.me()],
     "/v1/harnesses": [lambda c, _r: c.harnesses()],

@@ -50,6 +50,7 @@ Not guaranteed: anything the server does not. This module adds no
 authority; what a token may do, the server decides.
 """
 
+import base64
 import contextlib
 import dataclasses
 import json
@@ -118,6 +119,7 @@ __all__ = [
     "SteerRefusedError",
     "Step",
     "Surface",
+    "TerminalOutput",
     "TransportError",
     "UnauthorizedError",
     "UnsupportedError",
@@ -949,6 +951,8 @@ class Operation(Record):
     result: Optional[JSON]  # None until it has succeeded
     error: Optional[JSON]  # {code, message, detail?} once it failed
     priority: int
+    workspace_id: Optional[str]
+    session_id: Optional[str]
     replayed: bool = False
 
     @property
@@ -1027,6 +1031,25 @@ def branch_name(*parts: str, max_len: int = 60) -> str:
 
 def _drop_none(body: JSON) -> JSON:
     return {k: v for k, v in body.items() if v is not None and v is not False and v != [] and v != {}}
+
+
+class TerminalOutput(Record):
+    """A terminal replay page. `cursor` counts bytes, `truncated` reports
+    eviction, and `closed` marks an ended terminal. Handles are process-local."""
+
+    cursor: int
+    data: str
+    encoding: str
+    truncated: bool
+    closed: bool
+    error: Optional[str]
+
+    @property
+    def data_bytes(self) -> bytes:
+        """Exact terminal bytes, decoded with the standard base64 codec."""
+        if self.get("encoding") != "base64":
+            raise ValueError("unsupported terminal output encoding")
+        return base64.b64decode(self.get("data", ""), validate=True)
 
 
 class Client:
@@ -1233,8 +1256,11 @@ class Client:
         """`DELETE path`; the parsed JSON, empty for most."""
         return self.request("DELETE", path)
 
-    def _operation(self, path: str, body: JSON, key: Optional[str]) -> "Operation":
-        value = self.post(path, _drop_none(body), key=key or new_key())
+    def _operation(self, path: str, body: JSON, key: Optional[str], *, preserve_empty: bool = False) -> "Operation":
+        selected = (
+            {name: value for name, value in body.items() if value is not None} if preserve_empty else _drop_none(body)
+        )
+        value = self.post(path, selected, key=key or new_key())
         replayed = bool(value.pop("_replayed", False))
         op = Operation(value)
         op.replayed = replayed
@@ -1266,6 +1292,414 @@ class Client:
     def repo(self, name: str) -> "Repo":
         """The served repository `name`. No request is made: an unknown name fails at the first call, `unknown_repo`."""
         return Repo(self, name)
+
+    # -- projects and workspaces -------------------------------------------
+
+    def projects(self) -> list[Record]:
+        """Projects available to the authenticated caller."""
+        return [Record(value) for value in self.get("/v1/projects").get("projects", [])]
+
+    def project(self, project: str) -> Record:
+        """One project, including its source and result acceptance policy."""
+        return Record(self.get(f"/v1/projects/{_q(project)}"))
+
+    def create_project(
+        self, name: str, *, source: Optional[JSON] = None, result_mode: str = "artifacts", key: Optional[str] = None
+    ) -> Record:
+        """Create a knowledge project by default. A repository source is
+        `{"kind":"repository","repo":"registered-name"}`; no host path is
+        accepted. Result modes are artifacts, code or mixed."""
+        return Record(
+            self.post(
+                "/v1/projects",
+                {
+                    "name": name,
+                    "source": source if source is not None else {"kind": "knowledge"},
+                    "result_mode": result_mode,
+                },
+                key=key or new_key(),
+            )
+        )
+
+    def workspaces(self, project: Optional[str] = None) -> list[Record]:
+        """Authorized workspace summaries, optionally within one project."""
+        return [Record(value) for value in self.get("/v1/workspaces", project=project).get("workspaces", [])]
+
+    def workspace(self, workspace: str) -> Record:
+        """Workspace detail, sessions, immutable sources and accepted outputs."""
+        return Record(self.get(self._workspace(workspace)))
+
+    def create_workspace(self, project: str, title: str, *, key: Optional[str] = None) -> Operation:
+        """Reserve a workspace. The operation's workspace_id identifies it;
+        wait for initialization before starting sessions or uploading sources."""
+        return self._operation("/v1/workspaces", {"project_id": project, "title": title}, key)
+
+    def workspace_sessions(self, workspace: str) -> list[Record]:
+        """Named native attempts with their current result and provenance."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/sessions")).get("sessions", [])]
+
+    def start_workspace_session(
+        self,
+        workspace: str,
+        name: str,
+        prompt: str,
+        *,
+        harness: str,
+        model: Optional[str] = None,
+        effort: Optional[str] = None,
+        policy: Optional[JSON] = None,
+        provision: Optional[JSON] = None,
+        result_contract: Optional[JSON] = None,
+        access: str = "writer",
+        sources: Optional[Sequence[str]] = None,
+        artifacts: Optional[Sequence[str]] = None,
+        candidate: Optional[str] = None,
+        key: Optional[str] = None,
+    ) -> Operation:
+        """Queue an isolated writer or reviewer using the existing harness.
+        Omitted policy retains the server's deny default. Sources and review
+        artifacts are immutable IDs; candidate is an exact workspace commit.
+        Provisioning names operator-known secrets and connector grants."""
+        return self._operation(
+            self._workspace(workspace, "/sessions"),
+            {
+                "name": name,
+                "prompt": prompt,
+                "harness": harness,
+                "model": model,
+                "effort": effort,
+                "policy": policy,
+                "provision": provision,
+                "result_contract": result_contract,
+                "access": access,
+                "sources": list(sources) if sources is not None else None,
+                "artifacts": list(artifacts) if artifacts is not None else None,
+                "candidate": candidate,
+            },
+            key,
+            preserve_empty=True,
+        )
+
+    def workspace_messages(self, workspace: str, session: str, after: Optional[str] = None) -> Record:
+        """Native messages and next_cursor; pass that cursor on the next read."""
+        return Record(self.get(self._session(workspace, session, "/messages"), after=after))
+
+    def send_workspace_message(
+        self, workspace: str, session: str, prompt: str, *, action: Optional[str] = None, key: Optional[str] = None
+    ) -> Operation:
+        """Queue send, steer or explicit resume. Omitted action means send."""
+        return self._operation(
+            self._session(workspace, session, "/messages"), {"prompt": prompt, "action": action}, key
+        )
+
+    def cancel_workspace_session(self, workspace: str, session: str, *, key: Optional[str] = None) -> Operation:
+        """Queue cancellation of one native session."""
+        return self._operation(self._session(workspace, session, "/cancel"), {}, key)
+
+    def workspace_action(self, workspace: str, action: str, *, revision: int, key: Optional[str] = None) -> Operation:
+        """Queue a revision-checked lifecycle intent, such as archive or restore.
+        Unsupported provider capabilities remain explicit server errors."""
+        return self._operation(self._workspace(workspace, f"/actions/{_q(action)}"), {"revision": revision}, key)
+
+    def finalize_workspace(
+        self, workspace: str, artifacts: Sequence[str], *, revision: int, key: Optional[str] = None
+    ) -> Record:
+        """Accept current immutable deliverables at revision. Code integration
+        remains independent; no Git diff is required for knowledge outputs."""
+        return Record(
+            self.post(
+                self._workspace(workspace, "/finalize"),
+                {"revision": revision, "artifacts": list(artifacts)},
+                key=key or new_key(),
+            )
+        )
+
+    def workspace_members(self, workspace: str) -> list[Record]:
+        """Current members, bound to verified subjects and workspace roles."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/members")).get("members", [])]
+
+    def workspace_member(self, workspace: str, subject: str) -> Record:
+        """One membership by its stable verified subject."""
+        return Record(self.get(self._workspace(workspace, f"/members/{_q(subject)}")))
+
+    def set_workspace_member(
+        self, workspace: str, subject: str, role: str, *, revision: int, key: Optional[str] = None
+    ) -> Record:
+        """Set a revision-checked owner/editor/reviewer/viewer role. The server
+        requires existing tenant/source grants and an authorized owner."""
+        return Record(
+            self.post(
+                self._workspace(workspace, f"/members/{_q(subject)}"),
+                {"revision": revision, "role": role},
+                key=key or new_key(),
+            )
+        )
+
+    def remove_workspace_member(
+        self, workspace: str, subject: str, *, revision: int, key: Optional[str] = None
+    ) -> Record:
+        """Remove membership at revision. The final owner cannot be removed."""
+        return Record(
+            self.request(
+                "DELETE",
+                self._workspace(workspace, f"/members/{_q(subject)}"),
+                {"revision": revision},
+                key=key or new_key(),
+            )
+        )
+
+    def workspace_comments(self, workspace: str) -> list[Record]:
+        """Attributed comments in the workspace."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/comments")).get("comments", [])]
+
+    def add_workspace_comment(self, workspace: str, text: str, *, revision: int, key: Optional[str] = None) -> Record:
+        """Add a revision-checked comment; author identity comes from the token."""
+        return Record(
+            self.post(
+                self._workspace(workspace, "/comments"), {"revision": revision, "text": text}, key=key or new_key()
+            )
+        )
+
+    def workspace_presence(self, workspace: str) -> list[Record]:
+        """Unexpired advisory presence. Presence is never a writer lock."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/presence")).get("presence", [])]
+
+    def touch_workspace_presence(self, workspace: str, *, ttl_seconds: int = 60, key: Optional[str] = None) -> Record:
+        """Refresh advisory presence for 1..300 seconds without changing revision."""
+        return Record(
+            self.post(self._workspace(workspace, "/presence"), {"ttl_seconds": ttl_seconds}, key=key or new_key())
+        )
+
+    def workspace_sources(self, workspace: str) -> list[Record]:
+        """Immutable original source metadata; bytes are downloaded separately."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/sources")).get("sources", [])]
+
+    def upload_workspace_source(
+        self,
+        workspace: str,
+        data: bytes,
+        title: str,
+        *,
+        revision: int,
+        media_type: str = "application/octet-stream",
+        key: Optional[str] = None,
+    ) -> Record:
+        """Upload original bytes at revision, retaining the server's media type
+        and title header contract. This does not read any client filesystem path."""
+        return Record(
+            self.request(
+                "POST",
+                self._workspace(workspace, "/sources"),
+                data,
+                key=key or new_key(),
+                headers={
+                    "X-Source-Title": title,
+                    "X-Workspace-Revision": str(revision),
+                    "Content-Type": media_type,
+                },
+            )
+        )
+
+    def read_workspace_source(self, workspace: str, source: str) -> bytes:
+        """Download the authenticated original source bytes."""
+        return self.request("GET", self._workspace(workspace, f"/sources/{_q(source)}/content"), raw=True)[2]
+
+    def workspace_artifacts(self, workspace: str) -> list[Record]:
+        """Immutable artifacts produced by this workspace's native attempts."""
+        return [Record(value) for value in self.get(self._workspace(workspace, "/artifacts")).get("artifacts", [])]
+
+    def read_workspace_artifact(self, workspace: str, artifact: str) -> bytes:
+        """Download authenticated artifact bytes without requiring a branch path."""
+        return self.request("GET", self._workspace(workspace, f"/artifacts/{_q(artifact)}/content"), raw=True)[2]
+
+    def preview_workspace_source(
+        self,
+        workspace: str,
+        source: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Record:
+        """Read a document preview of an immutable workspace source."""
+        return Record(
+            self.get(
+                self._workspace(workspace, f"/sources/{_q(source)}/preview"),
+                view=view,
+                page=page,
+                sheet=sheet,
+                offset=offset,
+                limit=limit,
+            )
+        )
+
+    def read_workspace_source_preview_asset(
+        self,
+        workspace: str,
+        source: str,
+        asset: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> bytes:
+        """Read a source preview image using the same options as its manifest."""
+        return self.request(
+            "GET",
+            self._workspace(workspace, f"/sources/{_q(source)}/preview/assets/{_q(asset)}"),
+            query={"view": view, "page": page, "sheet": sheet, "offset": offset, "limit": limit},
+            raw=True,
+        )[2]
+
+    def preview_workspace_artifact(
+        self,
+        workspace: str,
+        artifact: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Record:
+        """Read a document preview of an immutable workspace output."""
+        return Record(
+            self.get(
+                self._workspace(workspace, f"/artifacts/{_q(artifact)}/preview"),
+                view=view,
+                page=page,
+                sheet=sheet,
+                offset=offset,
+                limit=limit,
+            )
+        )
+
+    def read_workspace_artifact_preview_asset(
+        self,
+        workspace: str,
+        artifact: str,
+        asset: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> bytes:
+        """Read an output preview image using the same options as its manifest."""
+        return self.request(
+            "GET",
+            self._workspace(workspace, f"/artifacts/{_q(artifact)}/preview/assets/{_q(asset)}"),
+            query={"view": view, "page": page, "sheet": sheet, "offset": offset, "limit": limit},
+            raw=True,
+        )[2]
+
+    # -- workspace execution and forge -------------------------------------
+
+    def workspace_runtime(self, workspace: str, session: str) -> Record:
+        """Actual provider state, owner-host readiness and terminal policy."""
+        return Record(self.get(self._session(workspace, session, "/runtime")))
+
+    def control_workspace_runtime(
+        self, workspace: str, session: str, action: str, *, key: Optional[str] = None
+    ) -> Operation:
+        """Queue pause, suspend, resume or destroy of the retained allocation.
+        This never starts or replays a model turn."""
+        return self._operation(self._session(workspace, session, f"/runtime/actions/{_q(action)}"), {}, key)
+
+    def open_workspace_terminal(
+        self,
+        workspace: str,
+        session: str,
+        *,
+        rows: Optional[int] = None,
+        columns: Optional[int] = None,
+        key: Optional[str] = None,
+    ) -> Record:
+        """Open a fixed operator-approved PTY on the owning provider. It requires
+        an idle branch and editor/run authority. Reuse key for an opening retry;
+        handles and their bounded replay do not survive restart or eviction."""
+        return Record(
+            self.post(
+                self._session(workspace, session, "/terminals"),
+                _drop_none({"rows": rows, "columns": columns}),
+                key=key or new_key(),
+            )
+        )
+
+    def workspace_terminal_output(
+        self, workspace: str, session: str, terminal: str, *, after: int = 0, limit: Optional[int] = None
+    ) -> TerminalOutput:
+        """Read bounded replay after a byte cursor. `data_bytes` is the exact
+        decoded output. A lost handle stays a server error; no shell is restarted."""
+        return TerminalOutput(
+            self.get(self._terminal(workspace, session, terminal, "/output"), after=after, limit=limit)
+        )
+
+    def write_workspace_terminal(
+        self, workspace: str, session: str, terminal: str, data: bytes, *, sequence: int
+    ) -> Record:
+        """Write at most 16 KiB using a sequence starting at one. Only the last
+        identical sequence can be retried safely; unknown writes are not replayed."""
+        return Record(
+            self.post(
+                self._terminal(workspace, session, terminal, "/input"),
+                {"sequence": sequence, "data": base64.b64encode(data).decode("ascii")},
+            )
+        )
+
+    def resize_workspace_terminal(self, workspace: str, session: str, terminal: str, rows: int, columns: int) -> Record:
+        """Resize the actual PTY; rows and columns must be 1..1000."""
+        return Record(
+            self.post(self._terminal(workspace, session, terminal, "/resize"), {"rows": rows, "columns": columns})
+        )
+
+    def close_workspace_terminal(self, workspace: str, session: str, terminal: str) -> Record:
+        """Idempotently close the PTY and release its branch writer lease."""
+        return Record(self.post(self._terminal(workspace, session, terminal, "/close"), {}))
+
+    def workspace_pull_request(self, workspace: str, session: str) -> Record:
+        """Current candidate, pull request and forge/check observations."""
+        return Record(self.get(self._session(workspace, session, "/pr")))
+
+    def publish_workspace_pull_request(
+        self,
+        workspace: str,
+        session: str,
+        *,
+        title: Optional[str] = None,
+        base: Optional[str] = None,
+        draft: bool = False,
+        key: Optional[str] = None,
+    ) -> Operation:
+        """Queue publication of the actual candidate. Requires editor membership,
+        merge scope and operator forge policy; credentials stay with the worker."""
+        return self._operation(
+            self._session(workspace, session, "/pr"),
+            {"title": title, "base": base, "draft": draft},
+            key,
+            preserve_empty=True,
+        )
+
+    def refresh_workspace_pull_request(self, workspace: str, session: str, *, key: Optional[str] = None) -> Operation:
+        """Queue fresh forge/check observations without publishing another PR."""
+        return self._operation(self._session(workspace, session, "/pr/refresh"), {}, key)
+
+    @staticmethod
+    def _workspace(workspace: str, suffix: str = "") -> str:
+        return f"/v1/workspaces/{_q(workspace)}{suffix}"
+
+    @staticmethod
+    def _session(workspace: str, session: str, suffix: str = "") -> str:
+        return Client._workspace(workspace, f"/sessions/{_q(session)}{suffix}")
+
+    @staticmethod
+    def _terminal(workspace: str, session: str, terminal: str, suffix: str = "") -> str:
+        return Client._session(workspace, session, f"/terminals/{_q(terminal)}{suffix}")
 
     # -- operations --------------------------------------------------------
 
