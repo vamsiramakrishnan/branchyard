@@ -21,8 +21,17 @@ impl Credentials {
     }
 
     /// Add Google-only ID-token verification without changing static credentials.
+    /// Select ring only when no process TLS provider has been installed.
     pub fn with_google(mut self, config: Option<GoogleIdTokenConfig>) -> Self {
         self.google = config.map(|config| {
+            if rustls::crypto::CryptoProvider::get_default().is_none() {
+                branchyard_support::best_effort(
+                    "initialize Google ID-token TLS",
+                    rustls::crypto::ring::default_provider()
+                        .install_default()
+                        .map_err(|_| "TLS provider was initialized concurrently"),
+                );
+            }
             let verifier = Builder::new([&config.audience])
                 .with_clock_skew(Duration::from_secs(10))
                 .build();
@@ -199,6 +208,27 @@ mod tests {
     fn claims() -> serde_json::Value {
         let now = branchyard_support::time::now_ms() / 1000;
         serde_json::json!({"iss":"https://accounts.google.com", "sub":"fake-external-subject", "aud":"https://branchyard.example", "iat":now, "exp":now+3600, "scope":"admin", "email":"untrusted@example.com"})
+    }
+
+    #[test]
+    fn google_verification_works_before_server_startup() {
+        let scratch = branchyard_testkit::Scratch::new("google-verifier-tls");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        let output = branchyard_testkit::hermetic(&mut command)
+            .current_dir(scratch.path())
+            .args([
+                "--exact",
+                "auth::tests::google_verification_preserves_origin_and_rechecks_exact_binding",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "fresh-process Google verification failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]
