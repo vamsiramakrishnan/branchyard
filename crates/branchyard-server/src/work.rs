@@ -36,6 +36,7 @@ use crate::store::StoredOperation;
 pub enum Work {
     /// Durable workspace command using native task/attempt execution.
     Console {
+        /// Native action bound to its admitted workspace and session.
         command: crate::console::ConsoleWork,
         /// Captured credential reference; no bearer token is stored.
         #[serde(default, skip_serializing_if = "Option::is_none")]
