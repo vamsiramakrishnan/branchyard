@@ -1316,15 +1316,15 @@ pub fn send_feedback(
     finish_one(env, remote, &op, delegating)
 }
 
-/// `send --json`: activity on stderr, then the branch's name and status,
-/// as local mode prints them once the turn and its subtree have ended.
+/// `send --json`: activity on stderr, then the completed branch for the
+/// caller to print as `Sent` and check for failure, as local mode does.
 pub fn send_json(
     env: &Env,
     remote: &Remote,
     branch: &str,
     prompt: Prompt<'_>,
     task: &TaskArgs,
-) -> Result<Sent, branchyard::Error> {
+) -> Result<BranchInfo, branchyard::Error> {
     let (request, notice) = send_request(task, prompt)?;
     let op = remote
         .repo
@@ -1332,15 +1332,7 @@ pub fn send_json(
         .map_err(sdk_error)?;
     crate::detach::accepted(branch);
     announce_for(remote, notice, None, false, branch);
-    let info = follow_result(env, remote, &op)?
-        .branches
-        .into_iter()
-        .next()
-        .ok_or_else(|| missing("branch"))?;
-    Ok(Sent {
-        name: info.name,
-        status: info.status,
-    })
+    Ok(first_branch(follow_result(env, remote, &op)?)?)
 }
 
 /// Follow an operation with activity on stderr, and return its result or

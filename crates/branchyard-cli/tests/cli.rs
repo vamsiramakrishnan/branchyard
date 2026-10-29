@@ -3916,7 +3916,7 @@ fn by_wait_after_a_send_waits_for_the_sent_turn() {
     let go = repo.dir.join("go");
     let prompt = [
         "SH by spawn 'SH echo first' --name kid --wait --json".to_owned(),
-        format!("SH by send kid '{}'", held_child(&go, "kid.txt")),
+        format!("SH by send kid '{}' --json", held_child(&go, "kid.txt")),
         "SH by wait kid --timeout 0.3 --json".to_owned(),
         format!("SH touch {}", go.display()),
         "SH by wait kid --json".to_owned(),
@@ -3925,6 +3925,10 @@ fn by_wait_after_a_send_waits_for_the_sent_turn() {
     let out = repo.by_agent(&["run", &prompt, "--name", "root", "--delegate", "--yes"]);
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     let said = reply(&repo, "root");
+    let (code, sent) = sh_line_json(&said, 1);
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(sent["name"], "kid", "{said}");
+    assert_eq!(sent["status"]["state"], "running", "{said}");
     let (code, early) = sh_line_json(&said, 2);
     assert_eq!(code, 1, "{said}");
     assert_eq!(early["timed_out"], true, "{said}");

@@ -535,8 +535,16 @@ pub fn send(
     }
     if let Target::Remote(remote) = target {
         if json {
-            let sent = remote::send_json(env, remote, branch, prompt, task);
-            return emit(true, sent, |_| String::new());
+            let info = match remote::send_json(env, remote, branch, prompt, task) {
+                Ok(info) => info,
+                Err(error) => return fail(true, &error),
+            };
+            let sent = branchyard::Sent {
+                name: info.name.clone(),
+                status: info.status.clone(),
+            };
+            print(&format!("{}\n", to_json(&sent)))?;
+            return branch_outcome(&info);
         }
         return remote::send(env, remote, branch, prompt, task);
     }
@@ -573,7 +581,8 @@ pub fn send(
             name: branch.info().name.clone(),
             status: branch.info().status.clone(),
         };
-        return print(&format!("{}\n", to_json(&sent)));
+        print(&format!("{}\n", to_json(&sent)))?;
+        return branch_outcome(branch.info());
     }
     let delegating = task.delegate.is_some() || !branch.info().children.is_empty();
     let live = Live::start_for(env, task, delegating, false, &branch)?;
