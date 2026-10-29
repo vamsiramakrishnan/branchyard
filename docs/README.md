@@ -41,6 +41,7 @@ How to do one thing.
 | [Usage and adopting sessions](usage.md) | How much of each Claude Code and Codex login's 5-hour and weekly limits is used, how do `by run` and the router avoid a login near its limit, and how do I turn a session already on this machine into a branch? |
 | [Web companion](companion.md) | How do I watch and steer branches from a phone with `by serve --app`, pair it with a link and a QR code, get push notifications, and why is it safe? |
 | [Harness hooks](harness-hooks.md) | How does a session a person started in any harness hear what Branchyard's branches did, through its hooks and status line? |
+| [Workspace management](workspace-management.md) | How does an external agent manage code and knowledge work through a separately authenticated MCP client, and how does the server reuse checked PR publication? |
 | [SDKs](sdk.md) | Which SDK does a harness, a Slack or web service, or a Rust program use, how does a third-party surface keep one branch per conversation and stream its replies, and how does it give, inspect and stay within connector grants? |
 | [Deploying `by serve`](deploy.md) | How do I run the server in a container or behind PostgreSQL with compose, and check a host is ready to? |
 | [Remote over ssh](remote-ssh.md) | How do I run commands against a repository on another machine with `by --remote ssh://…` and no server setup? |

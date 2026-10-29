@@ -70,6 +70,7 @@ pub mod cli;
 pub mod companion;
 pub mod config;
 pub mod connectors;
+pub mod console_pr;
 pub mod effects_routes;
 pub mod error;
 pub mod feed;

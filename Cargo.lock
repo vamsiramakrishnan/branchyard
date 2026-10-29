@@ -741,6 +741,7 @@ dependencies = [
  "backon",
  "blake3",
  "branchyard",
+ "branchyard-testkit",
  "branchyard-wire",
  "percent-encoding",
  "rustls",
@@ -811,6 +812,7 @@ name = "branchyard-mcp"
 version = "0.2.1"
 dependencies = [
  "branchyard",
+ "branchyard-client",
  "branchyard-support",
  "branchyard-testkit",
  "clap",

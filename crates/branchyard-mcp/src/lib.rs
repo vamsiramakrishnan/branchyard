@@ -43,6 +43,8 @@
 //! crate's tests.
 #![warn(missing_docs)]
 
+pub mod manager;
+
 use branchyard_support::LockExt as _;
 use std::borrow::Cow;
 use std::path::PathBuf;
@@ -93,7 +95,9 @@ An operator can run by setup --guided to select a repository and compute backend
 by setup --up --json includes readiness in one report; --directory PATH selects the repository. \
 An operator can use by compute gce --project PROJECT --zone ZONE --name NAME --tunnel-through-iap \
 to review an offline JSON plan; --apply provisions the VM and its dedicated IAP TCP 22 firewall rule. \
-Add --internal-ip to omit an external address. This operator command refuses harness sessions and --remote.";
+Add --internal-ip to omit an external address. This operator command refuses harness sessions and --remote. \
+An external operator can run branchyard-mcp manager --url URL --token-file FILE to manage authorized workspaces. \
+That separate manager uses an HTTP principal; it is not added to this branch-scoped delegation server.";
 
 fn schema(value: Value) -> Arc<Map<String, Value>> {
     match value {
@@ -930,7 +934,8 @@ pub fn serve_stdio(root: PathBuf, branch: &str, token: &str) -> std::io::Result<
     version,
     about = "Branchyard's delegation tools for one branch, over MCP on stdio.",
     after_help = "The delegation token is read from BRANCHYARD_DELEGATION. The engine starts \
-                  this server for a harness; it works only while that branch's turn runs."
+                  this server for a harness; it works only while that branch's turn runs. \
+                  For external workspace control use: branchyard-mcp manager --url URL --token-file FILE."
 )]
 struct Cli {
     /// The repository root
@@ -965,6 +970,9 @@ impl std::fmt::Display for Failure {
 /// Run the command line (after the program name): `--root <repository>
 /// --branch <name>`, token in [`ENV_TOKEN`].
 pub fn main_with_args(args: &[String]) -> Result<(), Failure> {
+    if args.first().is_some_and(|arg| arg == "manager") {
+        return manager::main_with_args(&args[1..]);
+    }
     use clap::Parser;
     let program = std::iter::once("branchyard-mcp".to_owned());
     let cli = Cli::try_parse_from(program.chain(args.iter().cloned())).map_err(Failure::Clap)?;
