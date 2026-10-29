@@ -1537,7 +1537,8 @@ fn run(
                     })?;
                 }
                 recorder.record(Activity::Prompt(submission.prompt.clone()))?;
-                match session.submit(&submission.prompt) {
+                let prompt = format!("{}\n\n{}", provisioned.capabilities, submission.prompt);
+                match session.submit(&prompt) {
                     Ok(n) => {
                         driven.submitted = true;
                         store.backend().finish_step(

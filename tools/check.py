@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
-TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py", "examples/python")
+TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py", "sdk/python/branchyard_artifacts", "examples/python")
 TAIL_LINES = 20
 # A check only reads. These make the schema generators and the catalog rewrite what they compare.
 REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
@@ -50,6 +50,7 @@ class Step(NamedTuple):
 
 STEPS = (
     # --fix, in the order it runs.
+    Step("fix_artifact_assets", "controls", (PY, "tools/artifact_assets.py", "--write"), fix=True),
     Step("fix_docs_facts", "controls", (PY, "tools/docs_facts.py", "--write"), fix=True),
     Step("fix_cargo_fmt", "fast", ("cargo", "fmt", "--all"), cargo=True, fix=True),
     Step("fix_ruff_format", "fast", (PY, "-m", "ruff", "format", *TARGETS), fix=True),
@@ -196,6 +197,11 @@ STEPS = (
     # HTTP framing is parsed only in branchyard-wire.
     Step("check_wire", "controls", (PY, "tools/check_wire.py")),
     Step("test_check_wire", "controls", (PY, "tests/test_check_wire.py")),
+    Step("artifact_assets", "controls", (PY, "tools/artifact_assets.py")),
+    Step("test_artifact_assets", "controls", (PY, "tests/test_artifact_assets.py")),
+    Step("test_artifact_bootstrap", "controls", (PY, "tests/test_artifact_bootstrap.py")),
+    Step("test_artifacts", "controls", (PY, "tests/test_artifacts.py")),
+    Step("test_artifacts_distribution", "controls", (PY, "tests/test_artifacts_distribution.py")),
     Step("docs_facts", "controls", (PY, "tools/docs_facts.py", "--check")),
     Step("test_docs_facts", "controls", (PY, "tests/test_docs_facts.py")),
     # docs/README.md lists every page under docs/.

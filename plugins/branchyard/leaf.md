@@ -31,6 +31,11 @@ each with `--json`:
   `by report "<text>" --result '<JSON>'` or `--result-file PATH`.
   A required report without its result is refused. Schema errors name the
   invalid path. Your parent reads the accepted value as your `result`.
+- If that contract includes `capture`, write its named manifest after
+  checking the files. The artifact-tools skill's `manifest` command records
+  paths, media types and hashes. Collection follows workspace transfer; a missing
+  or invalid declared file fails the required deliverable. Keep files
+  beneath the manifest's directory and share publications with artifact grants.
 - `by inbox` may contain a frozen handoff: copied result, source version,
   optional candidate commit, and selected artifact references. It arrives
   on your next turn. A handoff does not interrupt or restart your native

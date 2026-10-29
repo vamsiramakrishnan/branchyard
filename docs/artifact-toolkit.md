@@ -5,6 +5,46 @@ has its own module and request format. The package shares file checks, atomic
 writes and the versioned section/deck contracts. It does not run a model or
 replace a harness's planning or native subagents.
 
+## Installed skills and runtime
+
+<!-- fact:document.skills -->
+
+| Skill | Purpose | Requires |
+|---|---|---|
+| `artifact-tools` | Find and run Branchyard document tooling, check its runtime, and prepare file manifests for managed artifact capture. | none |
+| `docx` | Create, inspect, update and validate editable Word DOCX documents, preserving source files and checking layout when needed. | `artifact-tools` |
+| `xlsx` | Create, inspect, update and validate Excel workbooks, formulas, calculated values and native pivot tables. | `artifact-tools` |
+| `pdf` | Create, extract, overlay and validate PDFs, with rendered checks and explicit limits on document editing. | `artifact-tools` |
+| `pptx` | Create, inspect, update and validate editable PowerPoint decks, including native charts and rendered layout checks. | `artifact-tools` |
+| `google-docs` | Create, read and update native Google Docs through an authorized connector, checking actual document identity and revisions. | `artifact-tools` |
+| `google-sheets` | Create, inspect and update native Google Sheets, including ranges, calculations and pivots supported by the granted connector. | `artifact-tools` |
+| `google-slides` | Create, inspect and update native Google Slides through a granted connector while preserving presentation identity, layouts and permissions. | `artifact-tools` |
+| `parallel-deck` | Split a large presentation into independently owned section specifications and assemble checked editable slides with one renderer. | `pptx` |
+
+<!-- /fact -->
+
+`by init plugin` installs the format skills for the selected native harness.
+The standalone skill installer resolves dependencies: installing `parallel-deck`
+also installs `pptx` and `artifact-tools`, after checking all destinations for
+conflicts. The toolkit payload is embedded in the CLI; no source checkout is
+needed for managed tasks.
+
+Every task, including a leaf without delegation rights, receives a small
+capabilities-index notice. Its index names the actual guest-visible skill and
+tool paths. Assets are staged before a sandbox is created or its home is
+transferred. Local tasks without private homes use a separate per-branch cache
+under the yard state directory; Branchyard does not change the user's global
+skill installation to provision a task. Each harness keeps its own planning,
+subagents and internal graph.
+
+Run the installed helper's `doctor`. When Python libraries are missing, run
+`python3 <artifact-tools>/scripts/run.py setup` with the path from that index.
+This explicitly creates a private virtual environment and runs pip against the
+bundled hash-pinned dependency lock. Ordinary document commands never install
+software. Repeating setup repairs an interrupted install. A ready receipt binds the dependency-lock digest and Python version; partial environments are not selected. Linked cache paths are refused. It does not install
+system packages: native rendering and pivots need the image below or an
+explicit system installation of LibreOffice, poppler, fonts and python3-uno.
+
 Install the optional libraries explicitly from a checkout:
 
 ```sh
@@ -129,6 +169,23 @@ same inputs produce the same PPTX bytes with the pinned libraries. Independent
 workers never write the shared presentation. The lead remains free to choose
 its native planning, agents and DAG.
 
+The [parallel deck rig](../examples/rigs/parallel-deck.toml) provides section
+seats and a lead/assembler. Run it from a configured repository with the
+artifact runtime and AGY. This recipe names `GEMINI_API_KEY` for
+private-home provisioning: register that secret on the server, or make it
+available to the local process. The key is used by AGY; no Gemini CLI runs.
+AGY OAuth qualification is separate from this recipe.
+
+```sh
+by rig check examples/rigs/parallel-deck.toml --json
+by rig run examples/rigs/parallel-deck.toml "Build a 60-slide deck from the supplied brief" --allow-unapproved-tools
+```
+
+Copy its guidance folder with the recipe when using another project. Seat
+contracts capture section specifications and final files; the harness chooses
+how to plan and use its native agents. Reported dollar budgets depend on the
+harness's usage reporting. Prepare the brief and sources before a run.
+
 ## Native pivot tables
 
 ```sh
@@ -160,7 +217,7 @@ Spec/manifest SHA-256 values validate input bytes. Branchyard's published
 artifact digest is blake3 and its artifact ID names a publication. Keep those
 identities distinct.
 
-Status: hermetic local document tests inspect actual Office/PDF bytes,
+Status, 2026-10-29: hermetic local document tests inspect actual Office/PDF bytes,
 preservation updates, atomic failures and deterministic assembly of 60 slides
 from independently owned section files. Native local fixtures exercised
 LibreOffice 24.2.7 UNO pivot/cache records and computed total, and Office

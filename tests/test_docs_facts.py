@@ -25,6 +25,8 @@ def copy_tree(root):
         shutil.copy(REPO / name, root / name)
     for name in ("docs", "tools", "patches"):
         shutil.copytree(REPO / name, root / name, ignore=KEEP)
+    (root / "plugins/branchyard").mkdir(parents=True)
+    shutil.copy(REPO / "plugins/branchyard/capabilities.json", root / "plugins/branchyard/capabilities.json")
     for crate in (REPO / "crates").iterdir():
         for part in ("Cargo.toml", "src", "tests"):
             source = crate / part
@@ -61,6 +63,17 @@ class Tree(unittest.TestCase):
 
 
 class DocsFacts(Tree):
+    def test_document_skill_metadata_is_generated_from_the_catalog(self):
+        path = self.root / "plugins/branchyard/capabilities.json"
+        catalog = json.loads(path.read_text())
+        catalog["skills"][0]["description"] = "Updated capability description."
+        path.write_text(json.dumps(catalog))
+        self.assertNotEqual(self.facts("--check").returncode, 0)
+        self.assertEqual(self.facts("--write").returncode, 0)
+        text = (self.root / "docs/artifact-toolkit.md").read_text()
+        self.assertIn("Updated capability description.", text)
+        self.assertEqual(self.facts("--check").returncode, 0)
+
     def test_the_repository_is_current(self):
         done = subprocess.run(
             [sys.executable, str(REPO / "tools" / "docs_facts.py"), "--check"], capture_output=True, text=True

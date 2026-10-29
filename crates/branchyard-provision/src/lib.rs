@@ -1439,3 +1439,6 @@ mod tests {
         assert!(Provisioning::default().is_empty());
     }
 }
+
+/// Canonical installed skills and document tooling payloads.
+pub mod skills;

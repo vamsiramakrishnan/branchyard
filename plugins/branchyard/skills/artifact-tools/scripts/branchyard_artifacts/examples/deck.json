@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "kind": "deck",
+  "id": "evidence-brief",
+  "design": {
+    "id": "brief-v1",
+    "width_in": 13.333333,
+    "height_in": 7.5,
+    "font": "DejaVu Sans",
+    "title_font_size_pt": 28,
+    "footer_font_size_pt": 10,
+    "margin_in": 0.5,
+    "background": "FFFFFF",
+    "foreground": "17202A",
+    "accent": "2563EB"
+  },
+  "sections": [
+    {
+      "id": "evidence",
+      "path": "section.json",
+      "sha256": "cad0f374979dac9502827203937d2f4482f519011443ea83ebf39326d2cf424f"
+    }
+  ],
+  "slide_order": [
+    "evidence/revenue"
+  ]
+}

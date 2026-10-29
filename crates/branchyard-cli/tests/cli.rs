@@ -2079,6 +2079,30 @@ fn example(name: &str) -> String {
 }
 
 #[test]
+fn parallel_deck_rig_preserves_section_ownership_and_file_deliverables() {
+    let repo = Repo::new();
+    let out = repo.by(&["rig", "check", &example("parallel-deck.toml"), "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["root"]["harness"], "antigravity");
+    assert_eq!(plan["root"]["isolated"], true);
+    assert_eq!(plan["root"]["provision"]["secrets"][0]["name"], "GEMINI_API_KEY");
+    assert_eq!(plan["root"]["result"]["purpose"], "deliverable");
+    assert_eq!(
+        plan["root"]["result"]["capture"]["manifest"],
+        "outputs/artifacts.json"
+    );
+    let section = &plan["seats"]["table"]["section"];
+    assert_eq!(section["harness"], "antigravity");
+    assert_eq!(section["instances"], 3);
+    assert_eq!(section["owns"], serde_json::json!(["outputs"]));
+    assert_eq!(
+        section["result"]["capture"]["manifest"],
+        "outputs/artifacts.json"
+    );
+}
+
+#[test]
 fn rig_check_prints_the_plan_and_names_what_it_refuses() {
     let repo = Repo::new();
     let text = repo.by(&["rig", "check", &example("feature.toml")]);

@@ -103,6 +103,9 @@ by run [OPTIONS] [PROMPT]
 | `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
 | `--result-required` | Require a structured result matching the schema |
 | `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
+| `--result-artifacts <PATH>` | Collect this worktree-relative output manifest after the provider returns files |
+| `--result-artifacts-max-files <COUNT>` | Maximum captured files (default: 32; at most 1024) |
+| `--result-artifacts-max-bytes <BYTES>` | Maximum total captured bytes (default: 268435456) |
 
 ## `by fan`
 
@@ -194,6 +197,9 @@ by fan [OPTIONS] [PROMPT]
 | `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
 | `--result-required` | Require a structured result matching the schema |
 | `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
+| `--result-artifacts <PATH>` | Collect this worktree-relative output manifest after the provider returns files |
+| `--result-artifacts-max-files <COUNT>` | Maximum captured files (default: 32; at most 1024) |
+| `--result-artifacts-max-bytes <BYTES>` | Maximum total captured bytes (default: 268435456) |
 
 ## `by map`
 
@@ -687,6 +693,9 @@ by task new [OPTIONS] <PROMPT>
 | `--result-schema-file <PATH>` | Read the result schema from this file, or - for standard input |
 | `--result-required` | Require a structured result matching the schema |
 | `--result-deliverable` | Accept the native final JSON answer as the deliverable; no Git change is needed |
+| `--result-artifacts <PATH>` | Collect this worktree-relative output manifest after the provider returns files |
+| `--result-artifacts-max-files <COUNT>` | Maximum captured files (default: 32; at most 1024) |
+| `--result-artifacts-max-bytes <BYTES>` | Maximum total captured bytes (default: 268435456) |
 
 ### `by task ls`
 

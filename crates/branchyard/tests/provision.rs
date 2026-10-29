@@ -19,6 +19,31 @@ use common::{edit_record, stored_record, text, Fixture};
 
 const OPENAI_SECRET: &str = "sk-proj-PROVISIONED-SECRET-0123456789abcdefXYZ";
 
+#[test]
+fn a_non_delegating_task_receives_source_free_document_tools() {
+    let f = Fixture::new();
+    let branch = f.task(
+        "SH test -f \"$HOME/.branchyard/capabilities/docx/SKILL.md\" && echo docx-skill-present\n\
+         SH python3 \"$HOME/.branchyard/capabilities/artifact-tools/scripts/run.py\" doctor",
+    )
+    .name("document-leaf")
+    .isolated(true)
+    .policy(Policy::allow_all())
+    .run().unwrap();
+    let events = branch.events().unwrap();
+    assert_eq!(branch.info().status, BranchStatus::NoChanges, "{events:?}");
+    let said = text(&events);
+    assert!(said.contains("docx-skill-present"), "{said}");
+    assert!(said.contains("\"status\": \"passed\""), "{said}");
+    assert!(!branch
+        .info()
+        .worktree
+        .join(".branchyard/capabilities")
+        .exists());
+    assert!(events.iter().any(|event| matches!(&event.activity,
+        Activity::Provisioned {files, ..} if files.iter().any(|p| p == ".branchyard/capabilities/INDEX.md"))));
+}
+
 /// Options that run the fake agent as the `codex-acp` profile, isolated,
 /// with an API key read from `var`.
 fn codex(f: &Fixture, var: &str, value: &str) -> TaskOptions {
@@ -100,7 +125,12 @@ fn the_harness_sees_its_provisioned_home_and_the_secret_stays_there() {
         .expect("a provisioned activity");
     assert_eq!(provisioned.0.as_deref(), Some("api-key"));
     assert_eq!(
-        provisioned.1,
+        provisioned
+            .1
+            .iter()
+            .filter(|path| !path.starts_with(".branchyard/capabilities/"))
+            .cloned()
+            .collect::<Vec<_>>(),
         [
             ".codex/auth.json",
             ".codex/config.toml",

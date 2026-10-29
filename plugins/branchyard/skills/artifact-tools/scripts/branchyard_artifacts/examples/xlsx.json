@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "sheets": [
+    {
+      "name": "Data",
+      "cells": {
+        "A1": "Quarter",
+        "B1": "USD millions",
+        "A2": "Q1",
+        "B2": 12,
+        "A3": "Q2",
+        "B3": 14,
+        "B4": "=SUM(B2:B3)"
+      },
+      "number_formats": {
+        "B2": "0.0",
+        "B3": "0.0",
+        "B4": "0.0"
+      }
+    }
+  ]
+}

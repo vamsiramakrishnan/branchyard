@@ -99,6 +99,7 @@ mod adopt;
 mod assignment;
 mod broker;
 mod bundle;
+mod capabilities;
 mod capacity;
 mod checkpoint;
 mod compare;
