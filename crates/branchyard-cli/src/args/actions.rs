@@ -3,6 +3,23 @@
 
 use super::*;
 
+/// Operator workspace management, separate from branch delegation.
+#[derive(Subcommand, Clone, Debug, PartialEq)]
+pub enum McpCommand {
+    /// Manage authorized code and knowledge workspaces over MCP on stdio
+    ///
+    /// Use --token-file for a scoped bearer credential, or set
+    /// BRANCHYARD_MANAGER_TOKEN. Add --ca-file for private trust roots.
+    Manager {
+        /// Branchyard server URL
+        #[arg(long, value_name = "URL", value_parser = non_blank)]
+        url: String,
+        /// Print startup errors as JSON; MCP messages always use the stdio protocol
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// `by handoff`: relay a settled result without starting a recipient turn.
 #[derive(Args, Clone, Debug, PartialEq)]
 pub struct HandoffArgs {

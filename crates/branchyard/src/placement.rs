@@ -776,6 +776,9 @@ impl Placement {
 
     /// Add a variable to the harness's environment.
     pub fn set_env(&mut self, name: &str, value: &str) {
+        if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return;
+        }
         match &mut self.kind {
             Kind::Local(env) => *env = env.clone().set(name, value),
             Kind::Sandbox { env, .. } => {
@@ -966,6 +969,9 @@ pub(crate) fn sandbox_env(
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let mut env = BTreeMap::from([(OsString::from("HOME"), OsString::from(home))]);
     for name in pass_env {
+        if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return Err("the operator manager token cannot be passed to a sandbox".into());
+        }
         let value = std::env::var_os(name)
             .ok_or_else(|| format!("{name} is to be passed to the sandbox but is not set"))?;
         env.insert(name.into(), value);
@@ -1091,6 +1097,20 @@ pub(crate) fn private_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_pass_through_refuses_operator_manager_credentials_before_reading_them() {
+        for name in [
+            branchyard_support::MANAGER_TOKEN_ENV,
+            "branchyard_manager_token",
+        ] {
+            let error = sandbox_env("/home/agent", &[name.into()]).unwrap_err();
+            assert_eq!(
+                error,
+                "the operator manager token cannot be passed to a sandbox"
+            );
+        }
+    }
 
     #[test]
     fn sandbox_names_fit_the_runtime() {

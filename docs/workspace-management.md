@@ -6,15 +6,28 @@ delegation token from a running branch. The manager command refuses to start
 inside a managed turn before reading its operator credential. The native in-task MCP still acts only on
 its own branch and permitted descendants.
 
-Start the standalone MCP binary with a token file:
+Start the installed CLI's MCP server with a token file:
 
 ```sh
-branchyard-mcp manager --url https://branchyard.example --token-file /run/secrets/branchyard-manager
+by mcp manager --url https://branchyard.example --token-file /run/secrets/branchyard-manager
 ```
 
 The token file's first line supplies the scoped bearer credential. An operator
 may instead set `BRANCHYARD_MANAGER_TOKEN` in the child process environment. The
 command has no plaintext token argument. Use `--ca-file` for a private CA.
+The installed `by` command reuses its global token-file and CA-file options,
+including `BRANCHYARD_TOKEN_FILE` and `BRANCHYARD_CA_FILE`. `--json` formats startup
+errors as JSON. Normal MCP messages always use the stdio protocol.
+Manager startup does not open a yard or load the current directory's task defaults.
+The standalone `branchyard-mcp manager` accepts the same options. Existing
+engine launches with `by mcp --root DIR --branch NAME` keep their restricted
+delegation tools. `by mcp --list-tools` still lists those delegation tools.
+
+`BRANCHYARD_MANAGER_TOKEN` is reserved for the external operator. Harness
+environments remove it even in inherited mode and with explicit keep or set
+rules. Sandbox `--pass-env` refuses it. Provisioned environment entries cannot
+add it to a harness or alias it into another secret. Keep its token file outside
+managed workspaces.
 
 Knowledge projects use `source: {"kind": "knowledge"}` and
 `result_mode: "artifacts"`. They require no user Git repository. Code projects
@@ -40,6 +53,15 @@ command, host path or download destination. Artifact inspection returns metadata
 original downloads use the ordinary authorized content endpoint. Previewing a
 document does not establish visual approval. Upstream connector consent and
 worker IAM remain separate grants.
+
+Each manager tool's text and structured JSON payload has a 32 KiB budget. A
+larger success or API error becomes `manager_output_too_large`, with bounded
+identifiers, operation state and continuation cursors where present. Oversized
+metadata is explicitly marked as omitted. JSON is never cut mid-value. Preview
+defaults to 25 rows. Request fewer rows or a different page, download the original
+through its authorized endpoint, or ask a session to compute a focused result.
+An oversized mutation response can follow a successful action. Inspect its
+operation and reuse the original idempotency key when reconciling.
 
 ## Pull-request service integration
 
@@ -73,3 +95,11 @@ Clippy for the changed crates and rustdoc with warnings denied passed. See the [
 the exact suite scopes and log digests.
 Not done: integrated workspace HTTP routes, the UI, or a live GitHub publication
 through this service.
+
+Hermetic followup verification on 29 October 2026 passed the installed manager
+startup guard, credential scrubbing with a real fake-harness process, reserved
+secret-source and sandbox pass-through guards, bounded manager outputs over real
+MCP stdio, and the shipped skill, projection and command-surface checks. The CLI
+argument, help and reference checks passed, along with production Clippy,
+rustdoc and the fast Python gate. The verification record states the exact
+source scopes. Not done: live model, cloud or forge calls in this followup.

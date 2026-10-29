@@ -98,6 +98,94 @@
       "scope": "changed crates with warnings denied",
       "sha256": "e7c766bcf4452cb585279f4edacde97251f1c6220b5eeee378968d1dde629d17",
       "test_summaries": []
+    },
+    {
+      "log": "management-cli-final-checks.log",
+      "scope": "CLI arguments/help/reference, reserved-token core guards, production clippy and rustdoc; before final CLI startup relocation, which is covered by the final integration checks",
+      "sha256": "6c758f28477b2d47e55de598ee61a5ffbad41d20bd7a1a61ba9ca15809b7f469",
+      "test_summaries": [
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 61,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-cli-verified-tests.log",
+      "scope": "final installed CLI startup guards, fake-harness environment, provisioning/pass-through guards, manager output budget including real stdio, skill and projection embeds, operation command surface",
+      "sha256": "511401a3b29fede127ff231d9a4fb16e58a17036875b0d8d829915912777e9f6",
+      "test_summaries": [
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 8,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "passed": 9,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-cli-fast-verified.log",
+      "scope": "fast Python/lint/docs gate; subsequent final startup relocation and its malformed-config fixture are covered by CLI integration, final documentation checked separately",
+      "sha256": "e7a4a5e3cfee27ee8f6234a35e354e21bc6d30541de535ff7f7bc71e88b84ef5",
+      "test_summaries": []
     }
   ],
   "not_done": [

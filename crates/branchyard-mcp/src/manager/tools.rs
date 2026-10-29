@@ -71,7 +71,7 @@ fn definition(name: &str) -> (&'static str, Value, Vec<&'static str>, bool) {
         "list_artifacts" => ("List permitted immutable output artifacts, digests and provenance.",json!({"workspace_id":id()}),vec!["workspace_id"],true),
         "inspect_artifact" => ("Read one artifact's metadata. Use the normal authenticated content endpoint to download its original bytes.",
             json!({"workspace_id":id(),"artifact_id":id()}),vec!["workspace_id","artifact_id"],true),
-        "preview_artifact" => ("Read a bounded CSV/workbook table or document/slide preview. Conversion is not visual approval. Missing tools are explicit.",
+        "preview_artifact" => ("Read a bounded CSV/workbook table or document/slide preview, defaulting to 25 rows. Use a narrower preview or focused compute when the context budget is exceeded. Conversion is not visual approval. Missing tools are explicit.",
             json!({"workspace_id":id(),"artifact_id":id(),"view":choices(&["auto","table","pages"]),"page":{"type":"integer","minimum":1,"maximum":100000},
                 "sheet":text(500),"offset":{"type":"integer","minimum":0,"maximum":4294967295_u64},"limit":{"type":"integer","minimum":1,"maximum":1000}}),
             vec!["workspace_id","artifact_id"],true),

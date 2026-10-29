@@ -23,6 +23,13 @@ fn manager_discovery_and_calls_use_only_the_separate_http_principal() {
                 403,
                 &json!({"error":{"code":"denied","message":"workspace membership revoked"}}),
             ),
+            path if path.starts_with("/v1/workspaces/large/artifacts/table/preview?") => {
+                assert!(path.contains("limit=25"), "{path}");
+                Response::json(
+                    200,
+                    &json!({"rows":vec![vec!["cell";100];100],"next_cursor":"next-page","artifact_id":"table"}),
+                )
+            }
             _ => Response::json(
                 404,
                 &json!({"error":{"code":"unknown","message":"unexpected route"}}),
@@ -48,13 +55,23 @@ fn manager_discovery_and_calls_use_only_the_separate_http_principal() {
     let (error, text) = client.call("inspect_workspace", json!({"workspace_id":"hidden"}));
     assert!(error);
     assert!(text.contains("workspace membership revoked"));
+    let (error, text) = client.call(
+        "preview_artifact",
+        json!({"workspace_id":"large","artifact_id":"table"}),
+    );
+    assert!(error);
+    assert!(text.len() <= 32 * 1024);
+    let bounded: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(bounded["code"], "manager_output_too_large");
+    assert_eq!(bounded["metadata"]["next_cursor"], "next-page");
+    assert!(!text.contains("cell"));
     let invalid = client.request(
         "tools/call",
         json!({"name":"list_projects","arguments":{"url":"http://another-host"}}),
     );
     assert!(invalid.get("error").is_some());
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].header("idempotency-key"), Some("create-once"));
     assert_eq!(requests[0].json()["source"], json!({"kind":"knowledge"}));
     assert!(client.finish().success());

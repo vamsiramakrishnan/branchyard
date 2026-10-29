@@ -51,6 +51,9 @@ pub use locks::{CondvarExt, LockExt, RwLockExt};
 pub use process::{kill_group, kill_process, terminate_group};
 pub use threads::{join_reporting, spawn_named, survive_panic, PanicReport};
 
+/// Operator-only workspace-manager credential, never forwarded to a harness.
+pub const MANAGER_TOKEN_ENV: &str = "BRANCHYARD_MANAGER_TOKEN";
+
 /// Run a fallible step that may fail without failing the caller, logging the
 /// failure under `$context` and yielding `Some(value)` on success.
 ///

@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use branchyard_client::Client;
 use clap::Parser;
 
 /// The credential environment variable used only by an external manager.
-pub const TOKEN_ENV: &str = "BRANCHYARD_MANAGER_TOKEN";
+pub const TOKEN_ENV: &str = branchyard_support::MANAGER_TOKEN_ENV;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -48,7 +48,22 @@ pub fn main_with_args(args: &[String]) -> Result<(), crate::Failure> {
         std::iter::once("branchyard-mcp manager".to_owned()).chain(args.iter().cloned()),
     )
     .map_err(crate::Failure::Clap)?;
+    serve_configured(&cli.url, cli.token_file.as_deref(), cli.ca_file.as_deref())
+}
+
+/// Serve an operator-configured endpoint, reading its credential only after the
+/// managed-child authority guard. Paths are preserved without argument reparsing.
+pub fn serve_configured(
+    url: &str,
+    token_file: Option<&Path>,
+    ca_file: Option<&Path>,
+) -> Result<(), crate::Failure> {
     super::ensure_operator().map_err(|e| crate::Failure::Usage(e.to_string()))?;
+    let cli = Cli {
+        url: url.to_owned(),
+        token_file: token_file.map(Path::to_path_buf),
+        ca_file: ca_file.map(Path::to_path_buf),
+    };
     super::serve_stdio(client(cli)?)
         .map_err(|e| crate::Failure::Serve(format!("serving workspace manager: {e}")))
 }

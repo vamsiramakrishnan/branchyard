@@ -180,7 +180,7 @@ repo = "app"                              # when the server serves several
 
 `BRANCHYARD_REMOTE`, `BRANCHYARD_TOKEN_FILE`, `BRANCHYARD_REPO` and `BRANCHYARD_CA_FILE` are the same four, above the file. `--remote ssh://HOST/PATH` starts a server on the host for you and reaches it through a forwarded socket ([remote over ssh](remote-ssh.md)).
 
-**Guaranteed:** operations are admitted once and survive a restart; tokens carry scopes (`read`, `run`, `merge`, `admin`), tenants and quotas; plain HTTP is refused off loopback.
+**Guaranteed:** operations are admitted once and survive a restart; tokens carry scopes (`read`, `run`, `merge`, `admin`), tenants and quotas; plain HTTP is refused off loopback. The operator-only `BRANCHYARD_MANAGER_TOKEN` is removed from native harness environments, including inherited and explicitly configured environments. Sandbox pass-through refuses that variable. The separate [workspace manager](workspace-management.md) refuses managed turns.
 
 **Not guaranteed:** isolation. A `run` token on a repository can make a harness do anything the server's user can; scopes bound what a credential reaches, not what a harness does. `--allow-provider microsandbox,substrate` lets a request name a sandbox, the server's operator chooses it, and `local` stays allowed ([server](server.md#security)).
 

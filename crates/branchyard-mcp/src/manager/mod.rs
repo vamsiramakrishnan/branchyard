@@ -4,6 +4,7 @@
 //! credential. They are never added to a branch's descendant-scoped server.
 
 mod cli;
+mod output;
 mod tools;
 
 use std::borrow::Cow;
@@ -11,16 +12,14 @@ use std::borrow::Cow;
 use branchyard_client::manager_api::{Lifecycle, PreviewOptions, Read, Write};
 use branchyard_client::Client;
 use rmcp::model::{
-    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
-    Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, Implementation, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{json, Map, Value};
 
-/// Run the standalone manager command line.
-pub use cli::main_with_args;
+pub use cli::{main_with_args, serve_configured};
 
 const INSTRUCTIONS: &str = "Manage authorized Branchyard projects, workspaces and native agent conversations. \
 Knowledge work can start without a user Git repository and can finish with immutable deliverables, without a Git diff. \
@@ -28,7 +27,10 @@ Use one stable idempotency_key per intended mutation and reuse it on retries. Ac
 disconnect; inspect or wait on their operation IDs. Starting a conversation does not replace any native lead, plan or \
 subagents. Review current outputs and contracts before finalizing. Workspace permissions do not grant worker IAM or \
 upstream connector permissions. Tools never accept arbitrary shell commands, filesystem destinations or request URLs. \
-This external manager uses its own HTTP credential and is distinct from the restricted in-task delegation MCP.";
+This external manager uses its own HTTP credential and is distinct from the restricted in-task delegation MCP. \
+Tool responses have a bounded context budget; oversized responses return a structured error with small identifiers and cursors. \
+Preview defaults to 25 rows. Use narrower previews, authorized original downloads or focused compute for large tables. \
+A mutation can succeed before its response is found too large; inspect its operation and reuse the original idempotency_key.";
 
 /// Tool definitions for the external manager only.
 pub fn tools() -> Vec<Tool> {
@@ -87,7 +89,7 @@ impl Server {
                     offset: u32::try_from(number(&args, "offset", 0)).map_err(|_| {
                         CallError::Arguments("offset exceeds its supported range".into())
                     })?,
-                    limit: u16::try_from(number(&args, "limit", 100)).map_err(|_| {
+                    limit: u16::try_from(number(&args, "limit", 25)).map_err(|_| {
                         CallError::Arguments("limit exceeds its supported range".into())
                     })?,
                 },
@@ -223,14 +225,8 @@ impl ServerHandler for Server {
         let result = tokio::task::spawn_blocking(move || server.call(&name, arguments))
             .await
             .map_err(|e| ErrorData::internal_error(Cow::Owned(e.to_string()), None))?;
-        Ok(match result {
-            Ok(value) => {
-                let text = serde_json::to_string(&value)
-                    .map_err(|e| ErrorData::internal_error(Cow::Owned(e.to_string()), None))?;
-                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
-                result.structured_content = Some(value);
-                result
-            }
+        let (value, failed) = match result {
+            Ok(value) => (value, false),
             Err(error) => {
                 let detail = match &error {
                     CallError::Arguments(_) => {
@@ -243,12 +239,10 @@ impl ServerHandler for Server {
                         json!({"code":"request_failed","message":error.to_string()})
                     }
                 };
-                let mut result = CallToolResult::error(vec![ContentBlock::text(error.to_string())]);
-                result.structured_content = Some(detail);
-                result
+                (detail, true)
             }
-        }
-        .into())
+        };
+        Ok(output::bounded_result(value, failed)?.into())
     }
 }
 
@@ -387,6 +381,14 @@ mod tests {
         ] {
             server.call(name, args).unwrap();
         }
-        assert_eq!(http.requests().len(), 19);
+        server
+            .call(
+                "preview_artifact",
+                json!({"workspace_id":"w","artifact_id":"a"}),
+            )
+            .unwrap();
+        let requests = http.requests();
+        assert_eq!(requests.len(), 20);
+        assert!(requests.last().unwrap().path.contains("limit=25"));
     }
 }

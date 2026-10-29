@@ -894,9 +894,16 @@ pub enum Command {
         /// The server's own options (see `by worker --help`)
         args: Vec<String>,
     },
-    /// Serve a branch's delegation tools over MCP on stdio (started by the engine)
-    #[command(hide = true, display_order = 502)]
+    /// Serve branch delegation or authorized workspace management over MCP
+    #[command(
+        hide = true,
+        display_order = 502,
+        subcommand_negates_reqs = true,
+        args_conflicts_with_subcommands = true
+    )]
     Mcp {
+        #[command(subcommand)]
+        action: Option<McpCommand>,
         /// Repository root
         #[arg(long, value_name = "DIR", required_unless_present = "list_tools")]
         root: Option<String>,

@@ -1030,6 +1030,9 @@ fn run(
     if let Some(parent) = &turn.options.trace_parent {
         placement.set_env(crate::ENV_TRACEPARENT, parent);
     }
+    // An operator's manager credential never belongs to a native agent turn,
+    // including provider pass-through and provisioned environment entries.
+    placement.remove_env(branchyard_support::MANAGER_TOKEN_ENV);
     // The branch's network policy: its proxy's variables last, so nothing
     // above replaces them, and its namespace when the harness starts. The
     // proxy lives with the placement, after the harness is gone.

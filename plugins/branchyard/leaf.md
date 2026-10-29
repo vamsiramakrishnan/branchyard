@@ -59,6 +59,13 @@ The same operations are the `branchyard` MCP server's tools, and the
 `branchyard` Python module's functions. Anything else, such as another
 branch's work, is refused with the reason.
 
+The external workspace manager, `by mcp manager --url URL --token-file FILE`,
+is an operator command and refuses managed turns. Its separate HTTP credential
+does not expand your branch's permissions. Use your branch-scoped tools here.
+The operator-only `BRANCHYARD_MANAGER_TOKEN` is never forwarded to harnesses.
+That manager bounds its JSON responses and returns an explicit error for large
+results. Keep large documents in artifacts and return a focused answer here.
+
 ## Substrate setup and readiness
 
 `by substrate setup --image IMAGE --storage URI --plan` previews the saved

@@ -377,6 +377,15 @@ pub fn mcp_tools() -> Outcome {
     print(&format!("{}\n", to_json(&listing)))
 }
 
+/// Serve the separately authenticated operator manager without opening a yard.
+pub fn mcp_manager(url: &str, token_file: Option<&Path>, ca_file: Option<&Path>) -> Outcome {
+    branchyard_mcp::manager::serve_configured(url, token_file, ca_file).map_err(|error| {
+        Report::new("config", error.to_string())
+            .next("by mcp manager --help")
+            .into()
+    })
+}
+
 /// The delegate for this harness's branch when `by` runs inside a
 /// delegating harness; `None` outside one.
 pub(crate) fn harness_delegate(json: bool) -> Result<Option<Delegate>, Failure> {

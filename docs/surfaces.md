@@ -10,8 +10,14 @@ Surfaces:
 - **HTTP**: the server's API (`by serve`; see [the server reference](server.md)).
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
+- **workspace manager MCP**: an external operator agent starts `by mcp manager --url URL --token-file FILE`, with optional `--ca-file FILE`. Its separate HTTP credential reaches the same authorized project, workspace, session, artifact, lifecycle and operation actions as the console. It refuses managed harness turns and never adds account authority to the delegation tools. See [workspace management](workspace-management.md).
 
 The server registers <!-- fact:http.route_count -->91<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+
+The external manager bounds each tool's text and structured JSON payload to
+32 KiB. Larger responses return an explicit error with small identifiers and
+cursors. Artifact previews default to 25 rows. Narrow the preview or request a
+focused calculation instead of loading a large document into the lead's context.
 
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 

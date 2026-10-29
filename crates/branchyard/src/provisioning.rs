@@ -219,6 +219,12 @@ pub(crate) fn resolve(sources: &[SecretSource]) -> Result<Vec<Secret>, String> {
     sources
         .iter()
         .map(|source| {
+            if source
+                .name
+                .eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV)
+            {
+                return Err("the operator manager token cannot be provisioned to a harness".into());
+            }
             let value = match &source.from {
                 None => variable(&source.name, &source.name)?,
                 Some(SecretFrom::Env { var }) => variable(&source.name, var)?,
@@ -240,6 +246,9 @@ pub(crate) fn resolve(sources: &[SecretSource]) -> Result<Vec<Secret>, String> {
 }
 
 fn variable(secret: &str, var: &str) -> Result<String, String> {
+    if var.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+        return Err("the operator manager token cannot be used as a harness secret source".into());
+    }
     std::env::var(var).map_err(|_| match secret == var {
         true => format!("secret {secret}: {var} is not set"),
         false => format!("secret {secret}: its variable {var} is not set"),
@@ -696,6 +705,27 @@ mod tests {
         std::fs::write(&file, "\n").unwrap();
         let empty = resolve(&[SecretSource::parse(&format!("B=@{}", file.display())).unwrap()]);
         assert!(empty.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn operator_manager_credentials_cannot_be_provisioned_or_aliased() {
+        for spec in [
+            branchyard_support::MANAGER_TOKEN_ENV.to_owned(),
+            "branchyard_manager_token=@a-file-that-must-not-be-read".into(),
+            "OPENAI_API_KEY=BRANCHYARD_MANAGER_TOKEN".into(),
+            "DOCS_TOKEN=branchyard_manager_token".into(),
+        ] {
+            let error = resolve(&[SecretSource::parse(&spec).unwrap()]).unwrap_err();
+            assert!(error.contains("operator manager token"), "{spec}: {error}");
+            assert!(
+                !error.contains("not set"),
+                "reservation must be checked before reading"
+            );
+            assert!(
+                !error.contains("cannot read"),
+                "reservation must be checked before reading"
+            );
+        }
     }
 
     #[test]
