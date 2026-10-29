@@ -94,6 +94,11 @@ Shared test infrastructure lives in one crate, `crates/branchyard-testkit`, a de
 
 `BY_TEST_TIMEOUT_SCALE=3` multiplies every wait's timeout (`wait::until` and friends, and the mock server's read timeout) by three; use it to check a test against a slow machine. It does not stretch `wait::settle`: that is time against the code under test's own clocks. A test you write must pass with it.
 
+Use `wait::alive` or `wait::gone` for process liveness. A separate `/proc` directory
+check and negated `grep` can report an exited process as alive when its `stat`
+file disappears between the probes. Cancellation fixtures must stay blocked
+until cancelled, so natural completion cannot satisfy the assertion.
+
 The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratchet.json`: calls to `wait::settle`, hand-rolled `std::env::temp_dir()` directories and hand-rolled `TcpListener::bind` servers, per file. A count above the file fails; a count below it fails until the file is lowered (`python3 tools/check_test_hygiene.py --lower`). They can only fall: when you touch one of the listed files, move it onto the kit and lower its count.
 
 The check reads `#[cfg(test)]` code in `crates/*/src` as well as `crates/*/tests`, and fails, with no count to hide behind, on the shapes that made tests fail on a slow machine:
