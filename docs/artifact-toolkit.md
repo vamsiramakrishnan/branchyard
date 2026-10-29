@@ -41,8 +41,10 @@ Run the installed helper's `doctor`. When Python libraries are missing, run
 `python3 <artifact-tools>/scripts/run.py setup` with the path from that index.
 This explicitly creates a private virtual environment and runs pip against the
 bundled hash-pinned dependency lock. Ordinary document commands never install
-software. Repeating setup repairs an interrupted install. A ready receipt binds the dependency-lock digest and Python version; partial environments are not selected. Linked cache paths are refused. It does not install
-system packages: native rendering and pivots need the image below or an
+software. Repeating setup preserves a matching ready environment and repairs an
+interrupted install. A ready receipt binds the dependency-lock digest and Python
+version; partial environments are not selected.
+Linked cache paths are refused. Setup does not install system packages: native rendering and pivots need the image below or an
 explicit system installation of LibreOffice, poppler, fonts and python3-uno.
 
 Install the optional libraries explicitly from a checkout:
@@ -221,6 +223,9 @@ Status, 2026-10-29: hermetic local document tests inspect actual Office/PDF byte
 preservation updates, atomic failures and deterministic assembly of 60 slides
 from independently owned section files. Native local fixtures exercised
 LibreOffice 24.2.7 UNO pivot/cache records and computed total, and Office
-conversion plus every-page PNG decoding. Not done: Docker image build,
-cross-platform Office application qualification, live Google operations or a
-model-driven deck run.
+conversion plus every-page PNG decoding. The Docker image also built on GCE
+and passed the real-file and installed-wheel suites with networking disabled;
+an actual source-free AGY task loaded its staged skills and required doctor
+checks. See the [dated record](atomic-knowledge-validation-2026-10-29.md).
+Not done: cross-platform Office application qualification or live Google
+Workspace operations.

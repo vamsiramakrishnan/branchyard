@@ -59,7 +59,7 @@ def ready(target: Path) -> bool:
 
 
 def setup(target: Path) -> int:
-    """Use stdlib venv and pip with hashes; repeated setup repairs partial installs."""
+    """Reuse a ready runtime; repair partial installs with hash-pinned pip."""
     plain_directory(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / (target.name + ".lock")
@@ -70,32 +70,30 @@ def setup(target: Path) -> int:
         if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
             raise ValueError(f"runtime lock {lock_path} is not a regular file")
         fcntl.flock(lock, fcntl.LOCK_EX)
-        plain_directory(target)
-        if (target / ".ready").is_symlink():
-            raise ValueError("runtime receipt is a symbolic link")
-        (target / ".ready").unlink(missing_ok=True)
-        venv.EnvBuilder(with_pip=True, clear=True).create(target)
         python = target / "bin/python"
-        result = subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--require-hashes",
-                "-r",
-                str(HERE / "requirements.lock"),
-            ],
-            stdout=sys.stderr,
-            check=False,
-        )
-        if result.returncode:
-            return result.returncode
-        checked = subprocess.run([str(python), "-m", "pip", "check"], stdout=sys.stderr, check=False)
-        if checked.returncode:
-            return checked.returncode
-        (target / ".ready").write_text(json.dumps(receipt(), sort_keys=True) + "\n")
+        if not ready(target):
+            (target / ".ready").unlink(missing_ok=True)
+            venv.EnvBuilder(with_pip=True, clear=True).create(target)
+            result = subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--require-hashes",
+                    "-r",
+                    str(HERE / "requirements.lock"),
+                ],
+                stdout=sys.stderr,
+                check=False,
+            )
+            if result.returncode:
+                return result.returncode
+            checked = subprocess.run([str(python), "-m", "pip", "check"], stdout=sys.stderr, check=False)
+            if checked.returncode:
+                return checked.returncode
+            (target / ".ready").write_text(json.dumps(receipt(), sort_keys=True) + "\n")
     print(
         json.dumps(
             {

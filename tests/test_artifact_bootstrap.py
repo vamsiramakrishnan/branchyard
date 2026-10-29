@@ -48,6 +48,66 @@ class BootstrapTests(unittest.TestCase):
                 self.assertIn("--require-hashes", run.call_args_list[0].args[0])
                 self.assertEqual(run.call_args_list[1].args[0][-2:], ["pip", "check"])
 
+    def test_repeated_setup_keeps_a_matching_ready_runtime_without_installing(self) -> None:
+        module = launcher()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "runtime"
+
+            def create(path: Path) -> None:
+                (path / "bin").mkdir(parents=True, exist_ok=True)
+                python = path / "bin/python"
+                if not python.exists():
+                    python.symlink_to(module.sys.executable)
+
+            with (
+                mock.patch.object(module.venv, "EnvBuilder") as builder,
+                mock.patch.object(module.subprocess, "run") as run,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                builder.return_value.create.side_effect = create
+                run.return_value.returncode = 0
+                self.assertEqual(module.setup(target), 0)
+                self.assertTrue(module.ready(target))
+                installed = target / "installed-library.py"
+                installed.write_text("keep this running runtime")
+                marker = target / ".ready"
+                with marker.open("rb") as receipt:
+                    inode = module.os.fstat(receipt.fileno()).st_ino
+                    builder.reset_mock()
+                    run.reset_mock()
+                    self.assertEqual(module.setup(target), 0)
+                    builder.assert_not_called()
+                    run.assert_not_called()
+                    self.assertEqual(marker.stat().st_ino, inode)
+                    self.assertEqual(installed.read_text(), "keep this running runtime")
+                    self.assertTrue(module.ready(target))
+
+    def test_setup_repairs_mismatched_or_incomplete_runtimes(self) -> None:
+        module = launcher()
+        for state in ["missing receipt", "mismatched receipt", "missing interpreter"]:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                target = Path(directory) / "runtime"
+                (target / "bin").mkdir(parents=True)
+                if state != "missing interpreter":
+                    (target / "bin/python").touch()
+                if state != "missing receipt":
+                    record = module.receipt()
+                    if state == "mismatched receipt":
+                        record["requirements_sha256"] = "stale"
+                    (target / ".ready").write_text(json.dumps(record))
+                self.assertFalse(module.ready(target))
+                with (
+                    mock.patch.object(module.venv, "EnvBuilder") as builder,
+                    mock.patch.object(module.subprocess, "run") as run,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    builder.return_value.create.side_effect = lambda path: (path / "bin/python").touch()
+                    run.return_value.returncode = 0
+                    self.assertEqual(module.setup(target), 0)
+                    builder.assert_called_once_with(with_pip=True, clear=True)
+                    self.assertEqual(run.call_count, 2)
+                    self.assertTrue(module.ready(target))
+
     def test_failed_install_never_selects_partial_runtime(self) -> None:
         module = launcher()
         with tempfile.TemporaryDirectory() as directory:
