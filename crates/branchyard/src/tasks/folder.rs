@@ -122,7 +122,7 @@ pub(crate) fn owned(root: &Path) -> Option<Owned> {
 }
 
 /// What [`create`] makes.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewTask {
     /// What is asked.
     pub prompt: String,
@@ -249,6 +249,11 @@ fn commit(git_dir: &Path, tree: &str, parents: &[&str], message: &str) -> Result
 /// files. Its first commit is the folder as it is now (or an empty tree),
 /// on `main`. Returns the task and the yard its attempts run in.
 pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
+    super::initialize_reserved(&super::reserve(new)?)
+}
+
+/// Validate a source grant and freeze its paths without writing files.
+pub(super) fn validated(new: &NewTask) -> Result<NewTask, Error> {
     let folder = match &new.folder {
         Some(folder) => {
             let folder = fs::canonicalize(folder).map_err(|e| {
@@ -276,64 +281,104 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
         }
         None => None,
     };
+    let mut new = new.clone();
+    new.folder = folder;
     let home = new.home.clone().unwrap_or_else(super::home);
-    let id = super::new_id()?;
+    new.home = Some(if home.is_absolute() {
+        home
+    } else {
+        std::env::current_dir()?.join(home)
+    });
+    Ok(new)
+}
+
+/// Complete the reserved task allocation under its operating-system lock.
+pub(super) fn initialize(reservation: &super::TaskReservation) -> Result<(Task, Yard), Error> {
+    let new = &reservation.new;
+    let folder = new.folder.clone();
+    let home = new.home.clone().unwrap_or_else(super::home);
+    let id = reservation.id.clone();
     let dir = tasks_dir(&home).join(&id);
     let git_dir = dir.join("git");
     let work = dir.join("work");
-    fs::create_dir_all(&dir)?;
-    let made = (|| {
-        Git::new(&dir)
-            .args([
-                "init",
-                "--quiet",
-                "--initial-branch=main",
-                "--separate-git-dir",
-            ])
-            .arg(&git_dir)
-            .arg(&work)
+    let _initializing = crate::DirLock::acquire(&dir.join("initialize"), "initializing this task")?;
+    let intent = dir.join("initialize/intent.json");
+    match super::read_json::<super::TaskReservation>(&intent)? {
+        Some(existing) if existing != *reservation => {
+            return Err(Error::State(format!(
+                "task {id} has a different initialization reservation"
+            )));
+        }
+        Some(_) => {}
+        None => super::write_atomic(
+            &intent,
+            &serde_json::to_vec(reservation).map_err(|error| Error::State(error.to_string()))?,
+        )?,
+    }
+    if let Some(task) = super::load(&work, &id)? {
+        let yard = Yard::open(&work)?;
+        return Ok((task, yard));
+    }
+    // Keep incomplete initialization and its intent for the same reservation.
+    // No attempt or model turn is started by this operation.
+    Git::new(&dir)
+        .args([
+            "init",
+            "--quiet",
+            "--initial-branch=main",
+            "--separate-git-dir",
+        ])
+        .arg(&git_dir)
+        .arg(&work)
+        .run()
+        .map_err(git_err)?;
+    let threshold = new.large_threshold.unwrap_or(DEFAULT_THRESHOLD);
+    let chunks = new.chunks.clone().unwrap_or_else(|| home.join("chunks"));
+    let mut config = vec![
+        ("branchyard.task", id.clone()),
+        ("branchyard.home", dir.display().to_string()),
+        ("branchyard.largeFileThreshold", threshold.to_string()),
+        ("branchyard.chunks", chunks.display().to_string()),
+        ("core.quotePath", "false".into()),
+    ];
+    match &folder {
+        Some(folder) => {
+            config.push(("branchyard.files", "folder".into()));
+            config.push(("branchyard.folder", folder.display().to_string()));
+        }
+        None => config.push(("branchyard.files", "no_files".into())),
+    }
+    for (key, value) in [
+        ("user.name", "Branchyard"),
+        ("user.email", "branchyard@localhost"),
+    ] {
+        if !Git::new(&work)
+            .args(["config", "--get", key])
+            .test()
+            .map_err(git_err)?
+        {
+            config.push((key, value.into()));
+        }
+    }
+    for (key, value) in &config {
+        Git::new(&work)
+            .args(["config", key, value])
             .run()
             .map_err(git_err)?;
-        let threshold = new.large_threshold.unwrap_or(DEFAULT_THRESHOLD);
-        let chunks = new.chunks.clone().unwrap_or_else(|| home.join("chunks"));
-        let mut config = vec![
-            ("branchyard.task", id.clone()),
-            ("branchyard.home", dir.display().to_string()),
-            ("branchyard.largeFileThreshold", threshold.to_string()),
-            ("branchyard.chunks", chunks.display().to_string()),
-            ("core.quotePath", "false".into()),
-        ];
+    }
+    let large = Large {
+        threshold,
+        store: ChunkStore::new(chunks),
+    };
+    let title = super::title(&new.prompt);
+    let first = if Git::new(&git_dir)
+        .args(["show-ref", "--verify", "--quiet", MAIN])
+        .test()
+        .map_err(git_err)?
+    {
+        run(&git_dir, &["rev-parse", MAIN])?
+    } else {
         match &folder {
-            Some(folder) => {
-                config.push(("branchyard.files", "folder".into()));
-                config.push(("branchyard.folder", folder.display().to_string()));
-            }
-            None => config.push(("branchyard.files", "no_files".into())),
-        }
-        for (key, value) in [
-            ("user.name", "Branchyard"),
-            ("user.email", "branchyard@localhost"),
-        ] {
-            if !Git::new(&work)
-                .args(["config", "--get", key])
-                .test()
-                .map_err(git_err)?
-            {
-                config.push((key, value.into()));
-            }
-        }
-        for (key, value) in &config {
-            Git::new(&work)
-                .args(["config", key, value])
-                .run()
-                .map_err(git_err)?;
-        }
-        let large = Large {
-            threshold,
-            store: ChunkStore::new(chunks),
-        };
-        let title = super::title(&new.prompt);
-        let first = match &folder {
             Some(folder) => snapshot_folder(
                 &git_dir,
                 folder,
@@ -358,39 +403,35 @@ pub fn create(new: &NewTask) -> Result<(Task, Yard), Error> {
                     &format!("{title}\n\nA task with no files.\n"),
                 )?
             }
-        };
-        run(&git_dir, &["update-ref", MAIN, &first])?;
-        if folder.is_some() {
-            run(&git_dir, &["update-ref", FOLDER_REF, &first])?;
         }
-        run(&work, &["update-ref", "--no-deref", "HEAD", &first])?;
-        let yard = Yard::open(&work)?;
-        let files = match &folder {
-            Some(folder) => TaskFiles::Folder {
-                folder: folder.clone(),
-            },
-            None => TaskFiles::NoFiles,
-        };
-        let task = Task {
-            id: id.clone(),
-            title,
-            asked: new.prompt.clone(),
-            by: new
-                .by
-                .clone()
-                .unwrap_or_else(|| super::who(&work, &crate::TaskOptions::default())),
-            policy: new.policy.clone(),
-            created_ms: now_ms(),
-            files,
-            origin: "task".into(),
-        };
-        super::save(&work, &task)?;
-        Ok((task, yard))
-    })();
-    if made.is_err() {
-        branchyard_support::cleanup_dir(&dir);
+    };
+    run(&git_dir, &["update-ref", MAIN, &first])?;
+    if folder.is_some() {
+        run(&git_dir, &["update-ref", FOLDER_REF, &first])?;
     }
-    made
+    run(&work, &["update-ref", "--no-deref", "HEAD", &first])?;
+    let yard = Yard::open(&work)?;
+    let files = match &folder {
+        Some(folder) => TaskFiles::Folder {
+            folder: folder.clone(),
+        },
+        None => TaskFiles::NoFiles,
+    };
+    let task = Task {
+        id: id.clone(),
+        title,
+        asked: new.prompt.clone(),
+        by: new
+            .by
+            .clone()
+            .unwrap_or_else(|| super::who(&work, &crate::TaskOptions::default())),
+        policy: new.policy.clone(),
+        created_ms: reservation.created_ms,
+        files,
+        origin: "task".into(),
+    };
+    super::save(&work, &task)?;
+    Ok((task, yard))
 }
 
 /// The directories of every task with a repository of its own.

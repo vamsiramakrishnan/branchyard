@@ -849,6 +849,7 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::map_routes::router())
         // Tasks and their attempts: `task_routes`.
         .merge(crate::task_routes::router())
+        .merge(crate::console::router())
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
     let log = app.config.log_requests;
@@ -1123,11 +1124,20 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
                 return scope_required("read").into_response();
             }
             let caller = Caller(principal);
-            request.extensions_mut().insert(caller);
+            let path = request.uri().path().to_owned();
+            if let Err(error) =
+                crate::console::auth::authorize_legacy(&app, &caller, request.method(), &path)
+            {
+                return error.into_response();
+            }
+            request.extensions_mut().insert(caller.clone());
             if let Some(verified) = &verified {
                 request.extensions_mut().insert(verified.clone());
             }
             let response = next.run(request).await;
+            let response =
+                crate::console::auth::redact_workspace_error(&app, &path, response).await;
+            let response = crate::console::auth::bound_stream(app.clone(), caller, path, response);
             match verified {
                 Some(verified) => crate::companion::bound(&app, &verified, response),
                 None => response,
@@ -1372,8 +1382,9 @@ async fn operation(
     Path(id): Path<String>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Operation>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let wait = operation_wait(query.as_deref())?;
+    let access_caller = caller.clone();
     let registry = app.registry.clone();
     let policy = app.tenant_policy(&caller);
     let found = {
@@ -1397,7 +1408,9 @@ async fn operation(
         })
         .await??
     };
-    found.map(Json).ok_or_else(|| unknown_operation(id))
+    let operation = found.ok_or_else(|| unknown_operation(id))?;
+    crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
+    Ok(Json(crate::console::operation_value(&app, &operation)?))
 }
 
 /// The `wait` of `GET /v1/operations/{id}?wait=SECONDS`, capped at
@@ -1431,7 +1444,7 @@ async fn operation_by_key(
     State(app): State<Shared>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Operation>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let key = query
         .as_deref()
         .unwrap_or("")
@@ -1440,6 +1453,7 @@ async fn operation_by_key(
         .map(branchyard_client::http::decode_form)
         .filter(|k| !k.is_empty())
         .ok_or_else(|| ApiError::bad_request("give idempotency_key"))?;
+    let access_caller = caller.clone();
     let registry = app.registry.clone();
     let policy = app.tenant_policy(&caller);
     let found = {
@@ -1451,9 +1465,10 @@ async fn operation_by_key(
         })
         .await??
     };
-    found
-        .map(Json)
-        .ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))
+    let operation =
+        found.ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))?;
+    crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
+    Ok(Json(crate::console::operation_value(&app, &operation)?))
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.

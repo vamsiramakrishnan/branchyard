@@ -223,7 +223,7 @@ fn parse_publish_query(query: &str) -> (Option<String>, Option<String>, BTreeMap
 /// surface use. Kept off `branchyard::storage`'s own internals (grants,
 /// hashing, GC) on purpose, so a change there needs no matching change
 /// here.
-struct TempFile(std::path::PathBuf);
+pub(crate) struct TempFile(pub(crate) std::path::PathBuf);
 
 impl TempFile {
     fn new(prefix: &str) -> TempFile {
@@ -235,7 +235,7 @@ impl TempFile {
         TempFile(std::env::temp_dir().join(name))
     }
 
-    fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         &self.0
     }
 }

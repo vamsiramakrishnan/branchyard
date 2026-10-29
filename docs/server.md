@@ -693,3 +693,255 @@ Live on 28 October 2026: a dedicated `by` 0.0.1 server on GCE, using loopback HT
 | [`branchyard-client`](../crates/branchyard-client/src/lib.rs) | Wire types, a blocking HTTP/1.1 client over rustls, an SSE parser, and a reconnecting event stream |
 | [`branchyard-cli`](../crates/branchyard-cli/src/main.rs) | `by serve`, remote mode and `by watch` |
 | [`branchyard-herdr`](../crates/branchyard-herdr/src/main.rs) | The Herdr plugin's binary: the bridge, the branch pane, and the merge, cancel and send actions. Tests: [`bridge.rs`](../crates/branchyard-herdr/tests/bridge.rs) (against `by serve` and a fake `herdr`), [`manifest.rs`](../crates/branchyard-herdr/tests/manifest.rs) |
+
+### Console metadata transactions
+
+Console project, workspace, session, source and collaboration records live in the
+operation store's SQL database. They contain allocation intent and native task or
+attempt bindings. Conversation text and branch state remain in native records.
+SQLite and PostgreSQL use the same revision checks and immutable tenant ownership.
+There is no local metadata fallback when PostgreSQL is configured.
+
+`Registry::submit_console` admits a metadata batch and an operation through one
+transaction, including the existing idempotency binding, quota check, branch
+locks and queue row. A duplicate operation key returns its original operation
+without applying the retry's metadata. A failed metadata revision check rolls
+back the entire admission. `Registry::console_mutate` applies synchronous
+metadata batches with the same compare-and-set rules. Creation requires absence
+and revision one; replacement requires the current tenant and revision and
+increments that revision by one. A conflicting edit returns `revision_conflict`.
+
+Workspace quota reservations can use a tenant-owned counter record in the same
+batch as allocation intent and queue admission. Concurrent reservations must
+compare and increment that counter, so requests for different projects cannot
+both consume the last workspace allowance.
+
+The worker rechecks workspace access with the operation's recorded principal
+immediately before execution. Removing membership after admission therefore
+prevents queued work from running. Operator credentials do not implicitly bypass
+workspace membership. Infrastructure credentials, upstream connector grants and
+workspace roles remain separate permission checks.
+
+### Console membership on legacy resource URLs
+
+Workspace membership is additional to authenticated scope, tenant policy and
+repository grants. An `admin` scope does not bypass membership. Owners and editors
+can run sessions; reviewers and viewers can read them. Reviewers can comment when
+their credential also permits the mutation scope. Repository-restricted callers
+cannot allocate managed knowledge sources outside their explicit grants.
+
+A bound branch and its descendants retain workspace access checks through the
+older branch, artifact, operation and task-record URLs. Incomplete bindings fail
+closed. Managed private yards are accessible through workspace routes only; an
+opaque managed repository name does not grant legacy repository access. Aggregate
+legacy repository routes currently require membership in every workspace bound
+to that repository, including workspaces owned by another tenant. This conservative
+rule avoids exposing mixed lists or event feeds until per-record filtering is
+available. Use the workspace routes for individually authorized access.
+
+Long-lived legacy event streams recheck membership every second and close after
+revocation. Operation reads recheck access after a long poll completes. Queue
+execution must also authorize the admitted principal against current membership.
+These checks never grant upstream connector, IAM or workload identity privileges.
+
+Authenticated paired delegation preserves the issuing subject and verified origin
+separately from the acting device credential name. The server's delegated-link
+helper refuses a different tenant, broader scopes or broader repository grants.
+Operator-issued CLI links without an authenticated issuing identity create explicit
+standalone principals; their generated names do not assert a shared human identity.
+
+Admission also creates a resource binding keyed by the generated operation ID.
+Initial session metadata stores that `operation_id`; workspace allocation intent
+stores its initialization operation internally. Views can therefore distinguish
+queued, failed or interrupted allocation from an existing native conversation,
+without copying execution state into console metadata.
+
+### Durable workspace console
+
+Projects choose `source: {"kind":"knowledge"}` or
+`source: {"kind":"repository","repo":"registered-name"}` and a
+`result_mode` of `code`, `artifacts`, or `mixed`. Knowledge projects do not need
+GitHub, a registered repository, or a Git diff. A repository source must already
+be registered and granted to the caller. Neither source accepts a host path.
+
+The operator enables repository-free work in the server configuration:
+
+```json
+{
+  "managed_knowledge": {
+    "enabled": true,
+    "root": "/var/lib/branchyard/knowledge",
+    "max_workspaces": 100,
+    "max_source_bytes": 67108864,
+    "max_upload_bytes": 8388608
+  }
+}
+```
+
+It is disabled by default. An omitted root uses `data_dir/knowledge`. The root
+must be absolute and owned by the operator. A knowledge-only server needs no
+`repos` entry and needs an explicit data directory. Workers that claim managed
+work must enable this storage and mount the same root. Their queue routing name
+is `__console_managed__`; a repository-restricted principal or tenant needs an
+explicit grant for that name. Membership does not grant storage, execution scopes,
+connector permissions, or upstream credentials. Configured repositories remain
+immutable grants. Configured PostgreSQL stays authoritative for console and
+native execution state; an unavailable backend is an error.
+
+Every mutation takes `Idempotency-Key`. Workspace edits take the workspace's
+current `revision` and return `revision_conflict` on concurrent changes. Reload
+workspace detail before another revision-dependent edit. Stable workspace and
+session IDs are independent of titles, device names, branch execution state, and
+native conversation identifiers. A workspace points at one native task; a named
+session points at one isolated attempt of that task. Session starts return the
+existing Operation envelope with additional `workspace_id` and `session_id`
+fields. Poll the existing operation route to determine its outcome.
+
+| Route | Behavior |
+|---|---|
+| `GET /v1/projects` | List projects permitted by tenant and source policy |
+| `POST /v1/projects` | Create `{name,source,result_mode}` |
+| `GET /v1/projects/{project}` | Read one project |
+| `GET /v1/workspaces?project=ID` | List accessible workspaces |
+| `POST /v1/workspaces` | Reserve `{project_id,title}` and enqueue native task initialization |
+| `GET /v1/workspaces/{workspace}` | Read revision, task binding, sessions, source provenance, members, accepted outputs, and capabilities |
+| `GET /v1/workspaces/{workspace}/sessions` | Derive named session views from native attempts and operations |
+| `POST /v1/workspaces/{workspace}/sessions` | Start `{name,prompt,harness,model?,effort?,result_contract?,access,sources?,artifacts?}` |
+| `GET /v1/workspaces/{workspace}/sessions/{session}/messages?after=CURSOR` | Read native prompt, output, and steering text with a cursor |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/messages` | Continue `{prompt,action:"send"|"resume"|"steer"}` in the same native attempt |
+| `POST /v1/workspaces/{workspace}/sessions/{session}/cancel` | Admit attributed native cancellation |
+| `POST /v1/workspaces/{workspace}/actions/{action}` | Archive or restore at `{revision}`; unsupported provider actions return structured capability reasons |
+| `GET /v1/workspaces/{workspace}/sources` | List immutable original source metadata |
+| `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
+| `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment |
+| `GET /v1/workspaces/{workspace}/artifacts` | List native immutable artifacts owned by this workspace |
+| `GET /v1/workspaces/{workspace}/artifacts/{artifact}/content` | Download a permitted digest-verified native artifact |
+| `POST /v1/workspaces/{workspace}/finalize` | Accept `{revision,artifacts:[IDs]}` independently of code integration |
+| `GET /v1/workspaces/{workspace}/members` | List roles |
+| `GET /v1/workspaces/{workspace}/members/{subject}` | Read one verified subject's membership |
+| `POST /v1/workspaces/{workspace}/members/{subject}` | Owner with `admin` scope grants `{revision,role}` within the recipient's existing policy |
+| `DELETE /v1/workspaces/{workspace}/members/{subject}` | Owner removes membership at `{revision}`; the final owner cannot be removed |
+| `GET /v1/workspaces/{workspace}/comments` | List attributed review comments |
+| `POST /v1/workspaces/{workspace}/comments` | Add `{revision,text}` attributed to verified subject and acting credential |
+| `GET /v1/workspaces/{workspace}/presence` | Read unexpired advisory presence |
+| `POST /v1/workspaces/{workspace}/presence` | Refresh only the caller's presence with `{ttl_seconds}` between 1 and 300 |
+
+Uploads are bounded originals stored durably in the same SQL backend with digest,
+media type, title, uploader, and workspace provenance. A session's `sources` list
+selects explicit source IDs. Before its first turn, the engine copies those
+originals into its isolated worktree through the existing workspace-copy feature;
+source copies are excluded from candidate snapshots. Originals remain unchanged.
+A reviewer additionally selects frozen artifact IDs and runs under the
+intersection of the original policy and the engine's read-only policy. Separate
+sessions retain separate native conversations; continuation never substitutes a
+fresh native session.
+
+Finalization requires immutable artifacts from completed workspace producers with
+a valid deliverable contract and valid current-turn output. An earlier turn's
+artifacts cannot satisfy a later turn. Acceptance records the checked workspace
+revision, producer, turn, result event, digest, verified accepting subject, and
+acting credential. It changes no Git integration target. Mixed work can accept
+artifacts and integrate code independently.
+
+Task identity and initialization intent are reserved in the same SQL transaction
+as the durable queue entry. Initialization resumes the exact reserved location
+under the core task reservation API. A crashed model turn remains interrupted;
+no recovery resubmits it automatically. `restore` can explicitly reconcile an
+interrupted allocation. Archive refuses active or queued work and retains
+sources, native records, and accepted artifacts. Provider sleep/wake, terminal,
+proxy, preview rendering, and pull-request services attach to the task/provider
+binding; absent capabilities produce errors with reasons. No separate retention
+or cleanup controller is introduced.
+
+**Status, 29 October 2026.** Hermetic checks passed for native reservation and
+pre-submit cancellation, server and client unit tests that need no sockets, and
+the knowledge workflow through source copies, native fake-agent turns, immutable
+artifact acceptance, collaboration, and revoked access. Socket-free workflow tests
+seed inert native port reservations; the fake agent never listens on them.
+PostgreSQL and HTTP integration tests compile, and targeted clippy, rustdoc, and
+static checks pass. Actual commands and run logs are in `.console-checks/` in the
+foundation worktree. Not done: socket-bound test execution, PostgreSQL execution,
+live harness/model runs, cloud services, provider lifecycle/terminal/preview/PR
+qualification, generated facts/schema integration, or full workspace gates.
+
+Console operations retain the ordinary operation envelope and add `workspace_id`
+and, for session commands, `session_id`. These bindings are available on the
+initial response, `GET /v1/operations/{id}` and idempotency-key recovery. The
+explicit operation ownership record is committed with queue admission, so lookup
+does not depend on a branch having been created or retained.
+
+Control commands use the same durable SQL queue and claim fences. Each worker
+can dispatch one short cancel/steer operation beyond its normal model-turn slots,
+so a full turn pool cannot prevent cancellation. A configured tenant allows one
+extra control admission above its normal turn ceiling; controls reserve no
+branch. Ordinary admission conservatively counts a short control until it
+finishes. There is no second queue.
+
+Resource reads never initialize a task. An allocation that failed or was
+interrupted is inspectable through its original operation; a revision-checked
+`restore` queues initialization at the same reserved identity and location.
+Lifecycle completion verifies the operation that owns the current allocation
+intent before committing metadata. Registered repository sessions retain the
+existing sync leases and lease-loss cancellation behavior. A server configured
+with sync currently refuses a managed-source turn with `sync_source_unsupported`
+until its managed source has a supported replication mapping.
+
+Legacy artifact reads check both the reader branch and the immutable artifact's
+publisher. A native artifact sharing grant does not grant membership in the
+publisher's workspace. A legacy artifact collection is denied if any listed
+publisher is inaccessible; workspace artifact collections filter publishers to
+their owning workspace. Console session metadata or native task ownership cannot
+fall back to an unbound legacy grant when its atomic resource binding is missing.
+
+A native session retains the upstream identity with which it was created.
+Continuation and steering require that same verified subject, including a paired
+device delegated from that subject. Other workspace editors can read, comment,
+cancel permitted work, or start their own isolated session. Membership therefore
+does not silently delegate another person's connector account. Worker identity
+and upstream connector consent remain independent of workspace membership.
+
+Cancellation admitted before the first turn records durable cancellation intent
+on the named session. Its queued start checks that intent before submission; the
+native submit boundary also honors cancellation arriving during preparation.
+No uncertain model turn is retried. Conversation mutations advance the workspace
+revision, and acceptance refuses a producer with pending work, verifies original
+artifact bytes, and commits only at the checked revision.
+
+Original byte records are separate from source metadata within the same SQL
+store. Upload commits both records, the byte quota reservation, and idempotency
+receipt together. Listing a workspace therefore reads source metadata without
+loading every original file; downloads check the original's tenant, workspace,
+and digest binding before returning bytes.
+
+Session starts also accept the existing `policy` and `provision` structures.
+The default permission policy remains deny. Callers explicitly select permitted
+tool rules or a preset; the console never substitutes an allow-all policy.
+Provisioning uses operator-defined secret names, login choices, and connector
+grants through the same validation as task creation. Client-supplied commands or
+MCP executables do not gain additional permission through the console. Top-level
+model/effort choices cannot conflict with provisioning choices, and source-copy
+instructions are added without replacing the selected native authentication.
+
+Console session creation accepts optional `policy` and `provision` objects using
+the existing task request contracts. Omitted policy remains deny by default.
+An explicit policy can permit the selected source reads and tools needed for a
+session; reviewer constraints still intersect it with read-only access.
+Provisioning selects operator-defined secret names, login references and supported
+model settings. A request cannot select a secret's environment variable or host
+file source, and the existing operator controls still reject unapproved MCP
+executables and connector grants. No broader tools or secrets are granted merely
+because a request comes through the console.
+
+Workspace lifecycle locks use a reserved `workspace:<id>` resource key in the
+existing SQL lock table. The colon cannot occur in a native Git branch name.
+Allocation operations have no invented branch; their explicit operation binding
+provides `workspace_id`. Lifecycle readiness consults those bindings as well as
+real session branches when checking for queued work.
+
+Reviewer session input can be immutable workspace artifact IDs or an explicit
+`candidate` commit from the workspace's native task. The server validates the
+exact candidate against native attempt records and fixes the review checkout to
+that commit. A later writer turn cannot change the review input. Mutable branch
+names, arbitrary Git references and candidates from another task are rejected.
+The reviewer still runs with the intersection of its requested policy and
+read-only constraints; selecting a candidate grants no integration permission.

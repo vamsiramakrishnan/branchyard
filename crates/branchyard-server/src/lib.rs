@@ -69,8 +69,12 @@ mod checkpoint_routes;
 pub mod cli;
 pub mod companion;
 pub mod config;
+mod console;
+/// Durable console commands admitted to the existing operation queue.
+pub use console::ConsoleWork;
 pub mod connectors;
 pub mod console_pr;
+pub mod console_store;
 pub mod effects_routes;
 pub mod error;
 pub mod feed;

@@ -49,6 +49,7 @@ use branchyard::store_codec::{
 };
 
 use crate::config::{Principal, DEFAULT_TENANT};
+use crate::console_store::{self, Collection, Mutation, Record};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
 /// per request route, with a fingerprint of the request body.
@@ -545,6 +546,22 @@ pub trait OperationStore: Send + Sync {
         work: &Value,
         quota: &AdmissionQuota,
     ) -> io::Result<Admission>;
+    /// Metadata and durable queue admission committed in the same transaction.
+    fn admit_console(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+        mutations: &[Mutation],
+    ) -> io::Result<Admission>;
+    /// Read a console record. Callers must check its tenant and membership.
+    fn console_get(&self, collection: Collection, id: &str) -> io::Result<Option<Record>>;
+    /// List one tenant's records of a collection.
+    fn console_list(&self, collection: Collection, tenant: &str) -> io::Result<Vec<Record>>;
+    /// Internal ownership lookup across tenants. Never return these rows to a caller without authorization.
+    fn console_list_all(&self, collection: Collection) -> io::Result<Vec<Record>>;
+    /// Apply a metadata batch with compare-and-set revisions atomically.
+    fn console_mutate(&self, mutations: &[Mutation]) -> io::Result<()>;
     /// The tenant's queued and running operations.
     fn unfinished(&self, tenant: &str) -> io::Result<Vec<StoredOperation>>;
     /// [`OperationStore::claim_next`] with the default [`Scheduling`].
@@ -565,6 +582,15 @@ pub trait OperationStore: Send + Sync {
     /// this host, is claimed again under a new fence. Records the claim
     /// toward its tenant's usage in the same transaction.
     fn claim_next(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+    ) -> io::Result<Option<Claim>>;
+    /// Claim only a short console cancel/steer command from the same fenced queue.
+    fn claim_control(
         &self,
         worker: &Worker,
         repos: &[String],
@@ -833,6 +859,8 @@ fn sql(error: rusqlite::Error) -> io::Error {
 }
 
 const SQLITE_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS console_records (collection TEXT NOT NULL, id TEXT NOT NULL, tenant TEXT NOT NULL, revision INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(collection,id));
+    CREATE INDEX IF NOT EXISTS console_records_tenant ON console_records(collection,tenant,id);
     CREATE TABLE IF NOT EXISTS operations (
         id TEXT PRIMARY KEY,
         seq INTEGER NOT NULL,
@@ -1233,6 +1261,22 @@ impl branchyard::services::ServiceStore for SqliteStore {
 }
 
 impl OperationStore for SqliteStore {
+    fn console_get(&self, collection: Collection, id: &str) -> io::Result<Option<Record>> {
+        console_store::sqlite_get(&self.conn(), collection, id)
+    }
+    fn console_list(&self, collection: Collection, tenant: &str) -> io::Result<Vec<Record>> {
+        console_store::sqlite_list(&self.conn(), collection, tenant)
+    }
+    fn console_list_all(&self, collection: Collection) -> io::Result<Vec<Record>> {
+        console_store::sqlite_list_all(&self.conn(), collection)
+    }
+    fn console_mutate(&self, mutations: &[Mutation]) -> io::Result<()> {
+        self.immediate(|tx| {
+            console_store::sqlite_mutate(tx, mutations)?;
+            Ok(((), true))
+        })
+    }
+
     fn services(&self) -> &dyn branchyard::services::ServiceStore {
         self
     }
@@ -1295,6 +1339,16 @@ impl OperationStore for SqliteStore {
         work: &Value,
         quota: &AdmissionQuota,
     ) -> io::Result<Admission> {
+        self.admit_console(operation, work, quota, &[])
+    }
+
+    fn admit_console(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+        mutations: &[Mutation],
+    ) -> io::Result<Admission> {
         let work = serde_json::to_string(work)?;
         let op = &operation.operation;
         // `BEGIN IMMEDIATE` makes every admission take its turn, so the
@@ -1336,6 +1390,7 @@ impl OperationStore for SqliteStore {
                 )
                 .map_err(sql)?;
             }
+            console_store::sqlite_mutate(tx, mutations)?;
             sqlite_insert(tx, operation, false)?;
             tx.execute(
                 "INSERT INTO operation_queue \
@@ -1368,73 +1423,17 @@ impl OperationStore for SqliteStore {
         lease: Duration,
         scheduling: &Scheduling,
     ) -> io::Result<Option<Claim>> {
-        let repos = serde_json::to_string(repos)?;
-        let labels = serde_json::to_string(labels)?;
-        self.immediate(|tx| {
-            let clock = sqlite_now();
-            let now = scheduling.at_ms();
-            sqlite_reap(tx, worker, clock)?;
-            // Each tenant's usage per unit of weight, from its live claims
-            // and its decayed recent ones: computed here, inside the
-            // immediate transaction, and looked up by the order below.
-            let shares = sqlite_shares(tx, scheduling, clock, now)?;
-            let next: Option<(String, i64, String, Option<String>, String)> = tx
-                .query_row(
-                    "SELECT id, attempt, work, worker, tenant FROM operation_queue \
-                     WHERE repo IN (SELECT value FROM json_each(?1)) \
-                       AND (lease_until IS NULL OR lease_until <= ?2) \
-                       AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
-                           WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
-                     ORDER BY priority \
-                         + COALESCE(MAX(?4 - enqueued_ms, 0) / NULLIF(?5, 0), 0) DESC, \
-                       COALESCE((SELECT s.value FROM json_each(?6) s WHERE s.key = tenant), \
-                           json_extract(?6, '$.\"\"')), \
-                       seq \
-                     LIMIT 1",
-                    rusqlite::params![
-                        repos,
-                        clock,
-                        labels,
-                        now,
-                        scheduling.aging_ms(),
-                        serde_json::to_string(&shares)?
-                    ],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-                .optional()
-                .map_err(sql)?;
-            let Some((id, attempt, work, prior, tenant)) = next else {
-                return Ok((None, false));
-            };
-            let fence = attempt + 1;
-            tx.execute(
-                "UPDATE operation_queue SET attempt = ?2, worker = ?3, host = ?4, pid = ?5, \
-                 start = ?6, lease_until = ?7 WHERE id = ?1",
-                rusqlite::params![
-                    id,
-                    fence,
-                    worker.id,
-                    worker.host,
-                    worker.pid,
-                    worker.start,
-                    clock.saturating_add(ms(lease))
-                ],
-            )
-            .map_err(sql)?;
-            sqlite_count_claim(tx, scheduling, &tenant, now)?;
-            let operation = sqlite_op(tx, "SELECT id, body FROM operations WHERE id = ?1", &id)?
-                .ok_or_else(|| io::Error::other(format!("queued operation {id} has no record")))?;
-            let work = serde_json::from_str(&work)?;
-            Ok((
-                Some(Claim {
-                    operation,
-                    work,
-                    fence,
-                    took_over: prior.is_some(),
-                }),
-                true,
-            ))
-        })
+        self.claim_filtered(worker, repos, labels, lease, scheduling, false)
+    }
+    fn claim_control(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+    ) -> io::Result<Option<Claim>> {
+        self.claim_filtered(worker, repos, labels, lease, scheduling, true)
     }
 
     fn queue(&self) -> io::Result<Vec<Queued>> {
@@ -1788,6 +1787,7 @@ pub struct PostgresStore {
 /// the two would wait for each other.
 #[cfg(feature = "postgres")]
 const PG_SCHEMA: &[(&str, &str)] = &[
+    ("by_console_records", "CREATE TABLE IF NOT EXISTS by_console_records (collection TEXT NOT NULL, id TEXT NOT NULL, tenant TEXT NOT NULL, revision BIGINT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(collection,id)); CREATE INDEX IF NOT EXISTS by_console_records_tenant ON by_console_records(collection,tenant,id)"),
     (
         "by_operations",
         "CREATE TABLE IF NOT EXISTS by_operations (
@@ -1930,6 +1930,8 @@ const PG_CLAIM: &str = "
         WHERE q.repo = ANY($1)
           AND (q.lease_until IS NULL OR q.lease_until <= clock_timestamp())
           AND q.requires <@ $7::text[]
+          AND COALESCE((q.work::jsonb ->> 'kind') = 'console'
+              AND (q.work::jsonb #>> '{command,action}') = 'control', false) = $13::boolean
         ORDER BY q.priority
                  + COALESCE(GREATEST($9::bigint - q.enqueued_ms, 0) / NULLIF($8::bigint, 0), 0) DESC,
             s.share, q.seq
@@ -2110,6 +2112,47 @@ impl branchyard::services::ServiceStore for PostgresStore {
 
 #[cfg(feature = "postgres")]
 impl OperationStore for PostgresStore {
+    fn console_get(&self, collection: Collection, id: &str) -> io::Result<Option<Record>> {
+        self.with(|client| console_store::pg_get(client, collection, id))?
+    }
+    fn console_list(&self, collection: Collection, tenant: &str) -> io::Result<Vec<Record>> {
+        let rows = self.with(|client| {
+            client.query(
+                "SELECT body FROM by_console_records WHERE collection=$1 AND tenant=$2 ORDER BY id",
+                &[&collection.as_str(), &tenant],
+            )
+        })?;
+        rows.iter()
+            .map(|row| serde_json::from_str(&row.get::<_, String>(0)).map_err(io::Error::other))
+            .collect()
+    }
+    fn console_list_all(&self, collection: Collection) -> io::Result<Vec<Record>> {
+        let rows = self.with(|client| {
+            client.query(
+                "SELECT body FROM by_console_records WHERE collection=$1 ORDER BY id",
+                &[&collection.as_str()],
+            )
+        })?;
+        rows.iter()
+            .map(|row| serde_json::from_str(&row.get::<_, String>(0)).map_err(io::Error::other))
+            .collect()
+    }
+    fn console_mutate(&self, mutations: &[Mutation]) -> io::Result<()> {
+        self.with(|client| {
+            let mut tx = client.transaction()?;
+            match console_store::pg_mutate(&mut tx, mutations)? {
+                Ok(()) => {
+                    tx.commit()?;
+                    Ok(Ok(()))
+                }
+                Err(e) => {
+                    tx.rollback()?;
+                    Ok(Err(e))
+                }
+            }
+        })?
+    }
+
     fn services(&self) -> &dyn branchyard::services::ServiceStore {
         self
     }
@@ -2174,6 +2217,16 @@ impl OperationStore for PostgresStore {
         operation: &StoredOperation,
         work: &Value,
         quota: &AdmissionQuota,
+    ) -> io::Result<Admission> {
+        self.admit_console(operation, work, quota, &[])
+    }
+
+    fn admit_console(
+        &self,
+        operation: &StoredOperation,
+        work: &Value,
+        quota: &AdmissionQuota,
+        mutations: &[Mutation],
     ) -> io::Result<Admission> {
         let body = serde_json::to_string(operation)?;
         let work = serde_json::to_string(work)?;
@@ -2243,6 +2296,10 @@ impl OperationStore for PostgresStore {
                     return Ok(Err(Refused::Busy(branch.clone())));
                 }
             }
+            if let Err(e) = console_store::pg_mutate(&mut tx, mutations)? {
+                tx.rollback()?;
+                return Ok(Err(Refused::Io(e)));
+            }
             tx.execute(
                 "INSERT INTO by_operation_queue \
                      (id, repo, work, requires, priority, tenant, enqueued_ms) \
@@ -2306,75 +2363,17 @@ impl OperationStore for PostgresStore {
         lease: Duration,
         scheduling: &Scheduling,
     ) -> io::Result<Option<Claim>> {
-        let worker = worker.clone();
-        let repos = repos.to_vec();
-        let labels = labels.to_vec();
-        let lease = pg_lease(lease);
-        let now = scheduling.at_ms();
-        let aging = scheduling.aging_ms();
-        let window = ms(scheduling.window);
-        let (tenants, weights) = scheduling.weight_arrays();
-        // Claims whose process is gone from this host need not wait for
-        // their lease. The PID is checked here, outside the connection's
-        // closure, so a stored one that is no PID is an error naming it.
-        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
-            Ok(c.query(
-                "SELECT id, attempt, pid, start FROM by_operation_queue \
-                 WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
-                   AND lease_until > clock_timestamp()",
-                &[&worker.host, &worker.id],
-            )?
-            .iter()
-            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
-            .collect())
-        })?;
-        let mut gone = Vec::new();
-        for (id, attempt, pid, start) in local {
-            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
-                gone.push((id, attempt));
-            }
-        }
-        let claimed = self.with(move |c| {
-            for (id, attempt) in &gone {
-                c.execute(
-                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
-                     WHERE id = $1 AND attempt = $2",
-                    &[id, attempt],
-                )?;
-            }
-            let pid = i64::from(worker.pid);
-            let rows = c.query(
-                PG_CLAIM,
-                &[
-                    &repos,
-                    &worker.id,
-                    &worker.host,
-                    &pid,
-                    &worker.start,
-                    &(lease as f64),
-                    &labels,
-                    &aging,
-                    &now,
-                    &window,
-                    &tenants,
-                    &weights,
-                ],
-            )?;
-            Ok(rows.first().map(|row| {
-                let (id, fence, work, body, took_over): (String, i64, String, String, bool) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
-                (id, fence, work, body, took_over)
-            }))
-        })?;
-        let Some((id, fence, work, body, took_over)) = claimed else {
-            return Ok(None);
-        };
-        Ok(Some(Claim {
-            operation: parse_op(&id, &body, "")?,
-            work: serde_json::from_str(&work)?,
-            fence,
-            took_over,
-        }))
+        self.claim_filtered(worker, repos, labels, lease, scheduling, false)
+    }
+    fn claim_control(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+    ) -> io::Result<Option<Claim>> {
+        self.claim_filtered(worker, repos, labels, lease, scheduling, true)
     }
 
     fn queue(&self) -> io::Result<Vec<Queued>> {
@@ -3298,6 +3297,11 @@ impl OperationStore for MemoryStore {
         &self.0
     }
     forward! {
+        console_list_all(collection: Collection) -> io::Result<Vec<Record>>;
+        console_get(collection: Collection, id: &str) -> io::Result<Option<Record>>;
+        console_list(collection: Collection, tenant: &str) -> io::Result<Vec<Record>>;
+        console_mutate(mutations: &[Mutation]) -> io::Result<()>;
+        admit_console(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota, mutations: &[Mutation]) -> io::Result<Admission>;
         load() -> io::Result<Vec<StoredOperation>>;
         get(id: &str) -> io::Result<Option<StoredOperation>>;
         by_key(caller: &str, key: &str) -> io::Result<Option<StoredOperation>>;
@@ -3306,6 +3310,8 @@ impl OperationStore for MemoryStore {
         admit(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota)
             -> io::Result<Admission>;
         unfinished(tenant: &str) -> io::Result<Vec<StoredOperation>>;
+        claim_control(worker: &Worker, repos: &[String], labels: &[String], lease: Duration,
+            scheduling: &Scheduling) -> io::Result<Option<Claim>>;
         claim_next(worker: &Worker, repos: &[String], labels: &[String], lease: Duration,
             scheduling: &Scheduling) -> io::Result<Option<Claim>>;
         queue() -> io::Result<Vec<Queued>>;
@@ -3936,4 +3942,181 @@ mod tests {
             Admission::Admitted
         );
     }
+}
+
+impl SqliteStore {
+    fn claim_filtered(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+        control: bool,
+    ) -> io::Result<Option<Claim>> {
+        let repos = serde_json::to_string(repos)?;
+        let labels = serde_json::to_string(labels)?;
+        self.immediate(|tx| {
+            let clock = sqlite_now();
+            let now = scheduling.at_ms();
+            sqlite_reap(tx, worker, clock)?;
+            // Each tenant's usage per unit of weight, from its live claims
+            // and its decayed recent ones: computed here, inside the
+            // immediate transaction, and looked up by the order below.
+            let shares = sqlite_shares(tx, scheduling, clock, now)?;
+            let next: Option<(String, i64, String, Option<String>, String)> = tx
+                .query_row(
+                    "SELECT id, attempt, work, worker, tenant FROM operation_queue \
+                     WHERE repo IN (SELECT value FROM json_each(?1)) \
+                       AND (lease_until IS NULL OR lease_until <= ?2) \
+                       AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
+                           WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
+                       AND COALESCE(json_extract(work, '$.kind') = 'console' AND \
+                           json_extract(work, '$.command.action') = 'control', 0) = ?7 \
+                     ORDER BY priority \
+                         + COALESCE(MAX(?4 - enqueued_ms, 0) / NULLIF(?5, 0), 0) DESC, \
+                       COALESCE((SELECT s.value FROM json_each(?6) s WHERE s.key = tenant), \
+                           json_extract(?6, '$.\"\"')), \
+                       seq \
+                     LIMIT 1",
+                    rusqlite::params![
+                        repos,
+                        clock,
+                        labels,
+                        now,
+                        scheduling.aging_ms(),
+                        serde_json::to_string(&shares)?,
+                        control
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()
+                .map_err(sql)?;
+            let Some((id, attempt, work, prior, tenant)) = next else {
+                return Ok((None, false));
+            };
+            let fence = attempt + 1;
+            tx.execute(
+                "UPDATE operation_queue SET attempt = ?2, worker = ?3, host = ?4, pid = ?5, \
+                 start = ?6, lease_until = ?7 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    fence,
+                    worker.id,
+                    worker.host,
+                    worker.pid,
+                    worker.start,
+                    clock.saturating_add(ms(lease))
+                ],
+            )
+            .map_err(sql)?;
+            sqlite_count_claim(tx, scheduling, &tenant, now)?;
+            let operation = sqlite_op(tx, "SELECT id, body FROM operations WHERE id = ?1", &id)?
+                .ok_or_else(|| io::Error::other(format!("queued operation {id} has no record")))?;
+            let work = serde_json::from_str(&work)?;
+            Ok((
+                Some(Claim {
+                    operation,
+                    work,
+                    fence,
+                    took_over: prior.is_some(),
+                }),
+                true,
+            ))
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresStore {
+    fn claim_filtered(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+        control: bool,
+    ) -> io::Result<Option<Claim>> {
+        let worker = worker.clone();
+        let repos = repos.to_vec();
+        let labels = labels.to_vec();
+        let lease = pg_lease(lease);
+        let now = scheduling.at_ms();
+        let aging = scheduling.aging_ms();
+        let window = ms(scheduling.window);
+        let (tenants, weights) = scheduling.weight_arrays();
+        // Claims whose process is gone from this host need not wait for
+        // their lease. The PID is checked here, outside the connection's
+        // closure, so a stored one that is no PID is an error naming it.
+        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
+            Ok(c.query(
+                "SELECT id, attempt, pid, start FROM by_operation_queue \
+                 WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
+                   AND lease_until > clock_timestamp()",
+                &[&worker.host, &worker.id],
+            )?
+            .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
+        })?;
+        let mut gone = Vec::new();
+        for (id, attempt, pid, start) in local {
+            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
+                gone.push((id, attempt));
+            }
+        }
+        let claimed = self.with(move |c| {
+            for (id, attempt) in &gone {
+                c.execute(
+                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
+                     WHERE id = $1 AND attempt = $2",
+                    &[id, attempt],
+                )?;
+            }
+            let pid = i64::from(worker.pid);
+            let rows = c.query(
+                PG_CLAIM,
+                &[
+                    &repos,
+                    &worker.id,
+                    &worker.host,
+                    &pid,
+                    &worker.start,
+                    &(lease as f64),
+                    &labels,
+                    &aging,
+                    &now,
+                    &window,
+                    &tenants,
+                    &weights,
+                    &control,
+                ],
+            )?;
+            Ok(rows.first().map(|row| {
+                let (id, fence, work, body, took_over): (String, i64, String, String, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+                (id, fence, work, body, took_over)
+            }))
+        })?;
+        let Some((id, fence, work, body, took_over)) = claimed else {
+            return Ok(None);
+        };
+        Ok(Some(Claim {
+            operation: parse_op(&id, &body, "")?,
+            work: serde_json::from_str(&work)?,
+            fence,
+            took_over,
+        }))
+    }
+}
+
+/// Whether queued work only delivers a short cancellation or steering request.
+pub(crate) fn control_work(work: &Value) -> bool {
+    work.get("kind").and_then(Value::as_str) == Some("console")
+        && work
+            .get("command")
+            .and_then(|command| command.get("action"))
+            .and_then(Value::as_str)
+            == Some("control")
 }

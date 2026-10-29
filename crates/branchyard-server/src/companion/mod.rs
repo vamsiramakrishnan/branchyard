@@ -355,6 +355,7 @@ fn device_label(text: Option<String>) -> Option<String> {
 pub(crate) fn me_of(principal: &Principal, verified: Option<&Verified>) -> Me {
     let expires_at_ms = verified.and_then(|v| v.expires_at_ms);
     Me {
+        subject: principal.connector_subject(),
         name: principal.name.clone(),
         tenant: principal.tenant.clone(),
         scopes: principal.scopes.iter().cloned().collect(),

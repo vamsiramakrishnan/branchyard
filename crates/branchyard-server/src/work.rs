@@ -34,6 +34,10 @@ use crate::store::StoredOperation;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Work {
+    /// Durable workspace command using native task/attempt execution.
+    Console {
+        command: crate::console::ConsoleWork,
+    },
     /// `POST /v1/repos/{repo}/tasks`.
     Task { request: TaskRequest },
     /// `POST .../branches/{branch}/send`.
@@ -107,6 +111,7 @@ pub enum Work {
 impl Work {
     pub fn kind(&self) -> OperationKind {
         match self {
+            Work::Console { .. } => OperationKind::Task,
             Work::Task { .. } => OperationKind::Task,
             Work::Send { .. } => OperationKind::Send,
             Work::Fork { .. } => OperationKind::Fork,
@@ -146,6 +151,10 @@ impl Work {
             tenant: p.tenant.clone(),
         });
         match self {
+            Work::Console { .. } => Err(*ApiError::internal(
+                "console work must resolve its workspace before execution",
+            )
+            .body),
             Work::Task { request } => {
                 let options = TaskOptions {
                     actor: actor.clone(),
@@ -375,6 +384,26 @@ impl Executor for AppExecutor {
                 end_cursor: None,
             };
         }
+        if let Ok(Work::Console { command }) = serde_json::from_value::<Work>(work.clone()) {
+            return crate::console::execute(app, stored, command);
+        }
+        // Membership may have changed while this operation waited in the queue.
+        // The durable admitting principal, never the worker identity, must still
+        // be allowed to act on every workspace-bound resource before any effect.
+        let principal = stored.principal.clone().unwrap_or_else(|| {
+            crate::config::Principal::default_for("unattributed-legacy-operation")
+        });
+        if let Err(refused) = crate::console::auth::authorize_operation(
+            app,
+            &crate::api::Caller(principal),
+            operation,
+            scope_for(operation.kind),
+        ) {
+            return Finished {
+                result: Err(*refused.body),
+                end_cursor: None,
+            };
+        }
         let Some(repo) = app.repos.get(&operation.repo) else {
             // The repositories its principal may use, and no one else's.
             let served: Vec<&str> = app
@@ -491,7 +520,7 @@ const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is cancelled, naming the loss, and cancelled again each poll while the
 /// run lasts, so a turn starting after the loss stops too. Returns the
 /// run's result and, when a lease was lost, why.
-fn run_under_leases<T>(
+pub(crate) fn run_under_leases<T>(
     app: &App,
     repo: &RepoState,
     branches: &[String],

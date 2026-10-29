@@ -706,27 +706,7 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     for (name, path) in &config.repos {
         let yard = open_yard(config, name, path)
             .map_err(|e| format!("repository {name} at {}: {e}", path.display()))?;
-        // Only an operator's configuration lets a repository's scripts run;
-        // see docs/workspace.md.
-        if !config.allow_workspace_scripts.allows(name) {
-            yard.deny_workspace_scripts();
-        }
-        if let Some(gateway) = crate::connectors::gateway_for(config, name) {
-            yard.use_connectors(gateway);
-        }
-        // The model gateway its branches' turns may use, and each
-        // principal's ceiling (docs/model-gateway.md).
-        if let Some(gateway) = crate::models::gateway_for(config, name)
-            .map_err(|e| format!("repository {name}: {e}"))?
-        {
-            yard.use_models(gateway);
-        }
-        yard.use_ceilings(config.actor_policy(&config.ceilings));
-        // The administrator's locked approvals and the people's
-        // (docs/effects.md#approvals).
-        let mut approvals = config.approvals.clone();
-        approvals.people = config.actor_policy(&approvals.people);
-        yard.use_approvals(approvals);
+        configure_yard(config, name, &yard)?;
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(
@@ -744,7 +724,17 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         max_running: config.max_running,
         lease: config.operation_lease,
         poll: config.poll_interval,
-        repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
+        repos: config
+            .repos
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(
+                config
+                    .managed_knowledge
+                    .enabled
+                    .then(|| crate::console::MANAGED_REPO.to_owned()),
+            )
+            .collect(),
         exclusive: config.database.is_none(),
         labels: config.labels.clone(),
         inventory: config.inventory.then(|| {
@@ -765,9 +755,39 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     Ok((repos, registry))
 }
 
+/// Apply operator policy identically to registered and managed task yards.
+pub(crate) fn configure_yard(config: &Config, name: &str, yard: &Yard) -> Result<(), String> {
+    // Only an operator's configuration lets a repository's scripts run;
+    // see docs/workspace.md.
+    if !config.allow_workspace_scripts.allows(name) {
+        yard.deny_workspace_scripts();
+    }
+    if let Some(gateway) = crate::connectors::gateway_for(config, name) {
+        yard.use_connectors(gateway);
+    }
+    // The model gateway its branches' turns may use, and each
+    // principal's ceiling (docs/model-gateway.md).
+    if let Some(gateway) =
+        crate::models::gateway_for(config, name).map_err(|e| format!("repository {name}: {e}"))?
+    {
+        yard.use_models(gateway);
+    }
+    yard.use_ceilings(config.actor_policy(&config.ceilings));
+    // The administrator's locked approvals and the people's
+    // (docs/effects.md#approvals).
+    let mut approvals = config.approvals.clone();
+    approvals.people = config.actor_policy(&approvals.people);
+    yard.use_approvals(approvals);
+    Ok(())
+}
+
 /// A served repository, with its state in the configured database or in
 /// its own `.branchyard/state.db`.
-fn open_yard(config: &Config, name: &str, path: &std::path::Path) -> Result<Yard, String> {
+pub(crate) fn open_yard(
+    config: &Config,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<Yard, String> {
     match &config.database {
         None => Yard::open(path).map_err(|e| e.to_string()),
         #[cfg(feature = "postgres")]

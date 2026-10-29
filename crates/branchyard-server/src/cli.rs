@@ -653,7 +653,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     let mut warnings = std::mem::take(&mut partial.warnings);
     let mut repos = partial.repos;
     repos.extend(flags.repos);
-    if repos.is_empty() {
+    if repos.is_empty() && !partial.managed_knowledge.enabled {
         if flags.config.is_some() {
             return Err("the configuration serves no repositories".into());
         }
@@ -666,7 +666,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         None if flags.config.is_some() => {
             return Err("the configuration needs data_dir".into());
         }
-        None => repos[0].1.join(".branchyard").join("server"),
+        None => repos
+            .first()
+            .map(|(_, root)| root.join(".branchyard").join("server"))
+            .ok_or_else(|| "knowledge-only service requires data_dir".to_owned())?,
     };
     let mut tokens = partial.tokens;
     let mut token_files = flags.token_files;
@@ -716,6 +719,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.repos = repos;
     config.tokens = tokens;
     config.default_token_file = default_token_file;
+    config.managed_knowledge = partial.managed_knowledge;
     config.principals = partial.principals;
     config.credentials = partial.credentials;
     config.google_identity = partial.google_identity;

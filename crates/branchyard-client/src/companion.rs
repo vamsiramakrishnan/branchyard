@@ -32,6 +32,10 @@ pub struct Paired {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {
+    /// Stable verified subject used by workspace membership and audit.
+    /// Distinct from the acting device credential's display name.
+    #[serde(default)]
+    pub subject: String,
     /// The subject name: a configured credential's, or a paired token's.
     pub name: String,
     pub tenant: String,

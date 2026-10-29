@@ -1536,6 +1536,13 @@ fn run(
                     })?;
                 }
                 recorder.record(Activity::Prompt(submission.prompt.clone()))?;
+                // Observers can apply a durable cancellation intent at this last
+                // boundary. Do not send a model prompt after that cancellation.
+                if let Some(by) = store.backend().cancel_requested(fence)? {
+                    crate::inbox::abandon_submit(&store, fence, &submission)?;
+                    kill = true;
+                    break End::cancelled(by);
+                }
                 let prompt = format!("{}\n\n{}", provisioned.capabilities, submission.prompt);
                 match session.submit(&prompt) {
                     Ok(n) => {
