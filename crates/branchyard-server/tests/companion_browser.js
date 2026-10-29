@@ -133,10 +133,6 @@ const say = (text) => process.stdout.write(`${text}\n`);
   await page.getByRole('button', { name: 'Show the diff' }).click();
   await page.locator('pre.diff span.add', { hasText: '+2' }).waitFor({ timeout: 30000 });
 
-  const csp = problems.filter((p) => /Content.Security.Policy|Refused to/i.test(p));
-  if (csp.length) throw new Error(`policy violations: ${csp.join(' | ')}`);
-  const errors = problems.filter((p) => !/Failed to load resource/.test(p));
-  if (errors.length) throw new Error(`page errors: ${errors.join(' | ')}`);
   // BY_SCREENSHOTS=DIR saves phone-sized views in both themes, for a look.
   if (process.env.BY_SCREENSHOTS) {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -153,6 +149,30 @@ const say = (text) => process.stdout.write(`${text}\n`);
       await page.getByRole('heading', { name: 'first', exact: true }).waitFor();
     }
   }
+
+  // A token can expire between a failed list request and its retry.
+  let listAttempts = 0;
+  await page.route('**/v1/repos/app/branches', async (route) => {
+    listAttempts += 1;
+    const status = listAttempts === 1 ? 503 : 401;
+    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: {
+      code: status === 503 ? 'unavailable' : 'unauthorized',
+      message: status === 503 ? 'Fixture server temporarily unavailable.' : 'Fixture session expired.',
+    } }) });
+  });
+  await page.goto(`${process.env.BY_URL}/app/`, { waitUntil: 'domcontentloaded' });
+  await page.getByRole('heading', { name: 'Could not load branches' }).waitFor();
+  await page.getByRole('button', { name: 'Retry loading branches' }).click();
+  await page.getByRole('heading', { name: 'Connect to Branchyard' }).waitFor();
+  await page.getByLabel('Server token', { exact: true }).fill('new-token-fixture-only');
+  if (await page.getByRole('button', { name: 'Connect to server', exact: true }).isDisabled()) throw new Error('expired-token recovery left connection disabled');
+  const signedOut = await page.evaluate(() => sessionStorage.getItem('branchyard.token') === null && document.getElementById('nav').hidden);
+  if (!signedOut || listAttempts !== 2) throw new Error('retry did not clear the expired session');
+
+  const csp = problems.filter((p) => /Content.Security.Policy|Refused to/i.test(p));
+  if (csp.length) throw new Error(`policy violations: ${csp.join(' | ')}`);
+  const errors = problems.filter((p) => !/Failed to load resource/.test(p));
+  if (errors.length) throw new Error(`page errors: ${errors.join(' | ')}`);
   say('DONE');
   await browser.close();
   process.exit(0);

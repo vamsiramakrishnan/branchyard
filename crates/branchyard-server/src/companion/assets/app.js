@@ -668,7 +668,11 @@
         h('h2', { text: state.loaded ? 'Could not refresh branches' : 'Could not load branches' }),
         h('p', { text: state.branchError }),
         h('p', { class: 'hint', text: 'Check that the server is reachable and this token can read the repository, then retry. Your token stays in this tab.' }),
-        h('button', { type: 'button', class: 'secondary', text: 'Retry loading branches', onclick: loadBranches })) : null,
+        h('button', { type: 'button', class: 'secondary', text: 'Retry loading branches', onclick: async () => {
+          try { await loadBranches(); } catch (e) {
+            if (e.status !== 401) toast(`Could not load branches: ${e.message}`);
+          }
+        } })) : null,
       empty, list,
     );
     update();

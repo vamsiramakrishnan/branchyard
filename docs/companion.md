@@ -86,7 +86,7 @@ The branch list puts running and waiting work first. **New task** opens the task
 
 Filter branch names or prompt text without matching case. The result count follows the filter. When nothing matches, **Clear search** restores the list and keeps keyboard focus in the search field. Live updates preserve the text selection while you edit a filter. Long branch names and complete status reasons wrap within their cards.
 
-An empty repository explains how its first branch appears. Loading has a separate state. A failed list request shows **Retry loading branches** and retains any previously loaded branches; it does not report an empty repository. Retrying uses the current tab's token.
+An empty repository explains how its first branch appears. Loading has a separate state. A failed list request shows **Retry loading branches** and retains any previously loaded branches; it does not report an empty repository. Retrying uses the current tab's token. If that token has expired or been revoked, the page clears it and returns to the connection form.
 
 On narrow screens, the navigation uses two rows so every section remains visible. Buttons, links and fields have visible keyboard focus. The page follows the device's light or dark preference and reduced-motion setting.
 
