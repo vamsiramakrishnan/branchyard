@@ -1,22 +1,25 @@
 /**
- * test-preview-component.js
+ * artifact_preview_browser.js
  * Standalone Playwright hermetic test suite for BranchyardArtifactPreview component.
  * Uses intercepted route handlers to simulate backend API responses without model or server calls.
+ * Deterministic testing: uses Playwright clock and explicit deferred promises instead of fixed sleeps.
  */
 
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
-// Try finding playwright either via NODE_PATH or standard locations
+// Try finding playwright either via BY_TEST_PLAYWRIGHT / PLAYWRIGHT environment variables,
+// standard require('playwright'), or fallback to the provided test environment path.
 let playwright;
-const potentialPlaywrightPaths = [
+const playwrightCandidates = [
+  process.env.BY_TEST_PLAYWRIGHT,
+  process.env.PLAYWRIGHT,
   'playwright',
-  '/tmp/branchyard-product-polish-20261029/ux/browser/node_modules/playwright',
-  '/tmp/pw/node_modules/playwright'
-];
+  '/tmp/branchyard-product-polish-20261029/ux/browser/node_modules/playwright'
+].filter(Boolean);
 
-for (const p of potentialPlaywrightPaths) {
+for (const p of playwrightCandidates) {
   try {
     playwright = require(p);
     break;
@@ -26,16 +29,29 @@ for (const p of potentialPlaywrightPaths) {
 }
 
 if (!playwright) {
-  console.error('Playwright not found in environment paths. Exiting.');
+  console.error('Playwright could not be resolved from environment or standard paths.');
   process.exit(1);
 }
 
-const componentJs = fs.readFileSync(path.join(__dirname, 'artifact-preview.js'), 'utf8');
-const componentCss = fs.readFileSync(path.join(__dirname, 'artifact-preview.css'), 'utf8');
+// Relative paths to component assets within the repository
+const assetsDir = path.join(__dirname, '..', 'src', 'companion', 'assets');
+const componentJs = fs.readFileSync(path.join(assetsDir, 'artifact-preview.js'), 'utf8');
+const componentCss = fs.readFileSync(path.join(assetsDir, 'artifact-preview.css'), 'utf8');
 
 // Minimal 1x1 transparent PNG bytes for mock page preview image
 const samplePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const samplePngBuffer = Buffer.from(samplePngBase64, 'base64');
+
+// Helper to create a controlled deferred promise
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 async function runTests() {
   console.log('Launching Chromium headless browser for hermetic preview tests...');
@@ -45,6 +61,9 @@ async function runTests() {
   });
 
   const context = await browser.newContext();
+  // Install Playwright clock to allow deterministic control over timers
+  await context.clock.install();
+
   const page = await context.newPage();
 
   // Load hermetic test fixture HTML page
@@ -71,12 +90,12 @@ async function runTests() {
     window.revokedBlobUrls = [];
     const origCreate = URL.createObjectURL;
     const origRevoke = URL.revokeObjectURL;
-    URL.createObjectURL = function(obj) {
+    URL.createObjectURL = function (obj) {
       const url = origCreate.call(URL, obj);
       window.createdBlobUrls.push(url);
       return url;
     };
-    URL.revokeObjectURL = function(url) {
+    URL.revokeObjectURL = function (url) {
       window.revokedBlobUrls.push(url);
       return origRevoke.call(URL, url);
     };
@@ -85,7 +104,7 @@ async function runTests() {
   // Track authenticated fetch calls
   await page.evaluate(() => {
     window.fetchLogs = [];
-    window.mockFetchAuthenticated = function(url, init) {
+    window.mockFetchAuthenticated = function (url, init) {
       window.fetchLogs.push({ url, init });
       return fetch(url, init);
     };
@@ -95,7 +114,7 @@ async function runTests() {
   // Test 1: Malicious CSV cell rendering & inertness
   // ==========================================
   console.log('Test 1: Inert malicious CSV cell rendering...');
-  await page.route('https://api.branchyard.local/artifacts/art-1/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-1/preview*', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -116,7 +135,7 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.activePreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/art-1',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-1',
       displayName: 'data.csv',
       mediaType: 'text/csv',
       fetchAuthenticated: window.mockFetchAuthenticated
@@ -139,7 +158,7 @@ async function runTests() {
   // Test 2: Two-sheet XLSX selection and table pagination
   // ==========================================
   console.log('Test 2: Two-sheet XLSX selection and pagination...');
-  await page.route('https://api.branchyard.local/artifacts/art-2/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-2/preview*', (route) => {
     const url = new URL(route.request().url());
     const sheet = url.searchParams.get('sheet') || 'Summary';
     const offset = parseInt(url.searchParams.get('offset') || '0', 10);
@@ -185,7 +204,7 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.activePreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/art-2',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-2',
       displayName: 'financials.xlsx',
       mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       fetchAuthenticated: window.mockFetchAuthenticated
@@ -214,7 +233,7 @@ async function runTests() {
   // ==========================================
   console.log('Test 3: DOCX/PPTX page navigation and same-query asset fetch...');
   let assetRequestedUrl = null;
-  await page.route('https://api.branchyard.local/artifacts/art-3/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-3/preview*', (route) => {
     const url = new URL(route.request().url());
     const pageNum = parseInt(url.searchParams.get('page') || '1', 10);
     route.fulfill({
@@ -233,7 +252,7 @@ async function runTests() {
     });
   });
 
-  await page.route('https://api.branchyard.local/artifacts/art-3/preview/assets/*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-3/preview/assets/*', (route) => {
     assetRequestedUrl = route.request().url();
     route.fulfill({
       status: 200,
@@ -246,7 +265,7 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.activePreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/art-3',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-3',
       displayName: 'pitch.pptx',
       mediaType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       fetchAuthenticated: window.mockFetchAuthenticated
@@ -270,7 +289,7 @@ async function runTests() {
   // Test 4: Unavailable/Error state with setup action & Original Download
   // ==========================================
   console.log('Test 4: Error/Unavailable state with setup action & download...');
-  await page.route('https://api.branchyard.local/artifacts/art-4/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/preview*', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -285,9 +304,9 @@ async function runTests() {
     });
   });
 
-  let contentDownloadCalled = false;
-  await page.route('https://api.branchyard.local/artifacts/art-4/content', (route) => {
-    contentDownloadCalled = true;
+  const downloadRequestPromise = page.waitForRequest('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/content');
+
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/content', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/octet-stream',
@@ -299,7 +318,7 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.activePreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/art-4',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4',
       displayName: 'spec.docx',
       mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       fetchAuthenticated: window.mockFetchAuthenticated
@@ -312,19 +331,18 @@ async function runTests() {
   assert(await dlButton.isVisible(), 'Original download button must be visible even when unavailable');
 
   await dlButton.click();
-  await page.waitForTimeout(200);
-  assert.strictEqual(contentDownloadCalled, true, 'Original download content endpoint must be called');
+  const downloadReq = await downloadRequestPromise;
+  assert(downloadReq, 'Original download content endpoint must be requested');
   console.log('  ✓ Unavailable state, setup action, and original download passed.');
 
   // ==========================================
-  // Test 5: Rapid document switching & race condition protection
+  // Test 5: Rapid document switching & deterministic late-response rejection
   // ==========================================
-  console.log('Test 5: Rapid document switching and late-response cancellation...');
-  let delayedResolved = false;
-  await page.route('https://api.branchyard.local/artifacts/slow-doc/preview*', async (route) => {
-    // Delay response
-    await new Promise(resolve => setTimeout(resolve, 300));
-    delayedResolved = true;
+  console.log('Test 5: Rapid document switching and deterministic stale-response rejection...');
+  const slowDeferred = createDeferred();
+
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/slow-doc/preview*', async (route) => {
+    await slowDeferred.promise;
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -336,7 +354,7 @@ async function runTests() {
     });
   });
 
-  await page.route('https://api.branchyard.local/artifacts/fast-doc/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/fast-doc/preview*', (route) => {
     route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -353,41 +371,57 @@ async function runTests() {
     container.innerHTML = '';
     // Rapidly switch from slow-doc to fast-doc
     window.slowPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/slow-doc',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/slow-doc',
       fetchAuthenticated: window.mockFetchAuthenticated
     });
     // Immediately mount fast-doc into the container, disposing the previous
     window.slowPreview.dispose();
     window.fastPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/fast-doc',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/fast-doc',
       fetchAuthenticated: window.mockFetchAuthenticated
     });
   });
 
+  // Fast content renders first
   await page.waitForSelector('.by-preview-text-content');
   const preText = await page.locator('.by-preview-text-content').textContent();
   assert.strictEqual(preText, 'NEW FAST CONTENT');
 
-  // Wait to ensure slow doc resolve does not overwrite fast doc
-  await page.waitForTimeout(400);
+  // Now resolve the delayed slow request deterministically AFTER disposal
+  slowDeferred.resolve();
+  // Tick microtasks to allow any late promise chains to run
+  await page.evaluate(() => Promise.resolve());
+
   const finalText = await page.locator('.by-preview-text-content').textContent();
-  assert.strictEqual(finalText, 'NEW FAST CONTENT', 'Late response must not overwrite current content');
-  console.log('  ✓ Rapid document switching & late response rejection passed.');
+  assert.strictEqual(finalText, 'NEW FAST CONTENT', 'Late resolved response must not overwrite current content');
+  console.log('  ✓ Rapid document switching & deterministic stale response rejection passed.');
 
   // ==========================================
-  // Test 6: 202 Accepted polling and cancellation on dispose
+  // Test 6: 202 / 429 Retry-After polling and cancellation on dispose via Playwright Clock
   // ==========================================
-  console.log('Test 6: 202 retry polling and timer cancellation on dispose...');
+  console.log('Test 6: 202/429 retry polling and cancellation on dispose via Playwright Clock...');
   let pollAttempts = 0;
-  await page.route('https://api.branchyard.local/artifacts/polling-doc/preview*', (route) => {
+  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/polling-doc/preview*', (route) => {
     pollAttempts++;
-    if (pollAttempts < 3) {
+    if (pollAttempts === 1) {
+      // Return 202 Accepted with Retry-After: 1
       route.fulfill({
         status: 202,
-        headers: {
-          'Retry-After': '1'
-        },
+        headers: { 'Retry-After': '1' },
         body: JSON.stringify({ status: 'preparing' })
+      });
+    } else if (pollAttempts === 2) {
+      // Return 429 preview_busy with detail.retry_after: 2
+      route.fulfill({
+        status: 429,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'preview_busy',
+            message: 'Preview renderer busy',
+            detail: { retry_after: 2 }
+          }
+        })
       });
     } else {
       route.fulfill({
@@ -396,7 +430,7 @@ async function runTests() {
         body: JSON.stringify({
           status: 'passed',
           kind: 'text',
-          text: 'READY AFTER RETRY'
+          text: 'READY AFTER RETRY SEQUENCE'
         })
       });
     }
@@ -406,35 +440,50 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.pollingPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/polling-doc',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/polling-doc',
       fetchAuthenticated: window.mockFetchAuthenticated
     });
   });
 
-  // Verify it polls and resolves
-  await page.waitForSelector('text=READY AFTER RETRY', { timeout: 5000 });
-  assert(pollAttempts >= 3, 'Should have polled at least 3 times');
+  // Verify attempt 1 occurred
+  await page.waitForSelector('text=Preparing preview (attempt 1)...');
+  assert.strictEqual(pollAttempts, 1);
 
-  // Now test cancellation on dispose
+  // Advance clock by 1000ms for 202 Retry-After: 1
+  await context.clock.runFor(1000);
+  await page.waitForSelector('text=Preview service busy; retrying in 2s (attempt 2)...');
+  assert.strictEqual(pollAttempts, 2);
+
+  // Advance clock by 2000ms for 429 retry_after: 2
+  await context.clock.runFor(2000);
+  await page.waitForSelector('text=READY AFTER RETRY SEQUENCE');
+  assert.strictEqual(pollAttempts, 3);
+
+  // Now test deterministic cancellation on dispose
   pollAttempts = 0;
   await page.evaluate(() => {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.cancelledPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/polling-doc',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/polling-doc',
       fetchAuthenticated: window.mockFetchAuthenticated
     });
   });
 
-  // Wait for 1st attempt then immediately dispose
-  await page.waitForTimeout(100);
+  // Wait for 1st attempt to settle into retry wait
+  await page.waitForSelector('text=Preparing preview (attempt 1)...');
+  assert.strictEqual(pollAttempts, 1);
+
+  // Dispose while retry timer is pending
   await page.evaluate(() => {
     window.cancelledPreview.dispose();
   });
   const attemptsAtDispose = pollAttempts;
-  await page.waitForTimeout(1500); // Wait longer than Retry-After
+
+  // Advance clock far past Retry-After
+  await context.clock.runFor(10000);
   assert.strictEqual(pollAttempts, attemptsAtDispose, 'Dispose must cancel pending retry timers');
-  console.log('  ✓ 202 retry polling & timer cancellation on dispose passed.');
+  console.log('  ✓ 202/429 retry polling & timer cancellation on dispose passed.');
 
   // ==========================================
   // Test 7: Blob URL creation and revocation verification
@@ -448,7 +497,7 @@ async function runTests() {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.blobTestPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/artifacts/art-3',
+      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-3',
       fetchAuthenticated: window.mockFetchAuthenticated
     });
   });
@@ -470,7 +519,7 @@ async function runTests() {
   console.log('\nAll 7 hermetic Playwright component regression tests PASSED successfully!\n');
 }
 
-runTests().catch(err => {
+runTests().catch((err) => {
   console.error('\nPlaywright Test Suite Failed:', err);
   process.exit(1);
 });

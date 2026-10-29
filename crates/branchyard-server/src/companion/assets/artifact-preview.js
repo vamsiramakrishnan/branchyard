@@ -42,9 +42,10 @@
 
     // Instance state
     var isDisposed = false;
-    var activeAbortController = null;
+    var activeAbortControllers = new Set();
     var retryTimerId = null;
     var activeBlobUrls = [];
+    var pendingRevokeTimerIds = new Set();
     var generation = 0;
 
     // View state
@@ -84,18 +85,27 @@
     container.appendChild(rootEl);
 
     function announce(msg) {
-      if (liveRegion) {
+      if (!isDisposed && liveRegion) {
         liveRegion.textContent = '';
-        // Slight microtask tick for screen readers to register text change
-        window.setTimeout(function () {
-          if (!isDisposed && liveRegion) {
-            liveRegion.textContent = msg;
-          }
-        }, 10);
+        if (typeof queueMicrotask === 'function') {
+          queueMicrotask(function () {
+            if (!isDisposed && liveRegion) {
+              liveRegion.textContent = msg;
+            }
+          });
+        } else {
+          liveRegion.textContent = msg;
+        }
       }
     }
 
     function revokeAllBlobs() {
+      // Clear pending delayed revocation timers
+      pendingRevokeTimerIds.forEach(function (tid) {
+        clearTimeout(tid);
+      });
+      pendingRevokeTimerIds.clear();
+
       for (var i = 0; i < activeBlobUrls.length; i++) {
         try {
           URL.revokeObjectURL(activeBlobUrls[i]);
@@ -107,14 +117,15 @@
     }
 
     function cancelPendingRequests() {
-      if (activeAbortController) {
+      activeAbortControllers.forEach(function (ctrl) {
         try {
-          activeAbortController.abort();
+          ctrl.abort();
         } catch (e) {
           // ignore
         }
-        activeAbortController = null;
-      }
+      });
+      activeAbortControllers.clear();
+
       if (retryTimerId !== null) {
         clearTimeout(retryTimerId);
         retryTimerId = null;
@@ -309,7 +320,7 @@
       announce(text.textContent);
     }
 
-    function renderUnavailableOrError(titleMsg, detailNext, showSetup) {
+    function renderUnavailableOrError(titleMsg, detailNext, showSetup, showRetry) {
       contentEl.textContent = '';
       toolbarEl.textContent = '';
       renderWarnings([]);
@@ -331,6 +342,17 @@
 
       var actions = document.createElement('div');
       actions.className = 'by-preview-state-actions';
+
+      if (showRetry) {
+        var retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'by-preview-btn';
+        retryBtn.textContent = 'Retry Preview';
+        retryBtn.addEventListener('click', function () {
+          loadPreview();
+        });
+        actions.appendChild(retryBtn);
+      }
 
       if (showSetup) {
         var setupBtn = document.createElement('button');
@@ -455,7 +477,7 @@
 
       var imageFilename = data.image;
       if (!imageFilename || !isSafeBasename(imageFilename)) {
-        renderUnavailableOrError('Security Error: Invalid or unsafe page asset reference.', null, false);
+        renderUnavailableOrError('Security Error: Invalid or unsafe page asset reference.', null, false, false);
         return;
       }
 
@@ -470,12 +492,13 @@
       // Fetch the asset with the SAME preview query and authenticated fetch
       var assetPath = baseUrl + '/preview/assets/' + encodeURIComponent(imageFilename) + previewQuery;
       var assetAbort = new AbortController();
-      activeAbortController = assetAbort;
+      activeAbortControllers.add(assetAbort);
 
       fetchAuthenticated(assetPath, {
         method: 'GET',
         signal: assetAbort.signal
       }).then(function (res) {
+        activeAbortControllers.delete(assetAbort);
         if (currentGen !== generation || isDisposed) return;
         if (!res.ok) {
           throw new Error('Failed to load page image: ' + res.status);
@@ -501,6 +524,7 @@
         pagesContainer.appendChild(img);
         announce('Loaded page ' + (data.page || currentPage) + ' of ' + (data.pages || 1));
       }).catch(function (err) {
+        activeAbortControllers.delete(assetAbort);
         if (currentGen !== generation || isDisposed) return;
         if (err.name === 'AbortError') return;
         pagesContainer.textContent = '';
@@ -529,12 +553,17 @@
     }
 
     function handleDownloadOriginal() {
+      if (isDisposed) return;
       var contentPath = baseUrl + '/content';
       var dlAbort = new AbortController();
+      activeAbortControllers.add(dlAbort);
+
       fetchAuthenticated(contentPath, {
         method: 'GET',
         signal: dlAbort.signal
       }).then(function (res) {
+        activeAbortControllers.delete(dlAbort);
+        if (isDisposed) return;
         if (!res.ok) {
           throw new Error('Download failed: ' + res.status);
         }
@@ -542,6 +571,8 @@
       }).then(function (blob) {
         if (isDisposed || !blob) return;
         var blobUrl = URL.createObjectURL(blob);
+        activeBlobUrls.push(blobUrl);
+
         var a = document.createElement('a');
         a.style.display = 'none';
         a.href = blobUrl;
@@ -549,15 +580,23 @@
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        setTimeout(function () {
+
+        var timerId = setTimeout(function () {
+          pendingRevokeTimerIds.delete(timerId);
           try {
             URL.revokeObjectURL(blobUrl);
+            var idx = activeBlobUrls.indexOf(blobUrl);
+            if (idx !== -1) {
+              activeBlobUrls.splice(idx, 1);
+            }
           } catch (e) {
             // ignore
           }
         }, 1000);
+        pendingRevokeTimerIds.add(timerId);
       }).catch(function (err) {
-        if (err.name === 'AbortError') return;
+        activeAbortControllers.delete(dlAbort);
+        if (isDisposed || err.name === 'AbortError') return;
         alert('Could not download original document: ' + err.message);
       });
     }
@@ -569,7 +608,8 @@
       revokeAllBlobs();
 
       var thisGen = ++generation;
-      activeAbortController = new AbortController();
+      var fetchAbort = new AbortController();
+      activeAbortControllers.add(fetchAbort);
 
       renderLoading('Loading document preview...');
 
@@ -590,22 +630,26 @@
       var previewUrl = baseUrl + '/preview' + previewQuery;
 
       var retryCount = 0;
-      var MAX_RETRIES = 10;
+      var MAX_RETRIES = 5;
 
       function executeFetch() {
         if (thisGen !== generation || isDisposed) return;
 
+        var reqAbort = new AbortController();
+        activeAbortControllers.add(reqAbort);
+
         fetchAuthenticated(previewUrl, {
           method: 'GET',
-          signal: activeAbortController.signal
+          signal: reqAbort.signal
         }).then(function (res) {
+          activeAbortControllers.delete(reqAbort);
           if (thisGen !== generation || isDisposed) return;
 
           // 202 Accepted: Still preparing preview with Retry-After
           if (res.status === 202) {
             retryCount++;
             if (retryCount > MAX_RETRIES) {
-              renderUnavailableOrError('Preview generation timed out.', 'The preview took too long to prepare.', false);
+              renderUnavailableOrError('Preview generation timed out.', 'The preview took too long to prepare.', false, true);
               return;
             }
             var retrySec = 1;
@@ -627,12 +671,46 @@
           }
 
           return res.json().then(function (body) {
-            return { ok: res.ok, status: res.status, body: body };
+            return { ok: res.ok, status: res.status, headers: res.headers, body: body };
           }).catch(function (parseErr) {
-            return { ok: res.ok, status: res.status, body: null };
+            return { ok: res.ok, status: res.status, headers: res.headers, body: null };
           });
         }).then(function (result) {
           if (!result || thisGen !== generation || isDisposed) return;
+
+          // Handle 429 Too Many Requests (e.g. preview_busy)
+          if (result.status === 429) {
+            var body = result.body || {};
+            var errObj = body.error || body;
+            var isBusy = errObj.code === 'preview_busy' || (errObj.detail && errObj.detail.retry_after != null);
+            var retryAfterSec = null;
+
+            if (errObj.detail && typeof errObj.detail.retry_after === 'number') {
+              retryAfterSec = errObj.detail.retry_after;
+            } else if (result.headers && result.headers.get && result.headers.get('Retry-After')) {
+              var hSec = parseInt(result.headers.get('Retry-After'), 10);
+              if (!isNaN(hSec) && hSec > 0) {
+                retryAfterSec = hSec;
+              }
+            }
+
+            if (isBusy && retryAfterSec !== null && retryAfterSec > 0 && retryAfterSec <= 10 && retryCount < MAX_RETRIES) {
+              retryCount++;
+              renderLoading('Preview service busy; retrying in ' + retryAfterSec + 's (attempt ' + retryCount + ')...');
+              retryTimerId = setTimeout(function () {
+                retryTimerId = null;
+                if (thisGen === generation && !isDisposed) {
+                  executeFetch();
+                }
+              }, retryAfterSec * 1000);
+              return;
+            }
+
+            var busyMsg = errObj.message || 'Preview service is busy.';
+            var busyNext = (errObj.detail && errObj.detail.next) || 'Please retry in a moment.';
+            renderUnavailableOrError(busyMsg, busyNext, false, true);
+            return;
+          }
 
           if (!result.ok) {
             var errMsg = 'Preview request failed (' + result.status + ')';
@@ -643,13 +721,13 @@
                 nextAction = result.body.error.detail.next;
               }
             }
-            renderUnavailableOrError(errMsg, nextAction, Boolean(nextAction));
+            renderUnavailableOrError(errMsg, nextAction, Boolean(nextAction), result.status >= 500);
             return;
           }
 
           var payload = result.body;
           if (!payload) {
-            renderUnavailableOrError('Empty preview response received.', null, false);
+            renderUnavailableOrError('Empty preview response received.', null, false, false);
             return;
           }
 
@@ -657,7 +735,7 @@
             var msg = payload.message || 'Preview unavailable for this artifact.';
             var detailNext = (payload.detail && payload.detail.next) || (payload.error && payload.error.detail && payload.error.detail.next) || null;
             var showSetup = Boolean(payload.setup || detailNext);
-            renderUnavailableOrError(msg, detailNext, showSetup);
+            renderUnavailableOrError(msg, detailNext, showSetup, false);
             return;
           }
 
@@ -672,15 +750,16 @@
             } else if (payload.kind === 'text') {
               renderText(payload);
             } else {
-              renderUnavailableOrError('Unsupported preview kind: ' + payload.kind, null, false);
+              renderUnavailableOrError('Unsupported preview kind: ' + payload.kind, null, false, false);
             }
           } else {
-            renderUnavailableOrError('Unexpected preview status: ' + payload.status, null, false);
+            renderUnavailableOrError('Unexpected preview status: ' + payload.status, null, false, false);
           }
         }).catch(function (err) {
+          activeAbortControllers.delete(reqAbort);
           if (thisGen !== generation || isDisposed) return;
           if (err.name === 'AbortError') return;
-          renderUnavailableOrError('Preview error: ' + err.message, null, false);
+          renderUnavailableOrError('Preview error: ' + err.message, null, false, true);
         });
       }
 
