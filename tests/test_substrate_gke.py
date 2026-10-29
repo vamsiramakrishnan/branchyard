@@ -28,7 +28,7 @@ state = json.loads(state_path.read_text())
 with Path(os.environ["FAKE_LOG"]).open("a") as log:
     log.write(json.dumps({"tool": tool, "args": args, "context": os.environ.get("KUBECTL_CONTEXT"),
                           "kubeconfig": os.environ.get("KUBECONFIG"), "version": os.environ.get("VERSION"),
-                          "cwd": os.getcwd()}) + "\n")
+                          "cwd": os.getcwd(), "out": os.environ.get("OUT")}) + "\n")
 def done(value=""):
     state_path.write_text(json.dumps(state))
     print(json.dumps(value) if isinstance(value, (dict, list)) else value)
@@ -70,6 +70,12 @@ if tool == "go":
         state["fail_install"] = False
         fail("private-token-should-not-appear-in-output")
     done("installed")
+if tool == "bash" and "install-microvm-deps.sh" in " ".join(args) and os.environ.get("OUT"):
+    out = Path(os.environ["OUT"]); out.mkdir(parents=True, exist_ok=True)
+    (out / "generated-asset").write_text("fake native asset")
+    if state.get("fail_microvm_assets"):
+        state["fail_microvm_assets"] = False
+        fail("asset setup interrupted")
 if tool in ("docker", "bash"): done()
 if tool == "kubectl":
     if "get" in args and ("namespace" in args or "workerpool" in args):
@@ -337,6 +343,24 @@ class SubstrateGke(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("unowned or modified", result.stderr)
                 self.assertFalse(any(call["tool"] in {"gcloud", "kubectl"} for call in self.calls()))
+
+    def test_agentgateway_microvm_assets_use_git_source_and_private_output_on_retry(self):
+        self.state["fail_microvm_assets"] = True
+        self.save()
+        flags = ("--atenet-dataplane=agentgateway", "--runtime=microvm", "--apply")
+        first = self.invoke(*flags)
+        self.assertEqual(first.returncode, 1)
+        second = self.invoke(*flags)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        scripts = [call for call in self.calls() if call["tool"] == "bash"]
+        self.assertEqual(len(scripts), 2)
+        self.assertTrue(all(call["cwd"] == str(self.source) for call in scripts))
+        self.assertTrue(all(call["out"] == str(self.path / "state/microvm-assets") for call in scripts))
+        self.assertTrue((self.path / "state/microvm-assets/generated-asset").exists())
+        self.assertFalse(list(self.source.iterdir()))
+        exported = self.path / "state/agentgateway-source"
+        installs = [call for call in self.calls() if call["tool"] == "go" and "run" in call["args"]]
+        self.assertTrue(all(call["cwd"] == str(exported) and call["out"] is None for call in installs))
 
     def test_source_archive_cannot_escape_its_private_staging_directory(self):
         self.state["unsafe_archive"] = True

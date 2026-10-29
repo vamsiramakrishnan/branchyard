@@ -605,11 +605,35 @@
         "kustomize": "v5.7.1",
         "router_and_egress_rendered_image": "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
         "archive_go_module_lookup": "github.com/agent-substrate/substrate/cmd/ate-setup",
-        "cloud_commands_run_by_local_render_check": false
+        "cloud_commands_run_by_local_render_check": false,
+        "native_ko_build": {
+          "date": "2026-10-29",
+          "command": [
+            "ko",
+            "build",
+            "--push=false",
+            "--oci-layout-path=PRIVATE_STATE/oci-layout",
+            "--platform=linux/amd64",
+            "--sbom=none",
+            "github.com/agent-substrate/substrate/cmd/ateom-gvisor"
+          ],
+          "exit_code": 0,
+          "private_export_digest_before": "2ecc7a8bdc674c9618a4e022cc1f507880da78c7eb451570fda566f030e9ecdd",
+          "private_export_digest_after": "2ecc7a8bdc674c9618a4e022cc1f507880da78c7eb451570fda566f030e9ecdd",
+          "input_tree_unchanged": true,
+          "registry_push": false,
+          "cloud_resources_created": false
+        }
       },
       "hermetic_helper_tests": {
-        "passed": 25,
+        "passed": 26,
         "failed": 0
+      },
+      "microvm_asset_script": {
+        "working_directory": "original verified Git checkout",
+        "output_directory": "private state outside both source trees",
+        "retry_regression": "An interrupted asset write leaves the verified export digest unchanged and retries successfully.",
+        "live_microvm_install_run": false
       }
     },
     "not_done": [

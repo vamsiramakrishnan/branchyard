@@ -114,6 +114,12 @@ state. Inspect that state before removing only the generated `agentgateway-sourc
 directory to regenerate it. Ignored files, local credentials and untracked work
 are excluded from the export.
 
+For `--runtime=microvm`, the upstream asset script requires Git metadata. The
+helper runs that unchanged script from the supplied Git checkout and sets its
+output directory to private state. Generated assets stay outside the verified
+export, so interrupted downloads do not invalidate its content digest. The
+Go installer then resumes from the private export.
+
 The upstream source's older gateway image rejects its own worker certificate
 format with `403 Forbidden: actor certificate has no ActorIdentity`. The selected
 image includes [upstream fix 3677](https://github.com/agentgateway/agentgateway/pull/3677)
@@ -289,12 +295,16 @@ retained pause/resume, console model execution and final infrastructure cleanup
 remain separate checks. MicroVM and Agentic Compute Engine were not tested in
 this deployment.
 
-Hermetic and local rendering evidence, 29 October 2026: the helper's 25 tests
+Hermetic and local rendering evidence, 29 October 2026: the helper's 26 tests
 passed, including the optional agentgateway export, offline plan, Docker-free
 prerequisites, retry reuse, modified-state refusal and archive traversal refusal.
 Native Kustomize `v5.7.1` rendered the compatible image for both gateway components
 from the actual private export, and Go resolved the installer module there without
-Git metadata. The supplied source checkout remained clean. On the retained live
+Git metadata. Its native `ko` build also completed into a private OCI layout
+without registry publication; the export's content digest was identical before
+and after the build. The asset-script regression covers an interrupted download
+and retry with generated outputs outside the verified export. The supplied source
+checkout remained clean. On the retained live
 cluster, a single Actor reproduced gateway rejection before the egress image
 correction, then verified TLS 1.3 and unauthenticated HTTPS 404 responses from both
 Google hosts afterward. The Actor was destroyed, and a native API query confirmed

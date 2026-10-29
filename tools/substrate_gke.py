@@ -892,7 +892,18 @@ def apply(config: Config, run: Runner | None = None) -> dict[str, Any]:
     print("Installing pinned Substrate; private progress is in install.log...", file=sys.stderr, flush=True)
     run.run(ate_setup(config, "deploy", "ate-system"), install=True)
     if config.runtime == "microvm":
-        run.run(["bash", "hack/install-microvm-deps.sh", "--install"], install=True)
+        installer_config = run.config
+        if config.atenet_dataplane == "agentgateway":
+            # This upstream script needs git metadata; its generated assets
+            # belong outside both the pristine checkout and the verified export.
+            run.config = config
+            run.env["OUT"] = str(config.state_dir / "microvm-assets")
+        try:
+            run.run(["bash", "hack/install-microvm-deps.sh", "--install"], install=True)
+        finally:
+            run.config = installer_config
+            if config.atenet_dataplane == "agentgateway":
+                run.env.pop("OUT", None)
         run.run(kubectl(config, "get", "sandboxconfig", "microvm", "-o", "name"))
     print("Publishing and checking the dedicated worker pool...", file=sys.stderr, flush=True)
     worker = ensure_workers(config, run, build_version)
