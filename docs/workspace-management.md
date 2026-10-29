@@ -42,6 +42,13 @@ bounded document previews, accept deliverables, and observe operations. Each
 mutation requires an `idempotency_key`: use one key for one intended action and
 reuse that key after a lost connection. A new key is a new intended action.
 
+Concurrent session starts refresh internal workspace and tenant quota snapshots
+when another admission wins their metadata compare-and-set. A bounded retry
+rechecks current authorization, workspace state, source grants and quota, using
+the same request idempotency key. It does not replay a native model turn.
+Client-supplied revision conflicts and quota refusals still require their normal
+caller action.
+
 Work continues on the server if this MCP client disconnects. Inspect the returned
 operation ID; a long-poll response that is still nonterminal means work continues.
 Observing an operation does not cancel it. Cancellation is an explicit request

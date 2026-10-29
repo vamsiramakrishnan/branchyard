@@ -1847,3 +1847,59 @@ mod preview_http {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_named_sessions_admit_once_without_exposing_internal_revision_conflicts() {
+    let fixture = Fixture::new(true);
+    let wid = fixture.workspace().await;
+    let barrier = std::sync::Barrier::new(4);
+    let attempts = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|index| {
+                let fixture = &fixture;
+                let wid = &wid;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert("idempotency-key", format!("parallel-{index}").parse().unwrap());
+                    let body = json!({"name":format!("Writer {index}"),"prompt":"Say hello","harness":"gemini-cli","access":"writer"});
+                    barrier.wait();
+                    let result = super::runtime::start(&fixture.app, &Caller::new(Principal::default_for("owner")), wid, &headers, body.clone());
+                    (headers, body, result)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let mut operation_ids = std::collections::BTreeSet::new();
+    let mut session_ids = std::collections::BTreeSet::new();
+    for (headers, body, result) in attempts {
+        let admitted = result.unwrap();
+        let replay = super::runtime::start(
+            &fixture.app,
+            &Caller::new(Principal::default_for("owner")),
+            &wid,
+            &headers,
+            body,
+        )
+        .unwrap();
+        assert_eq!(admitted["id"], replay["id"]);
+        assert_eq!(admitted["session_id"], replay["session_id"]);
+        operation_ids.insert(admitted["id"].as_str().unwrap().to_owned());
+        session_ids.insert(admitted["session_id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(operation_ids.len(), 4);
+    assert_eq!(session_ids.len(), 4);
+    assert_eq!(
+        fixture
+            .app
+            .registry
+            .console_list(Collection::Sessions, "default")
+            .unwrap()
+            .len(),
+        4
+    );
+}

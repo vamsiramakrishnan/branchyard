@@ -438,6 +438,26 @@ pub(super) fn start(
     headers: &HeaderMap,
     body: Value,
 ) -> Result<Value, ApiError> {
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match start_once(app, caller, wid, headers, body.clone()) {
+            // The durable metadata and queue transaction rolled back. Re-read
+            // authorization, workspace state and quotas, retaining the caller's
+            // idempotency key. No native turn has started for this admission.
+            Err(error) if error.body.code == "revision_conflict" && attempts < 8 => continue,
+            result => return result,
+        }
+    }
+}
+
+fn start_once(
+    app: &App,
+    caller: &Caller,
+    wid: &str,
+    headers: &HeaderMap,
+    body: Value,
+) -> Result<Value, ApiError> {
     let access = body["access"].as_str().unwrap_or("writer");
     let required = if access == "reviewer" {
         "comment"
