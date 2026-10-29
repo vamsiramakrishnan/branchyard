@@ -2020,20 +2020,18 @@
     wsView = null;
   }
 
-  // The one live preview, disposed on every route, tab, output and source
-  // change and on signing out, so no hidden preview keeps fetching.
+  // The one live preview, of a source or an output, disposed on every route,
+  // tab, item and source change and on signing out, so no hidden preview
+  // keeps fetching.
   let livePreview = null;
-  function disposePreview() {
-    if (livePreview && livePreview.handle) livePreview.handle.dispose();
-    livePreview = null;
-  }
   function closePreview() {
-    disposePreview();
+    if (livePreview) livePreview.dispose();
+    livePreview = null;
     if (!wsView) return;
     wsView.previewing = null;
     const slot = $('preview');
     if (slot) fill(slot);
-    for (const b of document.querySelectorAll('#outputs .output-name')) b.setAttribute('aria-pressed', 'false');
+    for (const b of document.querySelectorAll('#inspector button[data-preview]')) b.setAttribute('aria-pressed', 'false');
   }
 
   // Every write the server checks against the workspace's revision reads it
@@ -2087,13 +2085,15 @@
   }
 
   // Reads overlap (a poll, an upload's reload): one asked earlier never
-  // replaces one asked later.
+  // replaces one asked later. Outputs are read again whenever a session's
+  // turn or status moved since they were last read.
   async function reloadDetail(v) {
     const asked = (v.asked += 1);
     const ws = await api('GET', workspacePath(v.id));
     if (wsView !== v || asked < v.applied) return;
     v.applied = asked;
     v.workspace = ws;
+    prune(v);
     if (!projectOf(ws.project_id)) {
       const project = await api('GET', `/v1/projects/${enc(ws.project_id)}`);
       state.projects = (state.projects || []).filter((p) => p.id !== project.id).concat(project);
@@ -2107,6 +2107,7 @@
     } else if (!row && state.workspaces.loaded && state.workspaces.project === ws.project_id) {
       loadWorkspaces(ws.project_id);
     }
+    if (v.artifacts !== null && turnsOf(v) !== v.artifactsFor) await loadArtifacts(v);
   }
 
   const INSPECTOR = [['sources', 'Sources', 'sources-count'], ['outputs', 'Outputs', 'outputs-count'], ['details', 'Details']];
@@ -2139,10 +2140,10 @@
           h('div', { class: 'panel-tools' },
             h('button', { type: 'button', id: 'upload-sources', text: 'Upload sources', disabled: !workspaceCanRun(v), onclick: () => files.click() }),
             files, workspaceCanRun(v) ? drop : null),
-          h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' })),
-        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
-          h('div', { id: 'outputs-list' }),
+          h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' }),
           h('div', { class: 'preview', id: 'preview', 'aria-label': 'Preview' })),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
+          h('div', { id: 'outputs-list' })),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-details', 'aria-labelledby': 'tab-details', hidden: true },
           h('dl', { class: 'facts', id: 'ws-facts' }),
           h('h2', { text: 'Sessions' }), h('ul', { class: 'events', id: 'ws-sessions' }),
@@ -2207,9 +2208,10 @@
     return m.loading;
   }
 
+  const turnsOf = (v) => JSON.stringify((v.workspace.sessions || []).map((s) => [s.id, s.status, s.turns]));
   async function loadArtifacts(v) {
     const sessions = v.workspace.sessions || [];
-    v.artifactsFor = JSON.stringify(sessions.map((s) => [s.id, s.status, s.turns]));
+    v.artifactsFor = turnsOf(v);
     if (!sessions.length) { v.artifacts = []; return; }
     try {
       v.artifacts = (await api('GET', `${workspacePath(v.id)}/artifacts`)).artifacts;
@@ -2218,7 +2220,7 @@
       v.artifactsError = e.message;
       if (v.artifacts === null) v.artifacts = [];
     }
-    for (const id of v.selected) if (!v.artifacts.some((a) => a.id === id)) v.selected.delete(id);
+    prune(v);
   }
 
   // While anything here is starting, running or settling, the page reads
@@ -2239,8 +2241,6 @@
       await reloadDetail(v);
       const s = wsView === v ? selectedSession(v) : null;
       if (s && sessionStatus(s)) await loadMessages(v, s.id);
-      const settled = JSON.stringify((v.workspace.sessions || []).map((x) => [x.id, x.status, x.turns]));
-      if (wsView === v && settled !== v.artifactsFor) await loadArtifacts(v);
       v.failures = 0;
       v.failure = null;
     } catch (e) {
@@ -2491,6 +2491,13 @@
     drawWorkspace(v);
   }
 
+  // Refusals that mean the page's list was out of date: what happened, and
+  // what to do once the outputs are read again.
+  const ACCEPT_REFUSED = {
+    deliverable_not_current: ['an output you chose is no longer its session\'s current result', 'The outputs are reloaded; accept the ones marked Current.'],
+    producer_busy: ['the session that made these outputs is working on a newer turn', 'The outputs are reloaded; accept the ones marked Current once that turn finishes.'],
+  };
+
   async function acceptSelected(v) {
     const ids = Array.from(v.selected);
     const names = ids.map((id) => ((v.artifacts || []).find((a) => a.id === id) || { name: id }).name);
@@ -2503,7 +2510,15 @@
     try {
       result = await revised(v, 'Could not accept', (revision) => api('POST', `${workspacePath(v.id)}/finalize`, { revision, artifacts: ids }));
     } catch (e) {
-      toast(`Could not accept: ${e.message}`);
+      const refused = e.status === 409 && ACCEPT_REFUSED[e.code];
+      if (refused) {
+        let reloaded = true;
+        try { await reloadDetail(v); } catch (_) { reloaded = false; }
+        if (wsView === v) scheduleWorkspace(v);
+        toast(`Not accepted: ${refused[0]}. ${reloaded ? refused[1] : 'Reload the page, then try again.'}`);
+      } else {
+        toast(`Could not accept: ${e.message}`);
+      }
     }
     v.busy = null;
     if (wsView !== v) return;
@@ -2515,95 +2530,134 @@
     drawWorkspace(v);
   }
 
+  // A source's or output's name: it opens that file in the preview.
+  function previewButton(v, item) {
+    return h('button', {
+      type: 'button', class: 'file-name', 'data-preview': item.key, 'aria-pressed': String(v.previewing === item.key),
+      title: `Preview ${item.name}`, text: item.name, onclick: () => openPreview(v, item),
+    });
+  }
+
   function drawSources(v) {
     const sources = (v.workspace.sources || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
     $('sources-count').textContent = sources.length ? String(sources.length) : '';
     const signature = JSON.stringify(sources.map((src) => src.id));
     if (signature === v.drawn.sources) return;
     v.drawn.sources = signature;
-    fill($('sources'), sources.length ? sources.map((src) => h('li', { class: 'file-item', 'data-source': src.id },
-      h('div', { class: 'file-main' },
-        h('span', { class: 'file-title', text: src.title, title: src.title }),
-        h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
-      h('button', {
-        type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`,
-        onclick: () => download(`${workspacePath(v.id)}/sources/${enc(src.id)}/content`, src.title),
-      })))
+    fill($('sources'), sources.length ? sources.map((src) => {
+      const base = `${workspacePath(v.id)}/sources/${enc(src.id)}`;
+      return h('li', { class: 'file-item', 'data-source': src.id },
+        h('div', { class: 'file-main' },
+          previewButton(v, { key: `source:${src.id}`, name: src.title, mediaType: src.media_type, base }),
+          h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
+        h('button', { type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`, onclick: () => download(`${base}/content`, src.title) }));
+    })
       : h('li', { class: 'muted pad', text: 'No sources yet. Upload the documents this workspace\'s sessions should read; each new session gets the ones you tick.' }));
+  }
+
+  // Where an output stands toward acceptance. The server accepts an output
+  // only from its session's current turn, once that turn finished with its
+  // result and nothing more is queued for the session (`finalize` in
+  // console/sources.rs); `current` is exactly that.
+  function standing(a, s, accepted) {
+    if (accepted.has(a.id)) return 'accepted';
+    if (s && a.turn < s.turns) return 'earlier';
+    if (s && sessionActive(s)) return 'working';
+    const info = s && sessionStatus(s);
+    const finished = info && ['ready', 'no_changes', 'merged'].includes(info.status.state) && s.result_event != null && !s.result_error;
+    return finished ? 'current' : 'unsettled';
+  }
+
+  const STANDING = {
+    accepted: { pick: false, tag: 'Accepted', note: (a) => `turn ${a.turn}` },
+    current: { pick: true, tag: 'Current', note: (a) => `turn ${a.turn}` },
+    working: { pick: false, note: (a) => `turn ${a.turn} · a newer turn is running` },
+    earlier: { pick: false, note: (a) => `Earlier turn ${a.turn} — not the current result` },
+    unsettled: { pick: false, note: (a) => `turn ${a.turn} · this turn ended without its result` },
+  };
+
+  // Outputs under the session that made them, in session order; within a
+  // session, the newest turn first.
+  function outputGroups(v) {
+    const accepted = new Set((v.workspace.accepted_deliverables || []).map((d) => d.artifact_id));
+    const sessions = sessionsOf(v);
+    const byBranch = new Map(sessions.map((s) => [s.branch, s]));
+    const groups = new Map();
+    for (const a of v.artifacts || []) {
+      const s = byBranch.get(a.publisher_branch) || null;
+      if (!groups.has(a.publisher_branch)) groups.set(a.publisher_branch, { s, name: s ? s.name : a.publisher_branch, rows: [] });
+      groups.get(a.publisher_branch).rows.push({ a, standing: standing(a, s, accepted) });
+    }
+    const order = (g) => (g.s ? sessions.indexOf(g.s) : sessions.length);
+    return Array.from(groups.values()).sort((x, y) => order(x) - order(y))
+      .map((g) => ({ ...g, rows: g.rows.sort((x, y) => y.a.turn - x.a.turn) }));
+  }
+
+  // Ticked outputs that can no longer be accepted are unticked.
+  function prune(v) {
+    if (!v.artifacts) return;
+    const pickable = new Set(outputGroups(v).flatMap((g) => g.rows).filter((r) => STANDING[r.standing].pick).map((r) => r.a.id));
+    for (const id of v.selected) if (!pickable.has(id)) v.selected.delete(id);
   }
 
   function drawOutputs(v) {
     const list = $('outputs-list');
     if (!list || wsView !== v) return;
-    const accepted = new Set((v.workspace.accepted_deliverables || []).map((a) => a.artifact_id));
     const all = v.artifacts || [];
+    const groups = outputGroups(v);
     $('outputs-count').textContent = all.length ? String(all.length) : '';
-    const signature = JSON.stringify([all.map((a) => a.id), Array.from(accepted), v.artifactsError, v.artifacts === null, workspaceCanRun(v)]);
+    const signature = JSON.stringify([groups.map((g) => [g.name, g.s && sessionText(g.s), g.rows.map((r) => [r.a.id, r.standing])]),
+      v.artifactsError, v.artifacts === null, workspaceCanRun(v)]);
     if (signature === v.drawn.outputs) return;
     v.drawn.outputs = signature;
-    const names = new Map((v.workspace.sessions || []).map((s) => [s.branch, s.name]));
-    const row = (a) => {
-      const done = accepted.has(a.id);
-      const box = h('input', { type: 'checkbox', 'aria-label': `Select ${a.name}`, checked: done || v.selected.has(a.id), disabled: done || !workspaceCanRun(v) });
+    const row = ({ a, standing: st }) => {
+      const meaning = STANDING[st];
+      const note = nextId('output-note');
+      const box = h('input', {
+        type: 'checkbox', 'aria-label': `Select ${a.name}`, 'aria-describedby': note,
+        checked: st === 'accepted' || v.selected.has(a.id), disabled: !meaning.pick || !workspaceCanRun(v),
+      });
       box.addEventListener('change', () => {
         if (box.checked) v.selected.add(a.id); else v.selected.delete(a.id);
         drawStrip(v);
       });
-      return h('li', { class: done ? 'output-row accepted' : 'output-row', 'data-artifact': a.id },
+      return h('li', { class: 'output-row', 'data-artifact': a.id, 'data-standing': st },
         box,
         h('div', { class: 'file-main' },
-          h('button', { type: 'button', class: 'output-name', 'aria-pressed': String(v.previewing === a.id), title: `Preview ${a.name}`, text: a.name, onclick: () => openPreview(v, a) }),
-          h('span', { class: 'item-meta', title: a.media_type, text: `${formatOf(a.media_type)} · ${size(a.size)} · ${names.get(a.publisher_branch) || a.publisher_branch}, turn ${a.turn}` })),
-        done ? h('span', { class: 'tag tag-accepted' }, checkMark(false), 'Accepted') : null);
+          previewButton(v, { key: `output:${a.id}`, name: a.name, mediaType: a.media_type, base: `${workspacePath(v.id)}/artifacts/${enc(a.id)}` }),
+          h('span', { class: 'item-meta', id: note, title: a.media_type, text: `${formatOf(a.media_type)} · ${size(a.size)} · ${meaning.note(a)}` })),
+        meaning.tag ? h('span', { class: `tag tag-${st}` }, st === 'accepted' ? checkMark(false) : null, meaning.tag) : null);
+    };
+    const group = (g) => {
+      const heading = nextId('output-group');
+      return h('section', { class: 'output-group', 'aria-labelledby': heading },
+        h('h3', { id: heading }, g.s ? dot(sessionLane(g.s)) : null, h('span', { class: 'group-name', text: g.name }),
+          g.s ? h('span', { class: 'group-meta', text: cap(sessionText(g.s)) }) : null),
+        h('ul', { class: 'file-list', 'aria-labelledby': heading }, g.rows.map(row)));
     };
     fill(list,
       v.artifactsError ? h('p', { class: 'error pad', text: `Could not list outputs: ${v.artifactsError}` }) : null,
       v.artifacts === null ? h('p', { class: 'muted pad', text: 'Loading outputs…' })
         : !all.length ? h('p', { class: 'muted pad', text: `No outputs yet. A session started with Collect outputs publishes the files it lists in ${OUTPUT_MANIFEST} when its turn ends.` })
-          : h('ul', { class: 'files file-list', id: 'outputs', 'aria-label': 'Outputs' }, all.map(row)));
+          : groups.map(group));
   }
 
-  // Mount the preview component for one output. It asks the workspace's
-  // preview route; when this server answers 404 there, it has none, and
-  // the inspector says so in place of a preview.
-  function openPreview(v, a) {
+  // Mount the preview component for one source or output in the open
+  // panel. A table, a page, or why the server made neither is the
+  // component's to show; the original stays one click away.
+  function openPreview(v, item) {
     closePreview();
-    v.previewing = a.id;
-    for (const b of document.querySelectorAll('#outputs .output-name')) {
-      b.setAttribute('aria-pressed', String(b.closest('[data-artifact]').dataset.artifact === a.id));
-    }
-    const base = `${workspacePath(v.id)}/artifacts/${enc(a.id)}`;
+    v.previewing = item.key;
+    for (const b of document.querySelectorAll('#inspector button[data-preview]')) b.setAttribute('aria-pressed', String(b.dataset.preview === item.key));
+    const slot = $('preview');
+    $(`panel-${v.tab}`).append(slot);
     const host = h('div', { class: 'preview-host', id: 'preview-host' });
-    fill($('preview'),
+    fill(slot,
       h('div', { class: 'preview-head' },
-        h('h3', { id: 'preview-title', text: a.name, title: a.name }),
-        h('button', { type: 'button', text: 'Download original', onclick: () => download(`${base}/content`, a.name) })),
+        h('h3', { id: 'preview-title', text: item.name, title: item.name }),
+        h('button', { type: 'button', text: 'Download original', onclick: () => download(`${item.base}/content`, item.name) })),
       host);
-    const live = { handle: null };
-    livePreview = live;
-    live.handle = window.BranchyardArtifactPreview.mount(host, {
-      baseUrl: base,
-      displayName: a.name,
-      mediaType: a.media_type,
-      fetchAuthenticated: (path, init) => authFetch(path, init).then(async (response) => {
-        if (response.status === 404 && path.startsWith(`${base}/preview?`) && livePreview === live) {
-          let message = null;
-          try { message = (await response.clone().json()).error.message; } catch (_) { /* not the error envelope */ }
-          // The router's fallback answers an unknown route; a 404 from a
-          // preview route itself (an output gone) is the component's to show.
-          if (livePreview === live && message === 'no such route') previewMissing(host, message);
-        }
-        return response;
-      }),
-    });
-  }
-
-  function previewMissing(host, message) {
-    disposePreview();
-    fill(host, h('div', { class: 'preview-missing', role: 'status' },
-      h('p', { class: 'preview-missing-title', text: 'This server cannot preview workspace outputs yet.' }),
-      h('p', { text: 'Download the original to open it on this device.' }),
-      message ? h('p', { class: 'hint', text: `The server answered: ${message}.` }) : null));
+    livePreview = window.BranchyardArtifactPreview.mount(host, { baseUrl: item.base, mediaType: item.mediaType, fetchAuthenticated: authFetch });
   }
 
   function drawDetails(v) {

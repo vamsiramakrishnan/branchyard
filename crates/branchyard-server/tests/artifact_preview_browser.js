@@ -285,54 +285,98 @@ async function runTests() {
   console.log('  ✓ Page navigation and same-query asset fetch passed.');
 
   // ==========================================
-  // Test 4: Unavailable/Error state with setup action & Original Download
+  // Test 4: The server's failure answers, each as a plain state
   // ==========================================
-  console.log('Test 4: Error/Unavailable state with setup action & download...');
-  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/preview*', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        status: 'unavailable',
-        message: 'LibreOffice preview service not running',
-        detail: {
-          next: 'Run branchyard rig setup preview-services to enable document conversion.'
-        },
-        setup: true
-      })
+  console.log('Test 4: Server failure envelopes as plain states...');
+  const envelope = (code, message, detail) => ({ error: Object.assign({ code, message }, detail ? { detail } : {}) });
+  const failures = [
+    {
+      name: 'unsupported', status: 422,
+      body: envelope('preview_unsupported', 'preview supports CSV, XLSX, DOCX, PPTX, PDF and raster images'),
+      title: 'No preview for this format', shows: ['Download the original to open it on this device.'], retry: false
+    },
+    {
+      name: 'renderer missing', status: 503,
+      body: envelope('preview_unavailable', 'A preview executable is unavailable.', { status: 'unavailable', next: 'Configure the documented isolated preview backend.' }),
+      title: 'This server cannot make previews right now', operator: ['A preview executable is unavailable.', 'Configure the documented isolated preview backend.'], retry: false
+    },
+    {
+      name: 'renderer lacks a component', status: 200,
+      body: { status: 'unavailable', error: { kind: 'unavailable', message: 'Missing pypdf', next: 'Run the doctor' } },
+      title: 'This server cannot make previews right now', operator: ['Missing pypdf', 'Run the doctor'], retry: false
+    },
+    {
+      name: 'conversion failed', status: 200,
+      body: { status: 'failed', error: { kind: 'invalid_artifact', message: 'LibreOffice completed without producing the requested PDF', next: 'Inspect the input' } },
+      title: 'This file could not be converted for preview', shows: ['LibreOffice completed without producing the requested PDF', 'Next: Inspect the input'], retry: false
+    },
+    {
+      name: 'timeout', status: 504,
+      body: envelope('preview_timeout', 'document conversion exceeded its time limit'),
+      title: 'The preview took too long to make', shows: ['Try again, or download the original.'], retry: true
+    },
+    {
+      name: 'too large', status: 413,
+      body: envelope('preview_too_large', 'document previews accept at most 64 MiB'),
+      title: 'This file is too large to preview', shows: ['document previews accept at most 64 MiB'], retry: false
+    },
+    {
+      name: 'output limit', status: 422,
+      body: envelope('preview_output_limit', 'document conversion exceeded its output bound or lost a pipe'),
+      title: 'This preview is too large to show', retry: false
+    },
+    {
+      name: 'gone', status: 404,
+      body: envelope('not_found', 'no artifact art-4 in this workspace'),
+      title: 'This file is no longer available', shows: ['no artifact art-4 in this workspace'], retry: false
+    }
+  ];
+  const failureRoute = 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/preview*';
+  for (const failure of failures) {
+    await page.route(failureRoute, (route) => route.fulfill({ status: failure.status, contentType: 'application/json', body: JSON.stringify(failure.body) }));
+    await page.evaluate(() => {
+      const container = document.getElementById('preview-container');
+      container.innerHTML = '';
+      window.activePreview = window.BranchyardArtifactPreview.mount(container, {
+        baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4',
+        mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        fetchAuthenticated: window.mockFetchAuthenticated
+      });
     });
-  });
+    const state = page.locator('.by-preview-failure');
+    await state.locator('.by-preview-state-message', { hasText: failure.title }).waitFor();
+    for (const text of failure.shows || []) {
+      assert(await state.getByText(text, { exact: true }).isVisible(), `${failure.name}: shows ${text}`);
+    }
+    const operator = state.locator('details.by-preview-operator');
+    assert.strictEqual(await operator.count(), failure.operator ? 1 : 0, `${failure.name}: operator details`);
+    if (failure.operator) {
+      assert(!(await operator.getByText(failure.operator[0], { exact: true }).isVisible()), `${failure.name}: operator details start closed`);
+      await operator.locator('summary').click();
+      for (const text of failure.operator) {
+        assert(await operator.getByText(text, { exact: true }).isVisible(), `${failure.name}: operator details show ${text}`);
+      }
+    }
+    assert.strictEqual(await state.getByRole('button', { name: 'Try again' }).count(), failure.retry ? 1 : 0, `${failure.name}: Try again`);
+    assert.strictEqual(await page.locator('.by-artifact-preview button', { hasText: /download/i }).count(), 0, `${failure.name}: the host owns the download`);
+    await page.waitForFunction((title) => document.querySelector('.by-preview-sr-only[aria-live="polite"]').textContent === title, failure.title);
+    await page.unroute(failureRoute);
+  }
 
-  const downloadRequestPromise = page.waitForRequest('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/content');
-
-  await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4/content', (route) => {
-    route.fulfill({
-      status: 200,
-      contentType: 'application/octet-stream',
-      body: Buffer.from('Original file bytes')
-    });
-  });
-
-  await page.evaluate(() => {
-    const container = document.getElementById('preview-container');
-    container.innerHTML = '';
-    window.activePreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/art-4',
-      displayName: 'spec.docx',
-      mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      fetchAuthenticated: window.mockFetchAuthenticated
-    });
-  });
-
-  await page.waitForSelector('text=LibreOffice preview service not running');
-  await page.waitForSelector('button:has-text("Setup Instructions")');
-  const dlButton = page.locator('button:has-text("Download Original")');
-  assert(await dlButton.isVisible(), 'Original download button must be visible even when unavailable');
-
-  await dlButton.click();
-  const downloadReq = await downloadRequestPromise;
-  assert(downloadReq, 'Original download content endpoint must be requested');
-  console.log('  ✓ Unavailable state, setup action, and original download passed.');
+  await page.route(failureRoute, (route) => route.abort('failed'));
+  await page.evaluate(() => window.activePreview.refresh());
+  await page.locator('.by-preview-failure .by-preview-state-message', { hasText: 'The server cannot be reached' }).waitFor();
+  await page.unroute(failureRoute);
+  await page.route(failureRoute, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ status: 'passed', kind: 'text', text: 'BACK AFTER TRY AGAIN' })
+  }));
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await page.waitForSelector('text=BACK AFTER TRY AGAIN');
+  await page.waitForFunction(() => document.querySelector('.by-preview-sr-only[aria-live="polite"]').textContent === 'Preview ready.');
+  await page.unroute(failureRoute);
+  console.log('  ✓ Each failure envelope shows its own plain state, server words and Try again where it helps.');
 
   // ==========================================
   // Test 5: Rapid document switching & deterministic late-response rejection
@@ -396,32 +440,16 @@ async function runTests() {
   console.log('  ✓ Rapid document switching & deterministic stale response rejection passed.');
 
   // ==========================================
-  // Test 6: 202 / 429 Retry-After polling and cancellation on dispose via Playwright Clock
+  // Test 6: preview_busy retry_after polling and cancellation on dispose via Playwright Clock
   // ==========================================
-  console.log('Test 6: 202/429 retry polling and cancellation on dispose via Playwright Clock...');
+  console.log('Test 6: preview_busy retry polling and cancellation on dispose via Playwright Clock...');
+  const busy = { error: { code: 'preview_busy', message: 'both document renderers are busy; retry shortly', detail: { retry_after: 2 } } };
   let pollAttempts = 0;
+  let busyAnswers = 1;
   await page.route('https://api.branchyard.local/v1/workspaces/ws-1/artifacts/polling-doc/preview*', (route) => {
     pollAttempts++;
-    if (pollAttempts === 1) {
-      // Return 202 Accepted with Retry-After: 1
-      route.fulfill({
-        status: 202,
-        headers: { 'Retry-After': '1' },
-        body: JSON.stringify({ status: 'preparing' })
-      });
-    } else if (pollAttempts === 2) {
-      // Return 429 preview_busy with detail.retry_after: 2
-      route.fulfill({
-        status: 429,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: {
-            code: 'preview_busy',
-            message: 'Preview renderer busy',
-            detail: { retry_after: 2 }
-          }
-        })
-      });
+    if (pollAttempts <= busyAnswers) {
+      route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify(busy) });
     } else {
       route.fulfill({
         status: 200,
@@ -434,8 +462,7 @@ async function runTests() {
       });
     }
   });
-
-  await page.evaluate(() => {
+  const mountPolling = () => page.evaluate(() => {
     const container = document.getElementById('preview-container');
     container.innerHTML = '';
     window.pollingPreview = window.BranchyardArtifactPreview.mount(container, {
@@ -444,45 +471,40 @@ async function runTests() {
     });
   });
 
-  // Verify attempt 1 occurred
-  await page.waitForSelector('text=Preparing preview (attempt 1)...');
+  // Paused, so only runFor moves the page's time and retry_after is measured exactly.
+  await context.clock.pauseAt(Date.now() + 60000);
+  await mountPolling();
+  await page.waitForSelector('text=The server is busy making other previews. Trying again in 2 seconds…');
   assert.strictEqual(pollAttempts, 1);
-
-  // Advance clock by 1000ms for 202 Retry-After: 1
-  await context.clock.runFor(1000);
-  await page.waitForSelector('text=Preview service busy; retrying in 2s (attempt 2)...');
+  await context.clock.runFor(1999);
+  assert.strictEqual(pollAttempts, 1, 'The retry waits the whole retry_after');
+  await context.clock.runFor(1);
+  await page.waitForSelector('text=READY AFTER RETRY SEQUENCE');
   assert.strictEqual(pollAttempts, 2);
 
-  // Advance clock by 2000ms for 429 retry_after: 2
-  await context.clock.runFor(2000);
-  await page.waitForSelector('text=READY AFTER RETRY SEQUENCE');
-  assert.strictEqual(pollAttempts, 3);
-
-  // Now test deterministic cancellation on dispose
   pollAttempts = 0;
-  await page.evaluate(() => {
-    const container = document.getElementById('preview-container');
-    container.innerHTML = '';
-    window.cancelledPreview = window.BranchyardArtifactPreview.mount(container, {
-      baseUrl: 'https://api.branchyard.local/v1/workspaces/ws-1/artifacts/polling-doc',
-      fetchAuthenticated: window.mockFetchAuthenticated
-    });
-  });
+  busyAnswers = Infinity;
+  await mountPolling();
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    await page.waitForFunction((n) => window.fetchLogs.filter((l) => l.url.includes('polling-doc')).length >= n, attempt);
+    await context.clock.runFor(2000);
+  }
+  await page.locator('.by-preview-failure .by-preview-state-message', { hasText: 'The server is busy making other previews' }).waitFor();
+  assert.strictEqual(pollAttempts, 6, 'Five retries, then the busy state');
+  assert(await page.getByRole('button', { name: 'Try again' }).isVisible(), 'A busy server offers Try again');
 
-  // Wait for 1st attempt to settle into retry wait
-  await page.waitForSelector('text=Preparing preview (attempt 1)...');
+  pollAttempts = 0;
+  await mountPolling();
+  await page.waitForSelector('text=The server is busy making other previews. Trying again in 2 seconds…');
   assert.strictEqual(pollAttempts, 1);
-
-  // Dispose while retry timer is pending
   await page.evaluate(() => {
-    window.cancelledPreview.dispose();
+    window.pollingPreview.dispose();
   });
   const attemptsAtDispose = pollAttempts;
-
-  // Advance clock far past Retry-After
   await context.clock.runFor(10000);
   assert.strictEqual(pollAttempts, attemptsAtDispose, 'Dispose must cancel pending retry timers');
-  console.log('  ✓ 202/429 retry polling & timer cancellation on dispose passed.');
+  await context.clock.resume();
+  console.log('  ✓ preview_busy retry_after polling, retry limit & timer cancellation on dispose passed.');
 
   // ==========================================
   // Test 7: Blob URL creation and revocation verification
