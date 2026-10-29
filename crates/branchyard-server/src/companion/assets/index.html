@@ -14,37 +14,47 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<header class="top">
-  <div class="top-inner">
-  <a class="brand" href="#/"><img src="icon.svg" alt="" width="22" height="22"> Branchyard</a>
-  <label class="repo-pick" id="repo-pick" hidden>
-    <span class="visually-hidden">Repository</span>
-    <select id="repo"></select>
-  </label>
-  <span id="live" class="live" data-state="off" role="status" aria-live="polite">offline</span>
+<div class="app">
+<aside id="sidebar" class="sidebar" aria-label="Branches" hidden>
+  <div class="side-top">
+    <a class="brand" href="#/"><img src="icon.svg" alt="Branchyard" width="20" height="20"></a>
+    <span id="repo-name" class="repo-name"></span>
+    <label class="repo-pick" id="repo-pick" hidden>
+      <span class="visually-hidden">Repository</span>
+      <select id="repo"></select>
+    </label>
+    <span id="live" class="live" data-state="off" role="status" aria-live="polite">offline</span>
   </div>
-</header>
-<nav id="nav" class="nav" aria-label="Sections" hidden>
-  <a href="#/" data-route="branches">Branches</a>
-  <a href="#/inbox" data-route="inbox">Inbox <span id="inbox-count" class="count" hidden></span></a>
-  <a href="#/approvals" data-route="approvals">Approvals <span id="approvals-count" class="count" hidden></span></a>
-  <a href="#/triggers" data-route="triggers">Triggers</a>
-  <a href="#/queue" data-route="queue">Queue</a>
-  <a href="#/settings" data-route="settings">Settings</a>
-</nav>
+  <nav class="side-links" aria-label="Work">
+    <a class="side-link" id="new-task" href="#/new" data-route="new"><span class="side-icon" aria-hidden="true">+</span>New task</a>
+    <a class="side-link" href="#/attention" data-route="attention"><span class="side-icon ring" aria-hidden="true"></span>Needs you <span id="attention-count" class="count" hidden></span></a>
+  </nav>
+  <div class="filter" id="filter" hidden>
+    <label for="branch-filter" class="visually-hidden">Filter branches</label>
+    <input id="branch-filter" type="search" placeholder="Filter branches" autocomplete="off" spellcheck="false">
+    <p id="branch-count" class="result-count" role="status" aria-live="polite"></p>
+  </div>
+  <div id="branch-list" class="lanes"></div>
+  <nav class="side-foot" aria-label="Sections">
+    <a href="#/triggers" data-route="triggers">Triggers</a>
+    <a href="#/queue" data-route="queue">Queue</a>
+    <a href="#/settings" data-route="settings">Settings</a>
+  </nav>
+</aside>
 <main id="main" tabindex="-1" aria-busy="true">
-  <section class="empty-state" role="status">
+  <section class="signin" role="status">
     <h1>Connecting to Branchyard</h1>
     <p class="muted">Loading your workspace…</p>
   </section>
 </main>
+</div>
 <div id="toasts" class="toasts" role="log" aria-live="polite" aria-label="Notifications"></div>
 <dialog id="confirm" aria-labelledby="confirm-title">
   <h2 id="confirm-title">Are you sure?</h2>
   <p id="confirm-text"></p>
-  <div class="row">
-    <button type="button" class="secondary" id="confirm-cancel">Cancel</button>
-    <button type="button" id="confirm-ok">Confirm</button>
+  <div class="row dialog-actions">
+    <button type="button" id="confirm-cancel">Cancel</button>
+    <button type="button" class="primary" id="confirm-ok">Confirm</button>
   </div>
 </dialog>
 <noscript><p>The Branchyard companion needs JavaScript.</p></noscript>

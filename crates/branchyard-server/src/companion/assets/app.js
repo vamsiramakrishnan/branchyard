@@ -12,6 +12,11 @@
   const RESUME_PROMPT = 'Your previous turn was interrupted before it finished. ' +
     'Continue the task from where you left off, then summarize what you did.';
   const DIFF_LIMIT = 400000;
+  // The server's largest event page; an open branch keeps at most
+  // EVENT_KEEP of its latest events.
+  const EVENT_WINDOW = 200;
+  const EVENT_KEEP = 2000;
+  const SVG = 'http://www.w3.org/2000/svg';
 
   const state = {
     token: null,
@@ -19,20 +24,25 @@
     repos: [],
     repo: null,
     branches: new Map(),
+    lastActive: new Map(),
     cursor: null,
     stream: null,
     backoff: 1000,
     loaded: false,
     branchError: null,
+    filter: '',
+    doneOpen: false,
     seen: new Set(),
     statusSeen: new Map(),
     permissions: [],
     inbox: [],
-    inboxStamp: 0,
     approvals: [],
     effects: [],
-    route: { name: 'branches' },
+    pending: new Map(),
+    merged: new Set(),
+    route: { name: 'home' },
     pushInfo: null,
+    pushOn: false,
   };
 
   // ---------------------------------------------------------------
@@ -68,29 +78,64 @@
   }
   const $ = (id) => document.getElementById(id);
   const enc = encodeURIComponent;
+  const cap = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+  // A `when` reason as a sentence; one that opens with a branch's name keeps its case.
+  const sentence = (why, name) => `${why.startsWith(name) ? why : cap(why)}.`;
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  const branchHref = (name) => `#/b/${enc(state.repo)}/${enc(name)}`;
   let uid = 0;
   const nextId = (prefix) => `${prefix}-${++uid}`;
 
+  // Replace an element's children, skipping what is null or false, as h() does.
+  function fill(el, ...children) {
+    el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+    return el;
+  }
+
+  // A page's heading takes focus on navigation, and keeps it when a live
+  // update redraws the page.
   function main(...children) {
     const m = $('main');
+    const kept = document.activeElement && document.activeElement.tagName === 'H1' && m.contains(document.activeElement);
     m.removeAttribute('aria-busy');
-    m.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+    fill(m, ...children);
+    const heading = m.querySelector('h1');
+    if (heading) heading.tabIndex = -1;
+    if (heading && kept) heading.focus({ preventScroll: true });
   }
 
   function focusHeading() {
     const heading = $('main').querySelector('h1');
-    if (heading) {
-      heading.setAttribute('tabindex', '-1');
-      heading.focus({ preventScroll: false });
-    }
+    if (heading) heading.focus({ preventScroll: false });
   }
 
+  const dot = (lane) => h('span', { class: `dot dot-${lane}`, 'aria-hidden': 'true' });
+
+  function counts(insertions, deletions) {
+    return [insertions || !deletions ? h('span', { class: 'add', text: `+${insertions}` }) : null,
+      insertions && deletions ? ' ' : null,
+      deletions ? h('span', { class: 'del', text: `−${deletions}` }) : null];
+  }
+
+  function checkMark(drawn) {
+    const svg = document.createElementNS(SVG, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('class', drawn ? 'check drawn' : 'check');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS(SVG, 'path');
+    path.setAttribute('d', 'M3 8.5l3.2 3L13 4.5');
+    svg.append(path);
+    return svg;
+  }
+
+  // Only what the person did here gets a toast: the branch list is the
+  // notice for everything else.
   function toast(text, href) {
     const box = h('div', { class: 'toast' }, text, href ? [' ', h('a', { href, text: 'Open' })] : null);
     const toasts = $('toasts');
     toasts.append(box);
-    while (toasts.children.length > 3) toasts.firstChild.remove();
-    setTimeout(() => box.remove(), 8000);
+    while (toasts.children.length > 2) toasts.firstChild.remove();
+    setTimeout(() => box.remove(), 6000);
   }
 
   function setLive(which, text) {
@@ -105,7 +150,7 @@
     $('confirm-text').textContent = text;
     const ok = $('confirm-ok');
     ok.textContent = okText || 'Confirm';
-    ok.className = danger ? 'danger' : '';
+    ok.className = danger ? 'danger' : 'primary';
     if (typeof dialog.showModal !== 'function') return Promise.resolve(window.confirm(`${title}\n\n${text}`));
     return new Promise((resolve) => {
       const done = (answer) => {
@@ -196,11 +241,6 @@
     }
   }
 
-  function badge(info) {
-    const s = statusOf(info);
-    return h('span', { class: `badge s-${s.key}`, text: s.text });
-  }
-
   // When each action applies: the rules of `by watch`'s action registry.
   const when = {
     send(info) {
@@ -229,16 +269,64 @@
     },
   };
 
+  // Branches grouped by what they ask of you, in display order: the first
+  // lane whose test passes takes the branch. `attention` maps a branch to
+  // the approval or question it waits on a person for.
+  const LANES = [
+    {
+      key: 'needs', label: 'Needs you', collapsed: false,
+      test: (b, attention) => attention.has(b.name) || b.stalled ||
+        ['blocked', 'failed', 'interrupted', 'budget_exceeded', 'awaiting_plan_approval'].includes(b.status.state),
+      meta: (b, attention) => attention.get(b.name) || (b.stalled ? 'stalled' : statusOf(b).text.split(/[:(]/)[0].trim()),
+    },
+    {
+      key: 'running', label: 'Running', collapsed: false,
+      test: (b) => ['running', 'waiting'].includes(b.status.state),
+      meta: (b) => b.status.state,
+    },
+    {
+      key: 'ready', label: 'Ready', collapsed: false,
+      test: (b) => b.status.state === 'ready',
+      meta: (b) => (b.candidate ? counts(b.candidate.insertions, b.candidate.deletions) : 'ready'),
+    },
+    {
+      key: 'done', label: 'Done', collapsed: true,
+      test: () => true,
+      meta: (b) => (b.status.state === 'merged' ? 'merged' : statusOf(b).text),
+    },
+  ];
+
+  function attention() {
+    const waiting = new Map();
+    for (const m of state.inbox) waiting.set(m.from, m.kind);
+    for (const a of state.approvals) waiting.set(a.branch, 'approval');
+    return waiting;
+  }
+
+  const laneOf = (b, waiting) => LANES.find((lane) => lane.test(b, waiting));
+  const activeAt = (b) => state.lastActive.get(b.name) || b.created_at * 1000;
+
+  function lanes(branches) {
+    const waiting = attention();
+    const sorted = branches.slice().sort((x, y) => activeAt(y) - activeAt(x));
+    return LANES.map((lane) => ({ lane, branches: sorted.filter((b) => laneOf(b, waiting) === lane) }));
+  }
+
   function money(v) {
     return v == null ? '—' : `$${Number(v).toFixed(v < 1 ? 4 : 2)}`;
   }
 
-  function ago(ms) {
+  function since(ms) {
     const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.round(s / 60)}m ago`;
-    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-    return `${Math.round(s / 86400)}d ago`;
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    if (s < 86400) return `${Math.round(s / 3600)}h`;
+    return `${Math.round(s / 86400)}d`;
+  }
+
+  // A relative time that ticks (see boot) without redrawing its page.
+  function ago(ms, suffix = ' ago') {
+    return h('time', { datetime: new Date(ms).toISOString(), 'data-at': ms, 'data-suffix': suffix, text: since(ms) + suffix });
   }
 
   function clock(ms) {
@@ -247,7 +335,7 @@
   }
 
   // ---------------------------------------------------------------
-  // What deserves a notice: `by watch`'s rules, each once
+  // What deserves a system notification: `by watch`'s rules, each once
 
   function notice(entry) {
     const a = entry.activity || {};
@@ -300,7 +388,7 @@
     } else {
       return null;
     }
-    const href = kind === 'question' ? '#/inbox' : kind === 'approval' ? '#/approvals' : `#/b/${enc(state.repo)}/${enc(target)}`;
+    const href = kind === 'question' || kind === 'approval' ? '#/attention' : branchHref(target);
     return { kind, text, href };
   }
 
@@ -313,17 +401,18 @@
     save(TOKEN_KEY, null);
     if (state.stream) state.stream.abort();
     state.stream = null;
-    $('nav').hidden = true;
-    $('repo-pick').hidden = true;
+    $('sidebar').hidden = true;
+    document.title = 'Branchyard';
     setLive('off', 'signed out');
     renderSignIn(message);
   }
 
   function renderSignIn(message) {
+    document.body.dataset.view = 'signin';
     const id = nextId('token');
     const error = h('p', { class: 'error', role: 'alert', text: message || '' });
     const input = h('input', { id, type: 'password', autocomplete: 'off', spellcheck: 'false', required: true });
-    const connect = h('button', { type: 'button', text: 'Connect to server', onclick: () => submit() });
+    const connect = h('button', { type: 'button', class: 'primary', text: 'Connect to server', onclick: () => submit() });
     const submit = async () => {
       const token = input.value.trim();
       if (!token) { input.focus(); input.reportValidity(); return; }
@@ -343,11 +432,11 @@
       }
     };
     input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submit(); });
-    main(
-      h('div', { class: 'page-heading' },
-        h('div', {}, h('h1', { text: 'Connect to Branchyard' }),
-          h('p', { class: 'lede', text: 'Follow your tasks and review their branches from this browser.' }))),
-      h('section', { class: 'panel connect-panel', 'aria-label': 'Connect to your server' },
+    main(h('div', { class: 'signin' },
+      h('img', { class: 'signin-mark', src: 'icon.svg', alt: '', width: 32, height: 32 }),
+      h('h1', { text: 'Connect to Branchyard' }),
+      h('p', { class: 'lede', text: 'Follow your tasks and review their branches from this browser.' }),
+      h('section', { class: 'card connect', 'aria-label': 'Connect to your server' },
         h('h2', { text: 'Open a pairing link' }),
         h('p', {}, 'On the machine running your server, run ', h('code', { text: 'by serve token new --link' }),
           '. Open the printed link on this device.'),
@@ -355,8 +444,7 @@
         h('label', { class: 'block', for: id, text: 'Server token' }), input,
         h('p', { class: 'hint', text: 'Kept only in this browser tab and sent only to this server.' }),
         h('div', { class: 'row form-actions' }, connect)),
-      error,
-    );
+      error));
     focusHeading();
   }
 
@@ -372,7 +460,8 @@
   async function pair(code) {
     // Take the code out of the address bar and history first.
     history.replaceState(null, '', location.pathname + location.search);
-    main(h('h1', { text: 'Pairing…' }));
+    document.body.dataset.view = 'signin';
+    main(h('div', { class: 'signin' }, h('h1', { text: 'Pairing…' })));
     try {
       const paired = await api('POST', '/app/pair', { code, device: deviceLabel() });
       state.token = paired.token;
@@ -393,20 +482,25 @@
     const { repos } = await api('GET', '/v1/repos');
     state.repos = repos.map((r) => r.name);
     if (!state.repos.length) throw new ApiError(403, 'no_repos', 'This token can reach no repository.');
+    const asked = parseRoute().repo;
     const remembered = load(REPO_KEY);
-    state.repo = state.repos.includes(remembered) ? remembered : state.repos[0];
-    const select = $('repo');
-    select.replaceChildren(...state.repos.map((r) => h('option', { value: r, text: r, selected: r === state.repo })));
+    state.repo = state.repos.includes(asked) ? asked : state.repos.includes(remembered) ? remembered : state.repos[0];
+    fill($('repo'), ...state.repos.map((r) => h('option', { value: r, text: r, selected: r === state.repo })));
     $('repo-pick').hidden = state.repos.length < 2;
-    $('nav').hidden = false;
-    await switchRepo(state.repo);
+    $('repo-name').hidden = state.repos.length > 1;
+    $('new-task').hidden = !can('run');
+    $('sidebar').hidden = false;
+    const loading = switchRepo(state.repo);
     route();
+    await loading;
   }
 
   async function switchRepo(repo) {
     state.repo = repo;
     save(REPO_KEY, repo);
+    $('repo-name').textContent = repo;
     state.branches = new Map();
+    state.lastActive = new Map();
     state.cursor = null;
     state.loaded = false;
     state.branchError = null;
@@ -420,38 +514,40 @@
   }
 
   async function loadBranches() {
+    const repo = state.repo;
     state.branchError = null;
-    if (state.route.name === 'branches') renderBranches();
+    renderLanes();
     let branches;
     try {
       ({ branches } = await api('GET', `${repoPath()}/branches`));
     } catch (e) {
       if (e.status === 401) throw e;
+      if (repo !== state.repo) return;
       state.branchError = e.message;
-      if (state.route.name === 'branches') renderBranches();
+      branchesChanged();
       return;
     }
+    if (repo !== state.repo) return;
     state.branches = new Map(branches.map((b) => [b.name, b]));
     state.loaded = true;
     refreshInbox();
     refreshApprovals();
-    if (['branches', 'queue'].includes(state.route.name)) render();
-    if (state.route.name === 'branch') updateBranchHeader();
+    branchesChanged();
+    if (state.route.name === 'queue') renderQueue();
   }
 
-  const pending = new Map();
+  const refreshing = new Map();
   function refreshBranch(name) {
-    if (pending.has(name)) return;
-    pending.set(name, setTimeout(async () => {
-      pending.delete(name);
+    if (refreshing.has(name)) return;
+    refreshing.set(name, setTimeout(async () => {
+      refreshing.delete(name);
       try {
         const info = await api('GET', branchPath(name));
         state.branches.set(name, info);
       } catch (e) {
         if (e.status === 404) state.branches.delete(name);
       }
-      if (state.route.name === 'branches') render();
-      if (state.route.name === 'branch' && state.route.branch === name) updateBranchHeader();
+      branchesChanged();
     }, 250));
   }
 
@@ -536,6 +632,7 @@
 
   function onActivity(entry) {
     const a = entry.activity || {};
+    state.lastActive.set(entry.branch, entry.at_ms);
     if (a.harness && a.harness.type === 'permission_requested') {
       state.permissions.unshift({ branch: entry.branch, tool: a.harness.request.tool, at_ms: entry.at_ms, decision: null });
       state.permissions.length = Math.min(state.permissions.length, 50);
@@ -547,36 +644,36 @@
     if (a.effect) refreshApprovals();
     if (state.loaded && Date.now() - entry.at_ms < 60000) {
       const n = notice(entry);
-      if (n) {
-        toast(n.text, n.href);
-        if (document.hidden && 'Notification' in window && Notification.permission === 'granted' && !state.pushOn) {
-          try { new Notification(`${state.repo}: ${n.text}`, { tag: n.href }); } catch (_) { /* page notifications unavailable */ }
-        }
+      // On screen the branch list is the notice; a hidden tab gets the system's.
+      if (n && document.hidden && 'Notification' in window && Notification.permission === 'granted' && !state.pushOn) {
+        try { new Notification(`${state.repo}: ${n.text}`, { tag: n.href }); } catch (_) { /* page notifications unavailable */ }
       }
     }
     refreshBranch(entry.branch);
-    if (state.route.name === 'branch' && state.route.branch === entry.branch) appendEvent(entry);
-    if (state.route.name === 'inbox') renderInbox();
-    if (state.route.name === 'approvals' && a.effect) renderApprovals();
+    if (view && view.name === entry.branch) refreshTimeline(view);
   }
 
   // ---------------------------------------------------------------
   // Routing
 
+  // Inbox and Approvals became Needs you; push notifications still open them.
+  const ALIASES = { '': 'home', inbox: 'attention', approvals: 'attention' };
+  const VIEWS = {
+    home: renderHome,
+    branch: renderBranch,
+    new: renderNew,
+    attention: renderAttention,
+    triggers: renderTriggers,
+    queue: renderQueue,
+    settings: renderSettings,
+  };
+
   function parseRoute() {
     const hash = location.hash || '#/';
     const parts = hash.replace(/^#\/?/, '').split('/').map((p) => { try { return decodeURIComponent(p); } catch (_) { return p; } });
-    switch (parts[0]) {
-      case '': return { name: 'branches' };
-      case 'b': return { name: 'branch', repo: parts[1], branch: parts.slice(2).join('/') };
-      case 'inbox': return { name: 'inbox' };
-      case 'approvals': return { name: 'approvals' };
-      case 'triggers': return { name: 'triggers' };
-      case 'queue': return { name: 'queue' };
-      case 'settings': return { name: 'settings' };
-      case 'new': return { name: 'new' };
-      default: return { name: 'branches' };
-    }
+    if (parts[0] === 'b') return { name: 'branch', repo: parts[1], branch: parts.slice(2).join('/') };
+    const name = ALIASES[parts[0]] || parts[0];
+    return { name: VIEWS[name] ? name : 'home' };
   }
 
   async function route() {
@@ -586,119 +683,165 @@
       $('repo').value = state.route.repo;
       await switchRepo(state.route.repo);
     }
-    const section = state.route.name === 'branch' || state.route.name === 'new' ? 'branches' : state.route.name;
-    for (const link of document.querySelectorAll('#nav a')) {
-      if (link.dataset.route === section) link.setAttribute('aria-current', 'page');
+    document.body.dataset.view = state.route.name;
+    view = null;
+    drawn = null;
+    for (const link of document.querySelectorAll('#sidebar a[data-route]')) {
+      if (link.dataset.route === state.route.name) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     }
-    await render();
+    renderLanes();
+    await VIEWS[state.route.name]();
     focusHeading();
   }
 
-  async function render() {
-    switch (state.route.name) {
-      case 'branch': return renderBranch();
-      case 'inbox': return renderInbox();
-      case 'approvals': return renderApprovals();
-      case 'triggers': return renderTriggers();
-      case 'queue': return renderQueue();
-      case 'settings': return renderSettings();
-      case 'new': return renderNew();
-      default: return renderBranches();
-    }
+  // A live update redraws a page only when what it shows changed, so focus
+  // and half-typed text survive the stream.
+  let drawn = null;
+  function redraw(signature, draw) {
+    if (signature === drawn) return;
+    drawn = signature;
+    draw();
+  }
+
+  function branchesChanged() {
+    renderLanes();
+    if (state.route.name === 'home') redraw(homeSignature(), renderHome);
+    if (state.route.name === 'attention') redraw(attentionSignature(), renderAttention);
+    if (state.route.name === 'branch') updateBranch();
   }
 
   // ---------------------------------------------------------------
-  // Branches
+  // The sidebar: branches by lane
 
-  let filterText = '';
-  function renderBranches() {
+  function renderLanes() {
+    const list = $('branch-list');
     const all = Array.from(state.branches.values());
-    const rank = (b) => ({ running: 0, waiting: 1 }[b.status.state] ?? 2);
-    all.sort((x, y) => rank(x) - rank(y) || y.created_at - x.created_at);
-    const matches = (b) => {
-      const needle = filterText.trim().toLowerCase();
-      return !needle || b.name.toLowerCase().includes(needle) || (b.prompt || '').toLowerCase().includes(needle);
-    };
-    const searchId = 'branch-filter';
-    const previous = document.activeElement;
-    const selection = previous && previous.id === searchId
-      ? [previous.selectionStart, previous.selectionEnd, previous.selectionDirection] : null;
-    const search = h('input', { id: searchId, type: 'search', value: filterText, placeholder: 'Filter by name or prompt' });
-    const count = h('p', { id: 'branch-count', class: 'result-count', role: 'status', 'aria-live': 'polite' });
-    const list = h('ul', { class: 'list branch-list', id: 'branch-list', 'aria-label': 'Branches' });
-    const empty = h('section', { class: 'empty-state', id: 'branch-empty' });
-    const update = () => {
-      const shown = all.filter(matches);
-      list.replaceChildren(...branchItems(shown));
-      count.textContent = filterText.trim()
-        ? `Showing ${shown.length} of ${all.length} branches`
-        : `${all.length} branch${all.length === 1 ? '' : 'es'}`;
-      empty.hidden = !!shown.length;
-      if (!shown.length && all.length) {
-        empty.replaceChildren(h('h2', { text: 'No matching branches' }),
-          h('p', { class: 'muted', text: 'Try another name or a word from the prompt.' }),
-          h('button', { type: 'button', class: 'secondary', text: 'Clear search', onclick: () => {
-            filterText = ''; search.value = ''; update(); search.focus();
-          } }));
-      } else if (!all.length) {
-        empty.hidden = !!state.branchError;
-        empty.replaceChildren(
-          h('h2', { text: state.loaded ? 'No branches yet.' : 'Loading branches…' }),
-          h('p', { class: 'muted', text: state.loaded
-            ? can('run') ? 'Start a task to create its own branch. Its progress and results will appear here.'
-              : 'Branches started from the CLI or another browser will appear here. This token has read access.'
-            : 'Getting the latest work from your server.' }));
-        if (!state.loaded) empty.setAttribute('role', 'status');
+    const needle = state.filter.trim().toLowerCase();
+    const matches = (b) => !needle || b.name.toLowerCase().includes(needle) || (b.prompt || '').toLowerCase().includes(needle);
+    const shown = all.filter(matches);
+    const groups = lanes(shown);
+    const waiting = attention();
+    const needs = lanes(all)[0].branches.length;
+    document.title = needs ? `(${needs}) Branchyard` : 'Branchyard';
+    $('attention-count').hidden = !needs;
+    $('attention-count').textContent = String(needs);
+    $('filter').hidden = !all.length;
+    $('branch-count').textContent = needle
+      ? `Showing ${shown.length} of ${all.length} branches`
+      : plural(all.length, 'branch', 'branches');
+    const focused = list.contains(document.activeElement) ? document.activeElement.dataset.branch : null;
+    const current = state.route.name === 'branch' ? state.route.branch : null;
+    const row = (b, lane) => h('li', {}, h('a', {
+      class: 'branch-row', href: branchHref(b.name), 'data-branch': b.name, title: b.name,
+      'aria-current': b.name === current ? 'page' : null,
+    }, dot(lane.key), h('span', { class: 'row-name', text: b.name }),
+    h('span', { class: 'row-meta' }, lane.meta(b, waiting), lane.key === 'needs' || lane.key === 'running' ? [' · ', ago(activeAt(b), '')] : null)));
+    const group = ({ lane, branches }) => {
+      if (!branches.length) return null;
+      const id = `lane-${lane.key}`;
+      const items = h('ul', { class: 'lane-list' }, branches.map((b) => row(b, lane)));
+      if (!lane.collapsed) {
+        return h('section', { class: 'lane', id, 'aria-labelledby': `${id}-h` },
+          h('h2', { class: 'lane-head', id: `${id}-h` }, h('span', { text: lane.label }), h('span', { class: 'lane-count', text: String(branches.length) })),
+          items);
       }
+      const open = state.doneOpen || !!needle;
+      const summary = h('summary', { class: 'lane-head' }, h('span', { text: `${open ? 'Hide' : 'Show'} ${branches.length} ${lane.label.toLowerCase()}` }));
+      const box = h('details', { class: 'lane', id, open }, summary, items);
+      box.addEventListener('toggle', () => {
+        if (!needle) state.doneOpen = box.open;
+        summary.firstChild.textContent = `${box.open ? 'Hide' : 'Show'} ${branches.length} ${lane.label.toLowerCase()}`;
+      });
+      return box;
     };
-    search.addEventListener('input', () => {
-      filterText = search.value;
-      update();
-    });
-    main(
-      h('div', { class: 'page-heading' },
-        h('div', {}, h('h1', { text: `Branches in ${state.repo}` }),
-          h('p', { class: 'lede', text: 'Follow running tasks, review results, and send the next step.' })),
-        can('run') ? h('a', { class: 'button', href: '#/new', text: 'New task' }) : null),
-      all.length ? h('div', { class: 'toolbar' },
-        h('label', { for: searchId, class: 'visually-hidden', text: 'Filter branches' }), search,
-        count) : null,
-      state.branchError ? h('section', { class: 'panel error-state', role: 'alert' },
+    const status = [];
+    if (state.branchError) {
+      status.push(h('section', { class: 'list-state error-state', role: 'alert' },
         h('h2', { text: state.loaded ? 'Could not refresh branches' : 'Could not load branches' }),
         h('p', { text: state.branchError }),
         h('p', { class: 'hint', text: 'Check that the server is reachable and this token can read the repository, then retry. Your token stays in this tab.' }),
-        h('button', { type: 'button', class: 'secondary', text: 'Retry loading branches', onclick: async () => {
+        h('button', { type: 'button', text: 'Retry loading branches', onclick: async () => {
           try { await loadBranches(); } catch (e) {
             if (e.status !== 401) toast(`Could not load branches: ${e.message}`);
           }
-        } })) : null,
-      empty, list,
-    );
-    update();
-    if (selection) { search.focus({ preventScroll: true }); search.setSelectionRange(...selection); }
+        } })));
+    } else if (!all.length) {
+      status.push(h('section', { class: 'list-state', role: state.loaded ? null : 'status' },
+        h('h2', { text: state.loaded ? 'No branches yet.' : 'Loading branches…' }),
+        h('p', { class: 'muted', text: state.loaded
+          ? can('run') ? 'Start a task to create its own branch. Its progress and results will appear here.'
+            : 'Branches started from the CLI or another browser will appear here. This token has read access.'
+          : 'Getting the latest work from your server.' })));
+    }
+    if (all.length && !shown.length) {
+      status.push(h('section', { class: 'list-state' },
+        h('h2', { text: 'No matching branches' }),
+        h('p', { class: 'muted', text: 'Try another name or a word from the prompt.' }),
+        h('button', { type: 'button', text: 'Clear search', onclick: () => {
+          const search = $('branch-filter');
+          state.filter = '';
+          search.value = '';
+          renderLanes();
+          search.focus();
+        } })));
+    }
+    fill(list, ...status, ...groups.map(group).filter(Boolean));
+    if (focused) {
+      const again = Array.from(list.querySelectorAll('a.branch-row')).find((a) => a.dataset.branch === focused);
+      if (again) again.focus({ preventScroll: true });
+    }
   }
 
-  function branchItems(list) {
-    return list.map((b) => {
-      const c = b.candidate;
-      const meta = [
-        b.harness,
-        `${b.turns} turn${b.turns === 1 ? '' : 's'}`,
-        b.cost_usd != null ? money(b.cost_usd) : null,
-        c ? `${c.files_changed} file${c.files_changed === 1 ? '' : 's'} +${c.insertions} −${c.deletions}` : null,
-        b.parent ? `from ${b.parent}` : null,
-      ].filter(Boolean).join(' · ');
-      return h('li', {},
-        h('a', { href: `#/b/${enc(state.repo)}/${enc(b.name)}` },
-          h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: b.name }), badge(b)),
-          h('div', { class: 'item-meta', text: meta }),
-          b.prompt ? h('div', { class: 'item-prompt', text: b.prompt.length > 140 ? `${b.prompt.slice(0, 139)}…` : b.prompt }) : null));
-    });
+  // `j` and `k` walk the visible branches; Enter follows the focused link.
+  function stepBranch(by) {
+    const rows = Array.from(document.querySelectorAll('#branch-list a.branch-row')).filter((a) => a.offsetParent);
+    if (!rows.length) return;
+    let at = rows.indexOf(document.activeElement);
+    if (at < 0) at = rows.findIndex((a) => a.getAttribute('aria-current') === 'page');
+    const next = at < 0 ? (by > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, at + by));
+    rows[next].focus();
   }
 
   // ---------------------------------------------------------------
-  // One branch
+  // Home: the repository at a glance
+
+  function homeSignature() {
+    const groups = lanes(Array.from(state.branches.values()));
+    return JSON.stringify([state.loaded, state.branchError, groups.map((g) => g.branches.map((b) => [b.name, b.status, b.stalled])), Array.from(attention())]);
+  }
+
+  function renderHome() {
+    const all = Array.from(state.branches.values());
+    const groups = lanes(all);
+    const needs = groups[0].branches;
+    const waiting = attention();
+    const lede = !state.loaded
+      ? state.branchError ? 'The branch list did not load.' : 'Loading…'
+      : !all.length ? 'Nothing has run here yet.'
+        : needs.length ? `${plural(needs.length, 'branch', 'branches')} ${needs.length === 1 ? 'needs' : 'need'} you.` : 'Nothing needs you right now.';
+    const card = (b) => {
+      const s = statusOf(b);
+      const why = waiting.get(b.name);
+      return h('li', {}, h('a', { class: 'card card-link', href: why === 'approval' || why === 'question' || why === 'escalation' ? '#/attention' : branchHref(b.name) },
+        h('span', { class: 'card-head' }, dot('needs'), h('span', { class: 'card-name', text: b.name }), ago(activeAt(b))),
+        h('span', { class: 'card-text', text: why ? `${cap(why)} waiting for you` : cap(s.text) }),
+        b.prompt ? h('span', { class: 'card-prompt', text: b.prompt.length > 160 ? `${b.prompt.slice(0, 159)}…` : b.prompt }) : null));
+    };
+    main(h('div', { class: 'page' },
+      h('header', { class: 'page-head' },
+        h('div', {}, h('h1', { text: state.repo }), h('p', { class: 'lede', text: lede }))),
+      state.loaded && all.length ? h('ul', { class: 'glance', 'aria-label': 'Branches by lane' }, groups.map(({ lane, branches }) =>
+        h('li', { class: 'glance-item' }, h('span', { class: 'glance-label' }, dot(branches.length ? lane.key : 'done'), lane.label), h('b', { text: String(branches.length) })))) : null,
+      needs.length ? [h('h2', { text: 'Needs you' }), h('ul', { class: 'cards' }, needs.map(card))] : null,
+      state.loaded && !all.length && can('run') ? h('div', { class: 'welcome' },
+        h('p', { text: 'Start a task and it gets a branch of its own, with its conversation, its changes and a merge button.' }),
+        h('a', { class: 'button primary', href: '#/new', text: 'Start a task' })) : null));
+  }
+
+  // ---------------------------------------------------------------
+  // One branch: the status strip, the conversation, the message box, and
+  // the inspector
 
   function describe(activity) {
     const [kind] = Object.keys(activity);
@@ -757,244 +900,526 @@
     });
   }
 
-  function appendEvent(entry) {
-    const list = $('events');
-    if (!list) return;
-    if (entry.activity.harness && entry.activity.harness.type === 'message_delta') return;
-    list.prepend(eventItem(entry));
-    while (list.children.length > 200) list.lastChild.remove();
-  }
-
-  function updateBranchHeader() {
-    const info = state.branches.get(state.route.branch);
-    const slot = $('branch-head');
-    if (!info || !slot) return;
-    slot.replaceChildren(...branchHead(info));
-    // Rebuild the forms only when what they allow changed, so text being
-    // typed into one survives the branch's activity.
-    const actions = $('actions');
-    const signature = `${info.status.state}|${info.candidate ? info.candidate.commit : ''}`;
-    if (actions && actions.dataset.signature !== signature) {
-      actions.dataset.signature = signature;
-      actions.replaceChildren(...actionForms(info));
+  // The event page as a conversation. A prompt or a steer opens a turn,
+  // which gathers what the agent said (one paragraph per run of deltas
+  // between tool calls), the tools it called, and how it ended. Events
+  // before the window's first prompt open a turn with no prompt; statuses
+  // and session bookkeeping belong to Activity alone.
+  function conversation(events) {
+    const turns = [];
+    let turn = null;
+    let cut = true;
+    const open = (text, steer) => {
+      turn = { text, steer, said: [], tools: [], status: null, checkpoint: null, candidate: null };
+      turns.push(turn);
+      cut = true;
+      return turn;
+    };
+    for (const { activity: a } of events) {
+      const ev = a.harness || {};
+      if (a.prompt != null) open(a.prompt, false);
+      else if (a.steered) open(a.steered.text, true);
+      else if (ev.type === 'message_delta') {
+        const t = turn || open(null, false);
+        if (cut) t.said.push(ev.text); else t.said[t.said.length - 1] += ev.text;
+        cut = false;
+      } else if (ev.type === 'tool_started') {
+        (turn || open(null, false)).tools.push(ev.name);
+        cut = true;
+      } else if (a.snapshot) (turn || open(null, false)).candidate = a.snapshot;
+      else if (a.checkpoint) (turn || open(null, false)).checkpoint = a.checkpoint;
+      else if (a.status && turn && !['running', 'waiting'].includes(a.status.state)) turn.status = a.status;
     }
+    for (const t of turns) t.said = t.said.map((s) => s.trim()).filter(Boolean);
+    return turns;
   }
 
-  function branchHead(info) {
-    const c = info.candidate;
-    const facts = [
-      ['Status', badge(info)],
-      ['Harness', `${info.harness}${info.profile && info.profile !== info.harness ? ` (${info.profile})` : ''}`],
-      ['Turns', String(info.turns)],
-      ['Cost', money(info.cost_usd)],
-      ['Started', new Date(info.created_at * 1000).toLocaleString()],
-      ['Candidate', c ? h('span', {}, h('span', { class: 'mono', text: c.commit.slice(0, 12) }), ` · ${c.files_changed} files +${c.insertions} −${c.deletions}`) : 'none yet'],
-      info.parent ? ['From', h('a', { href: `#/b/${enc(state.repo)}/${enc(info.parent)}`, text: info.parent })] : null,
-      info.children && info.children.length ? ['Delegated to', info.children.map((ch, i) => [i ? ', ' : '', h('a', { href: `#/b/${enc(state.repo)}/${enc(ch)}`, text: ch })])] : null,
-      info.superseded_by ? ['Superseded by', h('a', { href: `#/b/${enc(state.repo)}/${enc(info.superseded_by)}`, text: info.superseded_by })] : null,
-    ].filter(Boolean);
-    const readiness = when.merge(info);
-    return [
-      h('dl', { class: 'facts' }, facts.map(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
-      h('p', { class: readiness ? 'hint' : '' },
-        readiness ? `Not ready to merge: ${readiness}.` : 'Ready to merge: its check runs on the merge result first, and nothing changes unless it passes.'),
-    ];
-  }
-
-  async function act(label, run, after) {
-    try {
-      const result = await run();
-      if (result && result.id && result.state) {
-        toast(`${label}: operation ${result.id} ${result.state}.`);
-        followOperation(result.id, label);
-      } else {
-        toast(`${label}: done.`);
+  // A unified diff split at each file: its path, its counts, and its lines
+  // marked as they render. The file list already names the path, so git's
+  // own header lines are dropped; a mode, rename or binary note stays.
+  const GIT_HEADER = /^(diff --git |index |--- |\+\+\+ )/;
+  function parseDiff(text) {
+    const files = [];
+    let file = null;
+    let inHunk = false;
+    for (const line of text.split('\n')) {
+      if (line.startsWith('diff --git ')) {
+        const m = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+        file = { path: m ? m[2] : line.slice(11), add: 0, del: 0, lines: [] };
+        files.push(file);
+        inHunk = false;
       }
-      if (after) after(result);
-      refreshBranch(state.route.branch);
-      return true;
-    } catch (e) {
-      toast(`${label} refused: ${e.message}`);
-      return false;
+      if (!file) continue;
+      let kind = null;
+      if (line.startsWith('@@')) { kind = 'hunk'; inHunk = true; }
+      else if (!inHunk) {
+        kind = 'file';
+        if (line.startsWith('+++ b/')) file.path = line.slice(6);
+        if (GIT_HEADER.test(line)) continue;
+      } else if (line.startsWith('+')) { kind = 'add'; file.add += 1; }
+      else if (line.startsWith('-')) { kind = 'del'; file.del += 1; }
+      file.lines.push({ kind, text: line });
     }
-  }
-
-  async function followOperation(id, label) {
-    for (let i = 0; i < 600; i++) {
-      await new Promise((r) => setTimeout(r, i < 10 ? 1000 : 3000));
-      let op;
-      try { op = await api('GET', `/v1/operations/${enc(id)}`); } catch (_) { continue; }
-      if (['succeeded', 'failed', 'interrupted'].includes(op.state)) {
-        toast(op.error ? `${label} ${op.state}: ${op.error.message}` : `${label} ${op.state}.`);
-        return;
-      }
-    }
-  }
-
-  function textAction({ name, title, help, rule, info, scope, button, run, placeholder, allowAll }) {
-    const why = !can(scope) ? `this token lacks the ${scope} scope` : rule(info);
-    const id = nextId(name);
-    const hintId = `${id}-hint`;
-    const area = h('textarea', { id, placeholder: placeholder || '', disabled: !!why, 'aria-describedby': hintId });
-    const allowId = `${id}-allow`;
-    const allow = allowAll ? h('input', { type: 'checkbox', id: allowId, disabled: !!why }) : null;
-    const go = h('button', {
-      type: 'button', disabled: !!why, text: button,
-      onclick: async () => {
-        const text = area.value.trim();
-        if (!text) { area.focus(); return; }
-        go.disabled = true;
-        const ok = await act(button, () => run(text, allow && allow.checked));
-        go.disabled = false;
-        if (ok) area.value = '';
-      },
-    });
-    return h('div', { class: 'action' },
-      h('label', { class: 'block', for: id, text: title }),
-      area,
-      allow ? h('div', { class: 'check' }, allow, h('label', { for: allowId, text: 'Allow every tool (like --yes); otherwise tool requests are denied' })) : null,
-      h('div', { class: 'row' }, go),
-      h('p', { class: 'hint', id: hintId, text: why ? `Not now: ${why}.` : help }));
-  }
-
-  function buttonAction({ name, help, rule, info, scope, button, danger, confirm, run }) {
-    const why = !can(scope) ? `this token lacks the ${scope} scope` : rule(info);
-    const hintId = nextId(`${name}-hint`);
-    const go = h('button', {
-      type: 'button', class: danger ? 'danger' : 'secondary', disabled: !!why, text: button, 'aria-describedby': hintId,
-      onclick: async () => {
-        if (confirm && !(await confirmDialog(`${button}?`, confirm, button, danger))) return;
-        go.disabled = true;
-        await act(button, run);
-        go.disabled = false;
-      },
-    });
-    return h('div', { class: 'action' }, h('div', { class: 'row' }, go),
-      h('p', { class: 'hint', id: hintId, text: why ? `Not now: ${why}.` : help }));
+    return files;
   }
 
   function policy(allowAll) {
     return allowAll ? { mode: 'allow' } : undefined;
   }
 
-  function actionForms(info) {
-    const b = info.name;
-    return [
-      textAction({
-        name: 'send', title: 'Send a follow-up prompt', help: 'Starts a new turn in the branch\'s session (by send).',
-        rule: when.send, info, scope: 'run', button: 'Send', allowAll: true,
-        run: (text, all) => api('POST', `${branchPath(b)}/send`, { prompt: text, policy: policy(all) }),
-      }),
-      textAction({
-        name: 'steer', title: 'Steer the running turn', help: 'Adds input to the running turn without stopping it (by send --steer).',
-        rule: when.steer, info, scope: 'run', button: 'Steer',
-        run: (text) => api('POST', `${branchPath(b)}/steer`, { text }),
-      }),
-      buttonAction({
-        name: 'resume', help: 'Resumes an interrupted branch in its own session.', rule: when.resume, info, scope: 'run', button: 'Resume',
-        run: () => api('POST', `${branchPath(b)}/send`, { prompt: RESUME_PROMPT }),
-      }),
-      buttonAction({
-        name: 'cancel', help: 'Stops the running turn and those of every branch it delegated to (by cancel).',
-        rule: when.cancel, info, scope: 'run', button: 'Cancel turn', danger: true,
-        confirm: `Cancel ${b}'s running turn, and those of every branch it delegated to?`,
-        run: () => api('POST', `${branchPath(b)}/cancel`, {}),
-      }),
-      buttonAction({
-        name: 'merge', help: 'Validated merge into the served repository\'s checked-out branch (by merge).',
-        rule: when.merge, info, scope: 'merge', button: 'Merge',
-        confirm: `Merge ${b} into the checked-out branch? Its check runs on the merge result first, and nothing changes unless it passes.`,
-        run: () => api('POST', `${branchPath(b)}/merge`, {}),
-      }),
-      textAction({
-        name: 'fork', title: 'Fork with a prompt', help: 'A new branch from this one\'s candidate and conversation (by fork).',
-        rule: when.fork, info, scope: 'run', button: 'Fork', allowAll: true,
-        run: (text, all) => api('POST', `${branchPath(b)}/fork`, { prompt: text, policy: policy(all) }),
-      }),
-    ];
+  // What a branch's buttons do. `started` is said once the server took the
+  // request; `finished`, when its operation succeeded.
+  const ACTIONS = {
+    merge: {
+      label: 'Merge', busy: 'Merging…', scope: 'merge', rule: when.merge,
+      confirm: (b) => [`Merge ${b}?`, `Merge ${b} into the checked-out branch? Its check runs on the merge result first, and nothing changes unless it passes.`],
+      run: (b) => api('POST', `${branchPath(b)}/merge`, {}),
+      started: 'Merging. Its check runs on the merge result first.',
+      finished: (info) => (info && info.status.state === 'merged' ? `Merged into ${info.status.target}.` : 'Merged.'),
+    },
+    resume: {
+      label: 'Resume', busy: 'Resuming…', scope: 'run', rule: when.resume,
+      run: (b) => api('POST', `${branchPath(b)}/send`, { prompt: RESUME_PROMPT }),
+      started: 'Resuming. A new turn is starting.',
+    },
+    cancel: {
+      label: 'Cancel turn', busy: 'Cancelling…', scope: 'run', rule: when.cancel, danger: true,
+      confirm: (b) => ['Cancel turn?', `Cancel ${b}'s running turn, and those of every branch it delegated to?`],
+      run: (b) => api('POST', `${branchPath(b)}/cancel`, {}),
+      started: 'Cancelling the running turn.',
+      finished: () => 'Turn cancelled.',
+    },
+  };
+
+  // The strip's one main action for a state; a state without one has none.
+  const PRIMARY = {
+    ready: ACTIONS.merge,
+    interrupted: ACTIONS.resume,
+  };
+
+  // Rare actions, in the ⋯ menu. Fork puts the message box in fork mode.
+  const MENU = [
+    ACTIONS.cancel,
+    { label: 'Fork…', scope: 'run', rule: when.fork, pick: () => { view.forking = true; updateBranch(); $('composer-text').focus(); } },
+  ];
+
+  // The message box's verb, by the same rules: a running branch steers,
+  // any other sends a follow-up (refused, with the reason in the box, while
+  // it waits), and Fork from the menu holds until sent or cancelled.
+  const COMPOSER = {
+    send: {
+      label: 'Send', title: 'Send a follow-up prompt', scope: 'run', rule: when.send, allowAll: true,
+      placeholder: (b) => `Follow up on ${b}…`,
+      run: (b, text, all) => api('POST', `${branchPath(b)}/send`, { prompt: text, policy: policy(all) }),
+      started: 'Sent. A new turn is starting.',
+    },
+    steer: {
+      label: 'Steer', title: 'Steer the running turn', scope: 'run', rule: when.steer, allowAll: false,
+      placeholder: (b) => `Steer ${b}'s running turn…`,
+      run: (b, text) => api('POST', `${branchPath(b)}/steer`, { text }),
+      started: 'Steering sent. The running turn reads it next.',
+    },
+    fork: {
+      label: 'Fork', title: 'Fork with a prompt', scope: 'run', rule: when.fork, allowAll: true, opens: true,
+      placeholder: (b) => `What should a fork of ${b} do?`,
+      run: (b, text, all) => api('POST', `${branchPath(b)}/fork`, { prompt: text, policy: policy(all) }),
+      started: 'Forked. The new branch is starting.',
+    },
+  };
+
+  const lacks = (action) => (can(action.scope) ? null : `this token lacks the ${action.scope} scope`);
+  const applies = (action, info) => !lacks(action) && !action.rule(info);
+
+  function composerMode(info, forking) {
+    const mode = forking ? COMPOSER.fork : when.steer(info) ? COMPOSER.send : COMPOSER.steer;
+    return { mode, why: lacks(mode) || mode.rule(info) };
   }
 
-  function renderDiff(text, slot) {
-    const shown = text.length > DIFF_LIMIT ? text.slice(0, DIFF_LIMIT) : text;
-    const lines = shown.split('\n');
-    const pre = h('pre', { class: 'diff', tabindex: '0', 'aria-label': 'Diff' });
-    for (const line of lines) {
-      let cls = null;
-      if (line.startsWith('diff --git') || line.startsWith('+++ ') || line.startsWith('--- ')) cls = 'file';
-      else if (line.startsWith('@@')) cls = 'hunk';
-      else if (line.startsWith('+')) cls = 'add';
-      else if (line.startsWith('-')) cls = 'del';
-      pre.append(h('span', { class: cls }, line));
+  // Run one of a branch's actions and say what became of it, in words.
+  async function act(action, name, ...args) {
+    let result;
+    try {
+      result = await action.run(name, ...args);
+    } catch (e) {
+      toast(`Could not ${action.label.toLowerCase()}: ${e.message}`);
+      return null;
     }
-    slot.replaceChildren(
-      text.length > DIFF_LIMIT ? h('p', { class: 'hint', text: `Showing the first ${DIFF_LIMIT} characters of ${text.length}.` }) : null,
-      text ? pre : h('p', { class: 'muted', text: 'The diff is empty.' }));
+    const opened = action.opens && result && result.branches && result.branches[0];
+    toast(action.started, opened ? branchHref(opened) : null);
+    if (result && result.id && result.state) followOperation(result.id, action, name);
+    refreshBranch(name);
+    if (view && view.name === name) loadOperations(view);
+    return result || {};
   }
+
+  async function followOperation(id, action, name) {
+    const repo = state.repo;
+    for (let i = 0; i < 600; i++) {
+      await new Promise((r) => setTimeout(r, i < 10 ? 1000 : 3000));
+      let op;
+      try { op = await api('GET', `/v1/operations/${enc(id)}`); } catch (_) { continue; }
+      if (!['succeeded', 'failed', 'interrupted'].includes(op.state)) continue;
+      let info = null;
+      if (name && repo === state.repo) {
+        try { info = await api('GET', branchPath(name)); state.branches.set(name, info); } catch (_) { /* the list refresh catches up */ }
+      }
+      if (state.pending.get(name) === action.busy) state.pending.delete(name);
+      if (op.state !== 'succeeded') toast(`${action.label} ${op.state}${op.error ? `: ${op.error.message}` : '.'}`);
+      else if (action.finished) {
+        if (action === ACTIONS.merge) state.merged.add(name);
+        toast(action.finished(info));
+      }
+      branchesChanged();
+      return;
+    }
+  }
+
+  async function runAction(action, name) {
+    if (action.confirm) {
+      const [title, text] = action.confirm(name);
+      if (!(await confirmDialog(title, text, action.label, action.danger))) return;
+    }
+    state.pending.set(name, action.busy);
+    updateBranch();
+    const result = await act(action, name);
+    if (!result || !result.id) state.pending.delete(name);
+    updateBranch();
+  }
+
+  // The open branch: what its panes show, kept across live updates.
+  let view = null;
 
   async function renderBranch() {
     const name = state.route.branch;
     let info = state.branches.get(name);
     if (!info) {
       try { info = await api('GET', branchPath(name)); state.branches.set(name, info); } catch (e) {
-        main(h('h1', { text: name }), h('p', { class: 'error', text: e.message }), h('a', { href: '#/', text: 'All branches' }));
+        main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+          h('h1', { text: name }), h('p', { class: 'error', text: e.message })));
         return;
       }
     }
-    const eventsList = h('ul', { class: 'events', id: 'events', 'aria-label': 'Recent events' }, h('li', { class: 'muted', text: 'Loading…' }));
-    const checkpoints = h('div', {}, h('p', { class: 'muted', text: 'Loading…' }));
-    const opsSlot = h('div', {});
-    const diffSlot = h('div', {});
-    const diffWhy = when.diff(info);
-    const diffButton = h('button', {
-      type: 'button', class: 'secondary', disabled: !!diffWhy, text: 'Show the diff',
-      onclick: async () => {
-        diffButton.disabled = true;
-        try { renderDiff((await api('GET', `${branchPath(name)}/diff`)).diff || '', diffSlot); } catch (e) { diffSlot.replaceChildren(h('p', { class: 'error', text: e.message })); }
-        diffButton.disabled = false;
-      },
+    const v = {
+      name, events: [], first: 0, next: null, chain: null, queued: false,
+      forking: false, tab: 'changes', file: null, files: null, diffFor: undefined, truncated: 0,
+      open: new Set(), signature: null, operations: null,
+    };
+    view = v;
+    const tabs = [['changes', 'Changes'], ['details', 'Details'], ['activity', 'Activity']];
+    main(h('div', { class: 'branch' },
+      h('section', { class: 'focus', 'aria-label': 'Conversation' },
+        h('header', { class: 'strip', id: 'strip' }),
+        h('div', { class: 'convo', id: 'convo' }, h('p', { class: 'muted', text: 'Loading the conversation…' })),
+        composer()),
+      h('aside', { class: 'inspector', id: 'inspector', 'aria-label': 'Inspector' },
+        h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Inspector', onkeydown: (ev) => {
+          const at = tabs.findIndex(([k]) => k === v.tab);
+          const by = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
+          if (!by) return;
+          const [k] = tabs[(at + by + tabs.length) % tabs.length];
+          selectTab(v, k);
+          $(`tab-${k}`).focus();
+        } }, tabs.map(([k, label]) => h('button', {
+          type: 'button', role: 'tab', id: `tab-${k}`, 'aria-controls': `panel-${k}`,
+          'aria-selected': String(k === v.tab), tabindex: k === v.tab ? '0' : '-1',
+          onclick: () => selectTab(v, k),
+        }, label, k === 'changes' ? [' ', h('span', { class: 'tab-count', id: 'changes-count' })] : null))),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-changes', 'aria-labelledby': 'tab-changes' }, h('div', { id: 'changes' })),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-details', 'aria-labelledby': 'tab-details', hidden: true },
+          h('dl', { class: 'facts', id: 'facts' }),
+          h('h2', { text: 'Checkpoints' }), h('div', { id: 'checkpoints' }, h('p', { class: 'muted', text: 'Loading…' })),
+          h('h2', { text: 'Operations' }), h('div', { id: 'operations' }, h('p', { class: 'muted', text: 'Loading…' }))),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-activity', 'aria-labelledby': 'tab-activity', hidden: true },
+          h('ul', { class: 'events', id: 'events', 'aria-label': 'Recent events' }, h('li', { class: 'muted', text: 'Loading…' }))))));
+    updateBranch();
+    v.chain = pull(v).then(() => drawTimeline(v), (e) => {
+      if (view !== v) return;
+      fill($('convo'), h('p', { class: 'error', text: e.message }));
+      fill($('events'), h('li', { class: 'error', text: e.message }));
     });
-    main(
-      h('p', {}, h('a', { href: '#/', text: '← Branches' })),
-      h('h1', { text: name }),
-      h('section', { class: 'panel', 'aria-label': 'Summary', id: 'branch-head' }, branchHead(info)),
-      h('h2', { text: 'Prompt' }),
-      h('div', { class: 'panel' }, h('p', { class: 'prompt', text: info.prompt || '' })),
-      h('h2', { text: 'Actions' }),
-      h('section', { class: 'panel', id: 'actions', 'aria-label': 'Actions', 'data-signature': `${info.status.state}|${info.candidate ? info.candidate.commit : ''}` }, actionForms(info)),
-      h('h2', { text: 'Operations' }), opsSlot,
-      h('h2', { text: 'Checkpoints' }), h('div', { class: 'panel' }, checkpoints),
-      h('h2', { text: 'Diff' }),
-      h('div', { class: 'row' }, diffButton, diffWhy ? h('span', { class: 'hint', text: diffWhy }) : null),
-      diffSlot,
-      h('h2', { text: 'Recent events' }), h('div', { class: 'panel' }, eventsList),
-    );
-    try {
-      const page = await api('GET', `${branchPath(name)}/event-page?limit=200`);
-      const events = coalesce(page.events);
-      eventsList.replaceChildren(...events.slice().reverse().map(eventItem));
-      if (!events.length) eventsList.replaceChildren(h('li', { class: 'muted', text: 'No events yet.' }));
-      const cps = page.events.filter((e) => e.activity.checkpoint).map((e) => e.activity.checkpoint);
-      checkpoints.replaceChildren(cps.length
-        ? h('ul', { class: 'events' }, cps.reverse().map((cp) => h('li', {}, `turn ${cp.turn} · `, h('span', { class: 'mono', text: cp.commit.slice(0, 12) }), ` · ${cp.files_changed} files +${cp.insertions} −${cp.deletions}`)))
-        : h('p', { class: 'muted', text: page.total > page.events.length ? 'None in the latest events.' : 'None yet: each finished turn leaves one.' }));
-    } catch (e) {
-      eventsList.replaceChildren(h('li', { class: 'error', text: e.message }));
-      checkpoints.replaceChildren();
+    loadOperations(v);
+  }
+
+  function selectTab(v, tab) {
+    v.tab = tab;
+    for (const k of ['changes', 'details', 'activity']) {
+      const on = k === tab;
+      $(`tab-${k}`).setAttribute('aria-selected', String(on));
+      $(`tab-${k}`).tabIndex = on ? 0 : -1;
+      $(`panel-${k}`).hidden = !on;
     }
-    try {
-      const { operations } = await api('GET', `${repoPath()}/operations?branch=${enc(name)}`);
-      opsSlot.replaceChildren(operations.length
-        ? h('ul', { class: 'list' }, operations.map(opItem))
-        : h('p', { class: 'muted', text: 'Nothing queued or running for this branch.' }));
-    } catch (e) {
-      opsSlot.replaceChildren(h('p', { class: 'error', text: e.message }));
+    drawTimeline(v);
+  }
+
+  // The latest window of events first, then everything after it, page by
+  // page; a burst of stream events for this branch asks for one more pull.
+  async function pull(v) {
+    for (;;) {
+      const query = v.next == null ? '' : `cursor=${v.next}&`;
+      const page = await api('GET', `${branchPath(v.name)}/event-page?${query}limit=${EVENT_WINDOW}`);
+      if (v.next == null) v.first = page.next_cursor - page.events.length;
+      v.events.push(...page.events);
+      v.next = page.next_cursor;
+      if (v.events.length > EVENT_KEEP) {
+        v.first += v.events.length - EVENT_KEEP;
+        v.events.splice(0, v.events.length - EVENT_KEEP);
+      }
+      if (page.events.length < EVENT_WINDOW || v.next >= page.total) return;
     }
   }
 
+  function refreshTimeline(v) {
+    if (v.queued || !v.chain) return;
+    v.queued = true;
+    v.chain = v.chain
+      .then(() => new Promise((r) => setTimeout(r, 150)))
+      .then(() => { v.queued = false; return pull(v); })
+      .then(() => drawTimeline(v))
+      .catch(() => { v.queued = false; });
+  }
+
+  function drawTimeline(v) {
+    if (view !== v || v.next == null) return;
+    const box = $('convo');
+    const atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 48;
+    const turns = conversation(v.events);
+    const info = state.branches.get(v.name);
+    const working = info && ['running', 'waiting'].includes(info.status.state);
+    fill(box,
+      v.first > 0 ? h('p', { class: 'convo-note', text: `Earlier turns are not shown here: this is the latest of ${plural(v.first + v.events.length, 'event')}.` }) : null,
+      turns.length ? turns.map((t, i) => turnItem(t, i, v, working && i === turns.length - 1)) : h('p', { class: 'muted', text: 'No turns yet.' }),
+      working && !turns.length ? workingLine(info) : null);
+    if (atEnd || !v.scrolled) box.scrollTop = box.scrollHeight;
+    v.scrolled = true;
+    if (v.tab === 'activity') {
+      const events = coalesce(v.events);
+      fill($('events'), ...(events.length ? events.slice().reverse().map(eventItem) : [h('li', { class: 'muted', text: 'No events yet.' })]));
+    }
+    if (v.tab === 'details') {
+      const cps = v.events.filter((e) => e.activity.checkpoint).map((e) => e.activity.checkpoint);
+      fill($('checkpoints'), cps.length
+        ? h('ul', { class: 'events' }, cps.reverse().map((cp) => h('li', {}, `turn ${cp.turn} · `, h('span', { class: 'mono', text: cp.commit.slice(0, 12) }), ` · ${plural(cp.files_changed, 'file')} `, counts(cp.insertions, cp.deletions))))
+        : h('p', { class: 'muted', text: v.first > 0 ? 'None in the latest events.' : 'None yet: each finished turn leaves one.' }));
+    }
+  }
+
+  function workingLine(info) {
+    return h('p', { class: 'outcome' }, dot('running'), info.status.state === 'waiting' ? 'Waiting for its prerequisites…' : 'Working…');
+  }
+
+  function turnItem(t, i, v, last) {
+    let tools = null;
+    if (t.tools.length) {
+      tools = h('details', { class: 'tools', open: v.open.has(i) },
+        h('summary', { text: plural(t.tools.length, 'tool call') }),
+        h('ol', {}, t.tools.map((name) => h('li', { class: 'mono', text: name }))));
+      tools.addEventListener('toggle', () => { if (tools.open) v.open.add(i); else v.open.delete(i); });
+    }
+    const c = t.checkpoint || t.candidate;
+    const lane = t.status ? laneOf({ name: '', status: t.status }, new Map()).key : null;
+    const outcome = t.status || c ? h('p', { class: `outcome outcome-${lane || 'done'}` },
+      lane === 'ready' ? h('span', { class: 'tick', 'aria-hidden': 'true', text: '✓' }) : lane ? dot(lane) : null,
+      t.status ? cap(statusOf({ status: t.status }).text) : null,
+      c ? [t.status ? ' · ' : '', h('span', { class: 'mono', text: c.commit.slice(0, 7) }), ` · ${plural(c.files_changed, 'file')} `, counts(c.insertions, c.deletions)] : null) : null;
+    const info = state.branches.get(v.name);
+    return h('article', { class: 'turn' },
+      t.text != null ? h('div', { class: t.steer ? 'you steer' : 'you' },
+        t.steer ? h('span', { class: 'you-label', text: 'Steered' }) : null, h('p', { text: t.text })) : null,
+      t.said.length ? h('div', { class: 'agent' }, t.said.map((s) => h('p', { text: s }))) : null,
+      tools,
+      outcome,
+      last && !outcome && info ? workingLine(info) : null);
+  }
+
+  function composer() {
+    const area = h('textarea', { id: 'composer-text', rows: '2' });
+    area.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); submitComposer(); }
+    });
+    return h('div', { class: 'composer', id: 'composer' },
+      h('label', { class: 'visually-hidden', for: 'composer-text', id: 'composer-label' }),
+      area,
+      h('div', { class: 'composer-tools' },
+        h('label', { class: 'toggle', id: 'composer-allow-box', title: 'Like --yes. Otherwise every tool request is denied.' },
+          h('input', { type: 'checkbox', id: 'composer-allow' }), h('span', { text: 'Allow every tool' })),
+        h('button', { type: 'button', class: 'ghost', id: 'composer-cancel', text: 'Cancel fork', onclick: () => {
+          view.forking = false;
+          updateBranch();
+          $('composer-text').focus();
+        } }),
+        h('span', { class: 'spacer' }),
+        h('button', { type: 'button', class: 'primary', id: 'composer-go', onclick: () => submitComposer() })));
+  }
+
+  function applyComposer(info) {
+    const { mode, why } = composerMode(info, view.forking);
+    const area = $('composer-text');
+    $('composer').dataset.mode = Object.keys(COMPOSER).find((k) => COMPOSER[k] === mode);
+    $('composer-label').textContent = mode.title;
+    area.placeholder = why ? sentence(why, info.name) : mode.placeholder(info.name);
+    area.disabled = !!why;
+    $('composer-go').disabled = !!why;
+    $('composer-go').textContent = mode.label;
+    $('composer-allow-box').hidden = !mode.allowAll;
+    $('composer-cancel').hidden = mode !== COMPOSER.fork;
+  }
+
+  async function submitComposer() {
+    const v = view;
+    const info = state.branches.get(v.name);
+    if (!info) return;
+    const { mode, why } = composerMode(info, v.forking);
+    const area = $('composer-text');
+    const allow = $('composer-allow');
+    const go = $('composer-go');
+    if (why || go.disabled) return;
+    const text = area.value.trim();
+    if (!text) { area.focus(); return; }
+    go.disabled = true;
+    const result = await act(mode, v.name, text, allow.checked);
+    if (view !== v) return;
+    if (result) {
+      area.value = '';
+      allow.checked = false;
+      if (mode === COMPOSER.fork) v.forking = false;
+    }
+    applyComposer(state.branches.get(v.name) || info);
+  }
+
+  function strip(info) {
+    const s = statusOf(info);
+    const lane = laneOf(info, attention()).key;
+    const primary = PRIMARY[info.status.state];
+    const busy = state.pending.get(info.name);
+    const menu = MENU.filter((a) => applies(a, info));
+    const meta = [info.harness, plural(info.turns, 'turn'), info.cost_usd != null ? money(info.cost_usd) : null].filter(Boolean).join(' · ');
+    let action = null;
+    if (busy) action = h('button', { type: 'button', class: 'primary', disabled: true, text: busy });
+    else if (primary && applies(primary, info)) {
+      action = h('button', { type: 'button', class: 'primary', text: primary.label, onclick: () => runAction(primary, info.name) });
+    }
+    return [
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      h('div', { class: 'strip-title' }, h('h1', { tabindex: '-1', text: info.name }), h('p', { class: 'strip-meta', text: meta })),
+      s.key === 'merged'
+        ? h('p', { class: 'state state-merged' }, checkMark(state.merged.has(info.name)), cap(s.text))
+        : h('p', { class: `state state-${lane}` }, dot(lane), cap(s.text)),
+      action,
+      menu.length ? menuOf(menu, info) : null,
+    ];
+  }
+
+  function menuOf(items, info) {
+    const menu = h('details', { class: 'menu' },
+      h('summary', { 'aria-label': 'More actions', title: 'More actions' }, h('span', { 'aria-hidden': 'true', text: '⋯' })),
+      h('div', { class: 'menu-list' }, items.map((a) => h('button', {
+        type: 'button', class: a.danger ? 'menu-item danger-text' : 'menu-item', text: a.label,
+        onclick: () => { menu.open = false; if (a.pick) a.pick(); else runAction(a, info.name); },
+      }))));
+    return menu;
+  }
+
+  function facts(info) {
+    const c = info.candidate;
+    const lane = laneOf(info, attention()).key;
+    const link = (name) => h('a', { href: branchHref(name), text: name });
+    const rows = [
+      ['Status', h('span', { class: 'fact-state' }, dot(lane), cap(statusOf(info).text))],
+      ['Harness', `${info.harness}${info.profile && info.profile !== info.harness ? ` (${info.profile})` : ''}`],
+      info.model ? ['Model', info.model] : null,
+      ['Turns', String(info.turns)],
+      ['Cost', money(info.cost_usd)],
+      ['Started', new Date(info.created_at * 1000).toLocaleString()],
+      ['Candidate', c ? h('span', {}, h('span', { class: 'mono', text: c.commit.slice(0, 12) }), ` · ${plural(c.files_changed, 'file')} `, counts(c.insertions, c.deletions)) : 'none yet'],
+      info.parent ? ['From', link(info.parent)] : null,
+      info.children && info.children.length ? ['Delegated to', info.children.map((ch, i) => [i ? ', ' : '', link(ch)])] : null,
+      info.superseded_by ? ['Superseded by', link(info.superseded_by)] : null,
+      ['Prompt', h('span', { class: 'prompt', text: info.prompt || '' })],
+    ].filter(Boolean);
+    return rows.map(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)]);
+  }
+
+  function updateBranch() {
+    const v = view;
+    const info = v && state.branches.get(v.name);
+    if (!info || !$('strip')) return;
+    const signature = JSON.stringify([info.status, info.stalled, info.turns, info.cost_usd, info.candidate, state.pending.get(info.name) || '',
+      state.merged.has(info.name), laneOf(info, attention()).key]);
+    if (signature !== v.signature) {
+      const first = v.signature == null;
+      v.signature = signature;
+      const kept = document.activeElement === $('strip').querySelector('h1');
+      fill($('strip'), ...strip(info));
+      if (kept) $('strip').querySelector('h1').focus({ preventScroll: true });
+      fill($('facts'), ...facts(info).flat());
+      if (!first) drawTimeline(v);
+    }
+    applyComposer(info);
+    $('changes-count').textContent = info.candidate ? String(info.candidate.files_changed) : '';
+    const commit = info.candidate ? info.candidate.commit : null;
+    if (commit !== v.diffFor) loadDiff(v, info);
+  }
+
+  async function loadDiff(v, info) {
+    v.diffFor = info.candidate ? info.candidate.commit : null;
+    const slot = $('changes');
+    const why = when.diff(info);
+    if (why) { fill(slot, h('p', { class: 'muted pad', text: sentence(why, v.name) })); return; }
+    if (!v.files) fill(slot, h('p', { class: 'muted pad', text: 'Loading the changes…' }));
+    let text;
+    try {
+      text = (await api('GET', `${branchPath(v.name)}/diff`)).diff || '';
+    } catch (e) {
+      if (view === v) fill(slot, h('p', { class: 'error pad', text: e.message }));
+      return;
+    }
+    if (view !== v || v.diffFor !== info.candidate.commit) return;
+    v.truncated = text.length > DIFF_LIMIT ? text.length : 0;
+    v.files = parseDiff(text.slice(0, DIFF_LIMIT));
+    if (!v.files.some((f) => f.path === v.file)) v.file = v.files.length ? v.files[0].path : null;
+    renderChanges(v, false);
+  }
+
+  function renderChanges(v, focus) {
+    const slot = $('changes');
+    if (!v.files.length) { fill(slot, h('p', { class: 'muted pad', text: 'The diff is empty.' })); return; }
+    const file = v.files.find((f) => f.path === v.file);
+    const list = h('ul', { class: 'files', id: 'files', 'aria-label': 'Changed files' }, v.files.map((f) => {
+      const at = f.path.lastIndexOf('/');
+      return h('li', {}, h('button', {
+        type: 'button', class: 'file-row', 'aria-pressed': String(f === file), 'data-path': f.path, title: f.path,
+        onclick: () => { v.file = f.path; renderChanges(v, true); },
+      }, h('span', { class: 'path' }, h('span', { class: 'dir', text: f.path.slice(0, at + 1) }), h('b', { text: f.path.slice(at + 1) })),
+      h('span', { class: 'file-counts' }, counts(f.add, f.del))));
+    }));
+    const pre = h('pre', { class: 'diff', tabindex: '0', 'aria-label': `Diff of ${file.path}` },
+      file.lines.map((l) => h('span', { class: l.kind }, l.text)));
+    fill(slot,
+      v.truncated ? h('p', { class: 'hint pad', text: `Showing the first ${DIFF_LIMIT} characters of ${v.truncated}.` }) : null,
+      list, pre);
+    if (focus) list.querySelector('[aria-pressed="true"]').focus();
+  }
+
+  async function loadOperations(v) {
+    let operations;
+    try {
+      ({ operations } = await api('GET', `${repoPath()}/operations?branch=${enc(v.name)}`));
+    } catch (e) {
+      if (view === v) fill($('operations'), h('p', { class: 'error', text: e.message }));
+      return;
+    }
+    if (view !== v) return;
+    fill($('operations'), operations.length
+      ? h('ul', { class: 'list' }, operations.map(opItem))
+      : h('p', { class: 'muted', text: 'Nothing queued or running for this branch.' }));
+  }
+
   function opItem(op) {
-    return h('li', {}, h('div', { class: 'item' },
-      h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: `${op.kind} ${op.branches.join(', ')}` }), h('span', { class: `badge s-${op.state === 'running' ? 'running' : 'waiting'}`, text: op.state })),
-      h('div', { class: 'item-meta', text: [`${op.id}`, `${ago(op.created_at_ms)}`, op.priority ? `priority ${op.priority}` : null, op.waiting].filter(Boolean).join(' · ') })));
+    return h('li', { class: 'item' },
+      h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: `${op.kind} ${op.branches.join(', ')}` }),
+        h('span', { class: 'tag', text: op.state })),
+      h('div', { class: 'item-meta' }, h('span', { class: 'mono', text: op.id }), ' · ', ago(op.created_at_ms),
+        [op.priority ? `priority ${op.priority}` : null, op.waiting].filter(Boolean).map((t) => ` · ${t}`)));
   }
 
   // ---------------------------------------------------------------
@@ -1005,13 +1430,13 @@
     const nameId = nextId('name');
     const harnessId = nextId('harness');
     const allowId = nextId('allow');
-    const area = h('textarea', { id: promptId, required: true });
+    const area = h('textarea', { id: promptId, required: true, rows: '6' });
     const nameInput = h('input', { id: nameId, type: 'text', autocomplete: 'off', spellcheck: 'false' });
     const select = h('select', { id: harnessId }, h('option', { value: '', text: 'the server\'s default' }));
     const allow = h('input', { type: 'checkbox', id: allowId });
     const error = h('p', { class: 'error', role: 'alert' });
     const go = h('button', {
-      type: 'button', text: 'Start task', disabled: !can('run'),
+      type: 'button', class: 'primary', text: 'Start task', disabled: !can('run'),
       onclick: async () => {
         const prompt = area.value.trim();
         if (!prompt) { area.focus(); return; }
@@ -1022,27 +1447,28 @@
         go.disabled = true;
         try {
           const op = await api('POST', `${repoPath()}/tasks`, body);
-          toast(`Task ${op.id} ${op.state}.`);
-          followOperation(op.id, 'Task');
-          location.hash = op.branches.length ? `#/b/${enc(state.repo)}/${enc(op.branches[0])}` : '#/';
+          toast('Task started. Its branch is on the list.');
+          followOperation(op.id, { label: 'Task' }, op.branches[0] || '');
+          location.hash = op.branches.length ? branchHref(op.branches[0]) : '#/';
         } catch (e) {
           error.textContent = e.message;
           go.disabled = false;
         }
       },
     });
-    main(
-      h('p', {}, h('a', { href: '#/', text: '← Branches' })),
-      h('h1', { text: `New task in ${state.repo}` }),
-      h('div', { class: 'panel' },
+    main(h('div', { class: 'page narrow' },
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'New task' }),
+        h('p', { class: 'lede', text: `It runs in ${state.repo}, on a branch of its own.` }))),
+      h('div', { class: 'card form' },
         h('label', { class: 'block', for: promptId, text: 'Prompt' }), area,
-        h('label', { class: 'block', for: harnessId, text: 'Harness' }), select,
-        h('label', { class: 'block', for: nameId, text: 'Branch name (optional)' }), nameInput,
-        h('div', { class: 'check' }, allow, h('label', { for: allowId, text: 'Allow every tool (like --yes); otherwise tool requests are denied' })),
-        h('div', { class: 'row' }, go),
+        h('div', { class: 'form-grid' },
+          h('div', {}, h('label', { class: 'block', for: harnessId, text: 'Harness' }), select),
+          h('div', {}, h('label', { class: 'block', for: nameId, text: 'Branch name (optional)' }), nameInput)),
+        h('label', { class: 'toggle', for: allowId }, allow, h('span', { text: 'Allow every tool (like --yes); otherwise tool requests are denied' })),
+        h('div', { class: 'row form-actions' }, go),
         can('run') ? null : h('p', { class: 'hint', text: 'This token lacks the run scope.' })),
-      error,
-    );
+      error));
     try {
       const { harnesses } = await api('GET', '/v1/harnesses');
       for (const hn of harnesses.filter((x) => x.available)) select.append(h('option', { value: hn.harness, text: hn.harness }));
@@ -1050,8 +1476,10 @@
   }
 
   // ---------------------------------------------------------------
-  // Inbox: questions and escalations waiting for an answer, and the
-  // permission requests seen while this page was open
+  // Needs you: approvals a turn waits on, questions and escalations
+  // waiting for an answer, branches that stopped for a person, the
+  // permission requests seen while this page was open, and the effect
+  // ledger
 
   let inboxTimer = null;
   function refreshInbox() {
@@ -1079,62 +1507,8 @@
       } catch (_) { /* skip */ }
     }));
     state.inbox = asked.filter((m) => !answered.has(m.id)).sort((a, b) => b.at_ms - a.at_ms);
-    const count = $('inbox-count');
-    count.hidden = !state.inbox.length;
-    count.textContent = String(state.inbox.length);
-    if (state.route.name === 'inbox') renderInbox();
+    branchesChanged();
   }
-
-  function answerForm(m) {
-    const id = nextId('answer');
-    const area = h('textarea', { id, placeholder: m.kind === 'escalation' ? 'Optional note' : 'Your answer' });
-    const disabled = !can('run');
-    const send = async (prefix) => {
-      const note = area.value.trim();
-      const text = prefix ? (note ? `${prefix} ${note}` : prefix) : note;
-      if (!text) { area.focus(); return; }
-      try {
-        await api('POST', `${branchPath(m.to)}/answer`, { message_id: m.id, text });
-        toast(`Answered ${m.from}.`);
-        loadInbox();
-      } catch (e) {
-        toast(`Answer refused: ${e.message}`);
-      }
-    };
-    return h('div', { class: 'action' },
-      h('label', { class: 'block', for: id, text: `Answer as ${m.to}` }), area,
-      h('div', { class: 'row' },
-        m.kind === 'escalation'
-          ? [h('button', { type: 'button', disabled, text: 'Approve', onclick: () => send('Approved.') }),
-            h('button', { type: 'button', class: 'danger', disabled, text: 'Deny', onclick: () => send('Denied.') })]
-          : h('button', { type: 'button', disabled, text: 'Answer', onclick: () => send(null) })),
-      disabled ? h('p', { class: 'hint', text: 'This token lacks the run scope.' }) : null);
-  }
-
-  function renderInbox() {
-    const perms = state.permissions;
-    main(
-      h('h1', { text: 'Inbox' }),
-      h('h2', { text: 'Questions and escalations' }),
-      state.inbox.length
-        ? h('ul', { class: 'list' }, state.inbox.map((m) => h('li', {}, h('div', { class: 'item' },
-          h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: `${m.from} → ${m.to}` }), h('span', { class: 'badge s-waiting', text: m.kind })),
-          h('p', { class: 'prompt', text: m.text }),
-          h('div', { class: 'item-meta', text: ago(m.at_ms) }),
-          answerForm(m)))))
-        : h('p', { class: 'muted', text: 'Nothing waiting for an answer.' }),
-      h('h2', { text: 'Permission requests' }),
-      h('p', { class: 'hint', text: 'A server decides each tool request at once by the policy its task or send was given; there is nothing to approve afterwards. Send again with "Allow every tool" to let a branch use what was denied.' }),
-      perms.length
-        ? h('ul', { class: 'events' }, perms.map((p) => h('li', {}, h('time', { text: clock(p.at_ms) }),
-          h('a', { href: `#/b/${enc(state.repo)}/${enc(p.branch)}`, text: p.branch }), ` asked to use ${p.tool}${p.decision ? `: ${p.decision}` : ''}`)))
-        : h('p', { class: 'muted', text: 'None seen since this page opened.' }),
-    );
-  }
-
-  // ---------------------------------------------------------------
-  // Approvals: tools and connector calls a turn waits on, and staged
-  // effects held until approved (docs/effects.md); and the effect ledger
 
   let approvalsTimer = null;
   function refreshApprovals() {
@@ -1151,10 +1525,7 @@
       state.approvals = approvals;
       state.effects = effects.slice(-50).reverse();
     } catch (_) { return; }
-    const count = $('approvals-count');
-    count.hidden = !state.approvals.length;
-    count.textContent = String(state.approvals.length);
-    if (state.route.name === 'approvals') renderApprovals();
+    branchesChanged();
   }
 
   function aboutText(about) {
@@ -1166,9 +1537,35 @@
     }
   }
 
+  function answerForm(m) {
+    const id = nextId('answer');
+    const area = h('textarea', { id, rows: '2', 'data-draft': `answer:${m.id}`, placeholder: m.kind === 'escalation' ? 'Optional note' : 'Your answer' });
+    const disabled = !can('run');
+    const send = async (prefix) => {
+      const note = area.value.trim();
+      const text = prefix ? (note ? `${prefix} ${note}` : prefix) : note;
+      if (!text) { area.focus(); return; }
+      try {
+        await api('POST', `${branchPath(m.to)}/answer`, { message_id: m.id, text });
+        toast(`Answered ${m.from}.`);
+        loadInbox();
+      } catch (e) {
+        toast(`Could not answer: ${e.message}`);
+      }
+    };
+    return h('div', { class: 'reply' },
+      h('label', { class: 'block', for: id, text: `Answer as ${m.to}` }), area,
+      h('div', { class: 'row' },
+        m.kind === 'escalation'
+          ? [h('button', { type: 'button', class: 'primary', disabled, text: 'Approve', onclick: () => send('Approved.') }),
+            h('button', { type: 'button', class: 'danger', disabled, text: 'Deny', onclick: () => send('Denied.') })]
+          : h('button', { type: 'button', class: 'primary', disabled, text: 'Answer', onclick: () => send(null) })),
+      disabled ? h('p', { class: 'hint', text: 'This token lacks the run scope.' }) : null);
+  }
+
   function approvalForm(a) {
     const id = nextId('approval');
-    const area = h('textarea', { id, placeholder: 'Optional reason' });
+    const area = h('textarea', { id, rows: '2', 'data-draft': `approval:${a.id}`, placeholder: 'Optional reason' });
     const disabled = !can('run');
     const send = async (allow) => {
       if (!allow || a.about.kind === 'promote') {
@@ -1181,59 +1578,95 @@
       try {
         await api('POST', `${repoPath()}/approvals/${enc(a.id)}/${allow ? 'allow' : 'deny'}`,
           { surface: 'companion', ...(reason ? { reason } : {}) });
-        toast(`${allow ? 'Allowed' : 'Denied'}: ${aboutText(a.about)}.`);
+        toast(`${allow ? 'Allowed' : 'Denied'}: ${a.branch} may${allow ? '' : ' not'} ${aboutText(a.about)}.`);
         loadApprovals();
       } catch (e) {
-        toast(`Refused: ${e.message}`);
+        toast(`Could not answer the approval: ${e.message}`);
       }
     };
-    return h('div', { class: 'action' },
+    return h('div', { class: 'reply' },
       h('label', { class: 'block', for: id, text: 'Reason' }), area,
       h('div', { class: 'row' },
-        h('button', { type: 'button', disabled, text: 'Allow', onclick: () => send(true) }),
+        h('button', { type: 'button', class: 'primary', disabled, text: 'Allow', onclick: () => send(true) }),
         h('button', { type: 'button', class: 'danger', disabled, text: 'Deny', onclick: () => send(false) })),
       disabled ? h('p', { class: 'hint', text: 'This token lacks the run scope.' }) : null);
   }
 
-  function renderApprovals() {
-    const waiting = state.approvals;
-    const ledger = state.effects;
-    main(
-      h('h1', { text: 'Approvals' }),
-      waiting.length
-        ? h('ul', { class: 'list' }, waiting.map((a) => h('li', {}, h('div', { class: 'item' },
-          h('div', { class: 'item-head' },
-            h('a', { class: 'item-name', href: `#/b/${enc(state.repo)}/${enc(a.branch)}`, text: a.branch }),
-            h('span', { class: 'badge s-waiting', text: a.resolved ? a.resolved.layer : 'ask' })),
-          h('p', { class: 'prompt', text: `May it ${aboutText(a.about)}?` }),
-          a.request ? h('pre', { class: 'diff', text: JSON.stringify(a.request, null, 2).slice(0, 2000) }) : null,
-          h('div', { class: 'item-meta', text: [`turn ${a.turn}`, ago(a.created_ms), a.deadline_ms ? `waits until ${clock(a.deadline_ms)}` : null].filter(Boolean).join(' · ') }),
-          approvalForm(a)))))
-        : h('p', { class: 'muted', text: 'Nothing waiting for approval.' }),
-      h('h2', { text: 'Effect ledger' }),
-      h('p', { class: 'hint', text: 'What branches did outside the machine. by undo plans and performs inverses where the upstream allows.' }),
-      ledger.length
-        ? h('ul', { class: 'events' }, ledger.map((e) => h('li', {}, h('time', { text: clock(e.updated_ms) }),
-          h('a', { href: `#/b/${enc(state.repo)}/${enc(e.branch)}`, text: e.branch }),
-          ` ${e.connector} ${e.operation}: ${e.state} (${e.class})${e.undo ? ` · undo ${e.undo.operation}` : (e.undo_unavailable ? ` · no undo: ${e.undo_unavailable}` : '')}`)))
-        : h('p', { class: 'muted', text: 'No effects recorded.' }),
-    );
+  function attentionSignature() {
+    const needs = lanes(Array.from(state.branches.values()))[0].branches;
+    return JSON.stringify([state.approvals.map((a) => a.id), state.inbox.map((m) => m.id), state.permissions,
+      state.effects.map((e) => [e.updated_ms, e.state]), needs.map((b) => [b.name, b.status, b.stalled])]);
+  }
+
+  function renderAttention() {
+    // Keep what was being typed, and where, across a redraw.
+    const drafts = new Map(Array.from(document.querySelectorAll('#main [data-draft]'), (el) => [el.dataset.draft, el.value]));
+    const active = document.activeElement && document.activeElement.dataset ? document.activeElement : null;
+    const focused = active && active.dataset.draft ? [active.dataset.draft, active.selectionStart, active.selectionEnd] : null;
+    const waiting = attention();
+    const stopped = lanes(Array.from(state.branches.values()))[0].branches.filter((b) => !waiting.has(b.name));
+    const perms = state.permissions;
+    const total = state.approvals.length + state.inbox.length + stopped.length;
+    const section = (title, items) => h('section', { class: 'attention-group' }, h('h2', { text: title }), h('ul', { class: 'cards' }, items));
+    main(h('div', { class: 'page' },
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Needs you' }),
+        h('p', { class: 'lede', text: total ? `${plural(total, 'thing')} ${total === 1 ? 'waits' : 'wait'} for you in ${state.repo}.` : `Nothing in ${state.repo} waits for you.` }))),
+      state.approvals.length ? section('Waiting for approval', state.approvals.map((a) => h('li', { class: 'card' },
+        h('div', { class: 'card-head' }, dot('needs'), h('a', { class: 'card-name', href: branchHref(a.branch), text: a.branch }),
+          h('span', { class: 'tag', text: a.resolved ? a.resolved.layer : 'ask' })),
+        h('p', { class: 'card-text', text: `May it ${aboutText(a.about)}?` }),
+        a.request ? h('details', { class: 'request' }, h('summary', { text: 'The call\'s arguments' }),
+          h('pre', { class: 'code', text: JSON.stringify(a.request, null, 2).slice(0, 2000) })) : null,
+        h('p', { class: 'item-meta' }, `turn ${a.turn} · `, ago(a.created_ms), a.deadline_ms ? ` · waits until ${clock(a.deadline_ms)}` : null),
+        approvalForm(a)))) : null,
+      state.inbox.length ? section('Questions and escalations', state.inbox.map((m) => h('li', { class: 'card' },
+        h('div', { class: 'card-head' }, dot('needs'), h('span', { class: 'card-name', text: `${m.from} → ${m.to}` }), h('span', { class: 'tag', text: m.kind })),
+        h('p', { class: 'card-text prompt', text: m.text }),
+        h('p', { class: 'item-meta' }, ago(m.at_ms)),
+        answerForm(m)))) : null,
+      stopped.length ? section('Stopped branches', stopped.map((b) => h('li', {}, h('a', { class: 'card card-link', href: branchHref(b.name) },
+        h('span', { class: 'card-head' }, dot('needs'), h('span', { class: 'card-name', text: b.name }), ago(activeAt(b))),
+        h('span', { class: 'card-text', text: b.stalled ? 'Running, but stalled: no harness activity' : cap(statusOf(b).text) }))))) : null,
+      total ? null : h('p', { class: 'calm' }, checkMark(false), 'Approvals, questions and branches that stop for you appear here.'),
+      h('details', { class: 'attention-group ledger' },
+        h('summary', {}, h('h2', { text: `Permission requests (${perms.length})` })),
+        h('p', { class: 'hint', text: 'A server decides each tool request at once by the policy its task or send was given; there is nothing to approve afterwards. Send again with "Allow every tool" to let a branch use what was denied.' }),
+        perms.length
+          ? h('ul', { class: 'events' }, perms.map((p) => h('li', {}, h('time', { text: clock(p.at_ms) }),
+            h('a', { href: branchHref(p.branch), text: p.branch }), ` asked to use ${p.tool}${p.decision ? `: ${p.decision}` : ''}`)))
+          : h('p', { class: 'muted', text: 'None seen since this page opened.' })),
+      h('details', { class: 'attention-group ledger' },
+        h('summary', {}, h('h2', { text: `Effect ledger (${state.effects.length})` })),
+        h('p', { class: 'hint', text: 'What branches did outside the machine. by undo plans and performs inverses where the upstream allows.' }),
+        state.effects.length
+          ? h('ul', { class: 'events' }, state.effects.map((e) => h('li', {}, h('time', { text: clock(e.updated_ms) }),
+            h('a', { href: branchHref(e.branch), text: e.branch }),
+            ` ${e.connector} ${e.operation}: ${e.state} (${e.class})${e.undo ? ` · undo ${e.undo.operation}` : (e.undo_unavailable ? ` · no undo: ${e.undo_unavailable}` : '')}`)))
+          : h('p', { class: 'muted', text: 'No effects recorded.' }))));
+    for (const el of document.querySelectorAll('#main [data-draft]')) {
+      if (drafts.has(el.dataset.draft)) el.value = drafts.get(el.dataset.draft);
+      if (focused && el.dataset.draft === focused[0]) { el.focus({ preventScroll: true }); el.setSelectionRange(focused[1], focused[2]); }
+    }
   }
 
   // ---------------------------------------------------------------
   // Triggers
 
   async function renderTriggers() {
-    main(h('h1', { text: 'Triggers' }), h('p', { class: 'muted', text: 'Loading…' }));
+    const head = h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Triggers' }),
+      h('p', { class: 'lede', text: 'Tasks that start on a schedule or on an event.' })));
+    main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Branches' }), head, h('p', { class: 'muted', text: 'Loading…' })));
     let triggers;
     try { ({ triggers } = await api('GET', '/v1/triggers')); } catch (e) {
-      main(h('h1', { text: 'Triggers' }), h('p', { class: 'error', text: e.message }));
+      main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Branches' }), head, h('p', { class: 'error', text: e.message })));
       return;
     }
     const whenText = (w) => w.kind === 'cron' ? `cron ${w.expr}${w.timezone && w.timezone !== 'UTC' ? ` (${w.timezone})` : ''}`
       : w.kind === 'interval' ? `every ${w.seconds}s` : `on ${w.source} events`;
-    main(
-      h('h1', { text: 'Triggers' }),
+    main(h('div', { class: 'page' },
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      head,
       triggers.length ? h('ul', { class: 'list' }, triggers.map((t) => {
         const box = h('input', { type: 'checkbox', id: nextId('trigger'), checked: t.enabled, disabled: !can('run') });
         box.addEventListener('change', async () => {
@@ -1244,17 +1677,16 @@
             renderTriggers();
           } catch (e) {
             box.checked = !box.checked;
-            toast(`Refused: ${e.message}`);
+            toast(`Could not change ${t.name}: ${e.message}`);
             box.disabled = false;
           }
         });
-        return h('li', {}, h('div', { class: 'item' },
-          h('div', { class: 'item-head' }, h('span', { class: 'item-name', text: t.name }), h('span', { class: `badge s-${t.enabled ? 'ready' : 'no_changes'}`, text: t.enabled ? 'enabled' : 'disabled' })),
+        return h('li', { class: 'item' },
+          h('div', { class: 'item-head' }, dot(t.enabled ? 'ready' : 'done'), h('span', { class: 'item-name', text: t.name }), h('span', { class: 'tag', text: t.enabled ? 'enabled' : 'disabled' })),
           h('div', { class: 'item-meta', text: [t.repo, whenText(t.when), t.next_due_ms ? `next ${new Date(t.next_due_ms).toLocaleString()}` : null].filter(Boolean).join(' · ') }),
           t.paused_reason ? h('div', { class: 'item-meta', text: t.paused_reason }) : null,
-          h('div', { class: 'check' }, box, h('label', { for: box.id, text: 'Enabled' }))));
-      })) : h('p', { class: 'muted', text: 'No triggers. by trigger add makes one.' }),
-    );
+          h('label', { class: 'toggle', for: box.id }, box, h('span', { text: 'Enabled' })));
+      })) : h('p', { class: 'muted', text: 'No triggers. by trigger add makes one.' })));
   }
 
   // ---------------------------------------------------------------
@@ -1262,29 +1694,27 @@
 
   async function renderQueue() {
     const all = Array.from(state.branches.values());
-    const count = (pred) => all.filter(pred).length;
     const cost = all.reduce((s, b) => s + (b.cost_usd || 0), 0);
     const turns = all.reduce((s, b) => s + (b.turns || 0), 0);
     const opsSlot = h('div', {}, h('p', { class: 'muted', text: 'Loading…' }));
-    const stat = (label, value) => h('div', { class: 'stat' }, h('b', { text: value }), label);
-    main(
-      h('h1', { text: `Queue and stats for ${state.repo}` }),
+    const stat = (label, value, lane) => h('div', { class: 'stat' }, h('span', { class: 'glance-label' }, lane ? dot(lane) : null, label), h('b', { text: value }));
+    main(h('div', { class: 'page' },
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Queue and stats' }),
+        h('p', { class: 'lede', text: `Work queued and done in ${state.repo}.` }))),
       h('div', { class: 'stats' },
         stat('branches', String(all.length)),
-        stat('running', String(count((b) => b.status.state === 'running'))),
-        stat('ready to merge', String(count((b) => b.status.state === 'ready'))),
-        stat('failed or blocked', String(count((b) => ['failed', 'blocked'].includes(b.status.state)))),
+        lanes(all).map(({ lane, branches }) => stat(lane.label.toLowerCase(), String(branches.length), branches.length ? lane.key : 'done')),
         stat('turns', String(turns)),
         stat('cost reported', money(cost))),
-      h('h2', { text: 'Queued and running operations' }), opsSlot,
-    );
+      h('h2', { text: 'Queued and running operations' }), opsSlot));
     try {
       const { operations } = await api('GET', `${repoPath()}/operations`);
-      opsSlot.replaceChildren(operations.length
+      fill(opsSlot, operations.length
         ? h('ul', { class: 'list' }, operations.map(opItem))
         : h('p', { class: 'muted', text: 'Nothing queued or running.' }));
     } catch (e) {
-      opsSlot.replaceChildren(h('p', { class: 'error', text: e.message }));
+      fill(opsSlot, h('p', { class: 'error', text: e.message }));
     }
   }
 
@@ -1306,9 +1736,10 @@
     const me = state.me;
     const status = h('p', { role: 'status' });
     const pushSlot = h('div', {}, h('p', { class: 'muted', text: 'Checking…' }));
-    main(
-      h('h1', { text: 'Settings' }),
-      h('section', { class: 'panel', 'aria-label': 'This token' },
+    main(h('div', { class: 'page narrow' },
+      h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+      h('header', { class: 'page-head' }, h('div', {}, h('h1', { text: 'Settings' }))),
+      h('section', { class: 'card', 'aria-label': 'This token' },
         h('dl', { class: 'facts' },
           h('dt', { text: 'Name' }), h('dd', { text: me.name }),
           h('dt', { text: 'Tenant' }), h('dd', { text: me.tenant }),
@@ -1316,21 +1747,21 @@
           h('dt', { text: 'Repositories' }), h('dd', { text: (me.repos || state.repos).join(', ') }),
           h('dt', { text: 'Kind' }), h('dd', { text: me.kind === 'paired' ? 'paired from a link' : 'from the server\'s configuration' }),
           me.expires_at_ms ? [h('dt', { text: 'Expires' }), h('dd', { text: new Date(me.expires_at_ms).toLocaleString() })] : null)),
-      h('h2', { text: 'Notifications' }), pushSlot, status,
+      h('h2', { text: 'Notifications' }), h('div', { class: 'card' }, pushSlot, status),
       h('h2', { text: 'Sign out' }),
-      h('p', { class: 'hint', text: 'Forgets the token in this tab. To stop the token working everywhere, revoke it on the server: by serve token revoke NAME.' }),
-      h('div', { class: 'row' }, h('button', { type: 'button', class: 'danger', text: 'Sign out', onclick: () => signOut('Signed out.') })),
-    );
+      h('div', { class: 'card' },
+        h('p', { class: 'hint', text: 'Forgets the token in this tab. To stop the token working everywhere, revoke it on the server: by serve token revoke NAME.' }),
+        h('div', { class: 'row form-actions' }, h('button', { type: 'button', class: 'danger', text: 'Sign out', onclick: () => signOut('Signed out.') })))));
     let info;
     try { info = await api('GET', '/v1/app/push'); } catch (e) {
-      pushSlot.replaceChildren(h('p', { class: 'error', text: e.message }));
+      fill(pushSlot, h('p', { class: 'error', text: e.message }));
       return;
     }
     state.pushInfo = info;
     const supported = 'serviceWorker' in navigator && 'PushManager' in window && window.isSecureContext;
-    const pageNote = h('p', { class: 'hint', text: 'While this page is open it shows a notice for each permission request, question, stall, failure and finished turn.' });
+    const pageNote = h('p', { class: 'hint', text: 'While this page is open, a branch that needs you moves to the top of the list and the tab\'s title counts them. When the tab is hidden, and the browser allows it, a system notification says why.' });
     if (!info.enabled || !supported) {
-      pushSlot.replaceChildren(pageNote, h('p', { class: 'hint', text: !info.enabled
+      fill(pushSlot, pageNote, h('p', { class: 'hint', text: !info.enabled
         ? 'This server does not send push notifications.'
         : 'This browser cannot receive push notifications here (it needs HTTPS, or localhost, and push support).' }));
       return;
@@ -1344,7 +1775,7 @@
     const on = !!subscription && info.subscriptions.includes(subscription.endpoint);
     state.pushOn = on;
     const toggle = h('button', {
-      type: 'button', class: on ? 'secondary' : '', text: on ? 'Turn off on this device' : 'Notify this device',
+      type: 'button', class: on ? '' : 'primary', text: on ? 'Turn off on this device' : 'Notify this device',
       onclick: async () => {
         toggle.disabled = true;
         try {
@@ -1373,7 +1804,7 @@
       },
     });
     const test = h('button', {
-      type: 'button', class: 'secondary', text: 'Send a test', disabled: !on,
+      type: 'button', text: 'Send a test', disabled: !on,
       onclick: async () => {
         try {
           const r = await api('POST', '/v1/app/push/test', {});
@@ -1381,7 +1812,7 @@
         } catch (e) { status.textContent = e.message; }
       },
     });
-    pushSlot.replaceChildren(pageNote,
+    fill(pushSlot, pageNote,
       h('p', { text: on ? 'This device gets push notifications for the repositories this token can read.' : 'Get a push notification on this device even when the page is closed.' }),
       h('div', { class: 'row' }, toggle, test));
   }
@@ -1389,12 +1820,35 @@
   // ---------------------------------------------------------------
   // Start
 
+  function onKey(ev) {
+    if (ev.defaultPrevented || ev.metaKey || ev.ctrlKey || ev.altKey || !state.me || $('confirm').open) return;
+    if (ev.target.closest('input, textarea, select, [contenteditable]')) return;
+    const search = $('branch-filter');
+    if (ev.key === '/' && search.offsetParent) { ev.preventDefault(); search.focus(); search.select(); }
+    else if (ev.key === 'j' || ev.key === 'k') { ev.preventDefault(); stepBranch(ev.key === 'j' ? 1 : -1); }
+  }
+
   async function boot() {
     $('repo').addEventListener('change', async (ev) => {
       await switchRepo(ev.target.value);
       location.hash = '#/';
       route();
     });
+    $('branch-filter').addEventListener('input', (ev) => {
+      state.filter = ev.target.value;
+      renderLanes();
+    });
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('click', (ev) => {
+      for (const menu of document.querySelectorAll('details.menu[open]')) if (!menu.contains(ev.target)) menu.open = false;
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Escape') return;
+      for (const menu of document.querySelectorAll('details.menu[open]')) { menu.open = false; menu.querySelector('summary').focus(); }
+    });
+    setInterval(() => {
+      for (const t of document.querySelectorAll('time[data-at]')) t.textContent = since(Number(t.dataset.at)) + t.dataset.suffix;
+    }, 15000);
     window.addEventListener('hashchange', () => {
       const m = /^#pair=([0-9a-zA-Z]+)$/.exec(location.hash);
       if (m) { pair(m[1]).then((ok) => ok && start().catch((e) => renderSignIn(e.message))); return; }
@@ -1412,8 +1866,9 @@
     } catch (e) {
       if (e.status === 401) { signOut('This token is no longer accepted (expired or revoked). Pair again.'); return; }
       setLive('off', 'offline');
-      main(h('h1', { text: 'Cannot reach the server' }), h('p', { class: 'error', text: e.message }),
-        h('div', { class: 'row' }, h('button', { type: 'button', text: 'Try again', onclick: () => location.reload() })));
+      document.body.dataset.view = 'signin';
+      main(h('div', { class: 'signin' }, h('h1', { text: 'Cannot reach the server' }), h('p', { class: 'error', text: e.message }),
+        h('div', { class: 'row' }, h('button', { type: 'button', class: 'primary', text: 'Try again', onclick: () => location.reload() }))));
       focusHeading();
     }
   }
