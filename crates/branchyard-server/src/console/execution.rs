@@ -156,7 +156,16 @@ pub(crate) fn execute(
                     subject: caller.0.connector_subject(),
                     tenant: caller.tenant().into(),
                 });
-                super::sources::prepare(app, &caller, &workspace, &session, &repo, &mut options)?;
+                if let Some(index) = super::sources::prepare(
+                    app,
+                    &caller,
+                    &workspace,
+                    &session,
+                    &repo,
+                    &mut options,
+                )? {
+                    request.prompt.push_str(&super::sources::input_hint(&index));
+                }
                 cancel_observer(app, &repo, &session_id, &mut options);
                 if session.body["access"] == "reviewer" {
                     let harness = options.harness.as_deref().ok_or_else(|| {

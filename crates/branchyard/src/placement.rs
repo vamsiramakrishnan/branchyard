@@ -575,6 +575,19 @@ impl Placement {
         plan: &SandboxPlan,
         how: Copied<'_>,
     ) -> Result<Placement, String> {
+        // Copy inputs before the initial guest upload. Sandbox setup happens
+        // afterward, and its local copy alone cannot reach a copied worktree.
+        if let Some(workspace) = record.workspace.as_ref().filter(|state| !state.ready) {
+            let copied = crate::workspace::copy(
+                yard.root(),
+                &record.info.worktree,
+                &workspace.spec.copy,
+                None,
+            );
+            if !copied.ok {
+                return Err(copied.failure());
+            }
+        }
         let home = record
             .home
             .clone()

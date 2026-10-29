@@ -62,6 +62,15 @@ the same request idempotency key. It does not replay a native model turn.
 Client-supplied revision conflicts and quota refusals still require their normal
 caller action.
 
+Each session with selected sources or frozen review artifacts gets a bounded
+JSON input index at `.console-inputs/{workspace}/{session}/INDEX.md`. Both the
+initial native prompt and standing instructions link to that exact relative
+path. The index lists only selected grants, their staged paths, titles, media
+types and digests. Source digests use SHA256; artifact digests use BLAKE3. Titles
+and names are untrusted metadata encoded as JSON strings. The index contains no
+source contents and has a 64 KiB limit. It travels through the same workspace
+copy step as the immutable input bytes, including to copied remote worktrees.
+
 Work continues on the server if this MCP client disconnects. Inspect the returned
 operation ID; a long-poll response that is still nonterminal means work continues.
 Observing an operation does not cancel it. Cancellation is an explicit request
