@@ -15,8 +15,7 @@ let playwright;
 const playwrightCandidates = [
   process.env.BY_TEST_PLAYWRIGHT,
   process.env.PLAYWRIGHT,
-  'playwright',
-  '/tmp/branchyard-product-polish-20261029/ux/browser/node_modules/playwright'
+  'playwright'
 ].filter(Boolean);
 
 for (const p of playwrightCandidates) {
