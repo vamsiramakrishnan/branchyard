@@ -124,7 +124,11 @@ assert not any(name in sys.modules for name in ['docx','pptx','openpyxl','pypdf'
         self.assertEqual(result.returncode, 0, result.stderr)
         with mock.patch("sys.stdout"):
             self.assertEqual(main(["doctor", "--require", "unknown"]), 3)
-            self.assertEqual(main(["pdf", "read", str(self.root / "missing.pdf")]), 1)
+            with mock.patch.object(pdf, "library", side_effect=Unavailable("Missing pypdf")):
+                self.assertEqual(main(["pdf", "read", str(self.root / "missing.pdf")]), 3)
+            self.assertEqual(
+                main(["pdf", "create", str(self.root / "missing.json"), "--out", str(self.root / "out.pdf")]), 1
+            )
 
 
 @unittest.skipUnless(OPTIONAL, "install branchyard[artifacts] to inspect real document files")
