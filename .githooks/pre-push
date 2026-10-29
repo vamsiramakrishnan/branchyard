@@ -1,10 +1,14 @@
 #!/bin/sh
 # pre-push, installed by tools/install_hooks.py: runs the fast checks before a push.
-# To push once without them: git push --no-verify
 set -eu
 cat > /dev/null  # git sends the refs on stdin; the checks do not need them
+# Git exports this repository's context to hooks. Checks create other repositories.
+by_git_local_vars=$(git rev-parse --local-env-vars)
+for by_git_local_var in $by_git_local_vars; do
+    unset "$by_git_local_var"
+done
 if ! python3 tools/check.py --fast; then
     echo "pre-push: the checks failed, so the push was refused." >&2
-    echo "pre-push: fix them, or push once without them: git push --no-verify" >&2
+    echo "pre-push: run python3 tools/check.py --fast, fix the failures, and retry the push." >&2
     exit 1
 fi
