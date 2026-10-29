@@ -69,3 +69,7 @@ Warp files are a source reference collection, not a complete independently build
 Harness executables, model services, third-party ACP adapter packages, and Microsandbox are not distributed in this starter. Their licenses, authentication requirements, and server deployment terms must be tracked when producing runtime images. No affiliation or endorsement by an upstream project is implied.
 
 The Linux runtime uses the registry `msb_krun_vmm` dependency supplied by the pinned Microsandbox SDK. A small local zstd compatibility crate forwards its older API to the patched zstd dependency; no VMM source snapshot or manifest patch is maintained. The VMM package declares `Apache-2.0 AND BSD-3-Clause`. Its upstream license and third-party notices accompany runtime distribution in `packaging/licenses/`.
+
+## Brand lettering
+
+The wordmarks and sharing card in [assets/brand](assets/brand/README.md) contain outlined DejaVu Sans lettering. The [DejaVu font notice](assets/brand/LICENSE-DejaVu.txt) accompanies those assets. The Branchyard mark itself is original artwork under the repository's Apache-2.0 license.
