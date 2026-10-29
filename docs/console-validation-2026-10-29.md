@@ -26,10 +26,9 @@ Not done in that record: a model turn, a browser workflow, GKE conversion or
 production load testing.
 
 The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. The corrected GKE/Substrate model workflow also passed; all owned temporary cloud resources were verified removed. Publication is pending. See the [cleanup record](evidence/substrate-gke-2026-10-29.json) for exact resource checks.
-The GKE check has exercised the native Control API, an actor, a
+The earlier GKE smoke check exercised the native Control API, an actor, a
 byte-preserving file round trip and AGY 1.4.9's version command using the 0.3.0
-CLI. That model-free smoke check does not qualify a model workflow. Live model
-acceptance is recorded separately when it completes. Not done: final release
+CLI. The later model workflow is recorded separately below. Not done: final release
 publication and an Agent Compute Engine preview run, which is excluded because
 preview access is unavailable.
 
@@ -54,6 +53,10 @@ there was no local fallback and no artifact acceptance. A compatible upstream ga
 | LibreOffice exited without a PDF in the container | The `gen` backend attempted to open an X display | Use the headless `svp` backend. |
 | Parallel Rust tests intermittently reported no Git author | A fixture changed global Git environment variables while other tests ran | Remove the fixture mutation and run verification with an explicit sterile Git environment. |
 | A pre-push check read fixture commits from the integration repository | Git exports repository and index context into hooks; nested checks inherited it | Clear every Git-local environment variable before checks start. A regression proves another scratch repository stays separate. The refused push's fixture commit was retained under a backup reference, and the branch and index were restored to the saved integration commit without rewriting working files. |
+| Operation reads exposed a hidden repository name or failed on a controller without its files | The console guard reused local source resolution before the existing opaque visibility check | Check current repository grants and durable workspace membership independently of a local yard. Hidden operations retain `404 unknown_operation`, and native file access still requires the source. |
+| A cancellation test reported an exited check as alive | Its `/proc` file disappeared between a directory probe and a negated `grep` | Use the shared process-aware wait and require both a deliberately blocked check and its child to exit. Production cancellation behavior is unchanged. |
+| A managed conversation showed the operator's storage path | The message response copied native text without the redaction used by other workspace views | Redact the configured managed root in the response only. HTTP tests cover configured and default roots, unchanged repository messages, cursors and original native event bytes. |
+| macOS ARM packaging never obtained a runner | `macos-14` was in GitHub's scheduled 29 October retirement outage | Move both builds and native installer checks to `macos-15`; keep Intel on `macos-15-intel`. |
 | A schema test could not validate an operation response | A generic JSON root concealed the actual operation shape | Use the typed flat operation response and namespaced workspace schema roots. |
 | Bucket creation rejected `--labels` | The installed gcloud required a separate label update | Create, retain the exact creation receipt, then update labels. Refuse to adopt an ambiguous pre-existing bucket. |
 | The evaluation database allocated 500 GiB | The pinned upstream database manifest has a separate PVC | Use the supported smaller evaluation override, record PVC/PV identities and verify disk reclamation during cleanup. |
@@ -78,6 +81,12 @@ Unicode titles through an explicit encoded metadata contract before claiming
 full filename support. Source preview routes exist; the Sources panel currently
 offers downloads. Active application previews need a separate origin and are
 not served as trusted console HTML.
+
+Legacy repository-wide lists and event streams require access to every
+workspace sharing that repository, because those responses do not yet filter
+each native record. Branch-specific and workspace routes keep their own
+membership checks. Per-resource filtering is needed before those aggregate
+routes can support people with different workspace memberships on one repository.
 
 Use the [workspace manager](workspace-management.md),
 [runtime guide](workspace-runtime.md), [preview guide](artifact-previews.md) and

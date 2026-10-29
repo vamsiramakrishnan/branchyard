@@ -800,6 +800,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_portable_and_native_artifacts_have_dist_owned_targets_and_resources(self):
         self.assertEqual(self.config["dist"]["cargo-dist-version"], "0.33.1")
+        smoke = (ROOT / ".github/workflows/release-smoke.yml").read_text()
+        self.assertEqual(
+            set(re.findall(r"^\s+- runner: (\S+)$", smoke, re.M)),
+            set(self.config["dist"]["github-custom-runners"].values()),
+            "every native build runner needs a matching installation smoke runner",
+        )
         self.assertEqual(
             set(self.config["dist"]["targets"]),
             {

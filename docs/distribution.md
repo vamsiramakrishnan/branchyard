@@ -234,6 +234,13 @@ actual artifacts on matching native runners, checks reinstall, setup,
 readiness and checksum refusal, and calls no model. Publication depends on its
 successful result. The image job runs executable probes, also without a model.
 
+macOS ARM builds and installation checks use `macos-15`; Intel checks use
+`macos-15-intel`. Keep the build mapping in `dist-workspace.toml` and the native
+smoke matrix aligned when a runner image retires. GitHub's
+[macOS 14 retirement schedule](https://github.com/actions/runner-images/issues/13518)
+includes outages before removal, so a queued or cancelled job is not packaging
+validation.
+
 ### Homebrew
 
 `tools/homebrew_formula.py` renders the formula template from actual dist archive

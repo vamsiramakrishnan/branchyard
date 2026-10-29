@@ -17,7 +17,7 @@ jobs:
             runtime: false
           - runner: ubuntu-24.04-arm
             runtime: false
-          - runner: macos-14
+          - runner: macos-15
             runtime: false
           - runner: macos-15-intel
             runtime: false
