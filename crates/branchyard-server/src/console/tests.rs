@@ -1421,6 +1421,25 @@ async fn code_candidate_review_is_read_only_and_frozen_when_the_writer_advances(
         "first\n"
     );
     assert!(!reviewer.info().worktree.join("forbidden.txt").exists());
+    let (status, continued) = fixture
+        .json(
+            Method::POST,
+            &format!("{path}/{review_id}/messages"),
+            OWNER,
+            Some("continue-frozen-review"),
+            json!({"prompt":"PERMISSION WRITE forbidden-followup.txt=must-not-write"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{continued}");
+    assert_eq!(
+        fixture.finished(continued["id"].as_str().unwrap()).state,
+        branchyard_client::api::OperationState::Succeeded
+    );
+    assert!(!reviewer
+        .info()
+        .worktree
+        .join("forbidden-followup.txt")
+        .exists());
     assert!(reviewer.events().unwrap().iter().any(|event|matches!(&event.activity,branchyard::Activity::Harness(branchyard::Event::MessageDelta{text,..}) if text.contains("denied"))));
     let (status, advanced) = fixture
         .json(
@@ -1903,4 +1922,88 @@ async fn concurrent_named_sessions_admit_once_without_exposing_internal_revision
             .len(),
         4
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuation_retains_validated_tool_policy_without_widening_deny_or_creator_access() {
+    let fixture = Fixture::new(true);
+    let wid = fixture.workspace().await;
+    let workspace = fixture.detail(&wid).await;
+    let (status, member) = fixture
+        .json(
+            Method::POST,
+            &format!("/v1/workspaces/{wid}/members/editor"),
+            OWNER,
+            Some("policy-editor"),
+            json!({"revision":workspace["revision"],"role":"editor"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{member}");
+    for (name, policy, legacy, allowed) in [
+        ("default-deny", Value::Null, false, false),
+        ("explicit-allow", json!({"mode":"allow"}), false, true),
+        (
+            "legacy-missing-policy",
+            json!({"mode":"allow"}),
+            true,
+            false,
+        ),
+    ] {
+        let path = format!("/v1/workspaces/{wid}/sessions");
+        let (status, started) = fixture.json(Method::POST, &path, OWNER, Some(name), json!({"name":name,"prompt":"Say hello","harness":"gemini-cli","access":"writer","policy":policy})).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        assert_eq!(
+            fixture.finished(started["id"].as_str().unwrap()).state,
+            branchyard_client::api::OperationState::Succeeded
+        );
+        let sid = started["session_id"].as_str().unwrap();
+        let workspace = super::get(&fixture.app, Collection::Workspaces, &wid).unwrap();
+        let repo = super::runtime::resolve(&fixture.app, &workspace).unwrap();
+        let before = repo.yard.branch(sid).unwrap().info().clone();
+        if legacy {
+            let row = super::get(&fixture.app, Collection::Sessions, sid).unwrap();
+            let mut body = row.body.clone();
+            body.as_object_mut().unwrap().remove("_policy");
+            fixture
+                .app
+                .registry
+                .console_mutate(&[super::update(row, body)])
+                .unwrap();
+        }
+        let messages = format!("{path}/{sid}/messages");
+        let (status, denied) = fixture
+            .json(
+                Method::POST,
+                &messages,
+                EDITOR,
+                Some(&format!("foreign-{name}")),
+                json!({"prompt":"PERMISSION WRITE stolen.txt=must-not-write"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        assert_eq!(denied["error"]["code"], "session_subject_required");
+        let (status, sent) = fixture
+            .json(
+                Method::POST,
+                &messages,
+                OWNER,
+                Some(&format!("continue-{name}")),
+                json!({"prompt":"PERMISSION WRITE continued.txt=policy-preserved"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(
+            fixture.finished(sent["id"].as_str().unwrap()).state,
+            branchyard_client::api::OperationState::Succeeded
+        );
+        let after = repo.yard.branch(sid).unwrap().info().clone();
+        assert_eq!(after.session, before.session);
+        assert_eq!(after.turns, 2);
+        assert_eq!(
+            after.worktree.join("continued.txt").exists(),
+            allowed,
+            "{name}"
+        );
+        assert!(!after.worktree.join("stolen.txt").exists());
+    }
 }

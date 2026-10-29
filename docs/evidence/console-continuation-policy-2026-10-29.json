@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-29",
+  "evidence": "live AGY follow-up failure with hermetic permission regressions",
+  "candidate_version": "0.3.0",
+  "harness": "AGY 1.4.10",
+  "model": "gemini-3.8-flash-low",
+  "workspace_id": "01M63SMTZXZEN24K94F780BBSM",
+  "initial_turns": {
+    "concurrent_running_observed": true,
+    "status": "both succeeded",
+    "published_formats": [
+      "xlsx",
+      "docx",
+      "pptx"
+    ],
+    "original_downloads_and_previews": "passed"
+  },
+  "continuation": {
+    "operation_id": "op_54faf04dfece4580bad798b6",
+    "native_session_before": "c51c03ed-5a63-4bc9-9840-f8de785e8e6b",
+    "native_session_after": "c51c03ed-5a63-4bc9-9840-f8de785e8e6b",
+    "native_turn": 2,
+    "operation_state": "succeeded",
+    "result_event": null,
+    "result_error": "no accepted result in its latest turn",
+    "native_warning": "The CLI soft-denied a command because no permissions.allow rule in its settings lets it run.",
+    "acceptance_status": 409,
+    "acceptance_code": "deliverable_not_current",
+    "accepted": false
+  },
+  "cause": "Start validated an explicit allow policy, but session metadata retained only the unapproved-tools acknowledgement. Message admission constructed SendRequest with its default deny policy, overwriting native AGY tool permissions during continuation.",
+  "fix": "Persist the initially validated typed PolicySpec in private session metadata. Continue with that exact policy through current authorization, operator opt-ins, effect policy and creator checks. Reviewer turns retain their enforced read-only restriction. Missing or null legacy policy stays deny.",
+  "hermetic_checks": [
+    "A command-requiring continuation can write when the original policy explicitly allowed it.",
+    "Omitted policy and missing legacy policy deny the same write.",
+    "A different workspace editor cannot continue the creator-bound session.",
+    "A reviewer continuation cannot write even when its caller originally requested allow.",
+    "Explicit AGY acknowledgement still requires operator permission.",
+    "Strict server library/test clippy passed."
+  ],
+  "not_done": [
+    "Fresh final live workflow using rebuilt policy-fixed binaries at the time this record was written",
+    "Production load qualification"
+  ]
+}

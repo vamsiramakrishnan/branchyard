@@ -98,8 +98,10 @@ For AGY and other profiles that cannot route individual tool approvals, pass
 `unapproved_tools: true` explicitly. The operator must enable
 `allow_unapproved_tools` too. Typed clients, Python and manager MCP preserve this
 acknowledgment; its server default is false and it is never enabled automatically.
-The creator's explicit acknowledgment is retained for continuation, subject to
-current operator policy. Reviewers require a harness that routes tool approvals;
+The creator's explicit acknowledgment and initially validated tool policy are
+retained for continuation, subject to current operator policy. Omitted policies
+remain deny. Older sessions without a retained policy also remain deny; their
+permissions are not inferred from another account or a harness settings file. Reviewers require a harness that routes tool approvals;
 acknowledgment cannot bypass their read-only policy.
 
 Runtime controls and PR work use the existing durable operation queue, with

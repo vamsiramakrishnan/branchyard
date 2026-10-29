@@ -581,7 +581,7 @@ fn start_once(
         Collection::Sessions,
         &sid,
         caller,
-        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":body.get("model").filter(|value| !value.is_null()),"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"unapproved_tools":access != "reviewer" && request.unapproved_tools,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
+        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":body.get("model").filter(|value| !value.is_null()),"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"_policy":request.policy,"unapproved_tools":access != "reviewer" && request.unapproved_tools,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
     );
     let mutations = vec![
         insert(row),
@@ -672,8 +672,18 @@ pub(super) fn continue_session(
     }
     let repo = resolve(app, &workspace)?;
     let branch = repo.yard.branch(text(&row.body, "branch")?).map_err(sdk)?;
+    let policy = row
+        .body
+        .get("_policy")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .map(serde_json::from_value::<branchyard_client::api::PolicySpec>)
+        .transpose()
+        .map_err(|error| ApiError::internal(format!("stored session policy: {error}")))?
+        .unwrap_or_default();
     let request = SendRequest {
         prompt: text(&body, "prompt")?.into(),
+        policy,
         unapproved_tools: row.body["access"] != "reviewer"
             && row.body["unapproved_tools"].as_bool().unwrap_or(false),
         ..Default::default()
