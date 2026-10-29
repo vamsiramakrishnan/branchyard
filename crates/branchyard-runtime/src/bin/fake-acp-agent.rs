@@ -3,8 +3,9 @@
 //! It answers `initialize`, `session/new`, `session/resume`, `session/load`
 //! and `session/prompt` over newline-delimited JSON-RPC on stdio, and exits
 //! when stdin closes. Resuming or loading a session whose ID starts with
-//! `missing` fails as not found. A prompt replies `echo: <prompt>` unless it contains a
-//! keyword:
+//! `missing` fails as not found. A prompt replies `echo: <prompt>` unless it
+//! contains a complete whitespace-delimited directive word. Paths and IDs that
+//! contain a directive name do not invoke it:
 //!
 //! - `PERMISSION`: asks `session/request_permission` and replies `allowed` or
 //!   `denied` by the option selected. Any `WRITE` in the prompt happens only
@@ -136,6 +137,13 @@ fn update(session: &str, update: Value) {
         "method": "session/update",
         "params": {"sessionId": session, "update": update},
     }));
+}
+
+/// Find a fake directive and return its remaining words, excluding paths and IDs.
+fn directive<'a>(text: &'a str, name: &str) -> Option<std::str::SplitWhitespace<'a>> {
+    let mut words = text.split_whitespace();
+    words.find(|word| *word == name)?;
+    Some(words)
 }
 
 /// The canned history a `session/load` replays under `FAKE_ACP_REPLAY`.
@@ -341,12 +349,12 @@ fn main() {
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
-                if text.contains("SHOW_INSTRUCTIONS") {
+                if directive(text, "SHOW_INSTRUCTIONS").is_some() {
                     chunk(&session, &format!("instructions: {preamble}"));
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
-                if text.contains("INSTRUCTED") {
+                if directive(text, "INSTRUCTED").is_some() {
                     chunk(&session, &format!("instructed={instructed}"));
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
@@ -361,7 +369,7 @@ fn main() {
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
-                if text.contains("ORPHAN") {
+                if directive(text, "ORPHAN").is_some() {
                     stubborn = true;
                     chunk(&session, &orphan());
                     active = Some(Active {
@@ -372,7 +380,7 @@ fn main() {
                     });
                     continue;
                 }
-                if text.contains("AWAIT_STEER") {
+                if directive(text, "AWAIT_STEER").is_some() {
                     chunk(&session, "waiting for steering");
                     active = Some(Active {
                         id,
@@ -518,15 +526,15 @@ fn prompt(
     text: &str,
     next_request: &mut u64,
 ) -> Option<Active> {
-    if text.contains("GARBAGE") {
+    if directive(text, "GARBAGE").is_some() {
         println!("this is not JSON");
     }
-    if text.contains("EXIT") {
+    if directive(text, "EXIT").is_some() {
         chunk(session, "exiting");
         eprintln!("fake-acp-agent: exiting mid-turn as asked");
         std::process::exit(3);
     }
-    if text.contains("HANG") {
+    if directive(text, "HANG").is_some() {
         return Some(Active {
             id,
             permission: None,
@@ -534,9 +542,9 @@ fn prompt(
             awaits_steer: false,
         });
     }
-    if text.contains("PERMISSION") {
+    if directive(text, "PERMISSION").is_some() || directive(text, "PERMISSION_BY_ID").is_some() {
         *next_request += 1;
-        let tool_call = match text.contains("PERMISSION_BY_ID") {
+        let tool_call = match directive(text, "PERMISSION_BY_ID").is_some() {
             true => {
                 update(
                     session,
@@ -571,7 +579,7 @@ fn prompt(
         });
     }
     write_files(session, text);
-    let answer = if text.contains("BACKGROUND") {
+    let answer = if directive(text, "BACKGROUND").is_some() {
         // Same process group, detached from the protocol pipes.
         match Command::new("sleep")
             .arg("30")
@@ -583,13 +591,13 @@ fn prompt(
             Ok(child) => format!("background pid {}", child.id()),
             Err(error) => format!("background failed: {error}"),
         }
-    } else if text.contains("WHOAMI") {
+    } else if directive(text, "WHOAMI").is_some() {
         format!("session {session} resumed={resumed}")
-    } else if text.contains("WRITE") {
+    } else if directive(text, "WRITE").is_some() {
         String::new()
-    } else if let Some(rest) = text.split("ENV").nth(1) {
+    } else if let Some(rest) = directive(text, "ENV") {
         std::iter::once("HOME")
-            .chain(rest.split_whitespace())
+            .chain(rest)
             .map(|name| match std::env::var(name) {
                 Ok(value) => format!("{name}={value}\n"),
                 Err(_) => format!("{name} unset\n"),
@@ -942,5 +950,51 @@ fn started(client: &mut McpClient, branch: &str) -> Result<(bool, String), Strin
             return Ok((false, prompted.to_string()));
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::directive;
+
+    #[test]
+    fn directives_are_words_and_keep_composed_arguments() {
+        for name in [
+            "SHOW_INSTRUCTIONS",
+            "INSTRUCTED",
+            "ORPHAN",
+            "AWAIT_STEER",
+            "GARBAGE",
+            "EXIT",
+            "HANG",
+            "PERMISSION",
+            "PERMISSION_BY_ID",
+            "BACKGROUND",
+            "WHOAMI",
+            "WRITE",
+            "ENV",
+        ] {
+            let path = format!("/work/{name}/tasks/01ABC{name}XYZ/INDEX.md");
+            assert!(directive(&path, name).is_none(), "{name}");
+            let text = format!("Read {path}\n\n{name} first second");
+            assert_eq!(
+                directive(&text, name).unwrap().collect::<Vec<_>>(),
+                ["first", "second"],
+                "{name}"
+            );
+        }
+        assert!(directive("PERMISSION_BY_ID", "PERMISSION").is_none());
+        assert_eq!(
+            directive("HANG WRITE marker.txt=1", "HANG")
+                .unwrap()
+                .collect::<Vec<_>>(),
+            ["WRITE", "marker.txt=1"]
+        );
+        assert_eq!(
+            directive("Read /work/ENV/INDEX.md\nENV FIRST SECOND", "ENV")
+                .unwrap()
+                .collect::<Vec<_>>(),
+            ["FIRST", "SECOND"]
+        );
     }
 }

@@ -511,7 +511,12 @@ fn comments_are_attributed_and_removed_members_lose_legacy_operation_and_task_ac
 #[test]
 fn named_writer_sessions_keep_separate_attempts_and_native_conversations() {
     let f = Fixture::new();
-    let server = Server::start(config(&f, true));
+    let mut config = config(&f, true);
+    // The prepended capability path must not turn a directory name into a
+    // fake-agent directive, including HANG on initial and resumed turns.
+    config.managed_knowledge.root =
+        Some(f.dir.join("HANG-ENV-EXIT-WHOAMI-PERMISSION-WRITE-GARBAGE"));
+    let server = Server::start(config);
     let p = project(&server, json!({"kind":"knowledge"}), "sessions-project");
     let (wid, _) = workspace(&server, &p, "sessions-workspace");
     let sessions_path = format!("/v1/workspaces/{wid}/sessions");
@@ -524,6 +529,7 @@ fn named_writer_sessions_keep_separate_attempts_and_native_conversations() {
             json!({"name":name,"prompt":prompt,"harness":"gemini-cli","access":"writer"}),
         );
         assert_eq!(status, 200, "{operation}");
+        eprintln!("awaiting native session start {name}: {}", operation["id"]);
         let finished = await_operation(&server.client(), operation["id"].as_str().unwrap());
         assert_eq!(finished.state, OperationState::Succeeded, "{finished:?}");
         operation
@@ -558,6 +564,7 @@ fn named_writer_sessions_keep_separate_attempts_and_native_conversations() {
         json!({"prompt":"Follow up in the research conversation","action":"resume"}),
     );
     assert_eq!(status, 200, "{continued}");
+    eprintln!("awaiting Researcher continuation: {}", continued["id"]);
     let finished = await_operation(&server.client(), continued["id"].as_str().unwrap());
     assert_eq!(finished.state, OperationState::Succeeded, "{finished:?}");
     let (_, transcript) = read(&server, &first_messages, TOKEN);

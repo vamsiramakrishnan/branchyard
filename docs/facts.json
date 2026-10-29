@@ -65,7 +65,7 @@
     }
   },
   "tests": {
-    "total": 3073,
+    "total": 3074,
     "ignored": 34,
     "by_crate": {
       "branchyard": {
@@ -121,7 +121,7 @@
         "ignored": 0
       },
       "branchyard-runtime": {
-        "tests": 49,
+        "tests": 50,
         "ignored": 0
       },
       "branchyard-sandbox": {
