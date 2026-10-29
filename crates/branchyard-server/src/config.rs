@@ -216,23 +216,34 @@ impl GoogleIdTokenConfig {
         Ok(())
     }
 
-    /// Recheck the admitted identity and exact policy against this worker's config.
+    /// Recheck a direct identity's exact policy or a paired identity's issuer ceiling.
     pub fn still_allows(&self, principal: &Principal) -> bool {
+        let Some(origin) = principal.root_origin() else {
+            return false;
+        };
         let AuthenticationOrigin::GoogleIdToken {
             issuer,
             subject,
             audience,
-        } = &principal.origin
+        } = origin
         else {
             return false;
         };
         if audience != &self.audience {
             return false;
         }
-        let mut policy = principal.clone();
-        policy.origin = AuthenticationOrigin::Configured;
         self.bindings.iter().any(|binding| {
-            &binding.issuer == issuer && &binding.subject == subject && binding.principal == policy
+            if &binding.issuer != issuer || &binding.subject != subject {
+                return false;
+            }
+            match &principal.origin {
+                AuthenticationOrigin::Paired { .. } => principal.within_policy(&binding.principal),
+                _ => {
+                    let mut policy = principal.clone();
+                    policy.origin = AuthenticationOrigin::Configured;
+                    binding.principal == policy
+                }
+            }
         })
     }
 }
@@ -261,6 +272,43 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// A valid delegation chain's original authentication provenance.
+    /// Every paired hop keeps one stable subject; Google roots must reproduce it.
+    pub(crate) fn root_origin(&self) -> Option<&AuthenticationOrigin> {
+        let subject = self.connector_subject();
+        let mut origin = &self.origin;
+        while let AuthenticationOrigin::Paired {
+            subject: paired,
+            origin: parent,
+        } = origin
+        {
+            if paired != &subject {
+                return None;
+            }
+            origin = parent;
+        }
+        if matches!(self.origin, AuthenticationOrigin::Paired { .. })
+            && matches!(origin, AuthenticationOrigin::GoogleIdToken { .. })
+        {
+            let mut root = self.clone();
+            root.origin = origin.clone();
+            if root.connector_subject() != subject {
+                return None;
+            }
+        }
+        Some(origin)
+    }
+
+    /// Whether this policy is no broader than a current issuer's ceiling.
+    pub(crate) fn within_policy(&self, issuer: &Principal) -> bool {
+        self.tenant == issuer.tenant
+            && self.scopes.is_subset(&issuer.scopes)
+            && match (&self.repos, &issuer.repos) {
+                (_, None) => true,
+                (Some(asked), Some(allowed)) => asked.is_subset(allowed),
+                (None, Some(_)) => false,
+            }
+    }
     /// Every scope, every repository, in [`DEFAULT_TENANT`]: what a
     /// `tokens` entry becomes when it names no tenant or scopes of its own,
     /// keeping single-token configurations working unchanged.

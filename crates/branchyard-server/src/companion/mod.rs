@@ -211,9 +211,7 @@ pub(crate) async fn verify_paired(
         .await
         .ok()?
         .ok()??;
-    if crate::config::check_principal(&token.principal).is_err()
-        || !token.usable_at(branchyard_support::time::now_ms())
-    {
+    if !crate::auth::paired_allowed(&app.config, &token, branchyard_support::time::now_ms()) {
         return None;
     }
     Some((
@@ -240,6 +238,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
         return response;
     };
     let hash = verified.token_sha256.clone();
+    let policy = app.clone();
     let ended = async move {
         loop {
             let now = branchyard_support::time::now_ms();
@@ -254,7 +253,13 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .is_some_and(|t| t.usable_at(branchyard_support::time::now_ms()));
+                .is_some_and(|t| {
+                    crate::auth::paired_allowed(
+                        &policy.config,
+                        &t,
+                        branchyard_support::time::now_ms(),
+                    )
+                });
             if !still {
                 return;
             }

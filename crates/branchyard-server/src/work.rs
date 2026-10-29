@@ -701,18 +701,13 @@ fn admitted_principal_allowed(
     };
     crate::config::check_principal(principal)
         .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, "principal_invalid", why))?;
-    if matches!(
-        principal.origin,
-        crate::config::AuthenticationOrigin::GoogleIdToken { .. }
-    ) && !config
-        .google_identity
-        .as_ref()
-        .is_some_and(|config| config.still_allows(principal))
+    if principal.origin != crate::config::AuthenticationOrigin::Configured
+        && !crate::auth::origin_allowed(config, principal)
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "identity_binding_revoked",
-            "the admitted external identity binding changed or was removed",
+            "the admitted identity's issuing policy changed or was removed",
         ));
     }
     let repo = &stored.operation.repo;
@@ -1194,6 +1189,42 @@ pub(crate) fn delegator(yard: &Yard, name: &str) -> Result<String, branchyard::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_paired_google_work_cannot_outlive_its_issuer_binding() {
+        use crate::config::{
+            AuthenticationOrigin, Config, GoogleIdTokenConfig, GoogleIdentityBinding, Principal,
+        };
+        let mut issuer = Principal::default_for("operator-display");
+        issuer.repos = Some(["app".to_owned(), "other".to_owned()].into_iter().collect());
+        let mut config = Config::new(std::path::PathBuf::new());
+        config.google_identity = Some(GoogleIdTokenConfig {
+            audience: "server".into(),
+            bindings: vec![GoogleIdentityBinding {
+                issuer: "https://accounts.google.com".into(),
+                subject: "paired-external".into(),
+                principal: issuer.clone(),
+            }],
+        });
+        issuer.origin = AuthenticationOrigin::GoogleIdToken {
+            issuer: "https://accounts.google.com".into(),
+            subject: "paired-external".into(),
+            audience: "server".into(),
+        };
+        let mut phone = issuer.delegated_to("phone".into());
+        phone.scopes = ["run".into()].into_iter().collect();
+        phone.repos = Some(["app".to_owned()].into_iter().collect());
+        let stored: StoredOperation = serde_json::from_value(serde_json::json!({"operation":{"id":"paired-queued","repo":"app","kind":"task","state":"queued","branches":[],"cursor":0,"created_at_ms":0},"principal":phone.delegated_to("tablet".into()),"tenant":"default"})).unwrap();
+        assert!(admitted_principal_allowed(&config, &stored).is_ok());
+        config.google_identity = None;
+        assert_eq!(
+            admitted_principal_allowed(&config, &stored)
+                .unwrap_err()
+                .body
+                .code,
+            "identity_binding_revoked"
+        );
+    }
 
     #[test]
     fn queued_external_work_rechecks_binding_after_durable_round_trip() {

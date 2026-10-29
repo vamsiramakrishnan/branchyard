@@ -7,6 +7,9 @@ use crate::config::{sha256_hex, AuthenticationOrigin, Credential, GoogleIdTokenC
 use google_cloud_auth::credentials::idtoken::verifier::{Builder, Verifier};
 use std::time::Duration;
 
+mod policy;
+pub(crate) use policy::{origin_allowed, paired_allowed, recheck_caller};
+
 pub struct Credentials {
     credentials: Vec<Credential>,
     google: Option<GoogleVerifier>,
