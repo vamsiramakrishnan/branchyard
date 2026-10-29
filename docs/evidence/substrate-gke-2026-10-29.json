@@ -115,6 +115,7 @@
     }
   ],
   "running_image_digests": [
+    "cr.agentgateway.dev/agentgateway@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
     "docker.io/library/postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15",
     "ghcr.io/agentgateway/agentgateway@sha256:11c43cae4d8554be2507e6104592db5e9d05a1ed161be94fc13b323d737c239e",
     "us-central1-docker.pkg.dev/vital-octagon-19612/by-console-20261029-b1/ateapi@sha256:99ec4c4c76527163a737bbaf3e885f571949a16c784ac7101e0c024786d9281b",
@@ -365,6 +366,10 @@
     {
       "issue": "The operator loopback Control/router endpoints were not reachable as localhost from the GCE worker.",
       "resolution": "Allocated fresh loopback-only reverse SSH ports through the approved pinned-host wrapper, preserved TLS server name, then reran native smoke from GCE."
+    },
+    {
+      "issue": "The pinned upstream agentgateway image rejected the pinned worker SPIFFE certificate because it required a removed ActorIdentity extension.",
+      "resolution": "Only the owned egress Deployment image changed to the compatible verified 9e78 digest. Same-Actor TLS and unauthenticated HTTPS passed afterward; mTLS, current Actor checks and all other spec fields were retained. The optional product installer path now overlays this pin before installation."
     }
   ],
   "credential_handling": {
@@ -395,5 +400,221 @@
     "PTY, retained pause/resume and console model execution are separate acceptance work.",
     "MicroVM runtime and Agentic Compute Engine were not qualified in this deployment.",
     "Full temporary infrastructure cleanup is pending acceptance."
-  ]
+  ],
+  "network_egress_compatibility": {
+    "date": "2026-10-29",
+    "evidence": "live",
+    "failure": "The console Actor received connection resets before provider API traffic; worker atunnel logs showed 403 Forbidden: actor certificate has no ActorIdentity.",
+    "worker_rejections": {
+      "matching_lines": 81,
+      "first_observed_utc": "2026-10-29T12:43:42.130828877Z",
+      "reason": "egress gateway rejected CONNECT with 403 Forbidden: actor certificate has no ActorIdentity"
+    },
+    "cause": {
+      "substrate_source": "1d7ca8ced056192a1801d6565251adcaab3eb0c9",
+      "issued_identity": "spiffe://substrate-actor.local/ateom-for-actor/{atespace}/{actor}",
+      "ActorIdentity_extension_present": false,
+      "incompatible_gateway_source": "9f9744cf6adde1ad740fb5f8fe5d720721156fc4",
+      "incompatible_gateway_requirement": "ActorIdentity X509 extension OID 1.3.6.1.4.1.11129.2.12.2",
+      "source_proof": "Pinned workerservice certificate test explicitly asserts no ActorIdentity extension; the gateway parser requires it."
+    },
+    "official_fixes": [
+      "https://github.com/agentgateway/agentgateway/pull/3677",
+      "https://github.com/agent-substrate/substrate/pull/1923"
+    ],
+    "compatible_gateway": {
+      "source_commit": "9e78d1da3286dbca730b33e243cd8e153c773751",
+      "image": "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
+      "manifest_sha256": "sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
+      "registry_digest_header": "sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
+      "media_type": "application/vnd.oci.image.index.v1+json",
+      "platforms": [
+        {
+          "architecture": "arm64",
+          "os": "linux"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        },
+        {
+          "architecture": "amd64",
+          "os": "linux"
+        },
+        {
+          "architecture": "unknown",
+          "os": "unknown"
+        }
+      ]
+    },
+    "correction": {
+      "deployment": "ate-system/atenet-egress",
+      "deployment_uid": "d25960bb-e1ca-4cf0-94ad-1d20760f9b45",
+      "before_image": "ghcr.io/agentgateway/agentgateway:v0.0.0-alpha.9f9744cf",
+      "after_image": "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
+      "only_spec_change": "spec.template.spec.containers[0].image",
+      "all_other_spec_fields_equal": true,
+      "router_changed": false
+    },
+    "observed_running_image": [
+      {
+        "pod": "atenet-egress-d74b8f6bf-kmwp8",
+        "uid": "70bc9e1b-3e4e-419a-ae39-c10bfc4bb363",
+        "containers": [
+          {
+            "name": "agentgateway",
+            "ready": true,
+            "image": "sha256:dd69a6dd64a088dbeefa2ef7c0126af1c2e23786efacc6268ca375f1b201d5e2",
+            "image_id": "cr.agentgateway.dev/agentgateway@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45"
+          }
+        ]
+      }
+    ],
+    "model_free_probe": {
+      "actor": {
+        "atespace": "branchyard",
+        "name": "by-egress-01m63vr1qbt61yrqjkajfqxyww",
+        "uid": "a437f722-08e5-498a-97f8-1cdddcabdf9a"
+      },
+      "template": "agy-gvisor",
+      "egress": "unrestricted",
+      "same_actor_before_and_after": true,
+      "model_or_provider_keys_passed": false,
+      "model_called": false,
+      "requests": "Bounded DNS, TCP, verified TLS and unauthenticated HTTPS GET /; no provider API method or request body.",
+      "before": [
+        {
+          "host": "generativelanguage.googleapis.com",
+          "dns_addresses": [
+            "172.217.112.4",
+            "172.217.113.4",
+            "172.217.114.4",
+            "172.217.115.4",
+            "172.217.116.4",
+            "172.217.117.4",
+            "172.217.118.4",
+            "172.217.119.4"
+          ],
+          "tcp": "connected",
+          "tls_error": "SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)",
+          "https_error": "URLError: <urlopen error [Errno 104] Connection reset by peer>"
+        },
+        {
+          "host": "cloudcode-pa.googleapis.com",
+          "dns_addresses": [
+            "172.217.112.4",
+            "172.217.113.4",
+            "172.217.114.4",
+            "172.217.115.4",
+            "172.217.116.4",
+            "172.217.117.4",
+            "172.217.118.4",
+            "172.217.119.4"
+          ],
+          "tcp": "connected",
+          "tls_error": "SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1000)",
+          "https_error": "URLError: <urlopen error [Errno 104] Connection reset by peer>"
+        }
+      ],
+      "after": [
+        {
+          "host": "generativelanguage.googleapis.com",
+          "dns_addresses": [
+            "172.217.112.4",
+            "172.217.113.4",
+            "172.217.114.4",
+            "172.217.115.4",
+            "172.217.116.4",
+            "172.217.117.4",
+            "172.217.118.4",
+            "172.217.119.4"
+          ],
+          "tcp": "connected",
+          "tls": "TLSv1.3",
+          "certificate_hostname_verified": true,
+          "https_status": 404
+        },
+        {
+          "host": "cloudcode-pa.googleapis.com",
+          "dns_addresses": [
+            "172.217.112.4",
+            "172.217.113.4",
+            "172.217.114.4",
+            "172.217.115.4",
+            "172.217.116.4",
+            "172.217.117.4",
+            "172.217.118.4",
+            "172.217.119.4"
+          ],
+          "tcp": "connected",
+          "tls": "TLSv1.3",
+          "certificate_hostname_verified": true,
+          "https_status": 404
+        }
+      ],
+      "sdk_uid_fenced_destroy_succeeded": true,
+      "native_post_cleanup_observation": {
+        "actors": [],
+        "observed_at_utc": "2026-10-29T12:58:01Z",
+        "workers": [
+          {
+            "labels": {
+              "branchyard-deployment": "by-console-20261029-b1",
+              "branchyard-runtime": "gvisor",
+              "workload": "branchyard"
+            },
+            "name": "994038ee-7129-44b9-92ff-f52633d81fd1",
+            "pod": "console-gvisor-7b578b4497-7qrkm",
+            "sandbox_class": "gvisor",
+            "status": {
+              "state": 1,
+              "capacity": {
+                "resources": {
+                  "limits": [
+                    {
+                      "name": "cpu",
+                      "quantity": "2"
+                    },
+                    {
+                      "name": "memory",
+                      "quantity": "4Gi"
+                    }
+                  ]
+                },
+                "actors": 1000
+              }
+            }
+          }
+        ]
+      }
+    },
+    "ordinary_pod_comparison": {
+      "dns": "resolved both Google hostnames",
+      "unauthenticated_https_status": 404,
+      "limit": "Ordinary Pod network success did not establish the Actor egress tunnel was authorized."
+    },
+    "product_setup_fix": {
+      "flag": "--atenet-dataplane=agentgateway",
+      "default_dataplane_unchanged": "envoy",
+      "private_source_export": "Only committed files at the verified source revision; supplied checkout and vendor unchanged.",
+      "overlay": "Kustomize image mapping before the native installer runs, retained on retries.",
+      "reuse_guard": "Exact owner/source/image marker plus tree content digest; modified, unowned or symlink state refused.",
+      "archive_escape_guard": "Standard-library tar data filter; tested malicious parent traversal refusal.",
+      "native_local_validation": {
+        "kubectl": "v1.35.9-dispatcher",
+        "kustomize": "v5.7.1",
+        "router_and_egress_rendered_image": "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45",
+        "archive_go_module_lookup": "github.com/agent-substrate/substrate/cmd/ate-setup",
+        "cloud_commands_run_by_local_render_check": false
+      },
+      "hermetic_helper_tests": {
+        "passed": 25,
+        "failed": 0
+      }
+    },
+    "not_done": [
+      "These model-free network probes do not qualify model execution or the complete console workflow.",
+      "The revised installer helper has not provisioned a second live cluster."
+    ]
+  }
 }

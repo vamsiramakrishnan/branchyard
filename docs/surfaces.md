@@ -984,6 +984,9 @@ forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
 `--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
 connection flags. See the Substrate setup documentation for image and pool prerequisites.
+For GKE, an operator can use `tools/substrate_gke.py --atenet-dataplane=agentgateway`
+with the required target options. This pins a compatible gateway before installation
+from a private source export; the default Envoy path is unchanged.
 
 ## Cooperative native harness teams
 

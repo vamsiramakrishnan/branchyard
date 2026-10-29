@@ -2,14 +2,16 @@
 """Plan or provision a dedicated GKE cluster using a pinned Agent Substrate checkout."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +19,10 @@ from urllib.parse import urlsplit
 SOURCE_PIN = "1d7ca8ced056192a1801d6565251adcaab3eb0c9"
 SOURCE_URL = "https://github.com/agent-substrate/substrate.git"
 BUILD_VERSION = SOURCE_PIN[:7]
+AGENTGATEWAY_IMAGE = (
+    "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da"
+    "@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45"
+)
 OWNER_LABEL = "branchyard-deployment"
 VERSION_LABEL = "ate.dev/substrate-version"
 CERTIFICATE_APIS = ("podcertificaterequests", "clustertrustbundles")
@@ -53,6 +59,7 @@ class Config:
     worker_namespace: str = "branchyard"
     worker_name: str | None = None
     worker_replicas: int = 1
+    atenet_dataplane: str = "envoy"
 
     @property
     def pool_name(self) -> str:
@@ -106,6 +113,8 @@ class Config:
             raise SetupError("supply --kubeconfig and --context together, or omit both for an isolated kubeconfig")
         if self.runtime not in {"gvisor", "microvm"} or self.worker_replicas < 1:
             raise SetupError("--runtime must be gvisor or microvm, and --worker-replicas must be positive")
+        if self.atenet_dataplane not in {"envoy", "agentgateway"}:
+            raise SetupError("--atenet-dataplane must be envoy or agentgateway")
         for name in (self.worker_namespace, self.pool_name):
             if not re.fullmatch(r"[a-z][a-z0-9-]{0,61}[a-z0-9]", name):
                 raise SetupError("worker namespace and name must be lowercase Kubernetes names")
@@ -123,6 +132,7 @@ def plan(config: Config) -> dict[str, Any]:
         "context": config.kube_context,
         "kubeconfig": str(config.kube_path),
         "ownership_label": f"{OWNER_LABEL}={config.cluster}",
+        "agentgateway_image": AGENTGATEWAY_IMAGE if config.atenet_dataplane == "agentgateway" else None,
         "worker": {
             "namespace": config.worker_namespace,
             "name": config.pool_name,
@@ -132,7 +142,8 @@ def plan(config: Config) -> dict[str, Any]:
         },
         "required_certificate_apis": BETA_APIS.split(","),
         "actions": [
-            "Check pinned clean source, Go 1.27+, gcloud, kubectl, Docker daemon and buildx, and microVM asset tools",
+            "Check pinned source, Go 1.27+, gcloud, kubectl and asset tools; Envoy also needs Docker/buildx",
+            "For agentgateway, export the pinned source privately and apply the compatible immutable image overlay",
             "Inspect cluster, bucket, repository and dedicated node account; refuse foreign or incompatible resources",
             "Create absent dedicated resources; adopt compatible unlabeled resources only with --adopt-existing",
             "Disable node auto-upgrade and preserve all node labels while setting the exact Substrate build version",
@@ -430,7 +441,8 @@ def inspect(
 
 
 def prerequisites(config: Config, run: Runner) -> str:
-    for tool in ("git", "go", "gcloud", "kubectl", "docker", "curl", "tar", "zstd", "bash"):
+    tools = ("git", "go", "gcloud", "kubectl", "curl", "tar", "zstd", "bash")
+    for tool in (*tools, *(("docker",) if config.atenet_dataplane == "envoy" else ())):
         if not shutil.which(tool):
             raise SetupError(f"missing {tool}; install it from its official distribution and rerun")
     if run.run(["git", "rev-parse", "HEAD"]) != SOURCE_PIN or run.run(["git", "status", "--porcelain"]):
@@ -441,15 +453,89 @@ def prerequisites(config: Config, run: Runner) -> str:
         raise SetupError(
             "the pinned upstream checkout requires Go 1.27+ on PATH; automatic toolchain downloads are disabled"
         )
-    try:
-        run.run(["docker", "buildx", "version"])
-        run.run(["docker", "info", "--format={{.ServerVersion}}"])
-    except SetupError:
-        raise SetupError(
-            "Docker needs a running daemon and the buildx plugin; install buildx from Docker's official distribution"
-        ) from None
+    if config.atenet_dataplane == "envoy":
+        try:
+            run.run(["docker", "buildx", "version"])
+            run.run(["docker", "info", "--format={{.ServerVersion}}"])
+        except SetupError:
+            raise SetupError(
+                "Docker needs a running daemon and the buildx plugin; "
+                "install buildx from Docker's official distribution"
+            ) from None
     run.env["VERSION"] = BUILD_VERSION
     return BUILD_VERSION
+
+
+def source_digest(source: Path) -> str:
+    """Hash the private export, including names, modes and symlink targets."""
+    digest = hashlib.sha256()
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source).as_posix()
+        if relative == ".branchyard-source.json":
+            continue
+        if path.is_symlink():
+            content = ["symlink", os.readlink(path)]
+        elif path.is_file():
+            with path.open("rb") as handle:
+                content = ["file", hashlib.file_digest(handle, "sha256").hexdigest()]
+        elif path.is_dir():
+            content = ["directory"]
+        else:
+            raise SetupError("private source export contains an unsupported file type; inspect it before retrying")
+        digest.update(json.dumps([relative, path.lstat().st_mode & 0o777, content]).encode() + b"\n")
+    return digest.hexdigest()
+
+
+def installer_source(config: Config, run: Runner) -> Path:
+    """Prepare the compatible image overlay without modifying the supplied checkout."""
+    if config.atenet_dataplane == "envoy":
+        return config.source
+    target = config.state_dir / "agentgateway-source"
+    owner = {"source_revision": SOURCE_PIN, "agentgateway_image": AGENTGATEWAY_IMAGE}
+    if target.exists() or target.is_symlink():
+        try:
+            marker = target / ".branchyard-source.json"
+            if target.is_symlink() or marker.is_symlink():
+                raise ValueError("symlink source")
+            recorded = json.loads(marker.read_text())
+            if recorded != {**owner, "sha256": source_digest(target)}:
+                raise ValueError("modified source")
+        except (OSError, ValueError, TypeError):
+            raise SetupError("private agentgateway source is unowned or modified; inspect it before retrying") from None
+        return target
+    try:
+        with tempfile.TemporaryDirectory(prefix="agentgateway-", dir=config.state_dir) as temporary:
+            stage = Path(temporary)
+            archive = stage / "source.tar"
+            run.run(["git", "archive", "--format=tar", f"--output={archive}", SOURCE_PIN])
+            exported = stage / "source"
+            exported.mkdir(mode=0o700)
+            with tarfile.open(archive) as contents:
+                contents.extractall(exported, filter="data")
+            component = exported / "manifests/ate-install/components/agentgateway"
+            base = component.with_name("agentgateway-pinned-base")
+            if not (exported / "go.mod").is_file() or not (component / "kustomization.yaml").is_file() or base.exists():
+                raise SetupError("pinned source has an unexpected agentgateway layout; no installer was run")
+            component.rename(base)
+            component.mkdir(mode=0o700)
+            name, reference = AGENTGATEWAY_IMAGE.split(":v", 1)
+            tag, digest = ("v" + reference).split("@", 1)
+            overlay = {
+                "apiVersion": "kustomize.config.k8s.io/v1alpha1",
+                "kind": "Component",
+                "components": ["../agentgateway-pinned-base"],
+                "images": [
+                    {"name": "ghcr.io/agentgateway/agentgateway", "newName": name, "newTag": tag, "digest": digest}
+                ],
+            }
+            (component / "kustomization.yaml").write_text(json.dumps(overlay, indent=2) + "\n")
+            (exported / ".branchyard-source.json").write_text(json.dumps({**owner, "sha256": source_digest(exported)}))
+            exported.rename(target)
+    except (OSError, tarfile.TarError) as error:
+        raise SetupError(
+            f"could not prepare private agentgateway source: {type(error).__name__}; inspect state and retry"
+        ) from None
+    return target
 
 
 def ensure_resources(
@@ -676,6 +762,7 @@ def ate_setup(config: Config, *command: str) -> list[str]:
         f"--kubeconfig={config.kube_path}",
         f"--context={config.kube_context}",
         f"--rollout-timeout={config.rollout_timeout}s",
+        f"--atenet-dataplane={config.atenet_dataplane}",
         *command,
     ]
 
@@ -788,8 +875,11 @@ def apply(config: Config, run: Runner | None = None) -> dict[str, Any]:
     """Re-observe resources on each run and install only into the validated target."""
     config.validate()
     run = run or Runner(config)
+    run.config = config
     print("Checking pinned source and local tools...", file=sys.stderr, flush=True)
     build_version = prerequisites(config, run)
+    config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    run.config = replace(config, source=installer_source(config, run))
     print("Inspecting the dedicated Google Cloud resources...", file=sys.stderr, flush=True)
     number, cluster, bucket, repository = inspect(config, run, build_version)
     config.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -816,6 +906,8 @@ def apply(config: Config, run: Runner | None = None) -> dict[str, Any]:
         "source_revision": SOURCE_PIN,
         "worker": worker,
         "substrate_version": build_version,
+        "atenet_dataplane": config.atenet_dataplane,
+        "agentgateway_image": AGENTGATEWAY_IMAGE if config.atenet_dataplane == "agentgateway" else None,
         "context": config.kube_context,
         "kubeconfig": str(config.kube_path),
         "next": "Configure a bridge image and authenticated access using docs/substrate-setup.md",
@@ -841,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
         "--private-nodes", action="store_true", help="requires existing outbound connectivity such as Cloud NAT"
     )
     parser.add_argument("--runtime", choices=("gvisor", "microvm"), default="gvisor")
+    parser.add_argument("--atenet-dataplane", choices=("envoy", "agentgateway"), default="envoy")
     parser.add_argument("--worker-namespace", default="branchyard")
     parser.add_argument("--worker-name", help="defaults to branchyard-RUNTIME")
     parser.add_argument("--worker-replicas", type=int, default=1)

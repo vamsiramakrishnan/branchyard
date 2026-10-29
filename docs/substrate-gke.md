@@ -24,12 +24,14 @@ Install these tools from their official distributions:
 - Google Cloud CLI with support for nested virtualization and
   `--enable-kubernetes-unstable-apis`, plus `gke-gcloud-auth-plugin` when using
   its generated kubeconfig.
-- `kubectl`, a running Docker daemon and Docker's buildx plugin.
+- `kubectl`. The default Envoy dataplane also needs a running Docker daemon and Docker's buildx plugin.
 - `curl`, GNU tar and `zstd` for upstream's pinned microVM assets.
 
 The helper checks tools before touching cloud resources. It does not install
-missing software or download a newer Go toolchain automatically. Docker alone
-is insufficient: the upstream Envoy image build uses `docker buildx`.
+missing software or download a newer Go toolchain automatically. With the default
+Envoy dataplane, Docker alone is insufficient: its image build uses `docker buildx`.
+Use `--atenet-dataplane=agentgateway` for the prebuilt gateway path without a Docker
+daemon. The controllers and workers still build from the pinned Go source.
 
 Prepare an existing Google Cloud project with billing and the Compute Engine,
 GKE, Cloud Storage and Artifact Registry APIs enabled. Use an existing dedicated
@@ -91,6 +93,33 @@ New bucket and repository resources are regional and belong to the specified
 project. The bucket uses uniform bucket-level access. The node service account
 is explicit; the helper never selects the project's default Compute Engine
 account. New resources carry `branchyard-deployment=CLUSTER`.
+
+## Choose the gateway dataplane
+
+The default remains `--atenet-dataplane=envoy`. Add
+`--atenet-dataplane=agentgateway` to use the gateway tested in the
+[29 October run](evidence/substrate-gke-2026-10-29.json). This path does not require
+Docker or buildx. Its plan includes the immutable gateway image
+`cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45`.
+
+The supplied checkout stays pristine. On apply, the helper exports only committed
+files from the verified source revision into its private state directory, then
+wraps the upstream gateway component in a Kustomize image overlay. The native
+installer runs from that private copy with `VERSION` pinned, so it needs no Git
+metadata there. It retains upstream authentication, policy checks, certificates
+and resources. The same image reaches router and egress before their first apply;
+a retry does not restore the incompatible image first. The helper verifies its
+export's ownership and content digest on reuse and refuses edited or unowned
+state. Inspect that state before removing only the generated `agentgateway-source`
+directory to regenerate it. Ignored files, local credentials and untracked work
+are excluded from the export.
+
+The upstream source's older gateway image rejects its own worker certificate
+format with `403 Forbidden: actor certificate has no ActorIdentity`. The selected
+image includes [upstream fix 3677](https://github.com/agentgateway/agentgateway/pull/3677)
+and matches [Substrate's image update](https://github.com/agent-substrate/substrate/pull/1923).
+It validates the worker's actor SPIFFE identity and checks the current Actor;
+authentication is retained.
 
 ## Adopt or resume a deployment
 
@@ -259,6 +288,19 @@ is retained for acceptance. Not done: these checks called no model; PTY,
 retained pause/resume, console model execution and final infrastructure cleanup
 remain separate checks. MicroVM and Agentic Compute Engine were not tested in
 this deployment.
+
+Hermetic and local rendering evidence, 29 October 2026: the helper's 25 tests
+passed, including the optional agentgateway export, offline plan, Docker-free
+prerequisites, retry reuse, modified-state refusal and archive traversal refusal.
+Native Kustomize `v5.7.1` rendered the compatible image for both gateway components
+from the actual private export, and Go resolved the installer module there without
+Git metadata. The supplied source checkout remained clean. On the retained live
+cluster, a single Actor reproduced gateway rejection before the egress image
+correction, then verified TLS 1.3 and unauthenticated HTTPS 404 responses from both
+Google hosts afterward. The Actor was destroyed, and a native API query confirmed
+no Actors remained. The [run record](evidence/substrate-gke-2026-10-29.json) contains
+the identity mismatch and before/after results. Not done: the revised helper has
+not provisioned another cluster; these network checks do not qualify a model turn.
 
 ## Remove a test deployment
 
