@@ -2086,7 +2086,10 @@ fn parallel_deck_rig_preserves_section_ownership_and_file_deliverables() {
     let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(plan["root"]["harness"], "antigravity");
     assert_eq!(plan["root"]["isolated"], true);
-    assert_eq!(plan["root"]["provision"]["secrets"][0]["name"], "GEMINI_API_KEY");
+    assert_eq!(
+        plan["root"]["provision"]["secrets"][0]["name"],
+        "GEMINI_API_KEY"
+    );
     assert_eq!(plan["root"]["result"]["purpose"], "deliverable");
     assert_eq!(
         plan["root"]["result"]["capture"]["manifest"],
