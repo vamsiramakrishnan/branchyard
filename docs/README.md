@@ -98,6 +98,7 @@ Why it is built this way. Some pages describe a target rather than what exists; 
 | [Model gateway](model-gateway.md) | How does a harness's model call go through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, budgets and exact cost? |
 | [Egress policy](egress.md) | Which hosts may a branch reach, how is that enforced, and which permission presets name common tool policies? |
 | [Agent Substrate](substrate.md) | How does Branchyard run harnesses in Agent Substrate actors: the bridge and its protocol, per-attempt credentials, git transfer, and what is still unqualified? |
+| [Desktop console design](superpowers/specs/2026-10-29-desktop-console-design.md) | Why did the web companion become a three-pane desktop console, and what decides a branch's lane, its one primary action and the verb of its message box? |
 | [Sandbox snapshots](sandbox-snapshots.md) | How does a branch keep its sandbox paused between turns, take a provider snapshot with each checkpoint, and fork, rewind, delegate and fan from it, with git and setup as the fallback? |
 | [Observability](observability.md) | What metrics, traces and summaries does a server give about itself, and how does a turn's trace reach its harness? |
 | [Sync](sync.md) | How are tasks copied to Cloud Storage, S3, Azure Blob, a git remote or a directory, with one manifest per task, conflict branches, leases and client-side encryption? |
