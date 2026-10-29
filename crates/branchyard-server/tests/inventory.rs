@@ -205,7 +205,10 @@ mod postgres {
         assert_eq!(report.workers.len(), 2, "{report:?}");
         assert!(report.workers[0].this);
         let host = format!("worker-host:{}", branchyard::process_identity().0);
-        assert_eq!(report.workers[0].labels, [host.clone()]);
+        assert_eq!(
+            report.workers[0].labels.as_slice(),
+            std::slice::from_ref(&host)
+        );
         assert_eq!(report.workers[1].labels, ["harness:codex".to_owned(), host]);
         // A task that runs Codex by name is steered to it.
         let steered = client

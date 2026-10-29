@@ -987,11 +987,25 @@ fn request_bodies_are_bounded_and_checked() {
         (status, json(&body)["error"]["code"].clone()),
         (405, "method_not_allowed".into())
     );
-    let (status, _, _) = raw(
+    // Resource authorization precedes query validation, including unknown branches.
+    let (status, _, body) = raw(
         server.addr,
         &get("/v1/repos/app/branches/x/events?cursor=-1", Some(TOKEN)),
     );
-    assert_eq!(status, 400);
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "unknown_branch");
+    run(
+        &server.client(),
+        &task("WRITE cursor.txt=checked", "bounded-cursor"),
+    );
+    let (status, _, body) = raw(
+        server.addr,
+        &get(
+            "/v1/repos/app/branches/bounded-cursor/events?cursor=-1",
+            Some(TOKEN),
+        ),
+    );
+    assert_eq!(status, 400, "{body}");
 }
 
 #[test]

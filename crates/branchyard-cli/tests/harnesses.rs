@@ -2202,8 +2202,11 @@ fn a_server_shows_its_workers_harnesses_and_says_where_to_log_in() {
     let worker = &report["workers"][0];
     assert_eq!(worker["this"], true);
     assert_eq!(worker["repos"], serde_json::json!(["app"]));
-    // Logged out (verified), so no harness:codex label.
-    assert_eq!(worker["labels"], serde_json::json!([]));
+    // Logged out (verified): retain the host pin, without a harness:codex label.
+    assert_eq!(
+        worker["labels"],
+        serde_json::json!([format!("worker-host:{}", branchyard::process_identity().0)])
+    );
     let codex = harness(&worker["inventory"], "codex").unwrap();
     assert_eq!(codex["login"]["state"], "logged_out");
     let table = text(&remote(&["harnesses"]).stdout);
