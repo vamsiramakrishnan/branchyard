@@ -53,6 +53,8 @@ for the same edit. Either setting may be omitted. Rust uses
 replacement options. An empty patch, an unknown field or a blank model is
 refused. Patches are supported only by sends; they are refused for new tasks,
 forks and reincarnations, and inside-harness sends retain their existing scope.
+The harness-only `branchyard.send` function exposes the delegated arguments
+only; use the outside-harness `branchyard_client` operator client for a patch.
 
 Explicit `provision` requests keep their replacement behavior. In particular,
 `"provision": {"secrets": [], "mcp_servers": []}` clears those requested secret

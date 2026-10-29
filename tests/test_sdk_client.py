@@ -2160,7 +2160,7 @@ class OneApi(ServerCase):
             with self.assertRaises(bc.DeniedError):
                 inside.send("b", "more", session_patch=patch)
         with mock.patch.object(bm, "_run") as run:
-            with self.assertRaises(bc.DeniedError):
+            with self.assertRaisesRegex(TypeError, "unexpected keyword argument 'session_patch'"):
                 bm.send("b", "more", session_patch=patch)
             run.assert_not_called()
 
@@ -2322,6 +2322,14 @@ class OneApi(ServerCase):
             ours = list(inspect.signature(getattr(bc.Delegator, name)).parameters.values())[1:]
             # `**options` is the backend's own spawn: not part of the portable signature.
             ours = [p for p in ours if p.kind is not inspect.Parameter.VAR_KEYWORD]
+            if name == "send":
+                # The operator facade can patch a session; the harness-only API cannot.
+                patch = [p for p in ours if p.name == "session_patch"]
+                self.assertEqual(
+                    [(p.name, p.kind, p.default) for p in patch],
+                    [("session_patch", inspect.Parameter.KEYWORD_ONLY, None)],
+                )
+                ours = [p for p in ours if p.name != "session_patch"]
             self.assertEqual(
                 [(p.name, p.kind, p.default) for p in ours], [(p.name, p.kind, p.default) for p in theirs], name
             )
