@@ -303,6 +303,8 @@ fn a_delegated_child_is_never_wider_than_its_parent() {
         escalates_to: Vec::new(),
         instances: 2,
         bindings: Vec::new(),
+        owns: Vec::new(),
+        result: None,
     };
     let seats = Seats {
         rig: "team".into(),

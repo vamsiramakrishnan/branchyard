@@ -66,8 +66,8 @@ use crate::store_codec::{
 use crate::{Activity, BranchStatus, Error, Message, RecordedEvent, SteerState};
 use branchyard_support::time::now_ms;
 
-/// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
-const SCHEMA: i64 = 2;
+/// 3: frozen handoff messages fenced by recipient identity and turn.
+const SCHEMA: i64 = 3;
 /// How many times a write is attempted before a conflict is an error.
 const MAX_ATTEMPTS: u32 = 50;
 /// How long a write keeps retrying conflicts: well inside a lease's life
@@ -247,7 +247,12 @@ CREATE TABLE IF NOT EXISTS by_messages (
     delivered_ms BIGINT,
     steer_id BIGINT,
     delivered_steer BIGINT,
-    awaiting_until_ms BIGINT
+    awaiting_until_ms BIGINT,
+    handoff TEXT,
+    next_turn BOOLEAN NOT NULL DEFAULT FALSE,
+    handoff_key TEXT,
+    recipient_incarnation BIGINT,
+    min_recipient_turn BIGINT
 );
 CREATE INDEX IF NOT EXISTS by_messages_to ON by_messages (repo, to_branch, id);
 CREATE INDEX IF NOT EXISTS by_messages_steer ON by_messages (steer_id);
@@ -754,6 +759,16 @@ impl Postgres {
                 &[],
             )
             .map_err(db("schema"))?;
+            for sql in [
+                "ALTER TABLE by_messages ADD COLUMN IF NOT EXISTS handoff TEXT",
+                "ALTER TABLE by_messages ADD COLUMN IF NOT EXISTS next_turn BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE by_messages ADD COLUMN IF NOT EXISTS handoff_key TEXT",
+                "ALTER TABLE by_messages ADD COLUMN IF NOT EXISTS recipient_incarnation BIGINT",
+                "ALTER TABLE by_messages ADD COLUMN IF NOT EXISTS min_recipient_turn BIGINT",
+            ] {
+                tx.batch_execute(sql).map_err(db("schema"))?;
+            }
+            tx.batch_execute("CREATE UNIQUE INDEX IF NOT EXISTS by_messages_handoff ON by_messages (repo, handoff_key)").map_err(db("schema"))?;
             let version: Option<String> = tx
                 .query_opt("SELECT value FROM by_meta WHERE key = 'schema'", &[])
                 .map_err(db("schema"))?
@@ -768,6 +783,10 @@ impl Postgres {
                     Ok(())
                 }
                 Some(Ok(SCHEMA)) => Ok(()),
+                Some(Ok(2)) => {
+                    tx.execute("UPDATE by_meta SET value = $1 WHERE key = 'schema'", &[&SCHEMA.to_string()]).map_err(db("schema"))?;
+                    Ok(())
+                }
                 Some(Ok(1)) => upgrade_to_identities(tx),
                 Some(other) => Err(Fail::Error(Error::State(format!(
                     "the database has Branchyard schema {other:?}; this version understands \
@@ -1619,8 +1638,8 @@ impl Backend for Postgres {
                     for id in deliver {
                         tx.execute(
                             "UPDATE by_messages SET delivered_ms = $3 \
-                             WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
-                            &[&self.repo, &to_db("id", *id)?, &now],
+                             WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL AND (recipient_incarnation IS NULL OR (recipient_incarnation = $4 AND min_recipient_turn <= $5))",
+                            &[&self.repo, &to_db("id", *id)?, &now, &fence.incarnation, &to_db("turn", turn)?],
                         )
                         .map_err(db("message"))?;
                     }
@@ -1850,7 +1869,7 @@ impl Backend for Postgres {
                 let linked = tx
                     .execute(
                         "UPDATE by_messages SET steer_id = $3 \
-                         WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL",
+                         WHERE repo = $1 AND id = $2 AND delivered_ms IS NULL AND next_turn = FALSE",
                         &[&self.repo, &to_db("message", message)?, &id],
                     )
                     .map_err(db("message"))?;
@@ -2055,6 +2074,11 @@ impl Backend for Postgres {
     }
 
     fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        if message.handoff.is_some() || message.next_turn {
+            return Err(Error::Denied(
+                "structured handoffs require an atomic handoff commit".into(),
+            ));
+        }
         self.tx(true, |tx| {
             let at_ms = now_ms();
             let row = tx
@@ -2082,12 +2106,95 @@ impl Backend for Postgres {
         })
     }
 
+    fn commit_handoff(&self, commit: &crate::handoff::HandoffCommit) -> Result<Message, Error> {
+        self.appending(true, |tx, feed| {
+            let snapshot = commit.message.handoff.as_ref().ok_or_else(|| Error::State("missing handoff payload".into()))?;
+            // Lease acquisition updates its branch record before it commits.
+            // Lock endpoints and the lead in ancestry order before reading them.
+            let actor = commit.actor.as_ref().map_or(snapshot.source.as_str(), |(name, _)| name.as_str());
+            tx.query(
+                "SELECT incarnation FROM by_branches WHERE repo = $1 AND name IN ($2, $3, \
+                 $4) ORDER BY incarnation FOR UPDATE",
+                &[&self.repo, &snapshot.source, &commit.message.to, &actor],
+            ).map_err(db("handoff branches"))?;
+            let existing = tx.query_opt(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms, handoff, \
+                 next_turn FROM by_messages WHERE repo = $1 AND handoff_key = $2",
+                &[&self.repo, &commit.dedupe_key],
+            ).map_err(db("handoff"))?.map(|row| message_row(&row)).transpose()?;
+            if let Some(previous) = &existing {
+                let mut expected = commit.message.clone();
+                expected.id = previous.id;
+                expected.at_ms = previous.at_ms;
+                expected.delivered = previous.delivered;
+                if *previous != expected {
+                    return Err(Error::Denied("handoff retry key belongs to a different message".into()).into());
+                }
+            }
+            let source = self.stored_record(tx, &snapshot.source)?.ok_or_else(|| Error::UnknownBranch(snapshot.source.clone()))?;
+            if self.held(tx, &snapshot.source)? {
+                return Err(Error::Denied("the handoff producer has an active turn".into()).into());
+            }
+            let event_count = from_db("seq", tx.query_one(
+                "SELECT COALESCE(MAX(seq), 0) FROM by_events WHERE repo = $1 AND incarnation = $2",
+                &[&self.repo, &snapshot.version.incarnation],
+            ).map_err(db("handoff"))?.get(0))?;
+            let validated_count = if existing.as_ref().is_some_and(|message| message.from == snapshot.source)
+                && commit.source_event_count.checked_add(1) == Some(event_count) {
+                commit.source_event_count
+            } else { event_count };
+            let identities = tx.query(
+                "SELECT incarnation, name, parent_incarnation, record FROM by_branches \
+                 WHERE repo = $1 AND record IS NOT NULL",
+                &[&self.repo],
+            ).map_err(db("handoff identities"))?;
+            let lineage = crate::storage::Lineage::from_identities(identities_from(&identities)?);
+            let mut artifacts = Vec::new();
+            for selected in &snapshot.artifacts {
+                let row = tx.query_opt(
+                    &format!("SELECT {ARTIFACT_COLUMNS} FROM by_artifacts WHERE repo = $1 AND id = $2 \
+                     FOR SHARE"),
+                    &[&self.repo, &selected.id],
+                ).map_err(db("handoff artifact"))?
+                    .ok_or_else(|| Error::Denied(format!("handoff artifact {} no longer exists", selected.id)))?;
+                let shares = tx.query("SELECT branch, incarnation FROM by_artifact_shares WHERE repo = $1 AND id \
+                 = $2", &[&self.repo, &selected.id]).map_err(db("handoff shares"))?;
+                artifacts.push((artifact_row_from(&row)?, shares.iter().map(share_from).collect()));
+            }
+            commit.validate(&source, validated_count, &lineage, &artifacts)?;
+            if let Some(previous) = existing { return Ok(previous); }
+            let recipient = self.stored_record(tx, &commit.message.to)?.ok_or_else(|| Error::UnknownBranch(commit.message.to.clone()))?;
+            let lease_turn = self.lease_row(tx, &commit.message.to)?.filter(|lease| lease.owner.is_some() && lease.incarnation == commit.recipient_incarnation).map_or(0, |lease| lease.turn);
+            let min_turn = u64::from(recipient.info.turns).max(lease_turn).checked_add(1).ok_or_else(|| Error::State("recipient turn overflow".into()))?;
+            for (artifact, _) in &artifacts {
+                tx.execute(
+                    "INSERT INTO by_artifact_shares (repo, id, branch, incarnation) VALUES ($1, $2, $3, $4) \
+                     ON CONFLICT (repo, id, branch) DO UPDATE SET incarnation = excluded.incarnation",
+                    &[&self.repo, &artifact.artifact.id, &commit.message.to, &commit.recipient_incarnation],
+                ).map_err(db("handoff share"))?;
+            }
+            let at_ms = now_ms();
+            let row = tx.query_one(
+                "INSERT INTO by_messages (repo, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
+                 handoff, next_turn, handoff_key, recipient_incarnation, min_recipient_turn) VALUES ($1, $2, \
+                 $3, $4, $5, $6, $7, $8, TRUE, $9, $10, $11) RETURNING id",
+                &[&self.repo, &commit.message.from, &commit.message.to, &commit.message.kind.as_str(), &commit.message.text,
+                    &to_db_opt("in_reply_to", commit.message.in_reply_to)?, &to_db("at_ms", at_ms)?, &encode("handoff", snapshot)?, &commit.dedupe_key, &commit.recipient_incarnation, &to_db("min_recipient_turn", min_turn)?],
+            ).map_err(db("handoff"))?;
+            let message = Message { id: from_db("id", row.get(0))?, at_ms, delivered: false, ..commit.message.clone() };
+            let event = RecordedEvent { at_ms, activity: Activity::Message(message.clone()) };
+            self.insert_event(tx, feed, &message.from, &event)?;
+            if message.from != message.to { self.insert_event(tx, feed, &message.to, &event)?; }
+            Ok(message)
+        })
+    }
+
     fn message(&self, id: u64) -> Result<Option<Message>, Error> {
         let id_db = to_db("id", id)?;
         let row = self.query(|c| {
             c.query_opt(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM by_messages WHERE repo = $1 AND id = $2",
+                 delivered_ms, handoff, next_turn FROM by_messages WHERE repo = $1 AND id = $2",
                 &[&self.repo, &id_db],
             )
         })?;
@@ -2098,10 +2205,24 @@ impl Backend for Postgres {
         let rows = self.query(|c| {
             c.query(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM by_messages WHERE repo = $1 AND to_branch = $2 ORDER BY id",
+                 delivered_ms, handoff, next_turn FROM by_messages WHERE repo = $1 AND to_branch = $2 \
+                 AND (recipient_incarnation IS NULL OR recipient_incarnation = \
+                 (SELECT incarnation FROM by_branches WHERE repo = $1 AND name = $2 AND record IS NOT NULL)) ORDER BY id",
                 &[&self.repo, &to],
             )
         })?;
+        rows.iter().map(message_row).collect()
+    }
+
+    fn inbox_for_turn(&self, to: &str, turn: u64) -> Result<Vec<Message>, Error> {
+        let turn_db = to_db("turn", turn)?;
+        let rows = self.query(|client| client.query(
+            "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms, handoff, \
+             next_turn FROM by_messages WHERE repo = $1 AND to_branch = $2 AND (min_recipient_turn IS NULL OR \
+             min_recipient_turn <= $3) AND (recipient_incarnation IS NULL OR recipient_incarnation = (SELECT \
+             incarnation FROM by_branches WHERE repo = $1 AND name = $2 AND record IS NOT NULL)) ORDER BY id",
+            &[&self.repo, &to, &turn_db],
+        ))?;
         rows.iter().map(message_row).collect()
     }
 
@@ -2128,7 +2249,7 @@ impl Backend for Postgres {
         let row = self.query(|c| {
             c.query_opt(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM by_messages WHERE repo = $1 AND in_reply_to = $2 \
+                 delivered_ms, handoff, next_turn FROM by_messages WHERE repo = $1 AND in_reply_to = $2 \
                  ORDER BY id LIMIT 1",
                 &[&self.repo, &question_id_db],
             )
@@ -2250,7 +2371,7 @@ impl Glanced {
         let rows = tx
             .query(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM by_messages q \
+                 delivered_ms, handoff, next_turn FROM by_messages q \
                  WHERE q.repo = $1 AND q.kind IN ('question', 'escalation') \
                  AND NOT EXISTS (SELECT 1 FROM by_messages a \
                  WHERE a.repo = $1 AND a.in_reply_to = q.id) \
@@ -2267,8 +2388,9 @@ impl Glanced {
             Some(branch) => tx
                 .query(
                     "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                     delivered_ms FROM by_messages \
-                     WHERE repo = $1 AND to_branch = $2 AND delivered_ms IS NULL ORDER BY id",
+                     delivered_ms, handoff, next_turn FROM by_messages \
+                     WHERE repo = $1 AND to_branch = $2 AND delivered_ms IS NULL \
+                     AND (recipient_incarnation IS NULL OR recipient_incarnation = (SELECT incarnation FROM by_branches WHERE repo = $1 AND name = $2 AND record IS NOT NULL)) ORDER BY id",
                     &[&repo, &branch],
                 )
                 .map_err(e("inbox"))?
@@ -2299,6 +2421,11 @@ fn message_row(r: &Row) -> Result<Message, Error> {
         in_reply_to: from_db_opt("in_reply_to", r.get::<_, Option<i64>>(5))?,
         at_ms: from_db("at_ms", r.get(6))?,
         delivered: r.get::<_, Option<i64>>(7).is_some(),
+        handoff: r
+            .get::<_, Option<String>>(8)
+            .map(|text| decode("handoff", &text))
+            .transpose()?,
+        next_turn: r.get(9),
     })
 }
 
@@ -2839,6 +2966,22 @@ impl GraphBackend for Postgres {
     }
 }
 
+fn identities_from(rows: &[Row]) -> Result<Vec<Identity>, Error> {
+    rows.iter()
+        .map(|r| {
+            let name: String = r.get(1);
+            let text: String = r.get(3);
+            let record: Record = decode(&format!("record {name}"), &text)?;
+            Ok(Identity {
+                name,
+                incarnation: r.get(0),
+                parent_incarnation: r.get(2),
+                parent: record.info.parent,
+            })
+        })
+        .collect()
+}
+
 impl StorageBackend for Postgres {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
         let rows = self.query(|c| {
@@ -2848,19 +2991,7 @@ impl StorageBackend for Postgres {
                 &[&self.repo],
             )
         })?;
-        rows.iter()
-            .map(|r| {
-                let name: String = r.get(1);
-                let text: String = r.get(3);
-                let record: Record = decode(&format!("record {name}"), &text)?;
-                Ok(Identity {
-                    name,
-                    incarnation: r.get(0),
-                    parent_incarnation: r.get(2),
-                    parent: record.info.parent,
-                })
-            })
-            .collect()
+        identities_from(&rows)
     }
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {

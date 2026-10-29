@@ -22,6 +22,7 @@ How to do one thing.
 
 | Read | What it answers |
 |---|---|
+| [Cooperative teams](cooperative-teams.md) | How do I coordinate native code and knowledge workers, validate results, and relay frozen handoffs? |
 | [Watching branches](watch.md) | How do I watch every branch live with `by watch`, act on one with a key, and get told when a branch needs me or ends? |
 | [Checkpoints, rewind, try and compare](checkpoints.md) | How do I fork or rewind a branch to any turn, try a branch in my own checkout and take it back out exactly, and compare attempts and pick one? |
 | [Pull requests](pull-requests.md) | How do I start a branch from a GitHub, Linear, Jira or GitLab issue or a pull request's head, push it as a pull request, feed CI failures and reviews back into it, and see whether it can merge? |

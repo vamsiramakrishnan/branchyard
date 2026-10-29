@@ -42,8 +42,8 @@ use branchyard_support::time::now_ms;
 
 /// How long a write waits for another process's transaction.
 const BUSY: Duration = Duration::from_secs(30);
-/// 2: grants bound to incarnations (see `crate::storage::LegacyBinder`).
-pub(crate) const SCHEMA: i64 = 2;
+/// 3: frozen handoff messages fenced by recipient identity and turn.
+pub(crate) const SCHEMA: i64 = 3;
 
 const TABLES: &str = "
 CREATE TABLE IF NOT EXISTS meta (
@@ -184,7 +184,12 @@ CREATE TABLE IF NOT EXISTS messages (
     delivered_ms INTEGER,
     steer_id INTEGER,
     delivered_steer INTEGER,
-    awaiting_until_ms INTEGER
+    awaiting_until_ms INTEGER,
+    handoff TEXT,
+    next_turn BOOLEAN NOT NULL DEFAULT FALSE,
+    handoff_key TEXT,
+    recipient_incarnation INTEGER,
+    min_recipient_turn INTEGER
 );
 CREATE INDEX IF NOT EXISTS messages_to ON messages (to_branch, id);
 CREATE INDEX IF NOT EXISTS messages_steer ON messages (steer_id);
@@ -409,6 +414,47 @@ fn put(tx: &Transaction<'_>, record: &Record) -> Result<(), Error> {
     if let Some(parent) = &record.info.parent {
         bind_parent(tx, name, parent)?;
     }
+    Ok(())
+}
+
+/// Add handoff columns before upgrading either supported legacy schema.
+fn upgrade_handoff_columns(tx: &Transaction<'_>) -> Result<(), Error> {
+    let mut statement = tx
+        .prepare("PRAGMA table_info(messages)")
+        .map_err(|e| db("schema", e))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| db("schema", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| db("schema", e))?;
+    for (column, sql) in [
+        ("handoff", "ALTER TABLE messages ADD COLUMN handoff TEXT"),
+        (
+            "next_turn",
+            "ALTER TABLE messages ADD COLUMN next_turn BOOLEAN NOT NULL DEFAULT FALSE",
+        ),
+        (
+            "handoff_key",
+            "ALTER TABLE messages ADD COLUMN handoff_key TEXT",
+        ),
+        (
+            "recipient_incarnation",
+            "ALTER TABLE messages ADD COLUMN recipient_incarnation INTEGER",
+        ),
+        (
+            "min_recipient_turn",
+            "ALTER TABLE messages ADD COLUMN min_recipient_turn INTEGER",
+        ),
+    ] {
+        if !columns.iter().any(|name| name == column) {
+            tx.execute(sql, []).map_err(|e| db("schema", e))?;
+        }
+    }
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_handoff ON messages (handoff_key)",
+        [],
+    )
+    .map_err(|e| db("schema", e))?;
     Ok(())
 }
 
@@ -758,6 +804,7 @@ impl Sqlite {
                 tx.execute("ALTER TABLE outcomes ADD COLUMN decided_by TEXT", [])
                     .map_err(|e| db("schema", e))?;
             }
+            upgrade_handoff_columns(tx)?;
             let version: Option<String> = tx
                 .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
                     r.get(0)
@@ -774,6 +821,14 @@ impl Sqlite {
                     Ok(())
                 }
                 Some(Ok(SCHEMA)) => Ok(()),
+                Some(Ok(2)) => {
+                    tx.execute(
+                        "UPDATE meta SET value = ?1 WHERE key = 'schema'",
+                        params![SCHEMA.to_string()],
+                    )
+                    .map_err(|e| db("schema", e))?;
+                    Ok(())
+                }
                 Some(Ok(1)) => upgrade_to_identities(tx),
                 Some(other) => Err(Error::State(format!(
                     "{} has schema {other:?}; this version understands {SCHEMA}",
@@ -1315,8 +1370,8 @@ impl Backend for Sqlite {
                     for id in deliver {
                         tx.execute(
                             "UPDATE messages SET delivered_ms = ?2 \
-                             WHERE id = ?1 AND delivered_ms IS NULL",
-                            params![to_db("id", *id)?, now],
+                             WHERE id = ?1 AND delivered_ms IS NULL AND (recipient_incarnation IS NULL OR (recipient_incarnation = ?3 AND min_recipient_turn <= ?4))",
+                            params![to_db("id", *id)?, now, fence.incarnation, to_db("turn", turn)?],
                         )
                         .map_err(|e| db("message", e))?;
                     }
@@ -1552,7 +1607,7 @@ impl Backend for Sqlite {
                 let linked = tx
                     .execute(
                         "UPDATE messages SET steer_id = ?2 \
-                         WHERE id = ?1 AND delivered_ms IS NULL",
+                         WHERE id = ?1 AND delivered_ms IS NULL AND next_turn = FALSE",
                         params![to_db("message", message)?, id],
                     )
                     .map_err(|e| db("message", e))?;
@@ -1767,6 +1822,11 @@ impl Backend for Sqlite {
     }
 
     fn send_message(&self, message: &Message) -> Result<Message, Error> {
+        if message.handoff.is_some() || message.next_turn {
+            return Err(Error::Denied(
+                "structured handoffs require an atomic handoff commit".into(),
+            ));
+        }
         self.tx(true, |tx| {
             let at_ms = now_ms();
             tx.execute(
@@ -1792,11 +1852,78 @@ impl Backend for Sqlite {
         })
     }
 
+    fn commit_handoff(&self, commit: &crate::handoff::HandoffCommit) -> Result<Message, Error> {
+        self.tx(true, |tx| {
+            let snapshot = commit.message.handoff.as_ref().ok_or_else(|| Error::State("missing handoff payload".into()))?;
+            let existing = tx.query_row(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms, handoff, \
+                 next_turn FROM messages WHERE handoff_key = ?1",
+                params![commit.dedupe_key], message_from,
+            ).optional().map_err(|e| db("handoff", e))?;
+            if let Some(previous) = &existing {
+                let mut expected = commit.message.clone();
+                expected.id = previous.id;
+                expected.at_ms = previous.at_ms;
+                expected.delivered = previous.delivered;
+                if *previous != expected {
+                    return Err(Error::Denied("handoff retry key belongs to a different message".into()));
+                }
+            }
+            let source = stored_record(tx, &snapshot.source)?.ok_or_else(|| Error::UnknownBranch(snapshot.source.clone()))?;
+            if held(tx, &snapshot.source)? {
+                return Err(Error::Denied("the handoff producer has an active turn".into()));
+            }
+            let event_count = from_db("seq", tx.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE incarnation = ?1",
+                params![snapshot.version.incarnation], |row| row.get::<_, i64>(0),
+            ).map_err(|e| db("handoff", e))?)?;
+            let validated_count = if existing.as_ref().is_some_and(|message| message.from == snapshot.source)
+                && commit.source_event_count.checked_add(1) == Some(event_count) {
+                commit.source_event_count
+            } else { event_count };
+            let lineage = crate::storage::Lineage::from_identities(identities(tx)?);
+            let mut artifacts = Vec::new();
+            for selected in &snapshot.artifacts {
+                let row = tx.query_row(
+                    &format!("SELECT {ARTIFACT_COLUMNS} FROM artifacts WHERE id = ?1"),
+                    params![selected.id], artifact_from_row,
+                ).optional().map_err(|e| db("handoff artifact", e))?
+                    .ok_or_else(|| Error::Denied(format!("handoff artifact {} no longer exists", selected.id)))?;
+                artifacts.push((artifact_row_from(row)?, shares(tx, "artifact_shares", "id", &selected.id)?));
+            }
+            commit.validate(&source, validated_count, &lineage, &artifacts)?;
+            if let Some(previous) = existing { return Ok(previous); }
+            let recipient = stored_record(tx, &commit.message.to)?.ok_or_else(|| Error::UnknownBranch(commit.message.to.clone()))?;
+            let lease_turn = lease_row(tx, &commit.message.to)?.filter(|lease| lease.owner.is_some() && lease.incarnation == commit.recipient_incarnation).map_or(0, |lease| lease.turn);
+            let min_turn = u64::from(recipient.info.turns).max(lease_turn).checked_add(1).ok_or_else(|| Error::State("recipient turn overflow".into()))?;
+            for (artifact, _) in &artifacts {
+                tx.execute(
+                    "INSERT INTO artifact_shares (id, branch, incarnation) VALUES (?1, ?2, ?3) ON CONFLICT \
+                     (id, branch) DO UPDATE SET incarnation = excluded.incarnation",
+                    params![artifact.artifact.id, commit.message.to, commit.recipient_incarnation],
+                ).map_err(|e| db("handoff share", e))?;
+            }
+            let at_ms = now_ms();
+            tx.execute(
+                "INSERT INTO messages (from_branch, to_branch, kind, text, in_reply_to, at_ms, handoff, \
+                 next_turn, handoff_key, recipient_incarnation, min_recipient_turn) VALUES (?1, ?2, ?3, ?4, \
+                 ?5, ?6, ?7, TRUE, ?8, ?9, ?10)",
+                params![commit.message.from, commit.message.to, commit.message.kind.as_str(), commit.message.text,
+                    to_db_opt("in_reply_to", commit.message.in_reply_to)?, to_db("at_ms", at_ms)?, encode("handoff", snapshot)?, commit.dedupe_key, commit.recipient_incarnation, to_db("min_recipient_turn", min_turn)?],
+            ).map_err(|e| db("handoff", e))?;
+            let message = Message { id: from_db("id", tx.last_insert_rowid())?, at_ms, delivered: false, ..commit.message.clone() };
+            let event = RecordedEvent { at_ms, activity: Activity::Message(message.clone()) };
+            insert_event(tx, &message.from, &event)?;
+            if message.from != message.to { insert_event(tx, &message.to, &event)?; }
+            Ok(message)
+        })
+    }
+
     fn message(&self, id: u64) -> Result<Option<Message>, Error> {
         self.query(|conn| {
             conn.query_row(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM messages WHERE id = ?1",
+                 delivered_ms, handoff, next_turn FROM messages WHERE id = ?1",
                 params![to_db("id", id)?],
                 message_from,
             )
@@ -1810,12 +1937,27 @@ impl Backend for Sqlite {
             let mut statement = conn
                 .prepare(
                     "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                     delivered_ms FROM messages WHERE to_branch = ?1 ORDER BY id",
+                     delivered_ms, handoff, next_turn FROM messages WHERE to_branch = ?1 \
+                     AND (recipient_incarnation IS NULL OR recipient_incarnation = \
+                     (SELECT incarnation FROM branches WHERE name = ?1 AND record IS NOT NULL)) ORDER BY id",
                 )
                 .map_err(|e| db("inbox", e))?;
             let rows = statement
                 .query_map(params![to], message_from)
                 .map_err(|e| db("inbox", e))?;
+            rows.collect::<Result<_, _>>().map_err(|e| db("inbox", e))
+        })
+    }
+
+    fn inbox_for_turn(&self, to: &str, turn: u64) -> Result<Vec<Message>, Error> {
+        self.query(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms, handoff, \
+                 next_turn FROM messages WHERE to_branch = ?1 AND (min_recipient_turn IS NULL OR \
+                 min_recipient_turn <= ?2) AND (recipient_incarnation IS NULL OR recipient_incarnation = \
+                 (SELECT incarnation FROM branches WHERE name = ?1 AND record IS NOT NULL)) ORDER BY id",
+            ).map_err(|e| db("inbox", e))?;
+            let rows = statement.query_map(params![to, to_db("turn", turn)?], message_from).map_err(|e| db("inbox", e))?;
             rows.collect::<Result<_, _>>().map_err(|e| db("inbox", e))
         })
     }
@@ -1842,7 +1984,7 @@ impl Backend for Sqlite {
         self.query(|conn| {
             conn.query_row(
                 "SELECT id, from_branch, to_branch, kind, text, in_reply_to, at_ms, \
-                 delivered_ms FROM messages WHERE in_reply_to = ?1 ORDER BY id LIMIT 1",
+                 delivered_ms, handoff, next_turn FROM messages WHERE in_reply_to = ?1 ORDER BY id LIMIT 1",
                 params![to_db("question_id", question_id)?],
                 message_from,
             )
@@ -2267,6 +2409,14 @@ pub(crate) fn message_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         in_reply_to: from_db_opt("in_reply_to", r.get::<_, Option<i64>>(5)?)?,
         at_ms: from_db("at_ms", r.get(6)?)?,
         delivered: r.get::<_, Option<i64>>(7)?.is_some(),
+        handoff: r
+            .get::<_, Option<String>>(8)?
+            .map(|text| {
+                decode("handoff", &text)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+            })
+            .transpose()?,
+        next_turn: r.get(9)?,
     })
 }
 
@@ -2394,39 +2544,40 @@ fn shares(conn: &Connection, table: &str, key: &str, value: &str) -> Result<Vec<
         .map_err(|e| db(table, e))
 }
 
+fn identities(conn: &Connection) -> Result<Vec<Identity>, Error> {
+    let mut statement = conn
+        .prepare(
+            "SELECT incarnation, name, parent_incarnation, record FROM branches \
+             WHERE record IS NOT NULL",
+        )
+        .map_err(|e| db("identities", e))?;
+    let rows = statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| db("identities", e))?;
+    let mut found = Vec::new();
+    for row in rows {
+        let (incarnation, name, parent_incarnation, text) = row.map_err(|e| db("identities", e))?;
+        let record: Record = decode(&format!("record {name}"), &text)?;
+        found.push(Identity {
+            name,
+            incarnation,
+            parent_incarnation,
+            parent: record.info.parent,
+        });
+    }
+    Ok(found)
+}
+
 impl StorageBackend for Sqlite {
     fn identities(&self) -> Result<Vec<Identity>, Error> {
-        self.query(|conn| {
-            let mut statement = conn
-                .prepare(
-                    "SELECT incarnation, name, parent_incarnation, record FROM branches \
-                     WHERE record IS NOT NULL",
-                )
-                .map_err(|e| db("identities", e))?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<i64>>(2)?,
-                        r.get::<_, String>(3)?,
-                    ))
-                })
-                .map_err(|e| db("identities", e))?;
-            let mut found = Vec::new();
-            for row in rows {
-                let (incarnation, name, parent_incarnation, text) =
-                    row.map_err(|e| db("identities", e))?;
-                let record: Record = decode(&format!("record {name}"), &text)?;
-                found.push(Identity {
-                    name,
-                    incarnation,
-                    parent_incarnation,
-                    parent: record.info.parent,
-                });
-            }
-            Ok(found)
-        })
+        self.query(identities)
     }
 
     fn create_artifact(&self, new: &NewArtifact) -> Result<ArtifactRow, Error> {

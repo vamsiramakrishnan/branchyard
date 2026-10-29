@@ -1,5 +1,10 @@
-//! A result contract: the shape a child's answer must take, said by its
-//! parent at spawn and read back as JSON.
+//! Structured answers for native tasks and delegated children, read as JSON.
+//!
+//! A root run or fan may request a contract through [`crate::TaskOptions::result`].
+//! Its native final answer is captured after successful completion. An explicit
+//! [`ResultPurpose::Deliverable`] also permits useful work without Git changes;
+//! the default [`ResultPurpose::Report`] keeps ordinary code acceptance unchanged.
+//! No contract starts a planning session, subagent or follow-up turn.
 //!
 //! A parent that reads its children's answers as prose misreads them. At
 //! `spawn` it can give the child a [`ResultContract`]: a JSON Schema in a
@@ -34,9 +39,9 @@
 //!
 //! Not done: a result is not checked against anything but the schema (that
 //! it is true is the child's claim, like a self-reported status); and
-//! nothing here stops a child from ending its turn without a result: a
-//! `required` contract only records a warning on the parent when it does
-//! (the `settled` check at the end of a turn).
+//! a required Report contract only records a warning on the parent when a
+//! child ends without one. Deliverable acceptance instead requires valid
+//! current-turn output, but does not force the native harness to retry.
 
 use branchyard_support::best_effort;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -44,6 +49,7 @@ use serde_json::Value;
 
 use crate::json_schema::{Dialect, JsonSchema};
 use crate::record::{self, Recorder};
+use crate::state::Record;
 use crate::{Activity, BranchStatus, Error, Observer, RecordedEvent, Yard};
 
 /// The keywords a contract's schema checks: the same as a map's schema
@@ -67,6 +73,24 @@ pub const RESULT_MAX: usize = 64 * 1024;
 /// Most violations one refusal names; the rest are counted.
 const VIOLATIONS_SHOWN: usize = 8;
 
+/// Whether a structured answer is metadata or the task's deliverable.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultPurpose {
+    /// Report metadata; code acceptance still requires a Git candidate.
+    #[default]
+    Report,
+    /// A validated current-turn answer can complete work without Git changes.
+    Deliverable,
+}
+
+impl ResultPurpose {
+    fn is_report(&self) -> bool {
+        *self == Self::Report
+    }
+}
+
 /// What a parent says, at spawn, about the answer it wants from a child.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,20 +110,49 @@ pub struct ResultContract {
     /// its parent's log. Default false.
     #[serde(default)]
     pub required: bool,
+    /// Deliverable accepts a current-turn result instead of requiring a Git change.
+    /// Omitted for the legacy report-only behavior.
+    #[serde(default, skip_serializing_if = "ResultPurpose::is_report")]
+    pub purpose: ResultPurpose,
 }
 
 impl ResultContract {
     /// A contract for `schema`, or why the schema is not in the subset.
     pub fn new(schema: Value, required: bool) -> Result<ResultContract, Error> {
-        let contract = ResultContract { schema, required };
+        let contract = ResultContract {
+            schema,
+            required,
+            purpose: ResultPurpose::Report,
+        };
         contract.check()?;
         Ok(contract)
+    }
+
+    /// A required structured deliverable that may complete without Git changes.
+    pub fn deliverable(schema: Value) -> Result<ResultContract, Error> {
+        let contract = ResultContract {
+            schema,
+            required: true,
+            purpose: ResultPurpose::Deliverable,
+        };
+        contract.check()?;
+        Ok(contract)
+    }
+
+    /// Whether this contract makes a structured answer the work's deliverable.
+    pub fn is_deliverable(&self) -> bool {
+        self.purpose == ResultPurpose::Deliverable
     }
 
     /// Whether the schema is in the subset: the refusal names the place
     /// and the keyword (``result.schema uses `pattern`, which the contract
     /// does not support``).
     pub fn check(&self) -> Result<(), Error> {
+        if self.is_deliverable() && !self.required {
+            return Err(Error::Denied(
+                "a deliverable result contract must require a result".into(),
+            ));
+        }
         check_schema(&self.schema).map_err(Error::Denied)
     }
 
@@ -207,6 +260,78 @@ pub fn latest(events: &[RecordedEvent]) -> Option<Value> {
         Activity::Result { value } => Some(value.clone()),
         _ => None,
     })
+}
+
+/// The latest result after the latest prompt and its position in the complete
+/// oldest-first event log, numbered from 1 as in the store. A result from
+/// an earlier turn does not qualify.
+pub fn current_event(events: &[RecordedEvent]) -> Option<(u64, &Value)> {
+    let prompt = events
+        .iter()
+        .rposition(|event| matches!(event.activity, Activity::Prompt(_)))?;
+    events
+        .iter()
+        .enumerate()
+        .skip(prompt + 1)
+        .rev()
+        .find_map(|(index, event)| match &event.activity {
+            Activity::Result { value } => u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .map(|sequence| (sequence, value)),
+            _ => None,
+        })
+}
+
+/// The latest accepted value in the current turn, without borrowing the log.
+pub fn current(events: &[RecordedEvent]) -> Option<Value> {
+    current_event(events).map(|(_, value)| value.clone())
+}
+
+/// Append a final-answer contract to the task without taking over its native
+/// planning or subagents. An absent contract leaves the prompt unchanged.
+pub fn prompt(prompt: &str, contract: Option<&ResultContract>) -> String {
+    let mut prompt = prompt.to_owned();
+    if let Some(contract) = contract {
+        prompt.push_str("\n\n## Requested result\nKeep your own planning and subagents. End your final reply with one fenced JSON block matching this schema, so earlier progress text stays separate; no Branchyard reporting tool is needed:\n");
+        prompt.push_str(&contract.schema.to_string());
+    }
+    prompt
+}
+
+/// Capture a contracted native final answer while the turn still holds its
+/// recording fence. Explicit reports win; child Report contracts stay manual.
+pub(crate) fn capture_native(
+    yard: &Yard,
+    record: &Record,
+    recorder: &mut Recorder,
+) -> Result<(), Error> {
+    let Some(contract) = &record.result_contract else {
+        return Ok(());
+    };
+    if (!contract.is_deliverable() && record.info.depth > 0)
+        || !matches!(
+            record.info.status,
+            BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
+        )
+    {
+        return Ok(());
+    }
+    let events = record::read(&yard.store(), &record.info.name)?;
+    if current_event(&events).is_some() {
+        return Ok(());
+    }
+    let answer = crate::judge::message(&events);
+    let accepted = crate::map_input::parse_answer(&answer)
+        .map_err(Error::Denied)
+        .and_then(|value| accept(Some(contract), Some(value)));
+    match accepted {
+        Ok(Some(value)) => recorder.record(Activity::Result { value }),
+        Ok(None) => Ok(()),
+        Err(error) => recorder.record(Activity::Warning(format!(
+            "native final answer did not satisfy its result contract: {error}; no retry was started"
+        ))),
+    }
 }
 
 /// Whether `events` hold a result accepted after the last prompt: during
@@ -937,6 +1062,48 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<Activity>(json!({"result": {"value": [1]}})).unwrap(),
             Activity::Result { value: json!([1]) }
+        );
+    }
+    #[test]
+    fn deliverable_purpose_is_explicit_and_legacy_wire_stays_unchanged() {
+        let report = ResultContract::new(json!({"type":"object"}), true).unwrap();
+        assert!(!report.is_deliverable());
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            json!({"schema":{"type":"object"},"required":true})
+        );
+        let deliverable = ResultContract::deliverable(json!({"type":"object"})).unwrap();
+        assert!(deliverable.is_deliverable());
+        assert!(deliverable.required);
+        assert_eq!(
+            serde_json::to_value(&deliverable).unwrap()["purpose"],
+            "deliverable"
+        );
+        let legacy: ResultContract =
+            serde_json::from_value(json!({"schema":{},"required":false})).unwrap();
+        assert_eq!(legacy.purpose, ResultPurpose::Report);
+        assert_eq!(prompt("native task", None), "native task");
+        assert!(prompt("native task", Some(&deliverable))
+            .contains("Keep your own planning and subagents"));
+    }
+
+    #[test]
+    fn current_result_uses_the_latest_prompt_and_store_sequence_including_null() {
+        let events = vec![
+            event(Activity::Prompt("first".into())),
+            event(Activity::Result {
+                value: json!({"answer":"old"}),
+            }),
+            event(Activity::Prompt("second".into())),
+        ];
+        assert_eq!(current(&events), None);
+        let mut events = events;
+        events.push(event(Activity::Result { value: Value::Null }));
+        assert_eq!(current_event(&events), Some((4, &Value::Null)));
+        assert_eq!(current(&events), Some(Value::Null));
+        assert_eq!(
+            current(&[event(Activity::Result { value: json!(1) })]),
+            None
         );
     }
 }

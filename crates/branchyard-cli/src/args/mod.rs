@@ -185,6 +185,15 @@ pub struct TaskArgs {
     pub goal_judge: Option<String>,
     /// `--goal-judge-command`: launch the goal judge with this.
     pub goal_judge_command: Option<Vec<String>>,
+    /// An optional schema for the native final answer, inline or in a file.
+    pub result_schema: Option<String>,
+    pub result_schema_file: Option<String>,
+    /// Require a structured result under the declared schema.
+    pub result_required: bool,
+    /// The structured result is the deliverable; Git changes are optional.
+    pub result_deliverable: bool,
+    /// `fan --no-files`: use private task storage without project files.
+    pub no_files: bool,
     /// `--no-preflight`: do not check, before the branch is created, that
     /// the harness is installed and not logged out; see `crate::preflight`.
     pub no_preflight: bool,

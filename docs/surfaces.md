@@ -11,7 +11,7 @@ Surfaces:
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 
-The server registers <!-- fact:http.route_count -->90<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->91<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
 
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
@@ -945,3 +945,17 @@ forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
 `--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
 connection flags. See the Substrate setup documentation for image and pool prerequisites.
+
+## Cooperative native harness teams
+
+| Surface | Before | Now |
+|---|---|---|
+| `by run`, `fan`, `spawn` result flags; graph spawns | Result contracts were available only on delegated children | `--result-schema JSON` or `--result-schema-file PATH`, `--result-required`, and `--result-deliverable` also cover root runs and fans. `ResultContract.purpose` defaults to `report`; `deliverable` requires a current-turn accepted output and captures native final JSON after successful completion. No Git change is needed for a deliverable. `TaskOptions.result`, `TaskBuilder::result`, HTTP `TaskRequest.result`, SDK `task(result=…)` and MCP `spawn.result.purpose` carry the contract |
+| `by fan --no-files` | Only a single no-files run could own a private task yard | Parallel knowledge candidates use one private yard; `by task show ID --json` exposes result evidence. `by task open ID --attempt NAME --print` returns its worktree for later compare, judge and handoff commands |
+| `by compare`, `by judge`, `by fan --judge` | A candidate required a Git change | A deliverable with valid current output is eligible without a diff. Declared checks must pass. Git `--pick` refuses deliverables; the selected JSON result and provenance are returned instead. `by judge --require-judge` fails closed if the configured judge cannot return a valid judgment; optional fallback remains the default |
+| Rig seats | Scope and result contract were selected by each spawn | Child seats can fix `owns` and `result`; spawns may narrow ownership and must preserve the result contract. The root can have `result`, while root `owns` is refused |
+| Frozen handoff | Sharing artifacts and sending context were separate writes | `by handoff SOURCE --to TARGET [--artifact ID] [--note TEXT] [--expected-version JSON] [--json]`, MCP `handoff`, Rust `Yard::handoff`/`Delegate::handoff`, HTTP `POST /v1/repos/{repo}/branches/{source}/handoff`, and Python `handoff` atomically freeze the current settled result, bind its incarnation/turn/event, grant selected artifacts and enqueue one durable message. Retries deduplicate. Delivery waits for the recipient's next turn and never steers or starts one |
+| Result and message views | Only explicit delegated reports exposed result data | Attempts and private task views carry result contracts, accepted JSON, event provenance and validation errors. `Message.handoff` carries frozen evidence and `next_turn` marks deferred delivery; absent fields preserve legacy message behavior. SQLite and PostgreSQL migrate to schema 3 |
+
+[Cooperative teams](cooperative-teams.md) describes coding and knowledge examples,
+native harness autonomy, check and judge boundaries, and the current remote-check limit.

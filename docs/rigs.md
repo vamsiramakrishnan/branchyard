@@ -2,7 +2,14 @@
 
 A rig declares a team of harnesses in a file: a root seat and the seats below it, each with its harness, model, limits, check, policy and standing instructions. `by rig run` lowers it onto one root branch whose harness fills the other seats at runtime with `by spawn --seat`. The file declares what may exist; the root's harness decides what to spawn, when, and how often within each seat's limit. Budgets, envelopes, permissions and validated merges are [delegation](delegation.md)'s, unchanged.
 
-The idea is [OpenRig](https://github.com/mvschwarz/openrig)'s RigSpec; the format, planner and seats are Branchyard's own, and no OpenRig code is used ([comparison](comparison.md#openrig)). Everything here is tested against the fake ACP agent only; no real harness has run a rig.
+The idea is [OpenRig](https://github.com/mvschwarz/openrig)'s RigSpec; the format, planner and seats are Branchyard's own, and no OpenRig code is used ([comparison](comparison.md#openrig)). The parser and lowering have hermetic fake-agent coverage. Not done: live
+qualification of the cooperative recipes.
+
+A rig coordinates work between native harness sessions. Each harness keeps
+its own planning, internal task graph, and subagents. Seat instances and the
+Branchyard envelope count Branchyard branches. They do not configure native
+subagent limits. An existing native lead can instead use operator commands
+without being adopted or restarted. See [cooperative teams](cooperative-teams.md).
 
 ## Example
 
@@ -55,7 +62,17 @@ by rig run examples/rigs/feature.toml "Add a --json flag to the export command"
 #   by integrate feature-implementer
 ```
 
-[`examples/rigs/parser.toml`](../examples/rigs/parser.toml) has three levels and a pod. [`tests/golden/`](../crates/branchyard-cli/tests/golden) holds both examples' lowered plans; a test keeps them current.
+The AGY-only [coding recipe](../examples/rigs/cooperative-code.toml) gives
+source and test workers separate owned paths. The [research recipe](../examples/rigs/cooperative-research.toml)
+uses required native final-answer contracts and no code check. Validate either
+with `by rig check`. Running an AGY seat requires `--allow-unapproved-tools`;
+The profile ID is `antigravity` and its executable is `agy`. AGY retains its
+native permissions.
+
+Status: hermetic recipe validation with `by rig check`.
+Not done: live AGY cooperative team runs.
+
+[`examples/rigs/parser.toml`](../examples/rigs/parser.toml) has three levels and a pod. [`tests/golden/`](../crates/branchyard-cli/tests/golden) holds the feature and parser examples' lowered plans; a test keeps them current.
 
 ## The spec
 
@@ -100,6 +117,8 @@ A seat:
 | `isolated` | A private home; a child of an isolated seat is isolated too. Secrets and connectors need it on the seat or above | `isolated` |
 | `budget` | `{max_usd, max_turns, max_minutes}`; `max_minutes` is per turn | The root's `budget`; a child's limits |
 | `check` | `"cargo test"` (split like `--check`) or `["cargo", "test"]`. A child without one keeps its parent's | `check` |
+| `owns` | On delegated seats only: files, directories, or globs a child may change when integrated. A spawn can narrow the scope. Ancestor ownership still applies | `Seat::owns` |
+| `result` | `{schema, required, purpose}`. `purpose` defaults to `report`; `deliverable` requires `required = true` and accepts native final JSON without a Git change. A spawn override must equal the seat contract | The root's result contract or `Seat::result` |
 | `policy` | The root's: `default` (`allow`, `deny` or `ask`; default `deny`), `deny`, `allow`, `delegation_commands`. A child's: `deny` only | The root's `Policy`; a child's denials |
 | `delegates_to` | The seats below this one | The seats a branch in this seat may spawn |
 | `escalates_to` | Ancestor seats, besides this seat's own parent (always allowed), a branch here may `escalate` to (see [delegation](delegation.md#inbox)) | `Seat::escalates_to`; carried onto the branch's own `Seats` |
@@ -116,7 +135,7 @@ A startup file is a path relative to the spec's directory, without `..`, or `{ p
 
 `rig::plan` (in [`branchyard-cli`](../crates/branchyard-cli/src/rig.rs)) is pure: it reads nothing but the parsed spec and the harness registry, and produces the root's task options and [`Seats`](../crates/branchyard/src/seats.rs).
 
-- The root seat becomes the root branch: its harness, budget, check, isolation and provisioning, and a policy of its `deny` rules, then its `allow` rules, then the delegation command rule when `delegation_commands` is set, then its default.
+- The root seat becomes the root branch: its harness, budget, check, result contract, isolation and provisioning, and a policy of its `deny` rules, then its `allow` rules, then the delegation command rule when `delegation_commands` is set, then its default.
 - The seats below the root become `TaskOptions::seats`: the rig's name, the root's seat, the seats it delegates to, and a table of every seat below it.
 - The root's envelope is derived from the tree: `max_depth` is the longest chain of seats below the root, `max_children` the sum of its seats' `instances`, and `harnesses` every harness in the tree.
 - Every seat's instructions are generated, then the rig's, its pod's and its own startup files follow, each under `## From <path>`. The generated part names the seat, its role, and the seats it may spawn with their harness, instances, cost and turns, and how to spawn them (`by spawn --seat`, Python `seat=`, the MCP tool's `seat`). They reach the harness through [provisioning](provisioning.md): Claude Code's appended system prompt, Codex's `developerInstructions`, ACP's first-prompt preamble. Nothing is written to a worktree.
@@ -137,7 +156,7 @@ The engine checks the seats again when the root is created (`Seats::validate`: a
 
 A branch in a rig spawns only by seat, and only the seats its own seat delegates to: `by spawn --seat NAME`, `branchyard.spawn(prompt, seat=NAME)`, `Spawn { seat: Some(NAME), .. }`, or the MCP `spawn` tool's `seat`. Outside a harness, `by spawn --parent BRANCH --seat NAME` does the same with your authority, locally and with `--remote`.
 
-- The seat fixes the child's harness, check, delegation harnesses, isolation, provisioning and [bindings](graph.md#bindings); asking for another harness or check, or another access to a bound scratch area, is refused. The request may give a smaller budget, a shallower or narrower envelope, more denials and more bindings, never more.
+- The seat fixes the child's harness, check, result contract, owned paths, delegation harnesses, isolation, provisioning and [bindings](graph.md#bindings); asking for another harness or check, or another access to a bound scratch area, is refused. The request may give a smaller budget, a shallower or narrower envelope, narrower owned paths, more denials and more bindings, never more. A result override must equal the seat's contract.
 - A seat's child may wait for a sibling like any child: `by spawn --seat reviewer --depends-on feature-implementer "..."`, or a `spawn` edit with `seat` in a graph proposal. Dependencies are runtime decisions of the parent, not fields of the spec ([task graphs](graph.md)).
 - The child's name defaults to `<parent>-<seat>`, then `-2`, `-3`.
 - A parent may have at most `instances` children in a seat, counting finished ones until they are removed.
@@ -153,7 +172,21 @@ A branch in a rig spawns only by seat, and only the seats its own seat delegates
 
 ## Output
 
-`by rig check --json` prints the plan: `{rig, description, root: {seat, name, harness, profile, budget, policy, check, isolated, provision, delegation}, seats, unapproved_tools, skipped_files}`. `by rig run --json` prints `{rig, root: BranchInfo, descendants: [BranchInfo]}` once every seat it spawned has finished, the same locally and from a server; a refused spec prints `{"error": {"kind": "invalid_rig", "message", "field", "line", "column"}}` and exits 1.
+`by rig check --json` prints the compiled plan and its seat constraints.
+`by rig run --json` prints one rig report after its spawned seats finish, with
+root and descendant branch information. A refused spec returns a structured
+`invalid_rig` error with its field location and exits 1.
+
+A required root result contract has the same acceptance rules with and without
+`--json`. Missing or invalid current-turn output fails completion, and a
+deliverable's declared check must pass. JSON keeps the existing rig report and
+adds result assessment under `root`; incomplete required output exits 1 after
+that single report. It does not start another native turn to repair the output.
+
+Remote rig results use the same required-output assessment. A remote deliverable
+with a declared check is refused before execution because the client cannot
+verify that check. Use a local coordinator with a remote compute provider when
+that workflow needs checks.
 
 ## What is refused, and why
 

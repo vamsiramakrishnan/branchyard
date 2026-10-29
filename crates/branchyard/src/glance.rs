@@ -249,7 +249,7 @@ fn branches(conn: &Connection) -> rusqlite::Result<Result<Vec<BranchInfo>, Error
 }
 
 const MESSAGE_COLUMNS: &str =
-    "id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms";
+    "id, from_branch, to_branch, kind, text, in_reply_to, at_ms, delivered_ms, handoff, next_turn";
 
 fn questions(conn: &Connection) -> rusqlite::Result<Vec<Message>> {
     let mut statement = conn.prepare(&format!(
@@ -268,7 +268,7 @@ fn questions(conn: &Connection) -> rusqlite::Result<Vec<Message>> {
 fn unread(conn: &Connection, branch: &str) -> rusqlite::Result<Vec<Message>> {
     let mut statement = conn.prepare(&format!(
         "SELECT {MESSAGE_COLUMNS} FROM messages \
-         WHERE to_branch = ?1 AND delivered_ms IS NULL ORDER BY id"
+         WHERE to_branch = ?1 AND delivered_ms IS NULL AND (recipient_incarnation IS NULL OR recipient_incarnation = (SELECT incarnation FROM branches WHERE name = ?1 AND record IS NOT NULL)) ORDER BY id"
     ))?;
     let rows = statement.query_map(params![branch], crate::sqlite::message_from)?;
     rows.collect()
@@ -326,6 +326,8 @@ mod tests {
             in_reply_to,
             at_ms: id,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         }
     }
 

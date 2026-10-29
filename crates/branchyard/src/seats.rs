@@ -28,6 +28,12 @@ pub struct Seat {
     /// The child's merge check; `None` keeps its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<Vec<String>>,
+    /// Paths this seat may change; a spawn may narrow this assignment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    /// The result contract inherited by every child in this seat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::ResultContract>,
     /// Tool patterns the child is denied, before its parent's policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
@@ -165,6 +171,10 @@ impl Seats {
         }
         for (name, seat) in &self.table {
             harness::select(Some(&seat.harness))?;
+            crate::scope::normalize_all(&seat.owns)?;
+            if let Some(result) = &seat.result {
+                result.check()?;
+            }
             if seat.instances == 0 {
                 return invalid(format!("seat {name}'s instances must be at least 1"));
             }
@@ -286,6 +296,8 @@ mod tests {
             escalates_to: Vec::new(),
             instances: 1,
             bindings: Vec::new(),
+            owns: Vec::new(),
+            result: None,
         }
     }
 

@@ -9,6 +9,9 @@ pub fn run(env: &Env, target: &Target, prompt: &str, task: &TaskArgs, json: bool
         }
         // The issue's link lives in the prompt's header on a server.
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        if task.result_schema.is_some() || task.result_schema_file.is_some() {
+            return remote::run_with_result(env, remote, &prompt, &task, json);
+        }
         return match json {
             true => {
                 let info = remote::run_json(env, remote, &prompt, &task)?;
@@ -169,10 +172,20 @@ pub fn fan(
         }
     };
     if let Target::Remote(remote) = target {
+        if task.no_files {
+            return Err(Report::usage(
+                "fan --no-files creates a private local task and takes no --remote",
+            )
+            .next("drop --remote, or run the fan on the server's host")
+            .into());
+        }
         if routed || task.kind.is_some() || route.judge {
             return Err(crate::fleet_cmd::local_only());
         }
         let (prompt, task, _) = crate::pr::issue_task(prompt, task, None)?;
+        if task.result_schema.is_some() || task.result_schema_file.is_some() {
+            return remote::fan_with_result(env, remote, &prompt, harnesses, &task, route.json);
+        }
         if route.json {
             let infos = remote::fan_json(env, remote, &prompt, harnesses, &task)?;
             return fan_json(&infos, None);
@@ -180,16 +193,53 @@ pub fn fan(
         return remote::fan(env, remote, &prompt, harnesses, &task);
     }
     admit(env, task, harnesses, false, route.json)?;
-    let yard = open()?;
+    // Validate the new output contract before creating private task storage.
+    let contract = result_for_task(task)?;
+    // Resolve a file (including stdin) once, before a private task changes
+    // the execution directory or an options builder consumes it again.
+    let mut resolved_task = task.clone();
+    if let Some(contract) = &contract {
+        resolved_task.result_schema = Some(contract.schema.to_string());
+        resolved_task.result_schema_file = None;
+    }
+    let task = &resolved_task;
+    if contract
+        .as_ref()
+        .is_some_and(branchyard::ResultContract::is_deliverable)
+        && task.goal.is_some()
+    {
+        return Err(
+            Report::usage("a result deliverable cannot use an automatic goal loop")
+                .next("drop --goal; inspect the result and request revisions explicitly")
+                .into(),
+        );
+    }
+    let (yard, private_task) = if task.no_files {
+        let (created, yard) = branchyard::tasks::create(&branchyard::tasks::NewTask {
+            prompt: prompt.to_owned(),
+            ..branchyard::tasks::NewTask::default()
+        })?;
+        eprintln!(
+            "by: task {} (no project files); by task show {}",
+            created.id, created.id
+        );
+        (configure(yard)?, Some(created.id))
+    } else {
+        (open()?, None)
+    };
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let (prompt, task) = (prompt.as_str(), &task);
     let workspace = workspace(env, &yard)?;
     let live = Live::start_to(env, task, true, route.json, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
-    let options = TaskOptions {
+    let mut options = TaskOptions {
         workspace,
         ..live.options(task)?
     };
+    if let Some(task_id) = &private_task {
+        options.join_task = Some(task_id.clone());
+        options.base = Some("main".into());
+    }
     let options = crate::plan_cmd::with_fleet(options, task, prompt);
     // The judge's branch runs with the attempts' options.
     let judge_options = options.clone();
@@ -234,6 +284,73 @@ pub fn fan(
         .map(Branch::info)
         .chain(descendants.iter())
         .collect();
+    if private_task.is_some() || contract.is_some() {
+        let names: Vec<String> = branches
+            .iter()
+            .map(|branch| branch.info().name.clone())
+            .collect();
+        let judgement = if route.judge {
+            Some(crate::fleet_cmd::judge_names(
+                &yard,
+                &names,
+                None,
+                None,
+                task.fleet.as_ref(),
+                false,
+                &judge_options,
+            )?)
+        } else {
+            None
+        };
+        let views = infos
+            .iter()
+            .map(|info| {
+                if let Some(scored) = judgement.as_ref().and_then(|j| {
+                    j.candidates
+                        .iter()
+                        .find(|candidate| candidate.attempt.branch == info.name)
+                }) {
+                    Ok(super::live::ResultView::from_attempt(
+                        info,
+                        scored.attempt.clone(),
+                    ))
+                } else if info.depth == 0 {
+                    super::live::ResultView::local(&yard, info)
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        if route.json {
+            return fan_result_json(&infos, &views, judgement.as_ref(), private_task.as_deref());
+        }
+        let legacy = if views
+            .iter()
+            .flatten()
+            .any(super::live::ResultView::is_deliverable)
+        {
+            print(&format!(
+                "\n{}",
+                render::comparison_table(&infos, env.style())
+            ))
+        } else {
+            fan_summary(env, &infos)
+        };
+        for view in views.iter().flatten() {
+            print(&view.text(None))?;
+        }
+        if let Some(judgement) = &judgement {
+            print(&format!(
+                "\n{}",
+                crate::fleet_cmd::judgement_table(judgement, env.style())
+            ))?;
+        }
+        if let Some(task_id) = &private_task {
+            print(&format!("\nnext: by task show {task_id}\n"))?;
+        }
+        fan_result_outcome(&infos, &views)?;
+        return legacy;
+    }
     if route.json {
         let judgement = match route.judge {
             true => {
@@ -244,6 +361,7 @@ pub fn fan(
                     None,
                     None,
                     task.fleet.as_ref(),
+                    false,
                     &judge_options,
                 )?)
             }
@@ -262,6 +380,7 @@ pub fn fan(
             None,
             None,
             task.fleet.as_ref(),
+            false,
             &judge_options,
         )?;
         print(&format!(
@@ -277,6 +396,54 @@ pub fn fan(
         }
     }
     summary
+}
+
+/// Print contracted fan outputs once, preserving each native status.
+pub(crate) fn fan_result_json(
+    infos: &[&BranchInfo],
+    views: &[Option<super::live::ResultView>],
+    judgement: Option<&branchyard::Judgement>,
+    task_id: Option<&str>,
+) -> Outcome {
+    let branches: Vec<serde_json::Value> = infos
+        .iter()
+        .zip(views)
+        .map(|(info, view)| {
+            view.as_ref()
+                .map_or_else(|| json::branch(info), |view| view.json(info))
+        })
+        .collect();
+    let mut value = serde_json::json!({"branches":branches});
+    if let Some(judgement) = judgement {
+        value["judgement"] = serde_json::json!(judgement);
+    }
+    if let Some(task_id) = task_id {
+        value["task"] = serde_json::json!(task_id);
+    }
+    print(&(json::text(&value) + "\n"))?;
+    fan_result_outcome(infos, views)
+}
+
+fn fan_result_outcome(infos: &[&BranchInfo], views: &[Option<super::live::ResultView>]) -> Outcome {
+    let required = views
+        .iter()
+        .flatten()
+        .any(super::live::ResultView::required);
+    if required
+        && !views
+            .iter()
+            .flatten()
+            .any(|view| view.required() && view.complete())
+    {
+        return Err(Failure::Reported);
+    }
+    if infos
+        .iter()
+        .all(|info| matches!(info.status, BranchStatus::Failed { .. }))
+    {
+        return Err(Failure::Reported);
+    }
+    Ok(())
 }
 
 /// `by fan --json`: the branches as `by ls --json` prints them, and the

@@ -4,9 +4,46 @@
 
 use super::*;
 
+/// Relay a frozen result using the caller's existing authority.
+pub fn handoff(target: &Target, args: &args::HandoffArgs) -> Outcome {
+    let expected = args
+        .expected_version
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|error| {
+            Report::usage(format!(
+                "--expected-version is not a source version: {error}"
+            ))
+        })?;
+    let request = branchyard::HandoffRequest {
+        from: args.source.clone(),
+        to: args.to.clone(),
+        artifacts: args.artifacts.clone(),
+        note: args.note.clone(),
+        expected,
+    };
+    let result = match (harness_delegate(args.json)?, target) {
+        (Some(delegate), _) => delegate.handoff(request),
+        (None, Target::Local) => open_yard()?.handoff(request),
+        (None, Target::Remote(remote)) => remote.repo.handoff(&request).map_err(remote::sdk_error),
+    };
+    emit(args.json, result, |message| {
+        format!(
+            "handoff #{} queued for {}; no turn was started\n",
+            message.id, args.to
+        )
+    })
+}
+
 pub fn spawn(env: &Env, target: &Target, prompt: &str, args: &SpawnArgs) -> Outcome {
     let json = args.json;
-    let result = match result_contract(args) {
+    let result = match result_contract(
+        args.result_schema.as_deref(),
+        args.result_schema_file.as_deref(),
+        args.result_required,
+        args.result_deliverable,
+    ) {
         Ok(result) => result,
         Err(error) => return fail(json, &error),
     };
@@ -722,7 +759,10 @@ pub fn inbox(target: &Target, as_branch: Option<String>, unread: bool, json: boo
                 let read = if inbox.is_unread(m) { " [unread]" } else { "" };
                 format!(
                     "#{} {} from {}{reply}{read}: {}\n",
-                    m.id, m.kind, m.from, m.text
+                    m.id,
+                    m.kind,
+                    m.from,
+                    render::message_body(m)
                 )
             })
             .collect()

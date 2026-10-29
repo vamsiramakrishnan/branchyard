@@ -551,6 +551,8 @@ pub(crate) fn messages(s: Opened) {
             in_reply_to: None,
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         })
         .unwrap();
     assert!(sent.id > 0);
@@ -571,6 +573,8 @@ pub(crate) fn messages(s: Opened) {
             in_reply_to: None,
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         })
         .unwrap();
 
@@ -595,6 +599,8 @@ pub(crate) fn messages(s: Opened) {
             in_reply_to: Some(sent.id),
             at_ms: 0,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         })
         .unwrap();
     assert_eq!(store.answer_to(sent.id).unwrap().as_ref(), Some(&answer));
@@ -611,6 +617,8 @@ pub(crate) fn messages(s: Opened) {
                 in_reply_to: None,
                 at_ms: 0,
                 delivered: false,
+                handoff: None,
+                next_turn: false,
             })
             .unwrap()
     };
@@ -1085,6 +1093,313 @@ pub(crate) fn races(s: Opened) {
     }
 }
 
+/// Prepare a real result event and immutable artifact for transaction checks.
+fn handoff_fixture(s: &Opened) -> crate::handoff::HandoffCommit {
+    use crate::storage::{Lineage, NewArtifact};
+    for name in ["lead", "producer", "consumer"] {
+        let mut r = record_with_parent(name, (name != "lead").then_some("lead"));
+        r.info.turns = 1;
+        s.backend.write(&r, None).unwrap();
+    }
+    let result = serde_json::json!({"finding": "recorded"});
+    s.backend
+        .append(
+            "producer",
+            &RecordedEvent {
+                at_ms: now_ms(),
+                activity: Activity::Result {
+                    value: result.clone(),
+                },
+            },
+            None,
+        )
+        .unwrap();
+    let lineage = Lineage::from_identities(s.storage.identities().unwrap());
+    let producer = lineage.id("producer").unwrap();
+    let lead = lineage.id("lead").unwrap();
+    let artifact = s
+        .storage
+        .create_artifact(&NewArtifact {
+            digest: "frozen-digest".into(),
+            size: 12,
+            name: "evidence.txt".into(),
+            media_type: "text/plain".into(),
+            publisher_branch: "producer".into(),
+            turn: 1,
+            labels: Default::default(),
+            ancestry: vec!["lead".into()],
+            publisher_incarnation: producer,
+            ancestry_incarnations: vec![lead],
+        })
+        .unwrap();
+    crate::handoff::HandoffCommit {
+        actor: Some(("lead".into(), lead)),
+        recipient_incarnation: lineage.id("consumer").unwrap(),
+        source_event_count: 1,
+        dedupe_key: "one-handoff".into(),
+        message: crate::Message {
+            id: 0,
+            from: "lead".into(),
+            to: "consumer".into(),
+            kind: crate::MessageKind::Answer,
+            text: "use the finding".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+            next_turn: true,
+            handoff: Some(crate::Handoff {
+                source: "producer".into(),
+                version: crate::SourceVersion {
+                    incarnation: producer,
+                    turn: 1,
+                    result_event: 1,
+                },
+                result,
+                candidate: None,
+                artifacts: vec![artifact.artifact],
+            }),
+        },
+    }
+}
+
+/// A handoff grants and journals once, and waits past a turn already opening.
+pub(crate) fn handoffs(s: Opened) {
+    let commit = handoff_fixture(&s);
+    let recipient = s.backend.read("consumer").unwrap().unwrap();
+    let lease = granted(
+        s.backend
+            .acquire(&recipient, &owner("consumer"), TTL)
+            .unwrap(),
+    );
+    let delivered_turn = lease.turn.max(u64::from(recipient.info.turns)) + 1;
+    let message = s.backend.commit_handoff(&commit).unwrap();
+    assert_eq!(
+        s.backend.message(message.id).unwrap(),
+        Some(message.clone())
+    );
+    assert_eq!(
+        s.backend.inbox("consumer").unwrap().as_slice(),
+        std::slice::from_ref(&message)
+    );
+    assert!(s
+        .backend
+        .inbox_for_turn("consumer", delivered_turn - 1)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        s.backend
+            .inbox_for_turn("consumer", delivered_turn)
+            .unwrap()
+            .as_slice(),
+        std::slice::from_ref(&message)
+    );
+    assert!(s
+        .backend
+        .request_steer("consumer", "lead", "do not steer", Some(message.id))
+        .is_err());
+    assert!(s.backend.pending_steers(&lease).unwrap().is_empty());
+    assert_eq!(
+        s.backend.read("consumer").unwrap().unwrap().info.turns,
+        recipient.info.turns
+    );
+    let artifact = &message.handoff.as_ref().unwrap().artifacts[0];
+    assert_eq!(
+        s.storage.artifact_shares(&artifact.id).unwrap(),
+        [crate::storage::Share {
+            branch: "consumer".into(),
+            incarnation: Some(commit.recipient_incarnation),
+        }]
+    );
+    assert_eq!(s.backend.event_count("lead").unwrap(), 1);
+    assert_eq!(s.backend.event_count("consumer").unwrap(), 1);
+    assert_eq!(s.backend.commit_handoff(&commit).unwrap(), message);
+    let intent = serde_json::json!({"prompt": "p", "messages": [message.id]});
+    s.backend
+        .begin_step_delivering(&lease, lease.turn, "submit", &intent, &[message.id])
+        .unwrap();
+    assert!(!s.backend.message(message.id).unwrap().unwrap().delivered);
+    let mut completed = recipient.clone();
+    completed.info.turns = lease.turn.try_into().unwrap();
+    s.backend.finish(&lease, Some(&completed), None).unwrap();
+    let next = granted(
+        s.backend
+            .acquire(&completed, &owner("consumer-next"), TTL)
+            .unwrap(),
+    );
+    assert_eq!(next.turn, delivered_turn);
+    s.backend
+        .begin_step_delivering(&next, next.turn, "submit", &intent, &[message.id])
+        .unwrap();
+    let retry = s.backend.commit_handoff(&commit).unwrap();
+    assert_eq!(retry.id, message.id);
+    assert!(retry.delivered);
+    assert_eq!(s.backend.event_count("consumer").unwrap(), 1);
+    assert!(s.backend.send_message(&commit.message).is_err());
+
+    // Reusing a recipient name inherits neither the frozen payload nor its grant.
+    s.backend.delete("consumer").unwrap();
+    s.backend
+        .write(&record_with_parent("consumer", Some("lead")), None)
+        .unwrap();
+    assert!(s.backend.inbox("consumer").unwrap().is_empty());
+    assert!(s.backend.inbox_for_turn("consumer", u64::MAX).is_err());
+    assert!(s.backend.inbox_for_turn("consumer", 99).unwrap().is_empty());
+    assert!(s.backend.commit_handoff(&commit).is_err());
+    let lineage = crate::storage::Lineage::from_identities(s.storage.identities().unwrap());
+    assert_ne!(
+        lineage.id("consumer").unwrap(),
+        commit.recipient_incarnation
+    );
+    assert_eq!(
+        s.storage.artifact_shares(&artifact.id).unwrap()[0].incarnation,
+        Some(commit.recipient_incarnation)
+    );
+}
+
+/// Failed validation leaves every grant, message and event unchanged.
+pub(crate) fn handoff_fencing(s: Opened) {
+    let commit = handoff_fixture(&s);
+    let artifact = commit.message.handoff.as_ref().unwrap().artifacts[0]
+        .id
+        .clone();
+    let unchanged = || {
+        assert!(s.storage.artifact_shares(&artifact).unwrap().is_empty());
+        assert!(s.backend.inbox("consumer").unwrap().is_empty());
+        assert_eq!(s.backend.event_count("consumer").unwrap(), 0);
+    };
+    let mut stale = commit.clone();
+    stale.message.in_reply_to = Some(u64::MAX);
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.message.next_turn = false;
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.message.from = "consumer".into();
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.message.handoff.as_mut().unwrap().version.result_event = 0;
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.recipient_incarnation += 1000;
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.actor.as_mut().unwrap().1 += 1000;
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.message.handoff.as_mut().unwrap().version.incarnation += 1000;
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    stale.message.handoff.as_mut().unwrap().artifacts[0].digest = "tampered".into();
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+    stale = commit.clone();
+    let mut missing = stale.message.handoff.as_ref().unwrap().artifacts[0].clone();
+    missing.id = "missing-artifact".into();
+    stale
+        .message
+        .handoff
+        .as_mut()
+        .unwrap()
+        .artifacts
+        .push(missing);
+    assert!(s.backend.commit_handoff(&stale).is_err());
+    unchanged();
+
+    // A lease alone fences the producer, even before its status changes.
+    let producer = s.backend.read("producer").unwrap().unwrap();
+    let lease = granted(
+        s.backend
+            .acquire(&producer, &owner("producer"), TTL)
+            .unwrap(),
+    );
+    assert!(s.backend.commit_handoff(&commit).is_err());
+    unchanged();
+    s.backend.finish(&lease, None, None).unwrap();
+    s.backend.append("producer", &event(2), None).unwrap();
+    assert!(s.backend.commit_handoff(&commit).is_err());
+    unchanged();
+}
+
+/// Concurrent retriers enqueue one message; an operator's own event is idempotent too.
+pub(crate) fn handoff_retries(s: Opened) {
+    let commit = handoff_fixture(&s);
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let backend = (s.again)();
+        let commit = commit.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            backend.commit_handoff(&commit).unwrap()
+        }));
+    }
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(results[0], results[1]);
+    assert_eq!(s.backend.inbox("consumer").unwrap().len(), 1);
+    assert_eq!(s.backend.event_count("consumer").unwrap(), 1);
+
+    let mut operator = commit.clone();
+    operator.actor = None;
+    operator.message.from = "producer".into();
+    operator.dedupe_key = "operator-handoff".into();
+    let sent = s.backend.commit_handoff(&operator).unwrap();
+    assert_eq!(s.backend.commit_handoff(&operator).unwrap(), sent);
+    assert_eq!(s.backend.event_count("producer").unwrap(), 2);
+    s.backend.append("producer", &event(3), None).unwrap();
+    assert!(
+        s.backend.commit_handoff(&operator).is_err(),
+        "only the exact handoff's own event may be discounted"
+    );
+}
+
+/// A handoff cannot read a producer version whose update has not committed.
+#[cfg(feature = "postgres")]
+fn handoff_waits_for_source_update(s: Opened) {
+    let commit = handoff_fixture(&s);
+    let base = postgres_url().unwrap();
+    let repo = s.scope.as_ref().unwrap();
+    let artifact = commit.message.handoff.as_ref().unwrap().artifacts[0]
+        .id
+        .clone();
+    let application = format!("handoff-source-{repo}");
+    let separator = if base.contains('?') { '&' } else { '?' };
+    let url = format!("{base}{separator}application_name={application}");
+    let handoff = crate::pg::Postgres::open(&url, repo).unwrap();
+    let mut writer = crate::pg::connect(&base).unwrap();
+    let mut observer = crate::pg::connect(&base).unwrap();
+    let mut producer = s.backend.read("producer").unwrap().unwrap();
+    producer.info.turns += 1;
+    let record = crate::store_codec::encode("producer", &producer).unwrap();
+    let mut change = writer.transaction().unwrap();
+    change
+        .execute(
+            "UPDATE by_branches SET record = $3 WHERE repo = $1 AND name = $2",
+            &[&repo, &"producer", &record],
+        )
+        .unwrap();
+    let worker = std::thread::spawn(move || handoff.commit_handoff(&commit));
+    branchyard_testkit::wait::until("handoff to wait for the producer row", || {
+        observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock')", &[&application])
+            .unwrap().get::<_, bool>(0)
+    });
+    change.commit().unwrap();
+    assert!(matches!(worker.join().unwrap(), Err(Error::Denied(_))));
+    assert!(s.backend.inbox("consumer").unwrap().is_empty());
+    assert_eq!(s.backend.event_count("consumer").unwrap(), 0);
+    assert!(s.storage.artifact_shares(&artifact).unwrap().is_empty());
+}
+
 /// A turn's `submit` step and the inbox messages its prompt carries become
 /// durable together: journaled with them marked delivered in one
 /// transaction, nothing when fenced, and undone together, leaving what
@@ -1102,6 +1417,8 @@ pub(crate) fn delivery(s: Opened) {
                 in_reply_to: None,
                 at_ms: 0,
                 delivered: false,
+                handoff: None,
+                next_turn: false,
             })
             .unwrap()
             .id
@@ -2582,12 +2899,74 @@ pub(crate) fn corrupt(s: Opened) {
     refuses(store.leases(), "pid");
 }
 
+/// Schema 2 messages survive adding frozen handoff delivery metadata.
+fn upgrade_handoffs(
+    backend: &dyn Backend,
+    exec: &mut dyn FnMut(&str),
+    prefix: &str,
+    reopen: &dyn Fn() -> Arc<dyn Backend>,
+) {
+    let ordinary = backend
+        .send_message(&crate::Message {
+            id: 0,
+            from: "legacy-sender".into(),
+            to: "legacy-recipient".into(),
+            kind: crate::MessageKind::Report,
+            text: "legacy message".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+            handoff: None,
+            next_turn: false,
+        })
+        .unwrap();
+    exec(&format!("DROP INDEX {prefix}messages_handoff"));
+    for column in [
+        "handoff",
+        "next_turn",
+        "handoff_key",
+        "recipient_incarnation",
+        "min_recipient_turn",
+    ] {
+        exec(&format!(
+            "ALTER TABLE {prefix}messages DROP COLUMN {column}"
+        ));
+    }
+    exec(&format!(
+        "UPDATE {prefix}meta SET value = '2' WHERE key = 'schema'"
+    ));
+    let upgraded = reopen();
+    assert_eq!(
+        upgraded.message(ordinary.id).unwrap(),
+        Some(ordinary.clone())
+    );
+    assert_eq!(
+        upgraded.inbox_for_turn("legacy-recipient", 1).unwrap(),
+        [ordinary]
+    );
+    let new = upgraded
+        .send_message(&crate::Message {
+            id: 0,
+            from: "new-sender".into(),
+            to: "new-recipient".into(),
+            kind: crate::MessageKind::Report,
+            text: "new message".into(),
+            in_reply_to: None,
+            at_ms: 0,
+            delivered: false,
+            handoff: None,
+            next_turn: false,
+        })
+        .unwrap();
+    assert_eq!(upgraded.message(new.id).unwrap(), Some(new));
+}
+
 /// Generate one `#[test]` per conformance check for a backend.
 macro_rules! suite {
     ($open:expr) => {
         suite!($open; fencing, expiry, steps, cancels, steers, records, removed_children,
             reservations, events,
-            concurrent_appends, contended_feed, races, storage, messages, delivery, graph, ports, sandboxes,
+            concurrent_appends, contended_feed, races, storage, messages, delivery, handoffs, handoff_fencing, handoff_retries, graph, ports, sandboxes,
             outcomes, knowledge, pools, usage, effects, limits, corrupt);
     };
     ($open:expr; $($check:ident),*) => {
@@ -2623,6 +3002,12 @@ mod sqlite {
             None,
             &|| Arc::new(Sqlite::open(&dir).unwrap()),
         );
+        crate::conformance::upgrade_handoffs(
+            &backend,
+            &mut |sql| conn.execute_batch(sql).unwrap(),
+            "",
+            &|| Arc::new(Sqlite::open(&dir).unwrap()),
+        );
         scratch.close();
     }
 }
@@ -2630,6 +3015,14 @@ mod sqlite {
 #[cfg(feature = "postgres")]
 mod postgres {
     suite!(crate::conformance::postgres);
+
+    #[test]
+    fn handoff_waits_for_source_update() {
+        let Some(store) = crate::conformance::postgres("handoff-source-update") else {
+            return;
+        };
+        super::handoff_waits_for_source_update(store);
+    }
 
     /// In a schema of its own: it drops columns, which would break every
     /// other test sharing the tables.
@@ -2657,6 +3050,12 @@ mod postgres {
             &mut |sql| raw.batch_execute(sql).unwrap(),
             "by_",
             Some("repo"),
+            &|| Arc::new(Postgres::open(&url, "repo").unwrap()),
+        );
+        crate::conformance::upgrade_handoffs(
+            &backend,
+            &mut |sql| raw.batch_execute(sql).unwrap(),
+            "by_",
             &|| Arc::new(Postgres::open(&url, "repo").unwrap()),
         );
         drop(raw);

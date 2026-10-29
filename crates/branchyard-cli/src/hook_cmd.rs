@@ -1110,6 +1110,8 @@ mod tests {
             in_reply_to: None,
             at_ms: 1,
             delivered: false,
+            handoff: None,
+            next_turn: false,
         }
     }
 

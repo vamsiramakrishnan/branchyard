@@ -102,6 +102,7 @@ pub fn contract() -> Value {
     entry::<api::AskRequest>("AskRequest", &mut types);
     entry::<api::TextRequest>("TextRequest", &mut types);
     entry::<api::ReportRequest>("ReportRequest", &mut types);
+    entry::<branchyard::HandoffRequest>("HandoffRequest", &mut types);
     entry::<api::AnswerRequest>("AnswerRequest", &mut types);
     entry::<api::OperationKind>("OperationKind", &mut types);
     entry::<api::OperationState>("OperationState", &mut types);

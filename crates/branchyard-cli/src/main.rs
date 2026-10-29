@@ -386,10 +386,12 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
             }
             map_cmd::main(env, target, action.as_ref(), &map, json)
         }
+        Command::Handoff(args) => commands::handoff(target, &args),
         Command::Judge {
             targets,
             harness,
             deterministic,
+            require_judge,
             command,
             rubric,
             pick,
@@ -404,6 +406,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
                 targets,
                 harness,
                 deterministic,
+                require_judge,
                 command: command.map(|c| c.0),
                 rubric,
                 pick,

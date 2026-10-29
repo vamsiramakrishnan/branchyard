@@ -61,9 +61,11 @@ impl Judge for HarnessJudge {
             command: self.spec.command.clone().or(self.options.command.clone()),
             provision: (!provision.is_empty()).then_some(provision),
             policy: Policy::deny_all(),
+            unapproved_tools: false,
             name: None,
             base: None,
             check: None,
+            result: None,
             delegation: None,
             seats: None,
             workspace: None,
@@ -138,6 +140,9 @@ pub struct JudgeOptions {
     /// Run each candidate's check on its exact candidate first. `by judge`
     /// always does.
     pub run_checks: bool,
+    /// Require a valid model judge verdict. A missing judge is refused;
+    /// a failed or invalid verdict makes every attempt unpickable.
+    pub require_judge: bool,
     /// Ask this judge too; the deterministic score alone when `None`.
     pub judge: Option<Arc<dyn Judge>>,
     /// Added to the judge's prompt under `## Rubric`.
@@ -226,6 +231,13 @@ pub enum JudgedBy {
         name: String,
         error: String,
     },
+    /// A required judge failed or returned an invalid verdict; no pick is accepted.
+    RequiredFailed {
+        /// The judge that was required.
+        name: String,
+        /// Why its verdict could not be used.
+        error: String,
+    },
 }
 
 impl JudgedBy {
@@ -234,6 +246,9 @@ impl JudgedBy {
             JudgedBy::Deterministic => "deterministic".into(),
             JudgedBy::Judge { name } => name.clone(),
             JudgedBy::Fallback { name, .. } => format!("deterministic (fallback from {name})"),
+            JudgedBy::RequiredFailed { name, .. } => {
+                format!("required judge {name} failed; no pick accepted")
+            }
         }
     }
 }
@@ -250,8 +265,8 @@ pub struct Scored {
     pub judge: Option<f64>,
     /// The one ranked on.
     pub score: f64,
-    /// Whether it can be picked: it has a candidate, its turn completed and
-    /// its check did not fail.
+    /// Whether it can be picked: its turn completed, its code candidate or
+    /// contracted deliverable is valid, and its check did not fail.
     pub eligible: bool,
     pub reason: String,
 }
@@ -267,16 +282,39 @@ pub struct Judgement {
 
 /// Why an attempt cannot be picked, if it cannot.
 fn ineligible(attempt: &Attempt) -> Option<String> {
-    if attempt.candidate.is_none() {
-        return Some("no candidate".into());
-    }
-    if !matches!(
-        attempt.status,
-        BranchStatus::Ready | BranchStatus::Merged { .. }
-    ) {
-        return Some("its last turn did not complete with changes".into());
+    if attempt.is_deliverable() {
+        if !matches!(
+            attempt.status,
+            BranchStatus::Ready | BranchStatus::NoChanges | BranchStatus::Merged { .. }
+        ) {
+            return Some("its last turn did not complete successfully".into());
+        }
+        if let Some(error) = &attempt.result_error {
+            return Some(error.clone());
+        }
+        let Some(result) = &attempt.result else {
+            return Some("no accepted result in its latest turn".into());
+        };
+        if let Some(contract) = &attempt.result_contract {
+            if let Err(error) = crate::contract::accept(Some(contract), Some(result.clone())) {
+                return Some(error.to_string());
+            }
+        }
+    } else {
+        if attempt.candidate.is_none() {
+            return Some("no candidate".into());
+        }
+        if !matches!(
+            attempt.status,
+            BranchStatus::Ready | BranchStatus::Merged { .. }
+        ) {
+            return Some("its last turn did not complete with changes".into());
+        }
     }
     match &attempt.check {
+        AttemptCheck::NotRun | AttemptCheck::NoCandidate if attempt.is_deliverable() => {
+            Some("its configured check has not passed; run judging with checks enabled".into())
+        }
         AttemptCheck::Failed { .. } => Some("its check failed".into()),
         AttemptCheck::TimedOut { .. } => Some("its check timed out".into()),
         AttemptCheck::Error { message } => Some(format!("its check could not run: {message}")),
@@ -302,7 +340,9 @@ fn better_when_lower(value: Option<f64>, values: &[f64]) -> f64 {
 /// The score without a model, from 0 to 100: the check (passed 60, none or
 /// not run 40), the diff's size (smaller up to 20), cost (cheaper up to 10)
 /// and time (faster up to 10), each relative to the other eligible
-/// candidates. An ineligible candidate scores 0.
+/// candidates. A valid deliverable gets 80 for structure plus cost/time,
+/// without rewarding answer length or claiming semantic accuracy.
+/// An ineligible candidate scores 0.
 pub fn deterministic_scores(attempts: &[Attempt]) -> Vec<(f64, String)> {
     let eligible: Vec<&Attempt> = attempts
         .iter()
@@ -332,17 +372,25 @@ pub fn deterministic_scores(attempts: &[Attempt]) -> Vec<(f64, String)> {
                 20.0 * better_when_lower(Some(f64::from(a.insertions + a.deletions)), &lines);
             let cost = 10.0 * better_when_lower(a.cost_usd, &costs);
             let time = 10.0 * better_when_lower(a.duration_ms.map(|d| d as f64), &times);
-            let score = (check + size + cost + time).min(100.0);
-            (
-                (score * 10.0).round() / 10.0,
-                format!(
-                    "{said}; +{} -{} in {} file{}",
-                    a.insertions,
-                    a.deletions,
-                    a.files_changed,
-                    if a.files_changed == 1 { "" } else { "s" }
-                ),
-            )
+            let (score, reason) = if a.is_deliverable() {
+                (
+                    80.0 + cost + time,
+                    "current-turn result contract satisfied; semantic accuracy not verified"
+                        .to_owned(),
+                )
+            } else {
+                (
+                    check + size + cost + time,
+                    format!(
+                        "{said}; +{} -{} in {} file{}",
+                        a.insertions,
+                        a.deletions,
+                        a.files_changed,
+                        if a.files_changed == 1 { "" } else { "s" }
+                    ),
+                )
+            };
+            ((score.min(100.0) * 10.0).round() / 10.0, reason)
         })
         .collect()
 }
@@ -359,6 +407,9 @@ pub fn prompt(task: &str, attempts: &[Attempt], diffs: &[String], rubric: Option
          run anything.\n\n## Task\n{task}\n\n## Rubric\n{RUBRIC}\n",
         attempts.len()
     );
+    if attempts.iter().any(Attempt::is_deliverable) {
+        text = format!("You are judging {} attempts at one task. Read only: do not change, create or run anything.\n\n## Task\n{task}\n\n## Rubric\nPrefer a correct, supported, relevant answer. A valid result schema establishes structure, not truth. Do not reward length or require Git changes for knowledge deliverables.\n", attempts.len());
+    }
     if let Some(rubric) = rubric {
         text.push_str(&format!("{rubric}\n"));
     }
@@ -386,6 +437,21 @@ pub fn prompt(task: &str, attempts: &[Attempt], diffs: &[String], rubric: Option
                 .map_or("unknown".into(), |d| format!("{}s", d / 1000)),
             diff.trim_end()
         ));
+    }
+    for attempt in attempts {
+        if let Some(result) = &attempt.result {
+            text.push_str(&format!(
+                "\n### {} structured result\n```json\n{}\n```\n",
+                attempt.branch,
+                truncated(result.to_string())
+            ));
+        }
+        if let Some(error) = &attempt.result_error {
+            text.push_str(&format!(
+                "\n### {} result unavailable\n{error}\n",
+                attempt.branch
+            ));
+        }
     }
     let names: Vec<String> = attempts
         .iter()
@@ -420,6 +486,9 @@ pub(crate) fn judge(
     names: &[String],
     options: &JudgeOptions,
 ) -> Result<Judgement, Error> {
+    if options.require_judge && options.judge.is_none() {
+        return Err(Error::Unsupported("a required judge needs a judge harness or implementation; configure one or use deterministic judging without the requirement".into()));
+    }
     if names.is_empty() {
         return Err(Error::State("nothing to judge".into()));
     }
@@ -449,18 +518,26 @@ pub(crate) fn judge(
                 verdict = Some(parsed);
             }
             Err(error) => {
-                by = JudgedBy::Fallback {
-                    name: judge.name(),
-                    error,
+                by = if options.require_judge {
+                    JudgedBy::RequiredFailed {
+                        name: judge.name(),
+                        error,
+                    }
+                } else {
+                    JudgedBy::Fallback {
+                        name: judge.name(),
+                        error,
+                    }
                 }
             }
         }
     }
+    let required_failure = options.require_judge && verdict.is_none();
     let mut scored: Vec<Scored> = attempts
         .into_iter()
         .zip(deterministic)
         .map(|(attempt, (det, why))| {
-            let eligible = ineligible(&attempt).is_none();
+            let eligible = !required_failure && ineligible(&attempt).is_none();
             let judged = verdict.as_ref().map(|v| {
                 (
                     v.scores[&attempt.branch],
@@ -470,6 +547,9 @@ pub(crate) fn judge(
             let (score, reason) = match (&judged, eligible) {
                 (Some((s, r)), true) => (*s, r.clone()),
                 (Some((s, r)), false) => (*s, format!("{r} (not pickable: {why})")),
+                (None, _) if required_failure => {
+                    (0.0, "required judge did not return a valid verdict".into())
+                }
                 (None, _) => (det, why),
             };
             Scored {
@@ -564,6 +644,10 @@ mod tests {
             duration_ms: Some(1000),
             check,
             candidate: Some("c".into()),
+            result_contract: None,
+            result: None,
+            result_event: None,
+            result_error: None,
             files_changed: 1,
             insertions: lines,
             deletions: 0,
@@ -634,5 +718,31 @@ mod tests {
         assert!(text.contains("Prefer b."));
         assert!(text.contains("\"a\", \"b\""));
         assert!(truncated("x".repeat(DIFF_MAX + 5)).ends_with("(5 more characters)"));
+    }
+    #[test]
+    fn a_valid_deliverable_does_not_override_unsuccessful_execution_or_a_check_failure() {
+        let mut answer = attempt("research", AttemptCheck::None, 0, None);
+        answer.candidate = None;
+        answer.status = BranchStatus::NoChanges;
+        answer.result_contract =
+            Some(crate::ResultContract::deliverable(serde_json::json!({"type":"object"})).unwrap());
+        answer.result = Some(serde_json::json!({"finding":"evidence"}));
+        answer.result_event = Some(2);
+        assert!(ineligible(&answer).is_none());
+        for status in [
+            BranchStatus::Running,
+            BranchStatus::Interrupted,
+            BranchStatus::Failed {
+                reason: "native failure".into(),
+            },
+        ] {
+            answer.status = status;
+            assert!(ineligible(&answer).is_some());
+        }
+        answer.status = BranchStatus::NoChanges;
+        answer.check = AttemptCheck::Failed {
+            output_tail: "evidence check failed".into(),
+        };
+        assert!(ineligible(&answer).is_some());
     }
 }

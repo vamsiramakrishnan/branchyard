@@ -413,6 +413,8 @@ fn a_harness_in_a_rig_spawns_by_seat_over_mcp() {
         escalates_to: Vec::new(),
         instances: 1,
         bindings: Vec::new(),
+        owns: Vec::new(),
+        result: None,
     };
     let seats = Seats {
         rig: "team".into(),
@@ -506,6 +508,83 @@ fn artifacts_and_scratch_areas_are_reachable_over_mcp() {
     assert_eq!(scratch[0]["name"], "shared-cache");
     let lock = result(&kid_said, "lock_scratch");
     assert_eq!(lock["holder_branch"], "kid");
+}
+
+#[test]
+fn a_native_lead_hands_frozen_outputs_to_a_coworker_over_mcp() {
+    let f = Fixture::new();
+    let answer = json!({"summary":"native research output"});
+    let source = [
+        r#"MCP publish_artifact {"path":"a.txt","name":"evidence.txt"}"#.to_owned(),
+        format!("MCP report {}", json!({"text":"done","result":answer})),
+    ]
+    .join("\n");
+    let leaf = r#"MCP handoff {"from":"source","to":"root","artifacts":[]}"#;
+    let prompt = [
+        format!(
+            "MCP spawn {}",
+            json!({"prompt":source,"name":"source",
+            "result":{"schema":{"type":"object"},"required":true}})
+        ),
+        "MCP wait source".to_owned(),
+        format!("MCP spawn {}", json!({"prompt":leaf,"name":"consumer"})),
+        "MCP wait consumer".to_owned(),
+    ]
+    .join("\n");
+    let options = f.delegating(Envelope::default());
+    let root = f
+        .yard
+        .task(prompt)
+        .options(options.clone())
+        .name("root")
+        .run()
+        .unwrap();
+    root.wait_subtree().unwrap();
+    let published = result(&reply(&f, "source"), "publish_artifact");
+    let id = published["id"].as_str().unwrap();
+    let consumer_reply = reply(&f, "consumer");
+    assert!(
+        consumer_reply.contains("mcp handoff error: denied:")
+            && consumer_reply.contains("max_depth is 0"),
+        "{consumer_reply}"
+    );
+    let request = json!({"from":"source","to":"consumer","artifacts":[id],"note":"Use the supplied evidence"});
+    let session = root.info().session.clone();
+    assert!(session.is_some());
+    let continued = root
+        .send(
+            &format!("MCP handoff {request}\nMCP handoff {request}"),
+            options,
+        )
+        .unwrap();
+    assert_eq!(continued.info().session, session);
+    let said = reply(&f, "root");
+    let handed = nth_result(&said, "handoff", 0);
+    assert_eq!(handed["handoff"]["result"], answer);
+    assert_eq!(handed["handoff"]["artifacts"][0]["id"], id);
+    assert_eq!(
+        handed["handoff"]["artifacts"][0]["digest"],
+        published["digest"]
+    );
+    assert_eq!(handed["next_turn"], true);
+    assert_eq!(nth_result(&said, "handoff", 1)["id"], handed["id"]);
+    let consumer = f.yard.branch("consumer").unwrap();
+    assert_eq!(consumer.info().turns, 1);
+    assert!(!consumer
+        .events()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event.activity, Activity::Steered { .. })));
+    let out = f.dir.join("received.txt");
+    consumer.read_artifact(id, &out).unwrap();
+    assert_eq!(fs::read(out).unwrap(), b"one\n");
+    let inbox = consumer
+        .delegate(f.delegating(Envelope::default()))
+        .unwrap()
+        .inbox()
+        .unwrap();
+    assert_eq!(inbox.messages.len(), 1);
+    assert!(!inbox.messages[0].delivered);
 }
 
 /// The M5 gate: a parent creates a child which creates a grandchild, each

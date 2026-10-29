@@ -249,7 +249,7 @@ fn an_initialized_repository_has_no_failure() {
     assert_eq!(report.status("repository.state"), "ok");
     assert!(report.detail("repository.state").contains("0 branches"));
     assert_eq!(report.status("repository.schema"), "ok");
-    assert!(report.detail("repository.schema").starts_with("schema 2"));
+    assert!(report.detail("repository.schema").starts_with("schema 3"));
     assert_eq!(report.status("repository.services"), "ok");
     assert_eq!(report.status("config.merged"), "ok");
     assert_eq!(report.status("server.reachable"), "ok");
@@ -452,18 +452,22 @@ fn outside_a_repository_it_fails_and_path_points_it_at_one() {
 fn a_store_from_another_version_is_reported_and_left_as_it_is() {
     let repo = Repo::used();
     let db = repo.state_db();
-    assert_eq!(schema_of(&db), "2");
+    assert_eq!(schema_of(&db), "3");
 
     // Older: doctor says opening will upgrade it, and does not open it.
-    set_schema(&db, "1");
-    let report = repo.doctor(&[]);
-    assert_eq!(report.code, Some(0), "{}", report.stdout);
-    assert_eq!(report.status("repository.schema"), "warn");
-    assert!(report.detail("repository.schema").contains("schema 1"));
-    assert!(report.detail("repository.schema").contains("reads 2"));
-    assert_eq!(report.status("repository.state"), "warn");
-    assert!(report.detail("repository.state").starts_with("not opened"));
-    assert_eq!(schema_of(&db), "1", "doctor upgraded the store");
+    for older in ["1", "2"] {
+        set_schema(&db, older);
+        let report = repo.doctor(&[]);
+        assert_eq!(report.code, Some(0), "{}", report.stdout);
+        assert_eq!(report.status("repository.schema"), "warn");
+        assert!(report
+            .detail("repository.schema")
+            .contains(&format!("schema {older}")));
+        assert!(report.detail("repository.schema").contains("reads 3"));
+        assert_eq!(report.status("repository.state"), "warn");
+        assert!(report.detail("repository.state").starts_with("not opened"));
+        assert_eq!(schema_of(&db), older, "doctor upgraded the store");
+    }
 
     // Newer: a failure, with what to do.
     set_schema(&db, "99");

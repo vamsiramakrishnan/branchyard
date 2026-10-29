@@ -121,6 +121,7 @@ pub mod glance;
 mod goal;
 mod graph;
 pub mod guard;
+pub mod handoff;
 mod harness;
 mod inbox;
 mod integrate;
@@ -214,7 +215,7 @@ pub use checkpoint::{
     Rewound,
 };
 pub use compare::{attempt as compare_attempt, diff_files, mark_unique, Attempt, AttemptCheck};
-pub use contract::ResultContract;
+pub use contract::{ResultContract, ResultPurpose};
 pub use delegation::{
     nest_graph_budgets, nest_plan_budgets, Asked, Brief, Cancelled, ChildBudget, Children,
     Delegate, Delegated, DelegationPlan, Envelope, EventPage, Inbox, Inspection, Sent, Spawn,
@@ -247,6 +248,7 @@ pub use graph::{
     Access, After, Binding, Dependency, DependencyRef, Graph, GraphApplied, GraphEdit, GraphNode,
     GraphProposal, SpawnSpec, MAX_EDITS,
 };
+pub use handoff::{Handoff, HandoffRequest, SourceVersion};
 pub use inbox::{DeliveryHook, SteerDelivery};
 pub use json_schema::JsonSchema;
 pub use judge::{
@@ -1208,6 +1210,12 @@ impl Yard {
         storage::publish(self, branch, path.as_ref(), name, media_type, labels)
     }
 
+    /// Relay an immutable settled result to another branch without steering
+    /// or scheduling its next turn; see [`HandoffRequest`].
+    pub fn handoff(&self, request: HandoffRequest) -> Result<Message, Error> {
+        crate::handoff::relay(self, None, request)
+    }
+
     /// Every artifact `reader` may read: what it published, what its
     /// ancestors or descendants published, and what was explicitly shared
     /// to it with [`Yard::share_artifact`].
@@ -1377,6 +1385,10 @@ pub struct TaskOptions {
     /// Check run in the merge worktree before promotion. Stored with the
     /// branch; a send or fork without one keeps the branch's.
     pub check: Option<Vec<String>>,
+    /// Structured output for a root run or fan. Deliverable contracts allow
+    /// useful work without Git changes; native final JSON is captured without
+    /// enabling delegation or controlling the harness's own planning.
+    pub result: Option<ResultContract>,
     pub observer: Option<Observer>,
     /// Run the harness with a scrubbed environment (no `ANTHROPIC*`,
     /// `CLAUDE*`, `OPENAI*` or `CODEX*` variables) and a private `HOME`
@@ -1791,6 +1803,12 @@ impl TaskBuilder {
         self
     }
 
+    /// Request structured output; see [`TaskOptions::result`].
+    pub fn result(mut self, contract: ResultContract) -> Self {
+        self.options.result = Some(contract);
+        self
+    }
+
     pub fn on_event(mut self, observer: impl Fn(&BranchEvent) + Send + Sync + 'static) -> Self {
         self.options.observer = Some(Arc::new(observer));
         self
@@ -2010,6 +2028,11 @@ impl Branch {
             None => Ok(String::new()),
             Some(candidate) => git::diff(&self.yard.root, &info.base, &candidate.commit),
         }
+    }
+
+    /// The structured output contract stored with this branch, when requested.
+    pub fn result_contract(&self) -> Result<Option<ResultContract>, Error> {
+        Ok(self.yard.store().read(&self.info.name)?.result_contract)
     }
 
     /// Where this branch's harness runs; `None` is a local process.
@@ -3028,6 +3051,12 @@ pub struct Message {
     /// is the messages for which this is `false`.
     #[serde(default)]
     pub delivered: bool,
+    /// A frozen result and artifact handoff, delivered only at the recipient's next turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
+    /// Leave this message for the next turn instead of steering a running one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub next_turn: bool,
 }
 
 /// Activity from a named branch.

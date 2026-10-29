@@ -246,6 +246,9 @@ pub struct TaskRequest {
     /// A goal a judge verifies, like `by run --goal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalRequest>,
+    /// Structured native final-answer contract; deliverables may complete without Git changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<branchyard::ResultContract>,
     /// Tools the branch's harness is denied outright, like `by run --deny`
     /// and [`branchyard::TaskOptions::deny`]: stored with the branch, ahead
     /// of every policy its turns run under, and passed on to its children.

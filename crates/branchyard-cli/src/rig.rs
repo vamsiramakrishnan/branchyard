@@ -150,6 +150,10 @@ pub struct SeatSpec {
     pub isolated: bool,
     pub budget: ChildBudget,
     pub check: Option<Vec<String>>,
+    /// Paths children in this seat may change.
+    pub owns: Vec<String>,
+    /// The result shape children in this seat must return.
+    pub result: Option<branchyard::ResultContract>,
     pub policy: PolicySpec,
     pub delegates_to: Vec<String>,
     /// Ancestor seats, besides its parent (always allowed), this seat may
@@ -239,6 +243,9 @@ pub struct RootPlan {
     pub budget: ChildBudget,
     pub policy: PolicyPlan,
     pub check: Option<Vec<String>>,
+    /// The root seat's result contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<branchyard::ResultContract>,
     pub isolated: bool,
     pub provision: Provisioning,
     /// The envelope the seats need, when there are any.
@@ -750,6 +757,10 @@ struct RawSeat {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(schema_with = "schema::check"))]
     check: Option<RawCheck>,
+    /// Repository-relative paths this seat may change.
+    owns: Option<Vec<String>>,
+    /// Schema and purpose of this seat's reported answer.
+    result: Option<branchyard::ResultContract>,
     policy: Option<RawPolicy>,
     /// A permission preset: read-only, edit-worktree or full. Its rules
     /// follow the seat's own policy; a child seat takes its denials only.
@@ -1178,6 +1189,12 @@ impl RawSeat {
             }
             seat.bindings.push(binding);
         }
+        seat.owns = branchyard::scope::normalize_all(&self.owns.unwrap_or_default())
+            .map_err(|e| fail("owns", e.to_string()))?;
+        seat.result = self.result;
+        if let Some(result) = &seat.result {
+            result.check().map_err(|e| fail("result", e.to_string()))?;
+        }
         seat.startup = startup_at(self.startup, field, fields)?;
         match self.start.as_deref() {
             None | Some("on_demand") => {}
@@ -1468,6 +1485,13 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
         .get(spec.root.as_str())
         .ok_or_else(|| error("root", spec.root_at, format!("{} is not a seat", spec.root)))?;
 
+    if !root.owns.is_empty() {
+        return Err(root.error(
+            "owns",
+            "owned paths constrain delegated child seats; the root has no parent integration",
+        ));
+    }
+
     // The edges must form a tree below the root.
     let mut parent: BTreeMap<&str, &str> = BTreeMap::new();
     for seat in &spec.seats {
@@ -1739,6 +1763,8 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
                 escalates_to: seat.escalates_to.clone(),
                 instances: seat.instances,
                 bindings: seat.bindings.clone(),
+                owns: seat.owns.clone(),
+                result: seat.result.clone(),
             },
         );
     }
@@ -1766,6 +1792,7 @@ pub fn plan(spec: &RigSpec) -> Result<RigPlan, RigError> {
             budget: root.budget.clone(),
             policy: root_policy(&root.policy),
             check: root.check.clone(),
+            result: root.result.clone(),
             isolated: root.isolated,
             provision: root_provision,
             delegation: seats.as_ref().map(Seats::envelope),
@@ -2102,6 +2129,45 @@ fn provision_text(provision: &Provisioning) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seat_scope_and_result_contracts_lower_and_validate() {
+        let text = r#"version = 1
+name = "team"
+root = "lead"
+[seats.lead]
+harness = "codex"
+delegates_to = ["worker"]
+[seats.worker]
+harness = "antigravity"
+owns = ["./research/"]
+result = { schema = { type = "object" }, required = true }
+"#;
+        let plan = validate(text).unwrap();
+        let worker = &plan.seats.unwrap().table["worker"];
+        assert_eq!(worker.owns, ["research"]);
+        assert!(worker.result.as_ref().unwrap().required);
+        assert_eq!(
+            worker.result.as_ref().unwrap().schema,
+            serde_json::json!({"type": "object"})
+        );
+        let invalid = text.replace("./research/", "../private");
+        assert_eq!(validate(&invalid).unwrap_err().field, "seats.worker.owns");
+        let invalid = text.replace("type = \"object\"", "unsupported = true");
+        assert_eq!(validate(&invalid).unwrap_err().field, "seats.worker.result");
+        let root = text.replace("[seats.lead]", "[seats.lead]\nowns = [\"src\"]");
+        assert_eq!(validate(&root).unwrap_err().field, "seats.lead.owns");
+        let root = text.replace(
+            "[seats.lead]",
+            "[seats.lead]\nresult = { schema = { type = \"object\" }, required = true, purpose = \"deliverable\" }",
+        );
+        assert!(validate(&root)
+            .unwrap()
+            .root
+            .result
+            .unwrap()
+            .is_deliverable());
+    }
 
     const MINIMAL: &str = r#"
 version = 1

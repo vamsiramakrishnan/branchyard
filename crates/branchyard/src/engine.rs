@@ -434,6 +434,8 @@ fn execute_turn(turn: Turn<'_>, lease: Lease) -> Result<Branch, Error> {
         }
         Ok(())
     })();
+    let result =
+        result.and_then(|()| crate::contract::capture_native(turn.yard, &record, &mut recorder));
     let result = match result {
         Ok(()) => {
             crate::wake::remember(turn.yard, &record, turn.options);

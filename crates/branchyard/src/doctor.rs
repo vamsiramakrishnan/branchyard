@@ -71,10 +71,9 @@ impl StoreSchema {
         match self.found {
             None => SchemaState::Unrecorded,
             Some(found) if found == self.supported => SchemaState::Current,
-            // Version 1 is the one older layout `Sqlite::open` upgrades
-            // (its `upgrade_to_identities` arm); a new migration there is a
-            // new arm here, and the test below fails until it has one.
-            Some(1) if self.supported == 2 => SchemaState::Upgradable,
+            // SQLite upgrades identity grants from version 1 and frozen-message
+            // metadata from version 2; keep this list with its migration arms.
+            Some(1 | 2) if self.supported == 3 => SchemaState::Upgradable,
             Some(found) if found > self.supported => SchemaState::Newer,
             Some(_) => SchemaState::Unsupported,
         }
@@ -353,6 +352,10 @@ mod tests {
         assert_eq!(schema.found, Some(1));
         assert_eq!(schema.state(), SchemaState::Upgradable);
         assert_eq!(store_schema(dir.path()).unwrap().unwrap().found, Some(1));
+        set_schema(dir.path(), "2");
+        let schema = store_schema(dir.path()).unwrap().unwrap();
+        assert_eq!(schema.state(), SchemaState::Upgradable);
+        assert_eq!(schema.found, Some(2));
 
         set_schema(dir.path(), "99");
         assert_eq!(

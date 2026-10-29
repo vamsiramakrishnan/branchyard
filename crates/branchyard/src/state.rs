@@ -662,10 +662,16 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     /// Store a harness-to-harness message: assigns its id (counting from 1
     /// across the repository) and `at_ms`, and returns the stored copy.
     fn send_message(&self, message: &Message) -> Result<Message, Error>;
+    /// Freeze a validated result, grant its artifacts and enqueue its next-turn
+    /// message in one transaction, returning the original message on a retry.
+    fn commit_handoff(&self, commit: &crate::handoff::HandoffCommit) -> Result<Message, Error>;
     /// One message by id, if it exists.
     fn message(&self, id: u64) -> Result<Option<Message>, Error>;
     /// Every message addressed to `to`, oldest first.
     fn inbox(&self, to: &str) -> Result<Vec<Message>, Error>;
+    /// Messages eligible for this recipient turn, excluding handoffs queued
+    /// after that turn had already begun opening.
+    fn inbox_for_turn(&self, to: &str, turn: u64) -> Result<Vec<Message>, Error>;
     /// Mark these messages delivered; already-delivered and unknown ids are
     /// ignored. Steered input still queued with a message marked here
     /// finds it delivered ([`SteerRow::message_delivered`]) and is refused

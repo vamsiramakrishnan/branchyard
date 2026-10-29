@@ -36,6 +36,35 @@ TOKEN = "secret-token"
 REPO = "/v1/repos/app"
 # Routes the fake answers without the token, as the server does.
 PUBLIC = ("/.well-known/branchyard",)
+HANDOFF_MESSAGE: dict[str, Any] = {
+    "id": 42,
+    "from": "lead",
+    "to": "consumer",
+    "kind": "answer",
+    "text": "Use these sources",
+    "at_ms": 123,
+    "delivered": False,
+    "next_turn": True,
+    "handoff": {
+        "source": "source",
+        "version": {"incarnation": 7, "turn": 3, "result_event": 17},
+        "result": {"summary": "frozen evidence", "answer": None},
+        "candidate": "candidate-commit",
+        "artifacts": [
+            {
+                "id": "art7",
+                "digest": "ab" * 32,
+                "size": 8,
+                "name": "evidence.md",
+                "media_type": "text/markdown",
+                "publisher_branch": "source",
+                "turn": 3,
+                "created_at": 120,
+                "labels": {"kind": "evidence"},
+            }
+        ],
+    },
+}
 
 
 def _error(code: str, message: str = "", detail: dict | None = None) -> dict:
@@ -388,6 +417,47 @@ class Requests(ServerCase):
         self.app.spawn("p", "work", name="kid2")
         self.assertIsNone(self.requests("POST", f"{REPO}/branches/p/spawn")[1][3].get("result"))
 
+    def test_root_tasks_and_children_keep_explicit_deliverable_contracts(self):
+        contract = {"schema": {"type": "object"}, "required": True, "purpose": "deliverable"}
+        self.fake.answer("POST", f"{REPO}/tasks", (202, self.op("root", "queued", kind="task")))
+        self.fake.answer("POST", f"{REPO}/branches/p/spawn", (202, self.op("child", "queued", kind="spawn")))
+        self.app.task("Research sources", result=contract)
+        self.app.spawn("p", "Compare sources", result=contract)
+        self.assertEqual([request[3]["result"] for request in self.fake.requests], [contract, contract])
+        self.assertEqual(
+            [request[:2] for request in self.fake.requests],
+            [("POST", f"{REPO}/tasks"), ("POST", f"{REPO}/branches/p/spawn")],
+        )
+
+    def test_handoff_posts_only_the_frozen_relay_request_and_preserves_its_metadata(self):
+        path = f"{REPO}/branches/source/handoff"
+        self.fake.answer("POST", path, (200, HANDOFF_MESSAGE), (200, HANDOFF_MESSAGE))
+        expected = HANDOFF_MESSAGE["handoff"]["version"]
+        sent = self.app.handoff("source", "consumer", ["art7"], "Use these sources", expected)
+        self.assertIsInstance(sent, bc.Message)
+        self.assertEqual(sent.handoff, HANDOFF_MESSAGE["handoff"])
+        self.assertEqual(sent.handoff["version"], expected)
+        self.assertEqual(sent.handoff["artifacts"][0]["digest"], "ab" * 32)
+        self.assertEqual(sent.handoff["result"], {"summary": "frozen evidence", "answer": None})
+        self.assertTrue(sent.next_turn)
+        self.app.handoff("source", "consumer")
+        self.assertEqual(len(self.fake.requests), 2, "handoff must not start, send, share or inspect implicitly")
+        first, second = self.fake.requests
+        self.assertEqual(first[:2], ("POST", path))
+        self.assertEqual(
+            first[3],
+            {
+                "from": "source",
+                "to": "consumer",
+                "artifacts": ["art7"],
+                "note": "Use these sources",
+                "expected": expected,
+            },
+        )
+        self.assertEqual(len(first[2]["idempotency-key"]), 32)
+        self.assertEqual(second[:2], ("POST", path))
+        self.assertEqual(second[3], {"from": "source", "to": "consumer", "note": ""})
+
     def test_report_carries_a_result_and_keeps_an_empty_one(self):
         message = {"id": 1, "from": "kid", "to": "p", "kind": "report", "text": "done", "at_ms": 1}
         self.fake.always("POST", f"{REPO}/branches/kid/report", 200, message)
@@ -588,6 +658,16 @@ class Artifacts(ServerCase):
 
 
 class Records(unittest.TestCase):
+    def test_handoff_messages_keep_the_payload_while_legacy_messages_keep_their_defaults(self):
+        handed = bc.Message(HANDOFF_MESSAGE)
+        self.assertIsInstance(handed.handoff, bc.Record)
+        self.assertEqual(handed.handoff, HANDOFF_MESSAGE["handoff"])
+        self.assertTrue(handed.next_turn)
+        old = bc.Message({"id": 1, "from": "kid", "to": "lead", "kind": "report", "text": "done", "at_ms": 1})
+        self.assertIsNone(old.handoff)
+        self.assertFalse(old.next_turn)
+        self.assertEqual(old.text, "done")
+
     def test_a_missing_key_reads_none_and_dir_lists_the_keys_a_record_holds(self):
         op = bc.Operation({"id": "op1", "state": "running", "not-a-name": 1, 7: "x"})
         self.assertIsNone(op.stat)  # a typo reads None: documented, and what dir() is for
@@ -1642,6 +1722,76 @@ class ModuleSpawnAndReport(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.run_by(lambda: bm.spawn("work", result=bad), self.SPAWNED)  # noqa: B023
 
+    def test_spawn_selects_deliverable_only_for_an_explicit_required_contract(self):
+        schema = {"type": "object"}
+        for purpose in ("report", "deliverable"):
+            with self.subTest(purpose=purpose):
+                seen, _ = self.run_by(
+                    lambda purpose=purpose: bm.spawn(
+                        "Research", result={"schema": schema, "required": True, "purpose": purpose}
+                    ),
+                    self.SPAWNED,
+                )
+                ((args, stdin),) = seen
+                self.assertEqual(stdin, "Research")
+                self.assertEqual(json.loads(args[args.index("--result-schema") + 1]), schema)
+                self.assertIn("--result-required", args)
+                self.assertEqual("--result-deliverable" in args, purpose == "deliverable")
+        seen, _ = self.run_by(
+            lambda: bm.spawn("Research", result={"schema": schema, "required": False, "purpose": "report"}),
+            self.SPAWNED,
+        )
+        self.assertNotIn("--result-required", seen[0][0])
+        self.assertNotIn("--result-deliverable", seen[0][0])
+
+    def test_spawn_refuses_bad_purpose_or_requirement_before_any_cli_call(self):
+        invalid = [
+            *({"schema": {}, "purpose": purpose} for purpose in ("score", None, [], {})),
+            *({"schema": {}, "required": required} for required in ("yes", 1, None)),
+            {"schema": {}, "purpose": "deliverable"},
+            {"schema": {}, "purpose": "deliverable", "required": False},
+        ]
+        with mock.patch.object(bm, "_run") as run:
+            for contract in invalid:
+                with self.subTest(contract=contract), self.assertRaises(ValueError):
+                    bm.spawn("Research", result=contract)
+            run.assert_not_called()
+
+    def test_handoff_builds_one_cli_request_and_keeps_the_frozen_payload(self):
+        expected = HANDOFF_MESSAGE["handoff"]["version"]
+        seen, sent = self.run_by(
+            lambda: bm.handoff("source", "consumer", ["art7"], "Use these sources", expected),
+            HANDOFF_MESSAGE,
+        )
+        self.assertEqual(
+            seen,
+            [
+                (
+                    [
+                        "handoff",
+                        "--to",
+                        "consumer",
+                        "--artifact",
+                        "art7",
+                        "--note",
+                        "Use these sources",
+                        "--expected-version",
+                        json.dumps(expected),
+                        "--",
+                        "source",
+                    ],
+                    None,
+                )
+            ],
+        )
+        self.assertEqual(sent.handoff, HANDOFF_MESSAGE["handoff"])
+        self.assertTrue(sent.next_turn)
+        seen, _ = self.run_by(lambda: bm.handoff("source", "consumer"), HANDOFF_MESSAGE)
+        self.assertEqual(seen, [(["handoff", "--to", "consumer", "--", "source"], None)])
+        old = bm._message({"id": 1, "from": "kid", "to": "lead", "kind": "report", "text": "done", "at_ms": 1})
+        self.assertIsNone(old.handoff)
+        self.assertFalse(old.next_turn)
+
     def test_report_gives_by_the_result_as_json(self):
         message = {"id": 1, "from": "kid", "to": "p", "kind": "report", "text": "done", "at_ms": 1}
         seen, sent = self.run_by(lambda: bm.report("found", result={"files": ["a.rs"]}), message)
@@ -2024,6 +2174,65 @@ class OneApi(ServerCase):
         ((_, _, _, report),) = [r for r in self.fake.requests if r[1] == f"{REPO}/branches/lead/report"]
         self.assertEqual(report, {"text": "done", "result": {"files": ["parser.rs"]}})
 
+    def test_handoff_routes_inside_and_outside_without_forcing_an_acting_branch(self):
+        answer = {**HANDOFF_MESSAGE, "future_metadata": {"kept": True}}
+        expected = HANDOFF_MESSAGE["handoff"]["version"]
+        self.fake.answer("POST", f"{REPO}/branches/source/handoff", (200, answer))
+        env = {
+            "BRANCHYARD_BY": str(self.by),
+            "BRANCHYARD_DELEGATION": "token",
+            "FAKE_BY_LOG": str(self.log),
+            "FAKE_BY_ANSWERS": json.dumps({"handoff": {"body": answer}}),
+        }
+        with mock.patch.dict(os.environ, env):
+            os.environ.pop("BRANCHYARD_REMOTE", None)
+            os.environ.pop("BRANCHYARD_BRANCH", None)
+            inside = bc.connect()
+            outside = bc.connect(self.app)
+            self.assertTrue(inside.inside)
+            self.assertFalse(outside.inside)
+            self.assertIsNone(outside.branch)
+            local = inside.handoff("source", "consumer", ["art7"], "Use these sources", expected)
+            remote = outside.handoff("source", "consumer", ["art7"], "Use these sources", expected)
+        self.assertIsInstance(local, bc.Message)
+        self.assertEqual(local.raw, answer)
+        self.assertEqual(remote.raw, answer)
+        self.assertEqual(local.handoff, remote.handoff)
+        self.assertTrue(local.next_turn and remote.next_turn)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "handoff",
+                    "--json",
+                    "--to",
+                    "consumer",
+                    "--artifact",
+                    "art7",
+                    "--note",
+                    "Use these sources",
+                    "--expected-version",
+                    json.dumps(expected),
+                    "--",
+                    "source",
+                ]
+            ],
+        )
+        self.assertEqual(len(self.fake.requests), 1, "no implicit share, turn, send or discovery")
+        method, path, _, body = self.fake.requests[0]
+        self.assertEqual((method, path), ("POST", f"{REPO}/branches/source/handoff"))
+        self.assertEqual(
+            body,
+            {
+                "from": "source",
+                "to": "consumer",
+                "artifacts": ["art7"],
+                "note": "Use these sources",
+                "expected": expected,
+            },
+        )
+
     def test_every_delegation_call_has_branchyard_pys_signature(self):
         calls = [
             "spawn",
@@ -2038,6 +2247,7 @@ class OneApi(ServerCase):
             "events",
             "report",
             "report_status",
+            "handoff",
         ]
         for name in calls:
             theirs = inspect.signature(getattr(bm, name)).parameters.values()
@@ -2289,6 +2499,7 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
         lambda _c, r: r.graph("b"),
         lambda _c, r: r.apply_graph("b", 1, []),
     ],
+    "/v1/repos/{repo}/branches/{branch}/handoff": [lambda _c, r: r.handoff("b", "c")],
     "/v1/repos/{repo}/branches/{branch}/inbox": [lambda _c, r: r.inbox("b")],
     "/v1/repos/{repo}/branches/{branch}/inspection": [lambda _c, r: r.inspect("b")],
     "/v1/repos/{repo}/branches/{branch}/integrate": [lambda _c, r: r.integrate("b", with_=["c"])],

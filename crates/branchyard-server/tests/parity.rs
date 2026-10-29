@@ -924,6 +924,7 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
     let outside = ResultContract {
         schema: json!({"type": "string", "$ref": "#/a"}),
         required: false,
+        purpose: branchyard::ResultPurpose::Report,
     };
     let error = repo
         .spawn("root", &spawn("bad", outside), &new_key())
@@ -987,4 +988,131 @@ fn a_result_contract_is_set_at_spawn_and_reported_against_through_the_server() {
         .delegate(TaskOptions::default())
         .unwrap();
     assert_eq!(repo.inspect("kid").unwrap(), local.inspect("kid").unwrap());
+}
+
+#[test]
+fn handoffs_over_http_freeze_outputs_and_enforce_operator_access() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.by_path = Some("/bin/true".into());
+    config.allow_delegation = true;
+    config.tokens.push(branchyard_server::config::Token {
+        name: "reader".into(),
+        secret: "reader-token-0123456789".into(),
+    });
+    let mut reader = branchyard_server::config::Principal::default_for("reader");
+    reader.scopes = ["read".to_owned()].into_iter().collect();
+    config.principals.insert("reader".into(), reader);
+    config.principals.insert(
+        "tester".into(),
+        branchyard_server::config::Principal::default_for("tester"),
+    );
+    let server = Server::start(config.clone());
+    let client = server.client();
+    let repo = client.repo("app");
+    run(
+        &client,
+        &TaskRequest {
+            delegation: Some(Envelope::depth(2)),
+            ..task("coordinate", "lead")
+        },
+    );
+    for name in ["source", "consumer"] {
+        let operation = repo
+            .spawn(
+                "lead",
+                &SpawnRequest {
+                    prompt: "prepare knowledge work".into(),
+                    name: Some(name.into()),
+                    policy: PolicySpec::allow_all(),
+                    result: Some(ResultContract::new(json!({"type":"object"}), true).unwrap()),
+                    ..SpawnRequest::default()
+                },
+                &new_key(),
+            )
+            .unwrap();
+        assert_eq!(
+            await_operation(&client, &operation.id).state,
+            OperationState::Succeeded
+        );
+    }
+    let answer = json!({"summary":"evidence from the source"});
+    repo.report_result("source", "done", Some(answer.clone()))
+        .unwrap();
+    let artifact = repo
+        .publish_artifact(
+            "source",
+            b"frozen evidence",
+            Some("evidence.txt"),
+            Some("text/plain"),
+            &[],
+            &new_key(),
+        )
+        .unwrap();
+    assert_eq!(
+        repo.read_artifact("consumer", &artifact.id)
+            .unwrap_err()
+            .code(),
+        Some("denied")
+    );
+    let request = branchyard::HandoffRequest {
+        from: "source".into(),
+        to: "consumer".into(),
+        artifacts: vec![artifact.id.clone()],
+        note: "Use these bytes as evidence".into(),
+        expected: None,
+    };
+    let sent = repo.handoff(&request).unwrap();
+    assert!(sent.next_turn && !sent.delivered);
+    let snapshot = sent.handoff.as_ref().unwrap();
+    assert_eq!(snapshot.result, answer);
+    assert_eq!(
+        snapshot.artifacts.as_slice(),
+        std::slice::from_ref(&artifact)
+    );
+    assert!(snapshot.version.incarnation > 0 && snapshot.version.result_event > 0);
+    assert_eq!(repo.handoff(&request).unwrap().id, sent.id);
+    let (metadata, bytes) = repo.read_artifact("consumer", &artifact.id).unwrap();
+    assert_eq!((metadata, bytes), (artifact, b"frozen evidence".to_vec()));
+    repo.report_result("source", "updated", Some(json!({"summary":"new output"})))
+        .unwrap();
+    assert_eq!(
+        repo.inbox("consumer").unwrap().messages[0]
+            .handoff
+            .as_ref()
+            .unwrap()
+            .result,
+        answer
+    );
+    let consumer = repo.branch("consumer").unwrap();
+    assert_eq!(consumer.turns, 1);
+    assert!(!repo
+        .events("consumer", 0)
+        .unwrap()
+        .events
+        .iter()
+        .any(|event| matches!(event.activity, branchyard::Activity::Steered { .. })));
+    let body = serde_json::to_string(&request).unwrap();
+    let path = "/v1/repos/app/branches/source/handoff";
+    assert_eq!(raw(server.addr, &post(path, None, "", &body)).0, 401);
+    let (status, _, denied) = raw(
+        server.addr,
+        &post(path, Some("reader-token-0123456789"), "", &body),
+    );
+    assert_eq!(status, 403, "{denied}");
+    let mismatched = serde_json::to_string(&branchyard::HandoffRequest {
+        from: "consumer".into(),
+        ..request.clone()
+    })
+    .unwrap();
+    assert_eq!(
+        raw(server.addr, &post(path, Some(TOKEN), "", &mismatched)).0,
+        400
+    );
+    drop(client);
+    drop(server);
+    config.allow_delegation = false;
+    let closed = Server::start(config);
+    let error = closed.client().repo("app").handoff(&request).unwrap_err();
+    assert_eq!(error.code(), Some("delegation_not_allowed"));
 }

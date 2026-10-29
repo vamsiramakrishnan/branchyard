@@ -173,11 +173,97 @@ pub fn open() -> Result<Yard, Failure> {
 
 fn open_yard() -> Result<Yard, branchyard::Error> {
     let yard = match crate::inherited::root()? {
-        Some(root) => Yard::open(root),
+        Some(root) => Yard::open(root)?,
         // The absolute path, so that "not inside a repository" names where.
-        None => Yard::open(std::env::current_dir().unwrap_or_else(|_| ".".into())),
-    }?;
+        None => {
+            let cwd = std::env::current_dir()?;
+            match owning_task_yard(&cwd)? {
+                Some(yard) => yard,
+                None => Yard::open(cwd)?,
+            }
+        }
+    };
     configure(yard)
+}
+
+/// Resolve private task worktrees to their existing yard, before opening state.
+/// The task metadata must describe this exact common git directory.
+fn owning_task_yard(path: &Path) -> Result<Option<Yard>, branchyard::Error> {
+    use branchyard_workspace::{Git, GitError, Repository};
+
+    let git_error = |error: GitError| branchyard::Error::Git(error.to_string());
+    let repo = match Repository::open(path) {
+        Ok(repo) => repo,
+        Err(GitError::NotAWorkTree(_)) => return Ok(None),
+        Err(error) => return Err(git_error(error)),
+    };
+    let config = |key: &str| -> Result<Option<String>, branchyard::Error> {
+        let (out, _) = Git::new(repo.root())
+            .args(["config", "--local", "--get", key])
+            .output()
+            .map_err(git_error)?;
+        if out.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !out.status.success() {
+            return Err(branchyard::Error::Git(format!(
+                "cannot read task ownership: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        let text = String::from_utf8(out.stdout)
+            .map_err(|error| branchyard::Error::Git(error.to_string()))?;
+        Ok(Some(text.trim_end_matches('\n').to_owned()))
+    };
+    let task = config("branchyard.task")?;
+    let owner = config("branchyard.home")?;
+    let (task, owner) =
+        match (task, owner) {
+            (None, None) => return Ok(None),
+            (Some(task), Some(owner)) => (task, std::path::PathBuf::from(owner)),
+            _ => return Err(branchyard::Error::Denied(
+                "incomplete private task ownership metadata; refusing to redirect this repository"
+                    .into(),
+            )),
+        };
+    let denied = || {
+        branchyard::Error::Denied(
+            "private task ownership does not match this repository; refusing to redirect it".into(),
+        )
+    };
+    let tasks = owner.parent().ok_or_else(denied)?;
+    let home = tasks.parent().ok_or_else(denied)?;
+    if owner.file_name().and_then(|s| s.to_str()) != Some(task.as_str())
+        || tasks.file_name().is_none_or(|s| s != "tasks")
+    {
+        return Err(denied());
+    }
+    let common = Git::new(repo.root())
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .run()
+        .map_err(git_error)?;
+    let common = std::fs::canonicalize(common.trim_end_matches('\n'))?;
+    if common != std::fs::canonicalize(owner.join("git"))? {
+        return Err(denied());
+    }
+    // Check the owner's working tree before open_home can create state
+    // or recover records there. Its git file may have been redirected.
+    let work = owner.join("work");
+    let work_repo = Repository::open(&work).map_err(git_error)?;
+    let work_common = Git::new(work_repo.root())
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .run()
+        .map_err(git_error)?;
+    if std::fs::canonicalize(work_repo.root())? != std::fs::canonicalize(&work)?
+        || common != std::fs::canonicalize(work_common.trim_end_matches('\n'))?
+    {
+        return Err(denied());
+    }
+    let yard = branchyard::tasks::open_home(home, &task)?.ok_or_else(denied)?;
+    if std::fs::canonicalize(yard.root())? != std::fs::canonicalize(owner.join("work"))? {
+        return Err(denied());
+    }
+    Ok(Some(yard))
 }
 
 /// `yard` with what the configuration files give it (the gateways, the
@@ -426,19 +512,33 @@ fn json_flag(
         .map_err(|e| denied(format!("{flag} is not JSON: {e}")))
 }
 
-/// `by spawn`'s result contract: its schema, from `--result-schema` or
+/// A task's result contract: its schema, from `--result-schema` or
 /// `--result-schema-file`, checked against the subset the contract
 /// supports.
-fn result_contract(
-    args: &SpawnArgs,
+pub(crate) fn result_contract(
+    schema: Option<&str>,
+    file: Option<&str>,
+    required: bool,
+    deliverable: bool,
 ) -> Result<Option<branchyard::ResultContract>, branchyard::Error> {
-    let given = (
-        args.result_schema.as_deref(),
-        args.result_schema_file.as_deref(),
-    );
-    json_flag("--result-schema", given)?
-        .map(|schema| branchyard::ResultContract::new(schema, args.result_required))
+    json_flag("--result-schema", (schema, file))?
+        .map(|schema| match deliverable {
+            true => branchyard::ResultContract::deliverable(schema),
+            false => branchyard::ResultContract::new(schema, required),
+        })
         .transpose()
+}
+
+/// Read and validate a root task's declared output before it starts.
+pub(crate) fn result_for_task(
+    task: &TaskArgs,
+) -> Result<Option<branchyard::ResultContract>, branchyard::Error> {
+    result_contract(
+        task.result_schema.as_deref(),
+        task.result_schema_file.as_deref(),
+        task.result_required,
+        task.result_deliverable,
+    )
 }
 
 pub fn harnesses(env: &Env, target: &Target, as_json: bool) -> Outcome {
