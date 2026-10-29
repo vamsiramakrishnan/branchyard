@@ -22,8 +22,8 @@ use branchyard::{
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, CheckRequest, Diff, DiscardRequest,
     FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport,
-    MergeRequest, Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry,
-    RepoList, ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
+    MergeRequest, Operation, OperationKind, OperationView, PolicySpec, ReincarnateRequest, Removed,
+    RepoEntry, RepoList, ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
     WaitRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
@@ -1411,7 +1411,7 @@ async fn operation(
     Path(id): Path<String>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<OperationView>, ApiError> {
     let wait = operation_wait(query.as_deref())?;
     let access_caller = caller.clone();
     let registry = app.registry.clone();
@@ -1439,7 +1439,9 @@ async fn operation(
     };
     let operation = found.ok_or_else(|| unknown_operation(id))?;
     crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
-    Ok(Json(crate::console::operation_value(&app, &operation)?))
+    let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(view))
 }
 
 /// The `wait` of `GET /v1/operations/{id}?wait=SECONDS`, capped at
@@ -1473,7 +1475,7 @@ async fn operation_by_key(
     State(app): State<Shared>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<OperationView>, ApiError> {
     let key = query
         .as_deref()
         .unwrap_or("")
@@ -1497,7 +1499,9 @@ async fn operation_by_key(
     let operation =
         found.ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))?;
     crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
-    Ok(Json(crate::console::operation_value(&app, &operation)?))
+    let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(view))
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.
