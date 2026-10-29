@@ -118,6 +118,15 @@ upstream installer fetch GKE credentials again; the explicit `--context` avoids
 that behavior. With neither option, credentials go into the helper's dedicated
 state directory. Your normal kubeconfig and current context are unchanged.
 
+Cloud Storage bucket creation and ownership labeling are separate commands.
+The helper saves a private `bucket-creation.json` intent before creation and a
+receipt from raw bucket metadata before applying the label. If labeling fails,
+a retry can label only the same project, region, name and creation timestamp.
+A replacement bucket or an arbitrary unlabeled bucket still requires explicit
+ownership review. If the process stops after creation but before its receipt
+is saved, the helper refuses automatic adoption; inspect the bucket and use
+`--adopt-existing` only after verifying it belongs to this deployment.
+
 Retry the same command after fixing a failed prerequisite or installer step.
 Resources already created are reused; existing IAM bindings are not added
 again. Upstream reapplies its installation and reuses its existing prerequisites.
@@ -215,6 +224,15 @@ tracks the deployment and actor checks; the helper record is
 output in `logs/gke-helper-live-3.log` and `logs/gke-helper-microvm-live.log`.
 Not done: these helper runs did not create a fresh GKE cluster, execute an actor
 or call a model.
+
+Live setup evidence, 29 October 2026: Google Cloud SDK `590.0.1` rejected
+`gcloud storage buckets create --labels=...` with `unrecognized arguments`. A
+private qualification driver created the dedicated bucket without that flag,
+then applied `gcloud storage buckets update --update-labels=...`. The revised
+helper's hermetic tests exercise that supported sequence, a failed label update,
+a lost creation receipt, a replacement bucket and invalid or foreign receipts.
+Not done: this exact revised helper has not provisioned another live deployment;
+the live command record is `/home/user/branchyard-console-work-20261029/gke-state/commands.jsonl`.
 
 ## Remove a test deployment
 

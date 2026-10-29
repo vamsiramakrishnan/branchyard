@@ -98,15 +98,26 @@ if tool == "gcloud":
         if verb == "describe":
             if state.get("describe_failure"): fail(state["describe_failure"])
             if state[kind] is None: fail("NOT_FOUND")
+            if kind == "bucket" and state.get("fail_bucket_describe_after_create") and state.get("bucket_created"):
+                state["fail_bucket_describe_after_create"] = False
+                fail("temporary metadata failure after bucket creation")
             if kind == "bucket" and "--raw" not in args:
                 done({"name": "test-snapshots", "location": state[kind]["location"],
                       "uniform_bucket_level_access": True, "labels": state[kind].get("labels", {})})
             done(state[kind])
         if verb == "create":
+            if kind == "bucket" and flag("--labels"):
+                fail("unrecognized arguments: --labels", 2)
             if state[kind] is not None: fail("ALREADY_EXISTS")
             state[kind] = state["desired_" + kind]
+            if kind == "bucket":
+                state[kind].pop("labels", None)
+                state["bucket_created"] = True
             done()
         if verb == "update":
+            if kind == "bucket" and state.get("fail_bucket_label"):
+                state["fail_bucket_label"] = False
+                fail("interrupted before ownership label")
             field = "resourceLabels" if kind == "cluster" else "labels"
             state[kind].setdefault(field, {}).update(dict(x.split("=", 1) for x in flag("--update-labels").split(",")))
             done()
@@ -178,8 +189,10 @@ class SubstrateGke(unittest.TestCase):
             ],
         }
         bucket = {
+            "name": "test-snapshots",
             "projectNumber": "12345",
             "location": "US-CENTRAL1",
+            "timeCreated": "2026-10-29T11:00:00.000Z",
             "iamConfiguration": {"uniformBucketLevelAccess": {"enabled": True}},
             "labels": labels,
         }
@@ -259,6 +272,71 @@ class SubstrateGke(unittest.TestCase):
         self.assertIn("--context=gke_test-project_us-central1-a_test-substrate", install["args"])
         self.assertEqual(install["version"], "1d7ca8c")
         self.assertTrue(all(call["context"] == install["context"] for call in self.calls()))
+
+    def test_bucket_create_uses_supported_cli_and_private_receipt(self):
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bucket_calls = [call["args"] for call in self.calls() if call["args"][:2] == ["storage", "buckets"]]
+        created = next(args for args in bucket_calls if args[2] == "create")
+        self.assertFalse(any(arg.startswith("--labels=") for arg in created))
+        updated = next(args for args in bucket_calls if args[2] == "update")
+        self.assertIn("--update-labels=branchyard-deployment=test-substrate", updated)
+        receipt_path = self.path / "state/bucket-creation.json"
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt["phase"], "created")
+        self.assertEqual(receipt["receipt"]["timeCreated"], self.state["desired_bucket"]["timeCreated"])
+        self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+
+    def test_bucket_label_failure_resumes_only_its_recorded_creation(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        failed = self.invoke("--apply")
+        self.assertEqual(failed.returncode, 1)
+        self.assertFalse(json.loads(self.state_path.read_text())["bucket"].get("labels"))
+        resumed = self.invoke("--apply")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        creates = [call for call in self.calls() if call["args"][:3] == ["storage", "buckets", "create"]]
+        self.assertEqual(len(creates), 1)
+
+    def test_bucket_receipt_refuses_a_replacement_before_mutation(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        self.state = json.loads(self.state_path.read_text())
+        self.state["bucket"]["timeCreated"] = "2026-10-29T12:00:00.000Z"
+        self.save()
+        self.log.unlink()
+        refused = self.invoke("--apply")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("no branchyard-deployment label", refused.stderr)
+        self.assertEqual(self.mutations(), [])
+
+    def test_bucket_without_creation_receipt_requires_review_after_a_crash(self):
+        self.state["fail_bucket_describe_after_create"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        intent = json.loads((self.path / "state/bucket-creation.json").read_text())
+        self.assertEqual(intent["phase"], "creating")
+        self.log.unlink()
+        refused = self.invoke("--apply")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("no branchyard-deployment label", refused.stderr)
+        self.assertEqual(self.mutations(), [])
+
+    def test_invalid_or_foreign_bucket_receipts_cannot_authorize_labeling(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        receipt_path = self.path / "state/bucket-creation.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["target"]["project"] = "another-project"
+        for contents in (json.dumps(receipt), "invalid record"):
+            with self.subTest(contents=contents):
+                receipt_path.write_text(contents)
+                self.log.unlink(missing_ok=True)
+                refused = self.invoke("--apply")
+                self.assertEqual(refused.returncode, 1)
+                self.assertEqual(self.mutations(), [])
 
     def test_failure_resumes_without_duplicate_resources_or_secret_output(self):
         self.state["fail_install"] = True

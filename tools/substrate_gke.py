@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -263,6 +264,60 @@ def owned(config: Config, resource: dict[str, Any], field: str, kind: str) -> No
         )
 
 
+def bucket_creation_identity(config: Config, bucket: dict[str, Any]) -> dict[str, str] | None:
+    """Identify one immutable bucket creation from raw Cloud Storage metadata."""
+    project = str(bucket.get("projectNumber", ""))
+    created = bucket.get("timeCreated")
+    if (
+        bucket.get("name") != config.bucket
+        or not project.isdigit()
+        or not isinstance(created, str)
+        or not created
+        or bucket.get("location", "").lower() != config.region
+    ):
+        return None
+    return {"name": config.bucket, "projectNumber": project, "location": config.region, "timeCreated": created}
+
+
+def record_bucket_creation(config: Config, phase: str, receipt: dict[str, str] | None = None) -> None:
+    """Atomically save a private intent, then the successful creation's receipt."""
+    record = {
+        "target": {"project": config.project, "cluster": config.cluster, "bucket": config.bucket},
+        "phase": phase,
+        "receipt": receipt,
+    }
+    descriptor, name = tempfile.mkstemp(dir=config.state_dir, prefix=".bucket-creation-")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            json.dump(record, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config.state_dir / "bucket-creation.json")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def recorded_bucket_creation(config: Config, bucket: dict[str, Any]) -> bool:
+    """Allow label recovery only for the exact successfully recorded creation."""
+    path = config.state_dir / "bucket-creation.json"
+    if not path.exists():
+        return False
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise SetupError("bucket creation record is unreadable; inspect it or choose a new --state-dir") from None
+    identity = bucket_creation_identity(config, bucket)
+    return (
+        isinstance(record, dict)
+        and record.get("target") == {"project": config.project, "cluster": config.cluster, "bucket": config.bucket}
+        and record.get("phase") == "created"
+        and identity is not None
+        and record.get("receipt") == identity
+    )
+
+
 def check_cluster(config: Config, cluster: dict[str, Any], build_version: str) -> None:
     owned(config, cluster, "resourceLabels", "cluster")
     if cluster.get("autopilot", {}).get("enabled"):
@@ -352,7 +407,8 @@ def inspect(
     if cluster:
         check_cluster(config, cluster, build_version)
     if bucket:
-        owned(config, bucket, "labels", "bucket")
+        if OWNER_LABEL in bucket.get("labels", {}) or not recorded_bucket_creation(config, bucket):
+            owned(config, bucket, "labels", "bucket")
         if not str(bucket.get("projectNumber", "")).isdigit():
             raise SetupError(
                 "raw bucket metadata has no projectNumber; cannot verify ownership with this gcloud version"
@@ -482,6 +538,7 @@ def ensure_resources(
             )
         )
     if bucket is None:
+        record_bucket_creation(config, "creating")
         run.run(
             gcloud(
                 config,
@@ -491,10 +548,19 @@ def ensure_resources(
                 f"gs://{config.bucket}",
                 f"--location={config.region}",
                 "--uniform-bucket-level-access",
-                f"--labels={label}",
             )
         )
-    elif bucket.get("labels", {}).get(OWNER_LABEL) != config.cluster:
+        bucket = (
+            run.json(
+                gcloud(config, "storage", "buckets", "describe", f"gs://{config.bucket}", "--raw", "--format=json")
+            )
+            or {}
+        )
+        receipt = bucket_creation_identity(config, bucket)
+        if receipt is None:
+            raise SetupError("created bucket has incomplete raw metadata; inspect ownership before retrying")
+        record_bucket_creation(config, "created", receipt)
+    if bucket.get("labels", {}).get(OWNER_LABEL) != config.cluster:
         run.run(gcloud(config, "storage", "buckets", "update", f"gs://{config.bucket}", f"--update-labels={label}"))
     if repository is None:
         run.run(
