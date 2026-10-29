@@ -665,6 +665,44 @@ class Requests(ServerCase):
 
 
 class Artifacts(ServerCase):
+    def test_preview_metadata_keeps_authentication_options_and_encoded_identifiers(self):
+        path = f"{REPO}/branches/review%20%2F%20draft/artifacts/a%2Fone/preview"
+        answer = {"status": "passed", "kind": "table", "sheet": "Costs & risks", "rows": [["item", 42]]}
+        self.fake.answer("GET", path, (200, answer))
+        preview = self.app.preview_artifact(
+            "review / draft", "a/one", view="table", sheet="Costs & risks", offset=0, limit=25
+        )
+        self.assertIsInstance(preview, bc.Record)
+        self.assertEqual(preview.raw, answer)
+        ((_, target, headers, body),) = self.requests("GET", path)
+        self.assertEqual(
+            parse_qs(urlsplit(target).query),
+            {"view": ["table"], "sheet": ["Costs & risks"], "offset": ["0"], "limit": ["25"]},
+        )
+        self.assertEqual(headers["authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(body, b"")
+
+    def test_preview_assets_are_authenticated_raw_bytes_with_matching_options(self):
+        path = f"{REPO}/branches/b/artifacts/a1/preview/assets/page%203.png"
+        image = b"\x89PNG\r\n\x1a\n\x00\xff"
+        self.fake.answer("GET", path, (200, image))
+        self.assertEqual(self.app.read_preview_asset("b", "a1", "page 3.png", view="pages", page=3), image)
+        ((_, target, headers, _),) = self.requests("GET", path)
+        self.assertEqual(parse_qs(urlsplit(target).query), {"view": ["pages"], "page": ["3"]})
+        self.assertEqual(headers["authorization"], f"Bearer {TOKEN}")
+
+    def test_preview_errors_preserve_server_codes_and_never_fetch_an_asset_url(self):
+        path = f"{REPO}/branches/b/artifacts/a1/preview"
+        self.fake.answer("GET", path, (403, _error("scope_required", "read scope required")))
+        with self.assertRaises(bc.DeniedError) as denied:
+            self.app.preview_artifact("b", "a1")
+        self.assertEqual(denied.exception.code, "scope_required")
+        asset_path = f"{path}/assets/https%3A%2F%2Fother.invalid%2Fimage.png"
+        self.fake.answer("GET", asset_path, (404, _error("unknown_preview_asset")))
+        with self.assertRaises(bc.NotFoundError):
+            self.app.read_preview_asset("b", "a1", "https://other.invalid/image.png")
+        self.assertEqual(len(self.requests("GET", asset_path)), 1)
+
     def test_publish_sends_the_query_names_the_server_reads(self):
         self.fake.answer("POST", f"{REPO}/branches/b/artifacts", (201, {"id": "a1"}), (201, {"id": "a2"}))
         self.app.publish_artifact("b", b"data", "x.txt", "text/plain", labels={"team": "core", "run": "7"})
@@ -2560,6 +2598,10 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
     ],
     "/v1/repos/{repo}/branches/{branch}/artifacts/{id}": [lambda _c, r: r.read_artifact("b", "a1")],
     "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/content": [lambda _c, r: r.read_artifact("b", "a1")],
+    "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview": [lambda _c, r: r.preview_artifact("b", "a1")],
+    "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview/assets/{asset}": [
+        lambda _c, r: r.read_preview_asset("b", "a1", "page-1.png")
+    ],
     "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/share": [lambda _c, r: r.share_artifact("b", "a1", "c")],
     "/v1/repos/{repo}/branches/{branch}/ask": [lambda _c, r: r.ask("b", "?")],
     "/v1/repos/{repo}/branches/{branch}/cancel": [lambda _c, r: r.cancel("b")],

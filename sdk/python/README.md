@@ -77,6 +77,18 @@ app = client.repo("app")     # the NAME in --repo NAME=PATH; the default name is
 
 Everything after `client.repo` is the same as above. `Client.repos()` lists what a server serves.
 
+Read document previews and their images through the same authenticated client:
+
+```python
+preview = app.preview_artifact("draft", "artifact-id", view="pages", page=1)
+if preview.get("image"):
+    image_bytes = app.read_preview_asset("draft", "artifact-id", preview.image, view="pages", page=1)
+```
+
+Table previews accept `sheet`, `offset` and `limit`. Image requests must repeat the preview options because the
+server binds each image to its original artifact and options. The preview record reports conversion readiness;
+these methods use the server's renderer and preserve its permission and availability errors.
+
 ## Where to go next
 
 - [docs/sdk.md](https://github.com/vamsiramakrishnan/branchyard/blob/main/docs/sdk.md): the whole client, its errors,

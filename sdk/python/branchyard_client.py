@@ -416,6 +416,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "unknown_checkpoint": NotFoundError,
     "unknown_knowledge": NotFoundError,
     "unknown_message": NotFoundError,
+    "unknown_preview_asset": NotFoundError,
     "denied": DeniedError,
     "scope_required": DeniedError,
     "repo_not_allowed": DeniedError,
@@ -2426,6 +2427,54 @@ class Repo:
             "GET", self._branch(branch, f"/artifacts/{_q(artifact_id)}/content"), raw=True
         )
         return ref, content
+
+    def preview_artifact(
+        self,
+        branch: str,
+        artifact_id: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> Record:
+        """Read an artifact's document preview. `view` is auto, table or pages;
+        pages start at one and table offsets at zero. Omitted options use the
+        server defaults. Conversion readiness remains in the returned record."""
+        return Record(
+            self.client.get(
+                self._branch(branch, f"/artifacts/{_q(artifact_id)}/preview"),
+                view=view,
+                page=page,
+                sheet=sheet,
+                offset=offset,
+                limit=limit,
+            )
+        )
+
+    def read_preview_asset(
+        self,
+        branch: str,
+        artifact_id: str,
+        asset: str,
+        *,
+        view: Optional[str] = None,
+        page: Optional[int] = None,
+        sheet: Optional[str] = None,
+        offset: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> bytes:
+        """Read authenticated image bytes named by a preview response. Pass the
+        same options as `preview_artifact`; assets are bound to those options.
+        The asset is a name, not a URL, and never changes the server origin."""
+        _, _, content = self.client.request(
+            "GET",
+            self._branch(branch, f"/artifacts/{_q(artifact_id)}/preview/assets/{_q(asset)}"),
+            query={"view": view, "page": page, "sheet": sheet, "offset": offset, "limit": limit},
+            raw=True,
+        )
+        return content
 
     def share_artifact(self, branch: str, artifact_id: str, to: str) -> None:
         """Share an artifact `branch` may read with branch `to`."""
