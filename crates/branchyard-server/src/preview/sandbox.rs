@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::{ApiError, PreviewOptions};
 
@@ -16,32 +16,59 @@ const PIPE_BYTES: u64 = super::MAX_RESPONSE_BYTES;
 
 /// Operator-selected trusted executables, read once when the service is opened.
 #[derive(Clone)]
-pub(super) struct Settings {
-    pub(super) bwrap: PathBuf,
-    pub(super) python: PathBuf,
+pub(super) enum Settings {
+    Bubblewrap { bwrap: PathBuf, python: PathBuf },
+    Docker(super::docker::Settings),
+    Invalid(String),
+}
+
+/// A resolved renderer whose identity is included in every cache key.
+pub(super) enum Renderer {
+    Bubblewrap { bwrap: PathBuf, runtime: Runtime },
+    Docker(super::docker::Runtime),
+}
+
+impl Renderer {
+    pub(super) fn identity(&self) -> String {
+        match self {
+            Self::Bubblewrap { runtime, .. } => runtime.identity(),
+            Self::Docker(runtime) => runtime.identity(),
+        }
+    }
 }
 
 impl Settings {
-    /// Read only the explicit renderer executable settings.
+    /// Read only explicit operator renderer settings. Never select a fallback.
     pub(super) fn from_env() -> Self {
-        Self {
-            bwrap: std::env::var_os("BRANCHYARD_PREVIEW_BWRAP")
-                .map_or_else(|| PathBuf::from("bwrap"), PathBuf::from),
-            python: std::env::var_os("BRANCHYARD_PREVIEW_PYTHON")
-                .map_or_else(|| PathBuf::from("python3"), PathBuf::from),
+        match std::env::var("BRANCHYARD_PREVIEW_BACKEND").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("bubblewrap") => Self::Bubblewrap {
+                bwrap: std::env::var_os("BRANCHYARD_PREVIEW_BWRAP")
+                    .map_or_else(|| PathBuf::from("bwrap"), PathBuf::from),
+                python: std::env::var_os("BRANCHYARD_PREVIEW_PYTHON")
+                    .map_or_else(|| PathBuf::from("python3"), PathBuf::from),
+            },
+            Ok("docker") => Self::Docker(super::docker::Settings::from_env()),
+            Err(_) | Ok(_) => {
+                Self::Invalid("BRANCHYARD_PREVIEW_BACKEND must be bubblewrap or docker".into())
+            }
         }
     }
 
-    /// Query the trusted interpreter without loading a document.
-    pub(super) async fn runtime(&self) -> Result<Runtime, ApiError> {
+    /// Resolve trusted executables and image identity without loading a document.
+    pub(super) async fn runtime(&self) -> Result<Renderer, ApiError> {
         if !cfg!(target_os = "linux") {
-            return Err(unavailable("Document conversion requires a Linux renderer. Configure a Linux Branchyard server with Bubblewrap and the artifact runtime."));
+            return Err(unavailable(
+                "Document conversion requires a Linux rendering server.",
+            ));
         }
-        // This only queries the operator-selected interpreter. It does not load
-        // the converter, document, user site packages or user configuration.
+        let (bwrap, python) = match self {
+            Self::Bubblewrap { bwrap, python } => (bwrap, python),
+            Self::Docker(settings) => return settings.runtime().await.map(Renderer::Docker),
+            Self::Invalid(message) => return Err(unavailable(message)),
+        };
         let code = "import json,sys;print(json.dumps(dict(executable=sys.executable,prefix=sys.prefix,base_prefix=sys.base_prefix,version=sys.version)))";
         let args = ["-I", "-c", code].map(std::ffi::OsString::from);
-        let (status, bytes) = run(&self.python, &args, Duration::from_secs(5)).await?;
+        let (status, bytes) = run(python, &args, Duration::from_secs(5)).await?;
         if !status.success() {
             return Err(unavailable("The selected Python interpreter could not report its runtime. Set BRANCHYARD_PREVIEW_PYTHON to a working artifact-runtime interpreter."));
         }
@@ -49,7 +76,10 @@ impl Settings {
             unavailable("The selected Python interpreter returned invalid runtime information.")
         })?;
         runtime.validate()?;
-        Ok(runtime)
+        Ok(Renderer::Bubblewrap {
+            bwrap: bwrap.clone(),
+            runtime,
+        })
     }
 }
 
@@ -101,17 +131,22 @@ impl Runtime {
 
 /// Run one trusted helper with only the source, output and Python runtime bound.
 pub(super) async fn convert(
-    settings: &Settings,
-    runtime: &Runtime,
+    renderer: &Renderer,
     source: &Path,
     helper: &Path,
     output: &Path,
     options: &PreviewOptions,
 ) -> Result<Value, ApiError> {
+    let (bwrap, runtime) = match renderer {
+        Renderer::Bubblewrap { bwrap, runtime } => (bwrap, runtime),
+        Renderer::Docker(runtime) => {
+            return super::docker::convert(runtime, source, helper, output, options).await
+        }
+    };
     let args = arguments(runtime, source, helper, output, options)?;
-    let (status, bytes) = run(&settings.bwrap, &args, TIMEOUT).await?;
+    let (status, bytes) = run(bwrap, &args, TIMEOUT).await?;
     let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable(
-        "The isolated renderer could not start or returned no preview. Install Bubblewrap, enable unprivileged user namespaces, and set BRANCHYARD_PREVIEW_PYTHON to the artifact runtime. No unsandboxed conversion was attempted."
+        "The isolated renderer could not start or returned no preview. Configure the documented Bubblewrap policy and artifact runtime, or explicitly select BRANCHYARD_PREVIEW_BACKEND=docker with a pinned local image. No unsandboxed conversion was attempted."
     ))?;
     let result = value.get("status").and_then(Value::as_str);
     if !matches!(result, Some("passed" | "unavailable" | "failed"))
@@ -127,7 +162,7 @@ pub(super) async fn convert(
     Ok(value)
 }
 
-fn remove_internal_paths(value: &mut Value) {
+pub(super) fn remove_internal_paths(value: &mut Value) {
     const FIELDS: &[&str] = &[
         "status",
         "kind",
@@ -257,10 +292,10 @@ fn arguments(
     Ok(args)
 }
 
-async fn read_pipe(reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
+async fn read_pipe(reader: impl AsyncRead + Unpin, limit: u64) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(PIPE_BYTES + 1).read_to_end(&mut bytes).await?;
-    if bytes.len() as u64 > PIPE_BYTES {
+    reader.take(limit + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > limit {
         return Err(std::io::Error::new(
             std::io::ErrorKind::FileTooLarge,
             "renderer output limit exceeded",
@@ -277,10 +312,21 @@ impl Drop for ProcessGroup {
     }
 }
 
-async fn run(
+pub(super) async fn run(
     program: &Path,
     args: &[std::ffi::OsString],
     timeout: Duration,
+) -> Result<(std::process::ExitStatus, Vec<u8>), ApiError> {
+    run_input(program, args, timeout, None, PIPE_BYTES).await
+}
+
+/// Bound process lifetime, both pipes, and an optional standard JSON input.
+pub(super) async fn run_input(
+    program: &Path,
+    args: &[std::ffi::OsString],
+    timeout: Duration,
+    input: Option<Vec<u8>>,
+    pipe_bytes: u64,
 ) -> Result<(std::process::ExitStatus, Vec<u8>), ApiError> {
     let mut command = tokio::process::Command::new(program);
     command
@@ -288,7 +334,11 @@ async fn run(
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C.UTF-8")
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -298,7 +348,7 @@ async fn run(
         command.as_std_mut().process_group(0);
     }
     let mut child = command.spawn().map_err(|_| unavailable(
-        "A preview executable is unavailable. Install Bubblewrap and Python, then configure BRANCHYARD_PREVIEW_BWRAP and BRANCHYARD_PREVIEW_PYTHON."
+        "A preview executable is unavailable. Configure BRANCHYARD_PREVIEW_BWRAP and BRANCHYARD_PREVIEW_PYTHON for Bubblewrap, or BRANCHYARD_PREVIEW_DOCKER for the explicit Docker backend."
     ))?;
     let pid = child
         .id()
@@ -312,12 +362,27 @@ async fn run(
         .stderr
         .take()
         .ok_or_else(|| ApiError::internal("renderer stderr was not captured"))?;
+    let stdin = child.stdin.take();
     let completed = tokio::time::timeout(timeout, async {
-        tokio::try_join!(child.wait(), read_pipe(stdout), read_pipe(stderr))
+        let writer = async {
+            if let Some(bytes) = input {
+                let mut stdin =
+                    stdin.ok_or_else(|| std::io::Error::other("renderer stdin missing"))?;
+                stdin.write_all(&bytes).await?;
+                stdin.shutdown().await?;
+            }
+            Ok::<(), std::io::Error>(())
+        };
+        tokio::try_join!(
+            child.wait(),
+            read_pipe(stdout, pipe_bytes),
+            read_pipe(stderr, PIPE_BYTES),
+            writer
+        )
     })
     .await;
     match completed {
-        Ok(Ok((status, stdout, _stderr))) => Ok((status, stdout)),
+        Ok(Ok((status, stdout, _stderr, ()))) => Ok((status, stdout)),
         other => {
             branchyard_support::kill_group(group.0);
             branchyard_support::best_effort("reap document renderer", child.wait().await);
@@ -338,9 +403,9 @@ async fn run(
     }
 }
 
-fn unavailable(message: &str) -> ApiError {
+pub(super) fn unavailable(message: &str) -> ApiError {
     ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable", message)
-        .detail(serde_json::json!({"status":"unavailable", "next":"Install the documented artifact runtime and Bubblewrap on the rendering server; no fallback runs outside the sandbox."}))
+        .detail(serde_json::json!({"status":"unavailable", "next":"Configure the documented isolated preview backend on the rendering server; no fallback runs outside its sandbox."}))
 }
 
 #[cfg(test)]
@@ -433,7 +498,7 @@ mod tests {
     #[tokio::test]
     async fn pipes_stop_at_the_declared_bound() {
         let bytes = std::io::Cursor::new(vec![0_u8; PIPE_BYTES as usize + 1]);
-        assert!(read_pipe(bytes).await.is_err());
+        assert!(read_pipe(bytes, PIPE_BYTES).await.is_err());
     }
 
     #[cfg(unix)]

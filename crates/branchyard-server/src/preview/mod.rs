@@ -1,10 +1,12 @@
 //! Bounded, authorized document previews derived from immutable artifacts.
 //!
-//! Conversion runs in a networkless Bubblewrap namespace. Cache entries contain
+//! Conversion runs in a networkless Bubblewrap namespace or an explicitly
+//! selected hardened local container. Cache entries contain
 //! derivatives only; every HTTP request reads the original through its current
 //! artifact grant before using a cached response or image.
 
 mod cache;
+mod docker;
 mod routes;
 mod sandbox;
 
@@ -150,6 +152,7 @@ pub struct PreviewInput {
 }
 
 /// Isolated renderer and its private, bounded derivative cache.
+#[derive(Clone)]
 pub struct PreviewService {
     root: PathBuf,
     slots: Arc<Semaphore>,
@@ -189,7 +192,7 @@ impl PreviewPermit<'_> {
     ) -> Result<Value, ApiError> {
         Ok(self
             .service
-            .derive(input, options, self.admission.clone())
+            .derive_owned(input, options, self.admission.clone())
             .await?
             .value)
     }
@@ -206,7 +209,7 @@ impl PreviewPermit<'_> {
         }
         let cached = self
             .service
-            .derive(input, options, self.admission.clone())
+            .derive_owned(input, options, self.admission.clone())
             .await?;
         if cached.value.get("image").and_then(Value::as_str) != Some(asset) {
             return Err(unknown_asset());
@@ -289,6 +292,20 @@ impl PreviewService {
         self.admit_asset(asset)?.asset(input, options, asset).await
     }
 
+    // Keep admission, private source staging and daemon cleanup alive even if
+    // the HTTP request disconnects. Every backend still has a fixed deadline.
+    async fn derive_owned(
+        &self,
+        input: PreviewInput,
+        options: PreviewOptions,
+        admission: MaterializationGuard,
+    ) -> Result<Cached, ApiError> {
+        let service = self.clone();
+        tokio::spawn(async move { service.derive(input, options, admission).await })
+            .await
+            .map_err(|error| ApiError::internal(format!("preview task: {error}")))?
+    }
+
     async fn derive(
         &self,
         input: PreviewInput,
@@ -324,15 +341,7 @@ impl PreviewService {
         let source = input_dir.join(format!("source.{suffix}"));
         fs::write(&source, &input.bytes).map_err(io_error)?;
         materialize_helper(&helper)?;
-        let value = sandbox::convert(
-            &self.settings,
-            &runtime,
-            &source,
-            &helper,
-            &output,
-            &options,
-        )
-        .await?;
+        let value = sandbox::convert(&runtime, &source, &helper, &output, &options).await?;
         if value.get("status").and_then(Value::as_str) != Some("passed") {
             return Ok(Cached { value, image: None });
         }

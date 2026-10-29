@@ -1,0 +1,219 @@
+{
+  "recorded_at": "2026-10-29T11:47:57.854719+00:00",
+  "evidence": "live native converters and authenticated HTTP on a real GCE host; no model calls",
+  "environment": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "7.0.0-1011-gcp",
+    "docker": "29.1.3",
+    "bubblewrap": "0.9.0",
+    "python": "3.11.14",
+    "libreoffice": "7.4.7.2 40(Build:2)",
+    "poppler": "22.12.0",
+    "openpyxl": "3.1.5",
+    "python_docx": "1.2.0",
+    "python_pptx": "1.0.2",
+    "pillow": "11.3.0"
+  },
+  "bubblewrap_reproduction": {
+    "command": "/usr/bin/bwrap --unshare-all --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 /usr/bin/true",
+    "stderr": "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+    "additional_attempts": [
+      "Adding --uid 0 --gid 0 did not resolve the denial",
+      "unshare -Ur true failed writing /proc/self/uid_map with Operation not permitted"
+    ],
+    "apparmor_restrict_unprivileged_userns": 1,
+    "current_profile_before_namespace": "unconfined",
+    "observed_policy": "profile unprivileged_userns contains audit deny capability and allows userns",
+    "trace": "CLONE_NEWUSER and CLONE_NEWNET creation succeeded; loopback RTM_NEWADDR setup failed",
+    "interpretation": "Observed AppArmor capability policy explains the loopback denial. No direct kernel audit denial line was captured. Host UID alone was not established as the cause.",
+    "policy_changed": false,
+    "primary_sources": [
+      "https://documentation.ubuntu.com/release-notes/24.04/",
+      "https://github.com/containers/bubblewrap/blob/v0.9.0/network.c"
+    ]
+  },
+  "container_image": "sha256:1e07f11555c27b5c5a0ca92576774b8a90f1754b7d0f97a8bec95fe5cd68dd03",
+  "container_boundary_observed": {
+    "network": "none",
+    "readonly": true,
+    "cap_drop": [
+      "ALL"
+    ],
+    "security_opt": [
+      "no-new-privileges"
+    ],
+    "user": "65532:65532",
+    "memory": 805306368,
+    "memory_swap": 805306368,
+    "nano_cpus": 1000000000,
+    "pids": 128,
+    "tmpfs": {
+      "/output": "rw,noexec,nosuid,nodev,size=64m,mode=1777",
+      "/tmp": "rw,noexec,nosuid,nodev,size=256m,mode=1777"
+    },
+    "mounts": []
+  },
+  "headless_regression": {
+    "before": "SAL_USE_VCLPLUGIN=gen made LibreOffice exit 0 without PDF and report X11 error: Can't open display",
+    "after": "SAL_USE_VCLPLUGIN=svp rendered XLSX, DOCX and PPTX pages with the same isolation and resource limits"
+  },
+  "server": {
+    "version": "0.2.1",
+    "binary_sha256": "2b8c280322ce90506be58c389b05170939b9ae9843bf307d8f906de774538ce8",
+    "listen": "http://127.0.0.1:33547",
+    "temporary_directory": "/tmp/by-preview-http-20261029-46z1xm0t",
+    "exit": 0,
+    "remaining_running_preview_containers": []
+  },
+  "procedure": [
+    "Launch the new server on loopback port 0 in an owned temporary directory, with managed_knowledge explicitly enabled and one newly generated hash-only credential.",
+    "Create a knowledge project and workspace without any native agent session.",
+    "Upload synthetic CSV, XLSX, DOCX and PPTX bytes with the current workspace revision.",
+    "Request each preview; request XLSX table and pages separately. Fetch every returned PNG with authentication.",
+    "Repeat each metadata request to exercise the cache, reject unauthenticated metadata and image requests, then download the original and compare its SHA-256.",
+    "Stop only the owned server process group and verify no preview containers remain running."
+  ],
+  "http_cases": [
+    {
+      "format": "csv",
+      "view": "auto",
+      "status": 200,
+      "source_sha256_before": "b924706ec8019e64d53997322b5a9ab5efa181b500067e2dd109782b81e33e39",
+      "preview": {
+        "status": "passed",
+        "kind": "table",
+        "format": "csv",
+        "columns": [
+          "account",
+          "value"
+        ],
+        "rows": [
+          [
+            "001",
+            "=1+1"
+          ],
+          [
+            "002",
+            "12.50"
+          ]
+        ],
+        "sheets": [],
+        "sheet": null,
+        "offset": 0,
+        "next_offset": null,
+        "warnings": []
+      },
+      "unauthenticated_status": 401,
+      "source_sha256_after": "b924706ec8019e64d53997322b5a9ab5efa181b500067e2dd109782b81e33e39",
+      "original_preserved": true
+    },
+    {
+      "format": "xlsx",
+      "view": "table",
+      "status": 200,
+      "source_sha256_before": "69e5e6ffbd7a601591828247fc4c3caa751e6518dd595a55271cd2c361945f6d",
+      "preview": {
+        "status": "passed",
+        "kind": "table",
+        "format": "xlsx",
+        "columns": [
+          "account",
+          "value"
+        ],
+        "rows": [
+          [
+            "001",
+            12.5
+          ]
+        ],
+        "sheets": [
+          "Summary"
+        ],
+        "sheet": "Summary",
+        "offset": 0,
+        "next_offset": null,
+        "warnings": [
+          "Truncated columns to 100"
+        ]
+      },
+      "unauthenticated_status": 401,
+      "source_sha256_after": "69e5e6ffbd7a601591828247fc4c3caa751e6518dd595a55271cd2c361945f6d",
+      "original_preserved": true
+    },
+    {
+      "format": "xlsx",
+      "view": "pages",
+      "status": 200,
+      "source_sha256_before": "69e5e6ffbd7a601591828247fc4c3caa751e6518dd595a55271cd2c361945f6d",
+      "preview": {
+        "status": "passed",
+        "kind": "pages",
+        "format": "xlsx",
+        "page": 1,
+        "pages": 1,
+        "image": "page-1.png",
+        "width": 1449,
+        "height": 2048,
+        "warnings": []
+      },
+      "unauthenticated_status": 401,
+      "image_bytes": 18371,
+      "image_sha256": "427f66489a1af76b5edd2080e99e47721a5ff0cd9212cf8f2e7cd1f754090b6d",
+      "unauthenticated_image_status": 401,
+      "source_sha256_after": "69e5e6ffbd7a601591828247fc4c3caa751e6518dd595a55271cd2c361945f6d",
+      "original_preserved": true
+    },
+    {
+      "format": "docx",
+      "view": "auto",
+      "status": 200,
+      "source_sha256_before": "24786b1866d83a489b09a5ac5b6491d5f96fad57fd53498d1ae851110cd69c5d",
+      "preview": {
+        "status": "passed",
+        "kind": "pages",
+        "format": "docx",
+        "page": 1,
+        "pages": 1,
+        "image": "page-1.png",
+        "width": 1583,
+        "height": 2048,
+        "warnings": []
+      },
+      "unauthenticated_status": 401,
+      "image_bytes": 37271,
+      "image_sha256": "ff99df71c86429b088d2780fbb6120f697bc7f05b3df6dec202c5cc93795c634",
+      "unauthenticated_image_status": 401,
+      "source_sha256_after": "24786b1866d83a489b09a5ac5b6491d5f96fad57fd53498d1ae851110cd69c5d",
+      "original_preserved": true
+    },
+    {
+      "format": "pptx",
+      "view": "auto",
+      "status": 200,
+      "source_sha256_before": "6c7b1d4dbe9982bbb8da37115fdb68a7613efd03999c55f3831ae7fc553539fd",
+      "preview": {
+        "status": "passed",
+        "kind": "pages",
+        "format": "pptx",
+        "page": 1,
+        "pages": 1,
+        "image": "page-1.png",
+        "width": 2048,
+        "height": 1536,
+        "warnings": []
+      },
+      "unauthenticated_status": 401,
+      "image_bytes": 64048,
+      "image_sha256": "b94bd6d191969289bc1e475a811ee67769da9ffa1f4f79af9acf124d68d6bf65",
+      "unauthenticated_image_status": 401,
+      "source_sha256_after": "6c7b1d4dbe9982bbb8da37115fdb68a7613efd03999c55f3831ae7fc553539fd",
+      "original_preserved": true
+    }
+  ],
+  "not_done": [
+    "Browser acceptance",
+    "GKE renderer qualification",
+    "Model turns or agent harness qualification",
+    "Production load or adversarial corpus testing"
+  ]
+}

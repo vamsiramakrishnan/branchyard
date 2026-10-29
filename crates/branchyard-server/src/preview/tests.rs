@@ -7,7 +7,7 @@ use super::*;
 use branchyard_testkit::Scratch;
 use std::path::Path as FilePath;
 
-fn original() -> PreviewInput {
+pub(crate) fn original() -> PreviewInput {
     PreviewInput {
         bytes: b"account,value\n001,=1+1\n".to_vec(),
         name: "accounts.csv".into(),
@@ -197,8 +197,11 @@ pub(crate) fn fake_service(scratch: &Scratch, body: &str) -> PreviewService {
     script(&python, "#!/bin/sh\nprintf '%s\\n' '{\"executable\":\"/usr/bin/python3\",\"prefix\":\"/usr\",\"base_prefix\":\"/usr\",\"version\":\"fixture\"}'\n");
     let bwrap = scratch.join("bwrap");
     script(&bwrap, &format!("#!/bin/sh\nset -eu\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --bind ]; then output=\"$2\"; shift 3; else shift; fi\ndone\n{body}\n"));
-    PreviewService::with_settings(scratch.join("cache"), sandbox::Settings { python, bwrap })
-        .unwrap()
+    PreviewService::with_settings(
+        scratch.join("cache"),
+        sandbox::Settings::Bubblewrap { python, bwrap },
+    )
+    .unwrap()
 }
 
 #[cfg(target_os = "linux")]
@@ -287,7 +290,7 @@ async fn missing_executables_are_actionable_and_conversion_slots_are_bounded() {
     let scratch = Scratch::new("preview-unavailable");
     let service = PreviewService::with_settings(
         scratch.join("cache"),
-        sandbox::Settings {
+        sandbox::Settings::Bubblewrap {
             python: scratch.join("missing-python"),
             bwrap: scratch.join("missing-bwrap"),
         },
@@ -349,8 +352,11 @@ command = [translate(value) for value in args[split + 1:]]
 raise SystemExit(subprocess.run(command, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}).returncode)
 "#,
     );
-    PreviewService::with_settings(scratch.join("cache"), sandbox::Settings { python, bwrap })
-        .unwrap()
+    PreviewService::with_settings(
+        scratch.join("cache"),
+        sandbox::Settings::Bubblewrap { python, bwrap },
+    )
+    .unwrap()
 }
 
 #[cfg(target_os = "linux")]
