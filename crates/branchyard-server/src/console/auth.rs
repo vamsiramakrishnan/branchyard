@@ -28,6 +28,16 @@ pub(crate) fn authorize_workspace(
     id: &str,
     scope: &str,
 ) -> Result<Record, ApiError> {
+    let workspace = workspace_access(app, caller, id, scope)?;
+    let repo = workspace.body["repo"].as_str().ok_or_else(denied)?;
+    if repo != "__console_managed__" {
+        app.authorized_repo(caller, repo, if scope == "comment" { "run" } else { scope })?;
+    }
+    Ok(workspace)
+}
+
+/// Check durable membership and repository grants without resolving native files.
+fn workspace_access(app: &App, caller: &Caller, id: &str, scope: &str) -> Result<Record, ApiError> {
     let required_scope = if scope == "comment" { "run" } else { scope };
     if !caller.0.allows(required_scope) {
         return Err(crate::api::scope_required(required_scope));
@@ -44,9 +54,7 @@ pub(crate) fn authorize_workspace(
         .get("repo")
         .and_then(|v| v.as_str())
         .ok_or_else(denied)?;
-    if repo != "__console_managed__" {
-        app.authorized_repo(caller, repo, required_scope)?;
-    } else if !caller.0.repo_allowed(&app.tenant_policy(caller), repo) {
+    if !caller.0.repo_allowed(&app.tenant_policy(caller), repo) {
         return Err(denied());
     }
     let key = format!("{id}:{}", caller.0.connector_subject());
@@ -93,7 +101,7 @@ fn binding(app: &App, caller: &Caller, key: &str, scope: &str) -> Result<bool, A
         .get("workspace_id")
         .and_then(|v| v.as_str())
         .ok_or_else(denied)?;
-    let workspace = authorize_workspace(app, caller, id, scope)?;
+    let workspace = workspace_access(app, caller, id, scope)?;
     if record.collection != Collection::Bindings || record.id != key {
         return Err(denied());
     }
@@ -204,6 +212,16 @@ pub(crate) fn authorize_operation(
     operation: &branchyard_client::api::Operation,
     scope: &str,
 ) -> Result<(), ApiError> {
+    if !caller.0.allows(scope) {
+        return Err(crate::api::scope_required(scope));
+    }
+    if !caller
+        .0
+        .repo_allowed(&app.tenant_policy(caller), &operation.repo)
+    {
+        return Err(denied());
+    }
+
     if binding(app, caller, &format!("operation:{}", operation.id), scope)? {
         return Ok(());
     }
@@ -212,7 +230,6 @@ pub(crate) fn authorize_operation(
         // A missing row is damage, never a reason to infer a fallback grant.
         return Err(denied());
     }
-    app.authorized_repo(caller, &operation.repo, scope)?;
     for branch in &operation.branches {
         if binding(app, caller, &format!("{}:{branch}", operation.repo), scope)? {
             continue;
@@ -289,6 +306,12 @@ pub(crate) fn authorize_legacy(
     }
     if parts.len() >= 3 && parts[0] == "v1" && parts[1] == "operations" {
         if let Some(operation) = app.registry.get_for_tenant(&parts[2], caller.tenant())? {
+            if !caller
+                .0
+                .repo_allowed(&app.tenant_policy(caller), &operation.repo)
+            {
+                return Err(crate::api::unknown_operation(parts[2].clone()));
+            }
             authorize_operation(app, caller, &operation, scope)?;
         }
     }

@@ -25,6 +25,60 @@ fn record(collection: Collection, id: &str, body: serde_json::Value) -> Mutation
 }
 
 #[test]
+fn shared_controller_operation_reads_check_membership_without_local_yard() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.repos.push(("appb".into(), f.extra_repo("appb")));
+    let server = Server::start(config.clone());
+    let key = branchyard_client::new_key();
+    let operation = server
+        .client()
+        .repo("appb")
+        .submit_task(&task("WRITE result.txt=bound", "bound-result"), &key)
+        .unwrap();
+    assert_eq!(
+        common::await_operation(&server.client(), &operation.id).state,
+        branchyard_client::api::OperationState::Succeeded
+    );
+    server.stop();
+    let store = SqliteStore::open(f.data.join("state.db"), None).unwrap();
+    store.console_mutate(&[
+        record(Collection::Workspaces, "remote-workspace", json!({"repo":"appb","task_id":"remote-task"})),
+        record(Collection::Members, "remote-workspace:tester", json!({"workspace_id":"remote-workspace","subject":"tester","role":"viewer"})),
+        record(Collection::Bindings, &format!("operation:{}", operation.id), json!({"workspace_id":"remote-workspace","repo":"appb","operation_id":operation.id})),
+        record(Collection::Bindings, "appb:bound-result", json!({"workspace_id":"remote-workspace","repo":"appb","branch":"bound-result"})),
+    ]).unwrap();
+    config.repos.retain(|(name, _)| name == "app");
+    let server = Server::start(config);
+    let client = server.client();
+    assert_eq!(client.operation(&operation.id).unwrap().id, operation.id);
+    assert_eq!(client.operation_by_key(&key).unwrap().id, operation.id);
+    // Resolving actual native files still needs the served source.
+    assert_eq!(
+        raw(
+            server.addr,
+            &get("/v1/repos/appb/branches/bound-result", Some(TOKEN))
+        )
+        .0,
+        404
+    );
+    store
+        .console_mutate(&[Mutation::Delete {
+            collection: Collection::Members,
+            id: "remote-workspace:tester".into(),
+            tenant: "default".into(),
+            expected: 1,
+        }])
+        .unwrap();
+    for path in [
+        format!("/v1/operations/{}?wait=0", operation.id),
+        format!("/v1/operations?idempotency_key={key}"),
+    ] {
+        assert_eq!(raw(server.addr, &get(&path, Some(TOKEN))).0, 403, "{path}");
+    }
+}
+
+#[test]
 fn revoked_members_cannot_bypass_through_legacy_paths_or_open_streams() {
     let fixture = Fixture::new();
     let server = Server::start(fixture.config());

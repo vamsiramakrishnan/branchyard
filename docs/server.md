@@ -147,6 +147,8 @@ Global operation reads check the caller's tenant and current repository allowlis
 
 There is no additional submitter-only ownership for operation reads. A same-tenant reader authorized for a repository can read its operations. Operations retain the admitting principal for worker execution, while a branch records its subject and tenant for the [connector gateway](#connectors). Feed entries do not carry a separate principal field.
 
+Workspace-bound operation reads also check current tenant, repository grants and durable workspace membership without requiring a local yard. Native branch, session and file operations still resolve their source on the serving node. Repository-hidden operations remain `404 unknown_operation` before long polling; a missing managed ownership binding or revoked workspace membership still fails closed. The HTTP operation routes recheck the captured credential after waiting and before returning metadata.
+
 ## Quotas
 
 A tenant's `tenants.<name>` entry sets its resource ceilings, all optional (unconfigured means unlimited):

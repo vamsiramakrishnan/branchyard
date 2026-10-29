@@ -1413,7 +1413,8 @@ async fn inventory(
     Ok(Json(InventoryReport { workers }))
 }
 
-fn unknown_operation(what: String) -> ApiError {
+/// Hide an unknown or unauthorized operation without repository or result detail.
+pub(crate) fn unknown_operation(what: String) -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
         "unknown_operation",
@@ -1460,6 +1461,7 @@ async fn operation(
         .await??
     };
     let operation = found.ok_or_else(|| unknown_operation(id))?;
+    app.check_caller(&access_caller)?;
     crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
     let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
         .map_err(|error| ApiError::internal(error.to_string()))?;
@@ -1520,6 +1522,7 @@ async fn operation_by_key(
     };
     let operation =
         found.ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))?;
+    app.check_caller(&access_caller)?;
     crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
     let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
         .map_err(|error| ApiError::internal(error.to_string()))?;
