@@ -214,7 +214,7 @@ pub(crate) fn check_delegation_tools(profile: &Profile, private_home: bool) -> R
 
 /// Fail with [`Error::HarnessUnavailable`] unless `command[0]` is an
 /// executable file, by path or on `PATH`.
-pub(crate) fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {
+pub fn check_available(harness: &str, command: &[String]) -> Result<(), Error> {
     let unavailable = |cause: Unavailable, reason: String| Error::HarnessUnavailable {
         harness: harness.to_owned(),
         reason,
@@ -316,6 +316,29 @@ pub(crate) fn qualification(profile: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_command_availability_is_checked_without_running_a_harness() {
+        let command = vec![branchyard_testkit::fake_agent_here().display().to_string()];
+        assert!(crate::check_harness_command("configured-profile", &command).is_ok());
+        assert!(matches!(
+            crate::check_harness_command("configured-profile", &[]),
+            Err(Error::HarnessUnavailable {
+                cause: Unavailable::NoCommand,
+                ..
+            })
+        ));
+        assert!(matches!(
+            crate::check_harness_command(
+                "configured-profile",
+                &["/missing-configured-harness".into()]
+            ),
+            Err(Error::HarnessUnavailable {
+                cause: Unavailable::NotExecutable,
+                ..
+            })
+        ));
+    }
 
     /// A name that begins one drivable harness's ID is offered as that one;
     /// a name that begins none lists what is drivable, as before.

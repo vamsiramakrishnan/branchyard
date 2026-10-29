@@ -143,6 +143,13 @@ def _fenced_json_after(marker: str) -> dict:
 
 
 class ContractCoversEveryEndpoint(unittest.TestCase):
+    def test_workspace_wire_types_have_namespaced_contract_roots(self):
+        source = ROOT / "crates/branchyard-client/src/workspace_api.rs"
+        names = set(re.findall(r"^pub (?:struct|enum) ([A-Z][A-Za-z]+)", source.read_text(), re.MULTILINE))
+        self.assertTrue(names)
+        missing = sorted(f"workspace.{name}" for name in names if f"workspace.{name}" not in TYPES)
+        self.assertEqual(missing, [], "workspace wire types missing from schema/contract.json")
+
     def test_every_json_response_type_is_a_contract_root(self):
         """Each `Json<T>` a server handler returns is published as a root,
         so a client can look up every documented response."""

@@ -173,6 +173,7 @@ pub mod tasks;
 pub mod up;
 mod wake;
 mod workspace;
+pub mod workspace_runtime;
 
 use branchyard_support::best_effort;
 use branchyard_support::LockExt as _;
@@ -3196,6 +3197,9 @@ pub fn harnesses() -> Vec<HarnessInfo> {
     harness::list()
 }
 
+/// Validate an executable by path or `PATH`, without opening a yard or running it.
+pub use harness::check_available as check_harness_command;
+
 /// Known harness profile and local availability.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3203,7 +3207,7 @@ pub struct HarnessInfo {
     pub harness: String,
     pub profile: String,
     pub default: bool,
-    /// The executable was found on `PATH`.
+    /// The executable was found on `PATH`, or an admitted server command is executable.
     pub available: bool,
     /// Live qualification summary from `docs/qualification/`, such as
     /// "9/9 on 0.81.2".

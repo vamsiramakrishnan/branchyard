@@ -125,6 +125,8 @@ const DEFAULT_STRIP: [&str; 4] = ["ANTHROPIC", "CLAUDE", "OPENAI", "CODEX"];
 ///
 /// [`Environment::inherit`] is the exception: it strips no prefixes and
 /// leaves `HOME` as it is, for running a harness with the user's own login.
+/// The operator-only `BRANCHYARD_MANAGER_TOKEN` is always removed, including
+/// explicit settings and keep rules.
 #[derive(Clone, Debug)]
 pub struct Environment {
     home: PathBuf,
@@ -151,8 +153,8 @@ impl Environment {
     }
 
     /// This process's environment, `HOME` and credentials included, with
-    /// nothing stripped. It scrubs nothing: use [`Environment::remove`] for
-    /// variables the harness must not see. [`Environment::home`] is the
+    /// only the operator manager token stripped. Use [`Environment::remove`] for
+    /// other variables the harness must not see. [`Environment::home`] is the
     /// inherited `HOME`, or empty when it is unset.
     pub fn inherit() -> Self {
         Self {
@@ -187,8 +189,12 @@ impl Environment {
     }
 
     /// Set a variable after scrubbing; it wins over stripping and `HOME`.
+    /// The reserved operator manager token is never passed through.
     pub fn set(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.set.insert(name.into(), value.into());
+        let name = name.into();
+        if !name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            self.set.insert(name, value.into());
+        }
         self
     }
 
@@ -201,6 +207,9 @@ impl Environment {
     /// not stripped by a prefix (unless kept) and not removed. For a
     /// variable from elsewhere that must obey the same scrubbing.
     pub fn admits(&self, name: &str) -> bool {
+        if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return false;
+        }
         let upper = name.to_ascii_uppercase();
         let stripped = self.strip.iter().any(|p| upper.starts_with(p.as_str()));
         !((stripped && !self.keep.contains(name)) || self.remove.contains(name))

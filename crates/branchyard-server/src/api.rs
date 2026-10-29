@@ -22,8 +22,8 @@ use branchyard::{
 use branchyard_client::api::{
     BranchEvents, BranchList, CancelRequest, CancelResult, CheckRequest, Diff, DiscardRequest,
     FeedEntry, ForkRequest, GraphRequest, HarnessList, IntegrateRequest, InventoryReport,
-    MergeRequest, Operation, OperationKind, PolicySpec, ReincarnateRequest, Removed, RepoEntry,
-    RepoList, ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
+    MergeRequest, Operation, OperationKind, OperationView, PolicySpec, ReincarnateRequest, Removed,
+    RepoEntry, RepoList, ReportStatusRequest, SendRequest, SpawnRequest, SteerRequest, TaskRequest,
     WaitRequest, WorkerInventory,
 };
 use futures_util::stream::{self, Stream, StreamExt};
@@ -66,6 +66,12 @@ pub struct App {
     /// Sync to durable storage, when the configuration has `sync`; see
     /// `crate::sync`.
     pub sync: Option<Arc<crate::sync::ServerSync>>,
+    /// One bounded renderer shared by legacy and workspace preview routes.
+    pub(crate) preview: Arc<crate::preview::PreviewService>,
+    /// Workspace interaction service; callbacks retain only a weak application reference.
+    pub(crate) runtime: std::sync::OnceLock<Arc<crate::console_runtime::RuntimeGateway>>,
+    /// Candidate-bound PR service using the existing operation dispatcher.
+    pub(crate) pull_requests: std::sync::OnceLock<Arc<crate::console_pr_gateway::PrGateway>>,
 }
 
 #[derive(Clone)]
@@ -83,9 +89,27 @@ pub(crate) type Shared = Arc<App>;
 /// Requests never carry a `tenant_id`; every caller's tenant comes only
 /// from here. See `docs/server.md#identity-and-scopes`.
 #[derive(Clone)]
-pub struct Caller(pub Principal);
+pub struct Caller(pub Principal, Option<crate::companion::Verified>);
 
 impl Caller {
+    /// Construct an internal caller without a captured transport credential.
+    pub fn new(principal: Principal) -> Self {
+        Self(principal, None)
+    }
+
+    /// Retain the verified credential beside its stable subject identity.
+    pub(crate) fn authenticated(
+        principal: Principal,
+        verified: Option<crate::companion::Verified>,
+    ) -> Self {
+        Self(principal, verified)
+    }
+
+    /// The exact credential verified at this action's admission, when present.
+    pub(crate) fn verified(&self) -> Option<&crate::companion::Verified> {
+        self.1.as_ref()
+    }
+
     /// The subject name recorded for idempotency, audit and the operation
     /// registry's `busy` messages.
     pub fn name(&self) -> &str {
@@ -189,6 +213,14 @@ fn repo_not_allowed(repo: &str) -> ApiError {
 }
 
 impl App {
+    /// Revalidate the admitted credential and its current issuer policy.
+    pub(crate) fn check_caller(&self, caller: &Caller) -> Result<(), ApiError> {
+        if *self.shutdown.borrow() {
+            return Err(ApiError::shutting_down());
+        }
+        crate::auth::recheck_caller(self, caller, caller.verified())
+    }
+
     /// The repository named `name`, for a caller that is not asking: a
     /// trigger's own. Unlike [`App::authorized_repo`], its error lists no
     /// repositories, since there is no one to list them for.
@@ -849,8 +881,16 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::map_routes::router())
         // Tasks and their attempts: `task_routes`.
         .merge(crate::task_routes::router())
+        .merge(crate::console::router())
+        .merge(crate::preview::router(app.preview.clone()))
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router());
+    let v1 = match (app.runtime.get(), app.pull_requests.get()) {
+        (Some(runtime), Some(pr)) => v1
+            .merge(crate::console_runtime::router(runtime.clone()))
+            .merge(crate::console_pr_gateway::router(pr.clone())),
+        _ => v1,
+    };
     let log = app.config.log_requests;
     Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
@@ -1122,12 +1162,21 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
             if read && !principal.allows("read") {
                 return scope_required("read").into_response();
             }
-            let caller = Caller(principal);
-            request.extensions_mut().insert(caller);
+            let caller = Caller::authenticated(principal, verified.clone());
+            let path = request.uri().path().to_owned();
+            if let Err(error) =
+                crate::console::auth::authorize_legacy(&app, &caller, request.method(), &path)
+            {
+                return error.into_response();
+            }
+            request.extensions_mut().insert(caller.clone());
             if let Some(verified) = &verified {
                 request.extensions_mut().insert(verified.clone());
             }
             let response = next.run(request).await;
+            let response =
+                crate::console::auth::redact_workspace_error(&app, &path, response).await;
+            let response = crate::console::auth::bound_stream(app.clone(), caller, path, response);
             match verified {
                 Some(verified) => crate::companion::bound(&app, &verified, response),
                 None => response,
@@ -1305,12 +1354,24 @@ async fn harnesses(
     if !caller.0.allows("read") {
         return Err(scope_required("read"));
     }
-    let yard = app
-        .visible_repos(&caller)
-        .next()
-        .map(|r| r.yard.clone())
-        .ok_or_else(|| ApiError::internal("no repositories"))?;
-    let list = blocking(move || yard.harnesses()).await?;
+    if app.visible_repos(&caller).next().is_none() {
+        crate::console::knowledge_allowed(&app, &caller)?;
+    }
+    let list = blocking(move || -> Result<_, ApiError> {
+        let mut list = branchyard::harnesses();
+        for profile in &mut list {
+            let identity = if profile.default {
+                profile.harness.as_str()
+            } else {
+                profile.profile.as_str()
+            };
+            if let Some(command) = app.command(None, &[Some(identity)])? {
+                profile.available = branchyard::check_harness_command(identity, &command).is_ok();
+            }
+        }
+        Ok(list)
+    })
+    .await??;
     Ok(Json(HarnessList { harnesses: list }))
 }
 
@@ -1352,7 +1413,8 @@ async fn inventory(
     Ok(Json(InventoryReport { workers }))
 }
 
-fn unknown_operation(what: String) -> ApiError {
+/// Hide an unknown or unauthorized operation without repository or result detail.
+pub(crate) fn unknown_operation(what: String) -> ApiError {
     ApiError::new(
         StatusCode::NOT_FOUND,
         "unknown_operation",
@@ -1372,8 +1434,9 @@ async fn operation(
     Path(id): Path<String>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Operation>, ApiError> {
+) -> Result<Json<OperationView>, ApiError> {
     let wait = operation_wait(query.as_deref())?;
+    let access_caller = caller.clone();
     let registry = app.registry.clone();
     let policy = app.tenant_policy(&caller);
     let found = {
@@ -1397,7 +1460,12 @@ async fn operation(
         })
         .await??
     };
-    found.map(Json).ok_or_else(|| unknown_operation(id))
+    let operation = found.ok_or_else(|| unknown_operation(id))?;
+    app.check_caller(&access_caller)?;
+    crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
+    let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(view))
 }
 
 /// The `wait` of `GET /v1/operations/{id}?wait=SECONDS`, capped at
@@ -1431,7 +1499,7 @@ async fn operation_by_key(
     State(app): State<Shared>,
     Extension(caller): Extension<Caller>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Operation>, ApiError> {
+) -> Result<Json<OperationView>, ApiError> {
     let key = query
         .as_deref()
         .unwrap_or("")
@@ -1440,6 +1508,7 @@ async fn operation_by_key(
         .map(branchyard_client::http::decode_form)
         .filter(|k| !k.is_empty())
         .ok_or_else(|| ApiError::bad_request("give idempotency_key"))?;
+    let access_caller = caller.clone();
     let registry = app.registry.clone();
     let policy = app.tenant_policy(&caller);
     let found = {
@@ -1451,9 +1520,13 @@ async fn operation_by_key(
         })
         .await??
     };
-    found
-        .map(Json)
-        .ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))
+    let operation =
+        found.ok_or_else(|| unknown_operation(format!("with idempotency key {key}")))?;
+    app.check_caller(&access_caller)?;
+    crate::console::auth::authorize_operation(&app, &access_caller, &operation, "read")?;
+    let view = serde_json::from_value(crate::console::operation_value(&app, &operation)?)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(view))
 }
 
 /// Admit `work` as an operation: durably enqueued before this returns.

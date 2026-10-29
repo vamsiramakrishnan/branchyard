@@ -4140,26 +4140,25 @@ fn by_check_merges_into_the_parents_uncommitted_work_as_integrate_does() {
 fn a_by_check_whose_caller_is_killed_stops_its_check() {
     let repo = Repo::new();
     let pid = repo.dir.join("check.pid");
-    // The caller is killed only once the check has started (written its
-    // pid), as a tool timeout would kill it: killed earlier, the probe read
-    // no pid and saw `/proc/` alive.
-    let prompt = [
-        format!(
-            "SH by check & c=$!; n=0; until [ -s '{0}' ] || [ $n -ge 600 ]; do sleep 0.05; \
-             n=$((n+1)); done; kill $c; wait $c; echo caller=$?",
-            pid.display()
-        ),
-        format!(
-            "SH s=$(cat '{}'); [ -n \"$s\" ] || echo no-pid; n=0; \
-             while [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat && [ $n -lt 20 ]; \
-             do sleep 0.05; n=$((n+1)); done; \
-             if [ -d /proc/$s ] && ! grep -q ') Z ' /proc/$s/stat; \
-             then echo check-alive; else echo check-gone; fi",
-            pid.display()
-        ),
-    ]
-    .join("\n");
-    let check = format!("sh -c 'echo $$ > {}; sleep 60'", pid.display());
+    let child_pid = repo.dir.join("check-child.pid");
+    let blocked = repo.dir.join("check.block");
+    let made = repo.command("mkfifo").arg(&blocked).output().unwrap();
+    assert!(made.status.success(), "{}", stderr(&made));
+    // Kill the caller only after the check records both PIDs, so this
+    // exercises cancellation of a running check rather than its admission.
+    let prompt = format!(
+        "SH by check & c=$!; n=0; until [ -s '{0}' ] || [ $n -ge 600 ]; do sleep 0.05; \
+         n=$((n+1)); done; kill $c; wait $c; echo caller=$?",
+        pid.display()
+    );
+    // No writer opens this FIFO, so neither process can finish naturally
+    // before cancellation. Record both PIDs before publishing readiness.
+    let check = format!(
+        "sh -c 'cat < {} & echo $! > {}; echo $$ > {}; wait'",
+        blocked.display(),
+        child_pid.display(),
+        pid.display()
+    );
     let out = repo.by_agent(&[
         "run",
         &prompt,
@@ -4173,8 +4172,12 @@ fn a_by_check_whose_caller_is_killed_stops_its_check() {
     assert!(out.status.success(), "{}\n{}", stdout(&out), stderr(&out));
     let said = reply(&repo, "root");
     assert!(said.contains("caller=143\n"), "{said}");
-    assert!(!said.contains("no-pid"), "{said}");
-    assert!(said.contains("check-gone"), "{said}");
+    // A separate /proc directory check and negated grep can call an exited
+    // process alive when its stat file disappears between the two probes.
+    for path in [&pid, &child_pid] {
+        let pid: u32 = fs::read_to_string(path).unwrap().trim().parse().unwrap();
+        wait::gone(pid);
+    }
 }
 
 /// The battery's conflict3, envelope, depth2 and recovery scenarios (M3):

@@ -6,7 +6,7 @@ Start with [the roadmap](docs/roadmap.md), the live plan, and [the documentation
 
 Run `python3 tools/check.py --fast` before you push. It runs the Python gates, ruff, mypy and every Python test, as the `fast` job does in CI, in its order; it takes about 40 seconds here. Without `--fast` it also runs the cargo steps: `cargo fmt --check`, rustdoc with warnings denied, the undocumented-items ratchet, `cargo clippy` for the workspace, and the schema freshness tests. `--fix` rewrites what would fail first (`docs/facts.json`, formatting, the generated schemas). `--keep-going` reports every failing step rather than stopping at the first, and `--only NAME` runs named steps. The Python steps need `pip install ruff==0.15.8 mypy==2.4.0`, the versions CI pins.
 
-`python3 tools/install_hooks.py` makes `git push` run `python3 tools/check.py --fast` first. The hook is committed as `.githooks/pre-push`, and the command sets `core.hooksPath` to `.githooks` in your clone; `python3 tools/install_hooks.py --uninstall` unsets it. To push once without the checks, run `git push --no-verify`.
+`python3 tools/install_hooks.py` makes `git push` run `python3 tools/check.py --fast` first. The hook is committed as `.githooks/pre-push`, and the command sets `core.hooksPath` to `.githooks` in your clone; `python3 tools/install_hooks.py --uninstall` unsets it. The hook clears Git's inherited repository context before running the checks, so their temporary repositories stay separate from your checkout. Fix failures and retry the push; do not bypass the gate.
 
 ## Boundaries to preserve
 
@@ -93,6 +93,11 @@ Shared test infrastructure lives in one crate, `crates/branchyard-testkit`, a de
 | A mock HTTP server | `MockHttp::start(\|request\| Response::json(200, &body))`, then `.url()`, `.requests()` and `.await_requests(n)`. Every connection runs on a thread whose result is joined when the server is finished or dropped, so an I/O error, a truncated request or a handler panic fails the test that owns the server. `Response::hang()` and `Response::close()` are the receiver that never answers and the one that closes without a response; `MockHttp::start_v6` returns `None` where there is no IPv6 loopback. |
 
 `BY_TEST_TIMEOUT_SCALE=3` multiplies every wait's timeout (`wait::until` and friends, and the mock server's read timeout) by three; use it to check a test against a slow machine. It does not stretch `wait::settle`: that is time against the code under test's own clocks. A test you write must pass with it.
+
+Use `wait::alive` or `wait::gone` for process liveness. A separate `/proc` directory
+check and negated `grep` can report an exited process as alive when its `stat`
+file disappears between the probes. Cancellation fixtures must stay blocked
+until cancelled, so natural completion cannot satisfy the assertion.
 
 The hygiene check also keeps three counted ratchets in `tools/test_hygiene_ratchet.json`: calls to `wait::settle`, hand-rolled `std::env::temp_dir()` directories and hand-rolled `TcpListener::bind` servers, per file. A count above the file fails; a count below it fails until the file is lowered (`python3 tools/check_test_hygiene.py --lower`). They can only fall: when you touch one of the listed files, move it onto the kit and lower its count.
 

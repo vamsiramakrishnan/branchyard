@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0 - 2026-10-29
+
+One desktop console now handles coding and knowledge work. Projects contain
+workspaces and named native sessions. People can upload sources, follow
+conversations, preview CSV and Office outputs, download originals and accept
+current results. `by serve --app --knowledge` starts without a repository.
+
+Workspace access combines token scopes, membership and the session creator's
+identity. Queued actions recheck exact device credentials. Runtime and pull-request
+services use the existing durable queue; manager MCP carries workspace revisions
+for lifecycle actions. AGY tool approval compatibility requires an explicit
+acknowledgment and operator permission.
+
+Remote inputs have one bounded metadata index linked from the native prompt.
+Copied providers stage selected files before their initial upload. Concurrent
+session starts retry rolled-back metadata conflicts, and follow-up turns retain
+the validated session policy. The pre-push hook clears inherited Git repository
+context before running checks in scratch repositories.
+
+Live checks covered parallel document work on GCE and a captured CSV deliverable
+in a GKE Substrate gVisor actor. The GKE helper offers a Docker-free agentgateway
+path with a compatible immutable gateway image. Temporary cloud resources were
+verified removed. See the [validation record](docs/console-validation-2026-10-29.md)
+for versions, setup failures and the limits on retained runtimes, microVMs and
+other harness/model combinations.
+
 ## 0.2.1 - 2026-10-29
 
 Operation lookups recheck the caller's current repository grants, including

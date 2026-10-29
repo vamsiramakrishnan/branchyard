@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-29",
+  "evidence": "live admission collision on GCE plus hermetic before/after regression",
+  "candidate_version": "0.3.0",
+  "workspace_id": "01M63SMTZXZEN24K94F780BBSM",
+  "failure": {
+    "method": "POST",
+    "route": "/v1/workspaces/{workspace}/sessions",
+    "concurrent_named_writers": 2,
+    "status": 409,
+    "code": "revision_conflict",
+    "message": "console metadata revision conflict"
+  },
+  "cause": "Session starts update the workspace revision and the tenant quota snapshot before atomic queue admission. Concurrent valid starts can read the same revisions; the losing transaction rolls back without a new queue row.",
+  "safe_live_reconciliation": {
+    "idempotency_key": "c99fea99-0483-4610-a459-db1b5379ed49",
+    "lookup": "GET /v1/operations?idempotency_key=<same key>",
+    "lookup_status": 404,
+    "action": "Retry the identical start with its original key only after confirming no durable operation exists.",
+    "result": "Both native AGY writers were observed running concurrently and completed their initial turns."
+  },
+  "hermetic_regression": {
+    "name": "concurrent_named_sessions_admit_once_without_exposing_internal_revision_conflicts",
+    "implementation": "Four barrier-synchronized start calls against the real in-memory SQLite registry. Check unique operations and sessions, then repeat each original request/key and confirm exact operation/session replay.",
+    "before": "Failed with the same 409 revision_conflict.",
+    "after": "Passed, followed by both quota regressions and production/test clippy with warnings denied."
+  },
+  "fix": "Bounded revalidation retries refresh authorization, workspace state, immutable source selection and tenant quotas. They preserve the request idempotency key and retry only failed internal metadata compare-and-set admission. Native model turns are not replayed.",
+  "live_model_boundary": "Initial AGY outputs published and previewed. A later continuation policy-inheritance defect remained under investigation at this admission fix; this record does not claim full live workflow completion.",
+  "not_done": [
+    "Real-host admission without client retry on the rebuilt fixed binary",
+    "Production load qualification"
+  ]
+}

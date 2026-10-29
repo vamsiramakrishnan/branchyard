@@ -146,6 +146,19 @@ fn main() -> ExitCode {
     match &command {
         Command::Hook { harness, event } => return hook_cmd::hook(harness.as_deref(), event),
         Command::Statusline { harness } => return hook_cmd::statusline(harness.as_deref()),
+        Command::Mcp {
+            action: Some(args::McpCommand::Manager { url, .. }),
+            ..
+        } => {
+            return errors::finish(
+                commands::mcp_manager(
+                    url,
+                    cli.globals.token_file.as_deref().map(std::path::Path::new),
+                    cli.globals.ca_file.as_deref().map(std::path::Path::new),
+                ),
+                errors::wants_json(&argv),
+            );
+        }
         _ => {}
     }
     // branchyard.toml and the user configuration, under flags and variables.

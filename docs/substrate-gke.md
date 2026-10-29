@@ -24,12 +24,14 @@ Install these tools from their official distributions:
 - Google Cloud CLI with support for nested virtualization and
   `--enable-kubernetes-unstable-apis`, plus `gke-gcloud-auth-plugin` when using
   its generated kubeconfig.
-- `kubectl`, a running Docker daemon and Docker's buildx plugin.
+- `kubectl`. The default Envoy dataplane also needs a running Docker daemon and Docker's buildx plugin.
 - `curl`, GNU tar and `zstd` for upstream's pinned microVM assets.
 
 The helper checks tools before touching cloud resources. It does not install
-missing software or download a newer Go toolchain automatically. Docker alone
-is insufficient: the upstream Envoy image build uses `docker buildx`.
+missing software or download a newer Go toolchain automatically. With the default
+Envoy dataplane, Docker alone is insufficient: its image build uses `docker buildx`.
+Use `--atenet-dataplane=agentgateway` for the prebuilt gateway path without a Docker
+daemon. The controllers and workers still build from the pinned Go source.
 
 Prepare an existing Google Cloud project with billing and the Compute Engine,
 GKE, Cloud Storage and Artifact Registry APIs enabled. Use an existing dedicated
@@ -75,6 +77,14 @@ nested virtualization, no release channel, no node auto-upgrade and both require
 certificate beta APIs. The default is two `c3-standard-4` nodes with 100 GB disks.
 Use `--machine-type=n2-standard-8 --nodes=1`, for example, to specify another
 supported footprint. `--network` and `--subnet` default to `default`.
+The node disk size does not limit application volumes. The pinned upstream
+bundled PostgreSQL manifest requests a separate **500 GiB** persistent volume.
+The helper currently has no database-size option. Include that volume in the
+cost review before applying. A smaller evaluation database needs an explicit
+upstream Kustomize storage override; the upstream kind overlay also reduces
+this request for testing. Reducing storage changes available database I/O
+capacity, so a small evaluation volume does not establish production throughput.
+
 `--private-nodes` requires existing outbound connectivity, such as Cloud NAT;
 `--master-cidr` selects the control-plane CIDR. The helper does not configure NAT
 or routes to a private Kubernetes endpoint.
@@ -83,6 +93,39 @@ New bucket and repository resources are regional and belong to the specified
 project. The bucket uses uniform bucket-level access. The node service account
 is explicit; the helper never selects the project's default Compute Engine
 account. New resources carry `branchyard-deployment=CLUSTER`.
+
+## Choose the gateway dataplane
+
+The default remains `--atenet-dataplane=envoy`. Add
+`--atenet-dataplane=agentgateway` to use the gateway tested in the
+[29 October run](evidence/substrate-gke-2026-10-29.json). This path does not require
+Docker or buildx. Its plan includes the immutable gateway image
+`cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45`.
+
+The supplied checkout stays pristine. On apply, the helper exports only committed
+files from the verified source revision into its private state directory, then
+wraps the upstream gateway component in a Kustomize image overlay. The native
+installer runs from that private copy with `VERSION` pinned, so it needs no Git
+metadata there. It retains upstream authentication, policy checks, certificates
+and resources. The same image reaches router and egress before their first apply;
+a retry does not restore the incompatible image first. The helper verifies its
+export's ownership and content digest on reuse and refuses edited or unowned
+state. Inspect that state before removing only the generated `agentgateway-source`
+directory to regenerate it. Ignored files, local credentials and untracked work
+are excluded from the export.
+
+For `--runtime=microvm`, the upstream asset script requires Git metadata. The
+helper runs that unchanged script from the supplied Git checkout and sets its
+output directory to private state. Generated assets stay outside the verified
+export, so interrupted downloads do not invalidate its content digest. The
+Go installer then resumes from the private export.
+
+The upstream source's older gateway image rejects its own worker certificate
+format with `403 Forbidden: actor certificate has no ActorIdentity`. The selected
+image includes [upstream fix 3677](https://github.com/agentgateway/agentgateway/pull/3677)
+and matches [Substrate's image update](https://github.com/agent-substrate/substrate/pull/1923).
+It validates the worker's actor SPIFFE identity and checks the current Actor;
+authentication is retained.
 
 ## Adopt or resume a deployment
 
@@ -117,6 +160,15 @@ Kubernetes command and to `ate-setup`. Providing only `KUBECONFIG` would let the
 upstream installer fetch GKE credentials again; the explicit `--context` avoids
 that behavior. With neither option, credentials go into the helper's dedicated
 state directory. Your normal kubeconfig and current context are unchanged.
+
+Cloud Storage bucket creation and ownership labeling are separate commands.
+The helper saves a private `bucket-creation.json` intent before creation and a
+receipt from raw bucket metadata before applying the label. If labeling fails,
+a retry can label only the same project, region, name and creation timestamp.
+A replacement bucket or an arbitrary unlabeled bucket still requires explicit
+ownership review. If the process stops after creation but before its receipt
+is saved, the helper refuses automatic adoption; inspect the bucket and use
+`--adopt-existing` only after verifying it belongs to this deployment.
 
 Retry the same command after fixing a failed prerequisite or installer step.
 Resources already created are reused; existing IAM bindings are not added
@@ -216,12 +268,77 @@ output in `logs/gke-helper-live-3.log` and `logs/gke-helper-microvm-live.log`.
 Not done: these helper runs did not create a fresh GKE cluster, execute an actor
 or call a model.
 
+Live setup evidence, 29 October 2026: Google Cloud SDK `590.0.1` rejected
+`gcloud storage buckets create --labels=...` with `unrecognized arguments`. A
+private qualification driver created the dedicated bucket without that flag,
+then applied `gcloud storage buckets update --update-labels=...`. The revised
+helper's hermetic tests exercise that supported sequence, a failed label update,
+a lost creation receipt, a replacement bucket and invalid or foreign receipts.
+Not done: this exact revised helper has not provisioned another live deployment;
+the live command record is `/home/user/branchyard-console-work-20261029/gke-state/commands.jsonl`.
+
+Live native-bridge evidence, 29 October 2026: a fresh private GKE Standard
+`1.37.1-gke.2097000` cluster ran the pinned Substrate source on one
+`c3-standard-4` node with a 100 GB boot disk and an explicit 10 GiB evaluation
+database. Branchyard CLI `0.3.0` candidates ran
+`by substrate check --smoke --harness agy --json` from the operator machine and
+an existing GCE validation host. The command created a disposable gVisor Actor,
+put and retrieved the same 29 bytes through its bridge, executed
+`agy --version` with result `1.4.9`, and destroyed the Actor. An independent
+rerun passed, and a native API query afterward found no Actors in the
+test atespace. TLS hostname verification passed over the private GCE connection.
+The [dated run record](evidence/substrate-gke-2026-10-29.json) includes image
+digests, ownership, scoped IAM, the 500 GiB database-default correction and the
+worker-capacity recovery after resetting that fresh database. The later console
+model run and resource deletion are recorded below. Not done:
+this native smoke called no model. Interactive PTY, retained pause/resume,
+MicroVM and Agentic Compute Engine were not tested in this deployment.
+
+Hermetic and local rendering evidence, 29 October 2026: the helper's 26 tests
+passed, including the optional agentgateway export, offline plan, Docker-free
+prerequisites, retry reuse, modified-state refusal and archive traversal refusal.
+Native Kustomize `v5.7.1` rendered the compatible image for both gateway components
+from the actual private export, and Go resolved the installer module there without
+Git metadata. Its native `ko` build also completed into a private OCI layout
+without registry publication; the export's content digest was identical before
+and after the build. The asset-script regression covers an interrupted download
+and retry with generated outputs outside the verified export. The supplied source
+checkout remained clean. On the retained live
+cluster, a single Actor reproduced gateway rejection before the egress image
+correction, then verified TLS 1.3 and unauthenticated HTTPS 404 responses from both
+Google hosts afterward. The Actor was destroyed, and a native API query confirmed
+no Actors remained. The [run record](evidence/substrate-gke-2026-10-29.json) contains
+the identity mismatch and before/after results. Not done: the revised helper has
+not provisioned another cluster; these network checks do not qualify a model turn.
+
+Live console and cleanup evidence, 29 October 2026: Branchyard CLI and server
+`0.3.0` completed a knowledge session without a repository on Substrate, using
+native AGY in the immutable Actor image. The model produced `annual-net-summary.csv`;
+its download and in-system table preview returned 15,000, 21,000 and total 36,000.
+An independent check verified the CSV bytes, arithmetic, preview rows and input
+INDEX hash. Native API inspection at 13:29:52 UTC found no Actors across all
+atespaces and no worker allocation. After preserving outputs, owned-only cleanup
+removed the temporary cluster, both database disks, node and boot disk, registry,
+snapshot bucket, dedicated service account and its project IAM membership.
+Private forwards and the marked connection files were also removed. The
+[final run record](evidence/substrate-gke-2026-10-29.json) contains exact names,
+UIDs, checks and deletion results. Not done: interactive PTY and retained Actor
+pause/resume/suspend were not qualified; the default-destroy run returned an
+explicit unsupported response when a terminal was requested afterward. MicroVM
+and Agentic Compute Engine were not tested in this deployment.
+
 ## Remove a test deployment
 
 Keep the redacted run records before deleting a temporary deployment. Read its
 resource names from `deployment.json` and remove only resources dedicated to
 that test; adopted resources may serve other work. Stop its actors and local
-connection processes, then delete the cluster, repository and snapshot bucket:
+connection processes first. Before deleting the cluster,
+record each owned database claim UID, PV UID and CSI disk handle. Delete only
+the owned database controller and claim while Kubernetes is still running,
+wait for its `Delete` reclaim policy to remove the PV, and verify that exact
+Compute Engine disk is absent. A node boot disk's auto-delete setting does not
+cover a database PVC, and cluster deletion alone can leave that disk behind.
+After disk reclamation, delete the cluster, repository and snapshot bucket:
 
 ```sh
 gcloud container clusters delete CLUSTER --project=PROJECT --zone=ZONE

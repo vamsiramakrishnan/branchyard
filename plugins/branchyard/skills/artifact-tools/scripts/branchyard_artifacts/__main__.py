@@ -20,6 +20,14 @@ def parser() -> argparse.ArgumentParser:
     manifest = commands.add_parser("manifest", help="Hash named outputs for after-transfer collection; never publish")
     manifest.add_argument("files", type=Path, nargs="+")
     manifest.add_argument("--out", type=Path, required=True)
+    preview = commands.add_parser("preview", help="Render bounded table, page or image previews without side effects")
+    preview.add_argument("--file", type=Path, required=True, help="Source document, table or image path")
+    preview.add_argument("--out", type=Path, required=True, help="Directory for rendered preview derivatives")
+    preview.add_argument("--view", default="auto", help="Preview mode: auto, table or pages")
+    preview.add_argument("--page", type=int, default=1, help="1-based page number for page previews")
+    preview.add_argument("--sheet", default=None, help="Optional worksheet name for XLSX table previews")
+    preview.add_argument("--offset", type=int, default=0, help="0-based starting row offset for table previews")
+    preview.add_argument("--limit", type=int, default=100, help="Maximum rows returned for table previews")
     knowledge = commands.add_parser("knowledge", help="Capture evidence, transform tables and check deliverables")
     operations = knowledge.add_subparsers(dest="action", required=True)
     for action in ["source-capture", "table-extract", "data-clean", "calculate", "claim-verify", "inspect-layout"]:
@@ -65,6 +73,18 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
         from .manifest import create
 
         return create(args.files, args.out)
+    if args.format == "preview":
+        from .preview import preview
+
+        return preview(
+            args.file,
+            args.out,
+            view=args.view,
+            page=args.page,
+            sheet=args.sheet,
+            offset=args.offset,
+            limit=args.limit,
+        )
     if args.format == "knowledge":
         if args.action in {"source-capture", "claim-verify"}:
             from .evidence import capture, verify_claims

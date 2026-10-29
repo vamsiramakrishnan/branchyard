@@ -1393,3 +1393,184 @@ fn services_conform_on_postgres() {
         .collect();
     conformance::check_concurrent(stores, 15, "pg connections");
 }
+
+/// Metadata CAS, replay and queue rollback use the same guarantees as SQLite.
+#[test]
+fn console_metadata_admission_is_atomic_on_postgres() {
+    use branchyard_server::console_store::{Collection, Mutation, Record};
+    use serde_json::json;
+    let Some(url) = database() else { return };
+    let store = PostgresStore::open(&url).unwrap();
+    let row = Record {
+        collection: Collection::Workspaces,
+        id: "workspace".into(),
+        tenant: "a".into(),
+        revision: 1,
+        body: json!({"task_id":"reserved"}),
+    };
+    let insert = Mutation::Put {
+        record: row.clone(),
+        expected: None,
+    };
+    let first = stored("first", "a", "writer", &[]);
+    assert_eq!(
+        store
+            .admit_console(
+                &first,
+                &json!({}),
+                &AdmissionQuota::default(),
+                std::slice::from_ref(&insert)
+            )
+            .unwrap(),
+        Admission::Admitted
+    );
+    let reopened = PostgresStore::open(&url).unwrap();
+    assert_eq!(
+        reopened
+            .console_get(Collection::Workspaces, "workspace")
+            .unwrap(),
+        Some(row.clone())
+    );
+    assert!(reopened
+        .console_list(Collection::Workspaces, "b")
+        .unwrap()
+        .is_empty());
+    let mut replay = stored("retry", "a", "second-writer", &[]);
+    replay.idempotency = first.idempotency.clone();
+    let orphan = Record {
+        id: "orphan".into(),
+        ..row.clone()
+    };
+    assert!(matches!(
+        reopened
+            .admit_console(
+                &replay,
+                &json!({}),
+                &AdmissionQuota::default(),
+                &[Mutation::Put {
+                    record: orphan,
+                    expected: None
+                }]
+            )
+            .unwrap(),
+        Admission::Replayed(_)
+    ));
+    assert!(store
+        .console_get(Collection::Workspaces, "orphan")
+        .unwrap()
+        .is_none());
+    let rollback = Record {
+        id: "rollback".into(),
+        ..row.clone()
+    };
+    let failed = stored("failed", "a", "third-writer", &[]);
+    assert_eq!(
+        store
+            .admit_console(
+                &failed,
+                &json!({}),
+                &AdmissionQuota::default(),
+                &[
+                    Mutation::Put {
+                        record: rollback,
+                        expected: None
+                    },
+                    insert
+                ]
+            )
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    assert!(store.get("failed").unwrap().is_none());
+    assert!(store
+        .console_get(Collection::Workspaces, "rollback")
+        .unwrap()
+        .is_none());
+    assert_eq!(store.queue().unwrap().len(), 1);
+    let mut updated = row.clone();
+    updated.revision = 2;
+    updated.body = json!({"task_id":"reserved","title":"changed"});
+    store
+        .console_mutate(&[Mutation::Put {
+            record: updated.clone(),
+            expected: Some(1),
+        }])
+        .unwrap();
+    let mut stolen = updated.clone();
+    stolen.tenant = "b".into();
+    stolen.revision = 3;
+    assert!(reopened
+        .console_mutate(&[Mutation::Put {
+            record: stolen,
+            expected: Some(2)
+        }])
+        .is_err());
+    assert_eq!(
+        reopened.console_list_all(Collection::Workspaces).unwrap(),
+        vec![updated]
+    );
+    store
+        .console_mutate(&[Mutation::Delete {
+            collection: Collection::Workspaces,
+            id: "workspace".into(),
+            tenant: "a".into(),
+            expected: 2,
+        }])
+        .unwrap();
+    assert!(reopened
+        .console_get(Collection::Workspaces, "workspace")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn console_control_lane_keeps_postgres_queue_fences_and_routing() {
+    use branchyard_server::store::Scheduling;
+    use serde_json::json;
+    let Some(url) = database() else { return };
+    let store = PostgresStore::open(&url).unwrap();
+    let control = json!({"kind":"console","command":{"action":"control","control":"cancel","workspace_id":"w"}});
+    store
+        .admit(
+            &stored("control", "a", "control-lock", &[]),
+            &control,
+            &AdmissionQuota::default(),
+        )
+        .unwrap();
+    store
+        .admit(
+            &stored("ordinary", "a", "ordinary-lock", &[]),
+            &json!({"kind":"task"}),
+            &AdmissionQuota::default(),
+        )
+        .unwrap();
+    let worker = Worker::current();
+    let lease = Duration::from_secs(30);
+    let scheduling = Scheduling::default();
+    assert!(store
+        .claim_control(&worker, &["other-repo".into()], &[], lease, &scheduling)
+        .unwrap()
+        .is_none());
+    let ordinary = store
+        .claim_next(&worker, &["app".into()], &[], lease, &scheduling)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ordinary.operation.operation.id, "ordinary");
+    let first = store
+        .claim_control(&worker, &["app".into()], &[], lease, &scheduling)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.operation.operation.id, "control");
+    assert!(store
+        .claim_control(&worker, &["app".into()], &[], lease, &scheduling)
+        .unwrap()
+        .is_none());
+    store.release(&worker, "control", first.fence).unwrap();
+    let second = store
+        .claim_control(&worker, &["app".into()], &[], lease, &scheduling)
+        .unwrap()
+        .unwrap();
+    assert!(second.fence > first.fence);
+    assert!(!store.renew(&worker, "control", first.fence, lease).unwrap());
+}

@@ -158,7 +158,7 @@ impl Sink for AppSink {
         let canonical =
             serde_json::to_string(&request).map_err(|e| Refusal::Failed(e.to_string()))?;
         let idem = self.idempotency(trigger, key, &canonical);
-        let caller = Caller(trigger.principal.clone());
+        let caller = Caller::new(trigger.principal.clone());
         let app = self.app.clone();
         let repo = trigger.spec.repo.clone();
         let admitted = self.runtime.block_on(async move {
@@ -233,7 +233,7 @@ impl Sink for AppSink {
         };
         let canonical = serde_json::to_string(&send).map_err(|e| Refusal::Failed(e.to_string()))?;
         let idem = self.idempotency(trigger, key, &canonical);
-        let caller = Caller(trigger.principal.clone());
+        let caller = Caller::new(trigger.principal.clone());
         let app = self.app.clone();
         let repo = trigger.spec.repo.clone();
         // A branch its lifecycle made dormant starts its session over: the

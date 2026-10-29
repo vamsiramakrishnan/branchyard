@@ -1748,6 +1748,25 @@ impl Backend for Postgres {
             .collect()
     }
 
+    fn execution_host(&self, name: &str) -> Result<Option<String>, Error> {
+        let row = self.query(|client| {
+            client.query_opt(
+            "SELECT s.intent FROM by_steps s JOIN by_branches b ON b.incarnation = s.incarnation \
+             WHERE b.repo = $1 AND b.name = $2 AND s.step = 'start' ORDER BY s.turn DESC LIMIT 1",
+            &[&self.repo, &name],
+        )
+        })?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let intent: Value = decode("start", &row.get::<_, String>(0))?;
+        Ok(intent
+            .get("host")
+            .and_then(Value::as_str)
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned))
+    }
+
     fn record_process(&self, fence: &Fence, process: &ProcessRow) -> Result<(), Error> {
         self.tx(true, |tx| {
             self.check(tx, fence)?;
@@ -2711,30 +2730,42 @@ fn sandbox_row(r: &Row) -> Result<SandboxRow, Error> {
     })
 }
 
-impl SandboxBackend for Postgres {
-    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
-        self.tx(true, |tx| {
-            tx.execute(
-                "INSERT INTO by_sandboxes \
+fn write_sandbox(tx: &mut Transaction<'_>, repo: &str, row: &SandboxRow) -> R<()> {
+    tx.execute(
+        "INSERT INTO by_sandboxes \
                  (repo, branch, incarnation, kind, provider, name, turn, detail, used_ms) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
                  ON CONFLICT (repo, branch, kind, name) DO UPDATE SET \
                  incarnation = EXCLUDED.incarnation, provider = EXCLUDED.provider, \
                  turn = EXCLUDED.turn, detail = EXCLUDED.detail, used_ms = EXCLUDED.used_ms",
-                &[
-                    &self.repo,
-                    &row.branch,
-                    &row.incarnation,
-                    &row.kind.as_str(),
-                    &row.provider,
-                    &row.name,
-                    &row.turn.map(i64::from),
-                    &row.detail,
-                    &to_db("used_ms", row.used_ms)?,
-                ],
-            )
-            .map_err(db("sandbox"))?;
-            Ok(())
+        &[
+            &repo,
+            &row.branch,
+            &row.incarnation,
+            &row.kind.as_str(),
+            &row.provider,
+            &row.name,
+            &row.turn.map(i64::from),
+            &row.detail,
+            &to_db("used_ms", row.used_ms)?,
+        ],
+    )
+    .map_err(db("sandbox"))?;
+    Ok(())
+}
+
+impl SandboxBackend for Postgres {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| write_sandbox(tx, &self.repo, row))
+    }
+
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            self.check(tx, fence)?;
+            if row.incarnation != fence.incarnation || row.branch != fence.branch {
+                return Err(Error::Fenced(fence.branch.clone()).into());
+            }
+            write_sandbox(tx, &self.repo, row)
         })
     }
 

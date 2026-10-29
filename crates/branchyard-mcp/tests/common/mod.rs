@@ -107,9 +107,23 @@ pub struct Client {
 
 impl Client {
     pub fn start(root: &Path, branch: &str, token: &str) -> Client {
-        let mut child = branchyard_testkit::hermetic(&mut Command::new(SERVER))
+        let mut command = Command::new(SERVER);
+        branchyard_testkit::hermetic(&mut command)
             .args(["--root", &root.display().to_string(), "--branch", branch])
-            .env("BRANCHYARD_DELEGATION", token)
+            .env("BRANCHYARD_DELEGATION", token);
+        Self::launch(command)
+    }
+
+    pub fn manager(url: &str, token_file: &Path) -> Client {
+        let mut command = Command::new(SERVER);
+        branchyard_testkit::hermetic(&mut command)
+            .args(["manager", "--url", url, "--token-file"])
+            .arg(token_file);
+        Self::launch(command)
+    }
+
+    fn launch(mut command: Command) -> Client {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

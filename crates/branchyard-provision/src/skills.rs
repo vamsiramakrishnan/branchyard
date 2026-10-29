@@ -57,6 +57,7 @@ pub const SKILLS: &[Skill] = &[
         ("scripts/branchyard_artifacts/native.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/native.py")),
         ("scripts/branchyard_artifacts/pdf.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/pdf.py")),
         ("scripts/branchyard_artifacts/pptx.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/pptx.py")),
+        ("scripts/branchyard_artifacts/preview.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/preview.py")),
         ("scripts/branchyard_artifacts/schemas/deck-v1.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/schemas/deck-v1.json")),
         ("scripts/branchyard_artifacts/schemas/section-v1.json", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/schemas/section-v1.json")),
         ("scripts/branchyard_artifacts/tables.py", include_str!("../../../plugins/branchyard/skills/artifact-tools/scripts/branchyard_artifacts/tables.py")),

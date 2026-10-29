@@ -140,6 +140,13 @@ pub enum AuthenticationOrigin {
     /// A configured or paired static credential. Never an external user assertion.
     #[default]
     Configured,
+    /// A delegated paired credential retaining its verified issuing identity.
+    Paired {
+        /// Stable issuing subject, never a generated device name.
+        subject: String,
+        /// Original verified authentication provenance.
+        origin: Box<AuthenticationOrigin>,
+    },
     /// A Google-signed ID token matched an exact operator-configured binding.
     GoogleIdToken {
         /// The verified Google issuer.
@@ -209,23 +216,34 @@ impl GoogleIdTokenConfig {
         Ok(())
     }
 
-    /// Recheck the admitted identity and exact policy against this worker's config.
+    /// Recheck a direct identity's exact policy or a paired identity's issuer ceiling.
     pub fn still_allows(&self, principal: &Principal) -> bool {
+        let Some(origin) = principal.root_origin() else {
+            return false;
+        };
         let AuthenticationOrigin::GoogleIdToken {
             issuer,
             subject,
             audience,
-        } = &principal.origin
+        } = origin
         else {
             return false;
         };
         if audience != &self.audience {
             return false;
         }
-        let mut policy = principal.clone();
-        policy.origin = AuthenticationOrigin::Configured;
         self.bindings.iter().any(|binding| {
-            &binding.issuer == issuer && &binding.subject == subject && binding.principal == policy
+            if &binding.issuer != issuer || &binding.subject != subject {
+                return false;
+            }
+            match &principal.origin {
+                AuthenticationOrigin::Paired { .. } => principal.within_policy(&binding.principal),
+                _ => {
+                    let mut policy = principal.clone();
+                    policy.origin = AuthenticationOrigin::Configured;
+                    binding.principal == policy
+                }
+            }
         })
     }
 }
@@ -254,6 +272,43 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// A valid delegation chain's original authentication provenance.
+    /// Every paired hop keeps one stable subject; Google roots must reproduce it.
+    pub(crate) fn root_origin(&self) -> Option<&AuthenticationOrigin> {
+        let subject = self.connector_subject();
+        let mut origin = &self.origin;
+        while let AuthenticationOrigin::Paired {
+            subject: paired,
+            origin: parent,
+        } = origin
+        {
+            if paired != &subject {
+                return None;
+            }
+            origin = parent;
+        }
+        if matches!(self.origin, AuthenticationOrigin::Paired { .. })
+            && matches!(origin, AuthenticationOrigin::GoogleIdToken { .. })
+        {
+            let mut root = self.clone();
+            root.origin = origin.clone();
+            if root.connector_subject() != subject {
+                return None;
+            }
+        }
+        Some(origin)
+    }
+
+    /// Whether this policy is no broader than a current issuer's ceiling.
+    pub(crate) fn within_policy(&self, issuer: &Principal) -> bool {
+        self.tenant == issuer.tenant
+            && self.scopes.is_subset(&issuer.scopes)
+            && match (&self.repos, &issuer.repos) {
+                (_, None) => true,
+                (Some(asked), Some(allowed)) => asked.is_subset(allowed),
+                (None, Some(_)) => false,
+            }
+    }
     /// Every scope, every repository, in [`DEFAULT_TENANT`]: what a
     /// `tokens` entry becomes when it names no tenant or scopes of its own,
     /// keeping single-token configurations working unchanged.
@@ -272,6 +327,7 @@ impl Principal {
     pub fn connector_subject(&self) -> String {
         match &self.origin {
             AuthenticationOrigin::Configured => self.name.clone(),
+            AuthenticationOrigin::Paired { subject, .. } => subject.clone(),
             AuthenticationOrigin::GoogleIdToken {
                 issuer, subject, ..
             } => {
@@ -279,6 +335,18 @@ impl Principal {
                 format!("google:{}", sha256_hex(identity.as_bytes()))
             }
         }
+    }
+
+    /// Delegate this identity to a device while retaining its verified subject.
+    /// Policy remains unchanged; callers may narrow it before persisting the token.
+    pub fn delegated_to(&self, device_name: String) -> Self {
+        let mut delegated = self.clone();
+        delegated.origin = AuthenticationOrigin::Paired {
+            subject: self.connector_subject(),
+            origin: Box::new(self.origin.clone()),
+        };
+        delegated.name = device_name;
+        delegated
     }
 
     pub fn allows(&self, scope: &str) -> bool {
@@ -437,13 +505,43 @@ pub fn check_webhook_url(url: &str, insecure: bool) -> Result<(), String> {
     }
 }
 
-/// A resolved configuration.
+/// Operator-owned storage for repository-free console projects.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ManagedKnowledge {
+    /// Explicit operator opt-in; disabled by default.
+    pub enabled: bool,
+    /// Absolute server-owned root; defaults to `data_dir/knowledge`.
+    pub root: Option<PathBuf>,
+    /// Maximum workspace allocations per tenant.
+    pub max_workspaces: usize,
+    /// Maximum original source bytes per workspace.
+    pub max_source_bytes: u64,
+    /// Maximum size of one source upload.
+    pub max_upload_bytes: usize,
+}
+impl Default for ManagedKnowledge {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            root: None,
+            max_workspaces: 100,
+            max_source_bytes: 64 * 1024 * 1024,
+            max_upload_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+/// A resolved server configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     /// Name and path of each served repository.
     pub repos: Vec<(String, PathBuf)>,
+    /// Operator-owned knowledge workspace storage and limits.
+    pub managed_knowledge: ManagedKnowledge,
     pub tokens: Vec<Token>,
     /// The token file serving made or used because the configuration and
     /// the flags gave no credential (`<data_dir>/token`): what a client
@@ -726,6 +824,7 @@ impl Config {
             listen: DEFAULT_LISTEN.parse().expect("valid default address"),
             data_dir,
             repos: Vec::new(),
+            managed_knowledge: ManagedKnowledge::default(),
             tokens: Vec::new(),
             default_token_file: None,
             principals: BTreeMap::new(),
@@ -849,8 +948,28 @@ impl Config {
     /// unless explicitly allowed. Returns a warning to print loudly when
     /// serving insecurely.
     pub fn validate(&self) -> Result<Option<String>, String> {
-        if self.repos.is_empty() {
-            return Err("no repositories to serve".into());
+        if self.repos.is_empty() && !self.managed_knowledge.enabled {
+            return Err(
+                "no repositories to serve; enable managed_knowledge for knowledge projects".into(),
+            );
+        }
+        if self.managed_knowledge.enabled {
+            let knowledge = &self.managed_knowledge;
+            if knowledge
+                .root
+                .as_ref()
+                .is_some_and(|root| !root.is_absolute())
+            {
+                return Err(
+                    "managed_knowledge.root must be an absolute operator-owned path".into(),
+                );
+            }
+            if knowledge.max_workspaces == 0
+                || knowledge.max_source_bytes == 0
+                || knowledge.max_upload_bytes == 0
+            {
+                return Err("managed_knowledge quotas must be positive".into());
+            }
         }
         if let Some(c) = &self.connectors {
             for url in std::iter::once(&c.gateway).chain(&c.sandbox_gateway) {
@@ -1188,6 +1307,8 @@ pub(crate) struct FileConfig {
     _schema: Option<String>,
     listen: Option<String>,
     data_dir: Option<PathBuf>,
+    #[serde(default)]
+    managed_knowledge: ManagedKnowledge,
     #[serde(default)]
     repos: BTreeMap<String, PathBuf>,
     #[serde(default)]
@@ -1604,6 +1725,8 @@ pub mod schema {
 pub struct Partial {
     pub listen: Option<SocketAddr>,
     pub data_dir: Option<PathBuf>,
+    /// Operator knowledge storage settings from the config file.
+    pub managed_knowledge: ManagedKnowledge,
     pub repos: Vec<(String, PathBuf)>,
     pub tokens: Vec<Token>,
     pub principals: BTreeMap<String, Principal>,
@@ -1861,6 +1984,10 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         sync,
         listen,
         data_dir: file.data_dir.map(resolve),
+        managed_knowledge: ManagedKnowledge {
+            root: file.managed_knowledge.root.map(resolve),
+            ..file.managed_knowledge
+        },
         repos: file
             .repos
             .into_iter()
@@ -2331,5 +2458,33 @@ mod tests {
         );
         fs::write(&path, r#"{"listen": "127.0.0.1:0", "lisen": 1}"#).unwrap();
         assert!(load_file(&path).unwrap_err().contains("lisen"));
+    }
+}
+
+#[cfg(test)]
+mod managed_knowledge_tests {
+    use super::{Config, Token};
+    #[test]
+    fn knowledge_only_configuration_requires_valid_operator_storage_and_quotas() {
+        let mut config = Config::new(std::path::PathBuf::from("/operator/data"));
+        config.tokens.push(Token {
+            name: "test".into(),
+            secret: "managed-configuration-test-token".into(),
+        });
+        assert!(config.validate().is_err());
+        config.managed_knowledge.enabled = true;
+        assert!(config.validate().is_ok());
+        config.managed_knowledge.root = Some("relative".into());
+        assert!(config.validate().unwrap_err().contains("absolute"));
+        config.managed_knowledge.root = Some("/operator/knowledge".into());
+        for field in ["workspaces", "bytes", "upload"] {
+            let mut invalid = config.clone();
+            match field {
+                "workspaces" => invalid.managed_knowledge.max_workspaces = 0,
+                "bytes" => invalid.managed_knowledge.max_source_bytes = 0,
+                _ => invalid.managed_knowledge.max_upload_bytes = 0,
+            }
+            assert!(invalid.validate().unwrap_err().contains("positive"));
+        }
     }
 }

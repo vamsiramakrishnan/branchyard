@@ -7,7 +7,7 @@
 The hook is committed as .githooks/pre-push. Installing writes that file when it differs
 from HOOK here, and sets `core.hooksPath` to `.githooks` in this clone's config; every
 worktree of the clone shares that setting. --uninstall removes the setting and leaves the
-committed file, so git ignores the hook. To push once without the checks: git push --no-verify
+committed file, so git ignores the hook. Fix failed checks before retrying a push.
 """
 
 import argparse
@@ -19,12 +19,16 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOKS = ".githooks"
 HOOK = """#!/bin/sh
 # pre-push, installed by tools/install_hooks.py: runs the fast checks before a push.
-# To push once without them: git push --no-verify
 set -eu
 cat > /dev/null  # git sends the refs on stdin; the checks do not need them
+# Git exports this repository's context to hooks. Checks create other repositories.
+by_git_local_vars=$(git rev-parse --local-env-vars)
+for by_git_local_var in $by_git_local_vars; do
+    unset "$by_git_local_var"
+done
 if ! python3 tools/check.py --fast; then
     echo "pre-push: the checks failed, so the push was refused." >&2
-    echo "pre-push: fix them, or push once without them: git push --no-verify" >&2
+    echo "pre-push: run python3 tools/check.py --fast, fix the failures, and retry the push." >&2
     exit 1
 fi
 """

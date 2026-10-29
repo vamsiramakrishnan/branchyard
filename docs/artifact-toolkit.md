@@ -165,6 +165,44 @@ reports `visual_review: not_performed`. Open the previews to assess legibility,
 alignment and unintended overlap. A structural or rasterization pass does not
 substitute for that review.
 
+## Bounded document previews
+
+```sh
+python3 -m branchyard_artifacts preview --file outputs/data.xlsx --out outputs/preview --view auto --page 1 --sheet Data --offset 0 --limit 100
+python3 -m branchyard_artifacts preview --file outputs/brief.pptx --out outputs/slide-preview --view pages --page 1
+```
+
+`preview` inspects one local file and prints one JSON object without modifying
+the source. `--view auto` selects `table` for CSV and XLSX, `pages` for DOCX,
+PPTX, PDF and raster images, and `text` for UTF-8 `.txt`, `.md` and `.json`
+files. XLSX also supports `--view pages` for paginated print previews.
+
+Table previews (`kind: "table"`) return `columns`, `rows`, `sheets`, `sheet`,
+`offset`, `next_offset` and `warnings`. CSV files are read with the standard
+library `csv` parser; strings, leading zeros (`"00012"`), inert markup and
+formula-looking prefixes (`=`, `+`, `-`, `@`) stay literal strings and are
+never evaluated. XLSX table previews use `openpyxl` in read-only mode with
+`data_only=False` and `keep_links=False`: worksheet formulas are returned as
+stored formula strings rather than fabricated or stale cached values, and a
+warning notes that formulas were not evaluated. Rows, columns and per-cell text
+are bounded, with explicit truncation warnings and offset pagination.
+
+Poppler limits raster dimensions before allocating an image, including for PDFs
+with unusually large pages.
+Page previews (`kind: "pages"`) convert Office files to PDF in a fresh
+per-call LibreOffice user profile with macros disabled (`MacroSecurityLevel=3`)
+and external link updates disabled, then rasterize only the requested 1-based
+`--page` with Poppler (`pdftoppm -f PAGE -l PAGE`) and verify/decode the single
+PNG with Pillow inside `OUTPUT_DIR`. Raster images are decoded and re-encoded to
+a bounded PNG (`pages: 1`); SVG and HTML inputs are refused. Macro-enabled
+Office formats (`.xlsm`, `.docm`, `.pptm`, `.xlsb` or archives containing
+`vbaProject.bin`), symbolic links, path traversal and archives exceeding entry
+or expanded-byte bounds are rejected. Missing optional Python libraries or
+native converters exit 3 (`status: "unavailable"`) with installation guidance.
+`branchyard_artifacts.preview` enforces file, archive, dimension and subprocess
+timeout bounds, while the calling server or runtime provides OS-level process
+and network isolation.
+
 ## Independent sections and one deck assembler
 
 Charts can cite a web source with `{ "label": "Source", "url": "https://…" }`
@@ -261,12 +299,15 @@ artifact digest is blake3 and its artifact ID names a publication. Keep those
 identities distinct.
 
 Status, 2026-10-29: hermetic local document tests inspect actual Office/PDF bytes,
-preservation updates, atomic failures and deterministic assembly of 60 slides
-from independently owned section files. Native local fixtures exercised
-LibreOffice 24.2.7 UNO pivot/cache records and computed total, and Office
-conversion plus every-page PNG decoding. The Docker image also built on GCE
-and passed the real-file and installed-wheel suites with networking disabled;
-an actual source-free AGY task loaded its staged skills and required doctor
-checks. See the [dated record](atomic-knowledge-validation-2026-10-29.md).
+preservation updates, bounded CSV/XLSX/image/text previews, synthetic converter
+page selection, archive/symlink/macro rejections, atomic failures and
+deterministic assembly of 60 slides from independently owned section files.
+Native local fixtures exercised LibreOffice 24.2.7 UNO pivot/cache records and
+computed total, Office conversion plus every-page PNG decoding, and bounded
+single-page DOCX/XLSX/PPTX/PDF preview rendering with Poppler 24.02.0. The
+Docker image also built on GCE and passed the real-file and installed-wheel
+suites with networking disabled; an actual source-free AGY task loaded its
+staged skills and required doctor checks. See the
+[dated record](atomic-knowledge-validation-2026-10-29.md).
 Not done: cross-platform Office application qualification or live Google
 Workspace operations.

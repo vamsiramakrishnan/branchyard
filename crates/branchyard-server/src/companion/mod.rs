@@ -48,11 +48,12 @@ use crate::error::ApiError;
 use store::{CompanionStore, Subscription};
 
 /// The policy every file of the page is served with: its own scripts,
-/// styles, images and manifest only; requests only to this server; no
-/// inline script or style, no plugins, no framing, no form posts, no
-/// `<base>`.
+/// styles, images and manifest only, plus images from `blob:` URLs the page
+/// made itself (the preview component draws page images fetched with the
+/// page's token that way); requests only to this server; no inline script
+/// or style, no plugins, no framing, no form posts, no `<base>`.
 pub const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-    img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; \
+    img-src 'self' blob:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; \
     base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Redemption attempts per server per window; more are refused `429`.
@@ -83,6 +84,16 @@ const ASSETS: &[(&str, &str, &str)] = &[
         "app.css",
         "text/css; charset=utf-8",
         include_str!("assets/app.css"),
+    ),
+    (
+        "artifact-preview.js",
+        "text/javascript; charset=utf-8",
+        include_str!("assets/artifact-preview.js"),
+    ),
+    (
+        "artifact-preview.css",
+        "text/css; charset=utf-8",
+        include_str!("assets/artifact-preview.css"),
     ),
     (
         "sw.js",
@@ -160,7 +171,7 @@ impl Companion {
 
 /// How the caller authenticated, beside its [`Caller`]: the hash of its
 /// token, and for a paired token when it expires.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Verified {
     pub token_sha256: String,
     pub expires_at_ms: Option<u64>,
@@ -211,9 +222,7 @@ pub(crate) async fn verify_paired(
         .await
         .ok()?
         .ok()??;
-    if crate::config::check_principal(&token.principal).is_err()
-        || !token.usable_at(branchyard_support::time::now_ms())
-    {
+    if !crate::auth::paired_allowed(&app.config, &token, branchyard_support::time::now_ms()) {
         return None;
     }
     Some((
@@ -240,6 +249,7 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
         return response;
     };
     let hash = verified.token_sha256.clone();
+    let policy = app.clone();
     let ended = async move {
         loop {
             let now = branchyard_support::time::now_ms();
@@ -254,7 +264,13 @@ pub(crate) fn bound(app: &Shared, verified: &Verified, response: Response) -> Re
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                .is_some_and(|t| t.usable_at(branchyard_support::time::now_ms()));
+                .is_some_and(|t| {
+                    crate::auth::paired_allowed(
+                        &policy.config,
+                        &t,
+                        branchyard_support::time::now_ms(),
+                    )
+                });
             if !still {
                 return;
             }
@@ -355,6 +371,7 @@ fn device_label(text: Option<String>) -> Option<String> {
 pub(crate) fn me_of(principal: &Principal, verified: Option<&Verified>) -> Me {
     let expires_at_ms = verified.and_then(|v| v.expires_at_ms);
     Me {
+        subject: principal.connector_subject(),
         name: principal.name.clone(),
         tenant: principal.tenant.clone(),
         scopes: principal.scopes.iter().cloned().collect(),
@@ -644,6 +661,27 @@ mod tests {
             assert!(!text.contains("eval("), "{path} evaluates strings");
         }
         assert!(CSP.contains("script-src 'self'") && !CSP.contains("unsafe"));
+        // Blob URLs are for images only; scripts and fetches stay same-origin.
+        let directives: Vec<&str> = CSP.split(';').map(str::trim).collect();
+        assert!(directives.contains(&"img-src 'self' blob:"));
+        assert_eq!(CSP.matches("blob:").count(), 1);
+        let named = |file: &str| ASSETS.iter().any(|(path, _, _)| *path == file);
+        let page = ASSETS[0].2;
+        let shell = ASSETS
+            .iter()
+            .find(|(path, _, _)| *path == "sw.js")
+            .map(|a| a.2);
+        for file in ["artifact-preview.js", "artifact-preview.css"] {
+            assert!(named(file), "{file} is not served");
+            assert!(
+                page.contains(&format!("\"{file}\"")),
+                "the page does not load {file}"
+            );
+            assert!(
+                shell.is_some_and(|sw| sw.contains(&format!("'{file}'"))),
+                "the offline shell lacks {file}"
+            );
+        }
         assert_eq!(
             device_label(Some(" Pixel\u{7}  ".into())).as_deref(),
             Some("Pixel")

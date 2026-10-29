@@ -27,3 +27,6 @@ webpki-roots = { workspace = true }
 schemars = { workspace = true, optional = true }
 uuid = { workspace = true }
 backon = { workspace = true, features = ["std-blocking-sleep"] }
+
+[dev-dependencies]
+branchyard-testkit = { path = "../branchyard-testkit" }

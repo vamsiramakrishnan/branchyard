@@ -1,0 +1,362 @@
+/* artifact-preview.css - Framework-free drop-in preview pane component */
+
+:root {
+  --by-preview-bg: var(--by-surface-bg, #ffffff);
+  --by-preview-fg: var(--by-surface-fg, #1e293b);
+  --by-preview-muted: var(--by-text-muted, #64748b);
+  --by-preview-border: var(--by-border-color, #e2e8f0);
+  --by-preview-header-bg: var(--by-header-bg, #f8fafc);
+  --by-preview-accent: var(--by-accent-color, #2563eb);
+  --by-preview-accent-hover: var(--by-accent-hover, #1d4ed8);
+  --by-preview-accent-text: #ffffff;
+  --by-preview-warning-bg: #fffbeb;
+  --by-preview-warning-border: #fde68a;
+  --by-preview-warning-text: #92400e;
+  --by-preview-error-bg: #fef2f2;
+  --by-preview-error-border: #fecaca;
+  --by-preview-error-text: #991b1b;
+  --by-preview-btn-bg: #ffffff;
+  --by-preview-btn-border: #cbd5e1;
+  --by-preview-btn-hover: #f1f5f9;
+  --by-preview-table-stripe: #f8fafc;
+  --by-preview-focus-ring: #3b82f6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --by-preview-bg: var(--by-surface-bg, #0f172a);
+    --by-preview-fg: var(--by-surface-fg, #f1f5f9);
+    --by-preview-muted: var(--by-text-muted, #94a3b8);
+    --by-preview-border: var(--by-border-color, #334155);
+    --by-preview-header-bg: var(--by-header-bg, #1e293b);
+    --by-preview-accent: var(--by-accent-color, #3b82f6);
+    --by-preview-accent-hover: var(--by-accent-hover, #60a5fa);
+    --by-preview-warning-bg: #451a03;
+    --by-preview-warning-border: #78350f;
+    --by-preview-warning-text: #fef3c7;
+    --by-preview-error-bg: #450a0a;
+    --by-preview-error-border: #7f1d1d;
+    --by-preview-error-text: #fee2e2;
+    --by-preview-btn-bg: #1e293b;
+    --by-preview-btn-border: #475569;
+    --by-preview-btn-hover: #334155;
+    --by-preview-table-stripe: #1e293b;
+    --by-preview-focus-ring: #60a5fa;
+  }
+}
+
+.by-artifact-preview {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--by-preview-bg);
+  color: var(--by-preview-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
+}
+
+.by-artifact-preview *,
+.by-artifact-preview *::before,
+.by-artifact-preview *::after {
+  box-sizing: inherit;
+}
+
+/* Visually Hidden for accessibility announcements */
+.by-preview-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Toolbar */
+.by-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--by-preview-header-bg);
+  border-bottom: 1px solid var(--by-preview-border);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.by-preview-toolbar-left,
+.by-preview-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.by-preview-title {
+  font-weight: 600;
+  font-size: 13px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.by-preview-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--by-preview-btn-bg);
+  border: 1px solid var(--by-preview-btn-border);
+  color: var(--by-preview-muted);
+}
+
+.by-preview-select,
+.by-preview-btn {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--by-preview-btn-border);
+  background: var(--by-preview-btn-bg);
+  color: var(--by-preview-fg);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.by-preview-btn:hover:not(:disabled) {
+  background: var(--by-preview-btn-hover);
+}
+
+.by-preview-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.by-preview-btn:focus-visible,
+.by-preview-select:focus-visible {
+  outline: 2px solid var(--by-preview-focus-ring);
+  outline-offset: 1px;
+}
+
+.by-preview-btn-primary {
+  background: var(--by-preview-accent);
+  color: var(--by-preview-accent-text);
+  border-color: var(--by-preview-accent);
+}
+
+.by-preview-btn-primary:hover:not(:disabled) {
+  background: var(--by-preview-accent-hover);
+  border-color: var(--by-preview-accent-hover);
+}
+
+.by-preview-switch {
+  display: inline-flex;
+  border: 1px solid var(--by-preview-btn-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.by-preview-switch-btn {
+  border: none;
+  border-radius: 0;
+  background: var(--by-preview-btn-bg);
+  color: var(--by-preview-fg);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.by-preview-switch-btn.active {
+  background: var(--by-preview-accent);
+  color: var(--by-preview-accent-text);
+  font-weight: 600;
+}
+
+.by-preview-switch-btn:focus-visible {
+  outline: 2px solid var(--by-preview-focus-ring);
+  z-index: 1;
+}
+
+.by-preview-page-indicator {
+  font-size: 12px;
+  color: var(--by-preview-muted);
+  min-width: 65px;
+  text-align: center;
+}
+
+/* Warnings */
+.by-preview-warning-banner {
+  padding: 6px 12px;
+  background: var(--by-preview-warning-bg);
+  border-bottom: 1px solid var(--by-preview-warning-border);
+  color: var(--by-preview-warning-text);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Content Area */
+.by-preview-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Loading & Empty/Error States */
+.by-preview-state-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  text-align: center;
+  flex: 1;
+  gap: 12px;
+}
+
+.by-preview-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--by-preview-border);
+  border-top-color: var(--by-preview-accent);
+  border-radius: 50%;
+  animation: by-preview-spin 0.8s linear infinite;
+}
+
+@keyframes by-preview-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .by-preview-spinner {
+    animation: none;
+    border-top-color: var(--by-preview-accent);
+    opacity: 0.7;
+  }
+}
+
+.by-preview-state-message {
+  font-size: 13px;
+  color: var(--by-preview-fg);
+  max-width: 400px;
+}
+
+.by-preview-state-subtext {
+  font-size: 12px;
+  color: var(--by-preview-muted);
+  max-width: 400px;
+}
+
+.by-preview-state-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Table View */
+.by-preview-table-container {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.by-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+
+.by-preview-table th,
+.by-preview-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--by-preview-border);
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.by-preview-table th {
+  background: var(--by-preview-header-bg);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-weight: 600;
+  color: var(--by-preview-fg);
+}
+
+.by-preview-table tr:nth-child(even) td {
+  background: var(--by-preview-table-stripe);
+}
+
+.by-preview-table tr:hover td {
+  background: var(--by-preview-btn-hover);
+}
+
+.by-preview-table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--by-preview-header-bg);
+  border-top: 1px solid var(--by-preview-border);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* Page / Document View */
+.by-preview-pages-container {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--by-preview-btn-hover);
+}
+
+.by-preview-page-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  background: #ffffff;
+  border-radius: 2px;
+}
+
+/* Text View */
+.by-preview-text-container {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  margin: 0;
+}
+
+.by-preview-text-content {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--by-preview-fg);
+}

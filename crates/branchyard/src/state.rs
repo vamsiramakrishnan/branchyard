@@ -594,6 +594,9 @@ pub(crate) trait Backend: Send + Sync + fmt::Debug {
     /// The steps of one turn of the branch's current incarnation.
     fn steps(&self, name: &str, turn: u64) -> Result<Vec<StepRow>, Error>;
 
+    /// Host/boot recorded by the latest native start of this incarnation.
+    fn execution_host(&self, name: &str) -> Result<Option<String>, Error>;
+
     fn record_process(&self, fence: &Fence, process: &ProcessRow) -> Result<(), Error>;
     /// The processes recorded for one turn.
     fn processes(&self, name: &str, turn: u64) -> Result<Vec<ProcessRow>, Error>;
@@ -741,7 +744,7 @@ impl SandboxKind {
 /// A provider-side sandbox or snapshot a branch owns, so that a later turn,
 /// a fork or a removal in any process can find it, and eviction can pick
 /// the least recently used across the store.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SandboxRow {
     pub branch: String,
     pub incarnation: i64,
@@ -768,6 +771,8 @@ pub(crate) struct SandboxRow {
 pub(crate) trait SandboxBackend: Send + Sync + fmt::Debug {
     /// Insert or replace the row for (`branch`, `kind`, `name`).
     fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error>;
+    /// Restore an interactive allocation only while its branch fence still holds.
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error>;
     /// Every row of `branch`, oldest first.
     fn sandboxes(&self, branch: &str) -> Result<Vec<SandboxRow>, Error>;
     /// Every row of `kind` in the store whose provider is `provider`, least

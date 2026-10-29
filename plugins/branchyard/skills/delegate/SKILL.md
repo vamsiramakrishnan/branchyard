@@ -13,6 +13,9 @@ graph or replace your current lead.
   commands such as `by run`, `by fan`, and `by handoff` from the yard. They
   create or coordinate coworkers without adopting or restarting your session.
   Use explicit waits or status commands. Branchyard does not wake this lead.
+  For the remote workspace console API, configure the separate operator MCP
+  with `by mcp manager --url URL --token-file FILE`. Add `--ca-file FILE` for
+  private trust roots. Its scoped HTTP credential stays outside managed turns.
 - **Managed lead:** when `BRANCHYARD_BRANCH` is set, `by` acts as that branch.
   It can create Branchyard children only within its envelope and budget, and
   acts on its own descendants. These limits count Branchyard branches, not
@@ -22,6 +25,27 @@ Decide whether each coworker produces checked code or a structured answer.
 A researcher with a deliverable contract can return native final JSON without
 Git changes or a Branchyard reporting tool. A code worker runs its configured
 check before its candidate is integrated.
+
+The workspace manager creates code or knowledge projects, starts and continues
+native sessions, inspects sources and immutable outputs, accepts deliverables,
+and observes queued operations. Its discovery lists the available tools.
+For repository-free knowledge work, an operator starts `by serve --app --knowledge`.
+This opt-in retains configured storage and quotas; it does not change your grant.
+Reuse one `idempotency_key` when retrying one intended mutation. The ordinary server
+scopes and workspace membership still apply. Never pass the operator token to a
+managed agent. `BRANCHYARD_MANAGER_TOKEN` is reserved and removed from harness
+environments, including inherited environments and explicit keep or set rules.
+Manager responses have a 32 KiB JSON budget and previews default to 25 rows.
+Oversized responses return an error with small identifiers and cursors. Narrow
+the preview, download the original through its authorized endpoint, or delegate
+a focused calculation. A mutation can already have succeeded; inspect its
+operation and reuse its original idempotency key when reconciling.
+For `workspace_action`, pass the `revision` from `inspect_workspace`. A
+`revision_conflict` requires fresh inspection and an explicit new proposal with
+a new key; never refresh and resubmit automatically.
+The operator manager's `start_session` accepts explicit `unapproved_tools: true`
+for a profile such as AGY that cannot route tool approvals. The server operator
+must also permit it. Omission means false; do not infer this acknowledgment.
 
 Continue while your own native tasks or tools are active. A managed lead may
 end its turn to await Branchyard children after its native work finishes.
@@ -621,3 +645,6 @@ forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
 `--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
 connection flags. See the Substrate setup documentation for image and pool prerequisites.
+For GKE, an operator can use `tools/substrate_gke.py --atenet-dataplane=agentgateway`
+with the required target options. This pins a compatible gateway before installation
+from a private source export; the default Envoy path is unchanged.

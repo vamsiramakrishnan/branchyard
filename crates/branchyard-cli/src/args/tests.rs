@@ -873,6 +873,7 @@ fn mcp_needs_a_root_and_a_branch() {
         parse_str("mcp --root /r --branch b").unwrap(),
         Command::Mcp {
             root: Some("/r".into()),
+            action: None,
             branch: Some("b".into()),
             list_tools: false,
         }
@@ -884,6 +885,7 @@ fn mcp_needs_a_root_and_a_branch() {
         parse_str("mcp --list-tools").unwrap(),
         Command::Mcp {
             root: None,
+            action: None,
             branch: None,
             list_tools: true,
         }
@@ -892,6 +894,50 @@ fn mcp_needs_a_root_and_a_branch() {
         kind("mcp --list-tools --root /r"),
         ErrorKind::ArgumentConflict
     );
+}
+
+#[test]
+fn mcp_manager_has_separate_arguments_and_no_plaintext_token_flag() {
+    assert_eq!(
+        parse_str(
+            "mcp manager --url https://by.example --token-file scoped.token --ca-file root.pem"
+        )
+        .unwrap(),
+        Command::Mcp {
+            action: Some(McpCommand::Manager {
+                url: "https://by.example".into(),
+                json: false,
+            }),
+            root: None,
+            branch: None,
+            list_tools: false,
+        }
+    );
+    let cli = parse_from([
+        "by",
+        "mcp",
+        "manager",
+        "--url",
+        "https://by.example",
+        "--token-file",
+        "scoped.token",
+        "--ca-file",
+        "root.pem",
+    ])
+    .unwrap();
+    assert_eq!(cli.globals.token_file.as_deref(), Some("scoped.token"));
+    assert_eq!(cli.globals.ca_file.as_deref(), Some("root.pem"));
+    assert_eq!(kind("mcp manager"), ErrorKind::MissingRequiredArgument);
+    assert_eq!(
+        kind("mcp manager --url https://by.example --token fixture"),
+        ErrorKind::UnknownArgument
+    );
+    assert!(parse_str("mcp --root /r --branch b manager --url https://by.example").is_err());
+    assert!(parse_str("mcp --list-tools manager --url https://by.example").is_err());
+    let help = err("mcp manager --help");
+    assert!(help.contains("--url <URL>"), "{help}");
+    assert!(help.contains("BRANCHYARD_MANAGER_TOKEN"), "{help}");
+    assert!(!help.contains("--root"), "{help}");
 }
 
 /// `--deny` takes a comma list and repeats, on every command that has
@@ -1606,6 +1652,14 @@ fn watch_and_serve() {
     assert_eq!(call("run serve"), None);
     assert_eq!(call("help merge"), None);
     assert_eq!(call(""), None);
+    assert_eq!(
+        call("serve --app --knowledge").unwrap().args,
+        ["--app", "--knowledge"]
+    );
+    assert_eq!(
+        call("worker --knowledge").unwrap().args,
+        ["--worker", "--knowledge"]
+    );
 }
 
 #[test]

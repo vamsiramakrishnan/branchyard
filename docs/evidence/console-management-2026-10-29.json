@@ -1,0 +1,195 @@
+{
+  "date": "2026-10-29",
+  "evidence": "hermetic",
+  "models_called_by_tests": false,
+  "records": [
+    {
+      "log": "management-client-final.log",
+      "scope": "final client routes and idempotency",
+      "sha256": "3d40a2bd18d0b3bb6795c7a665df0dfa2815abad934fc62112393c27c052964f",
+      "test_summaries": [
+        {
+          "passed": 3,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-mcp-final.log",
+      "scope": "full MCP suite before readiness tools and managed-turn guard",
+      "sha256": "bde19c541aeb02426d6574fcd06a2d3f2153cec0eac9137a8c180c0a29211a0f",
+      "test_summaries": [
+        {
+          "passed": 11,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 18,
+          "failed": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-mcp-verified.log",
+      "scope": "final manager tools and real stdio protocols",
+      "sha256": "271d2b919b841902a64b1d234fe52e775b3515003eabaf7b5d4d92bb168c21de",
+      "test_summaries": [
+        {
+          "passed": 6,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-pr-verified.log",
+      "scope": "final PR service fake-executable suite",
+      "sha256": "65d33617c2b470c3d28ec886d1e8b1471c94c099bca869117c1b8a78fcc59d98",
+      "test_summaries": [
+        {
+          "passed": 5,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-clippy-verified.log",
+      "scope": "all targets in changed client, MCP and server crates",
+      "sha256": "721fffa9a327084dc58b900af0cfeb52f60fde98f947f65b7f7607f77082a87c",
+      "test_summaries": []
+    },
+    {
+      "log": "management-rustdoc-verified.log",
+      "scope": "changed crates with warnings denied",
+      "sha256": "e7c766bcf4452cb585279f4edacde97251f1c6220b5eeee378968d1dde629d17",
+      "test_summaries": []
+    },
+    {
+      "log": "management-cli-final-checks.log",
+      "scope": "CLI arguments/help/reference, reserved-token core guards, production clippy and rustdoc; before final CLI startup relocation, which is covered by the final integration checks",
+      "sha256": "6c758f28477b2d47e55de598ee61a5ffbad41d20bd7a1a61ba9ca15809b7f469",
+      "test_summaries": [
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 61,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-cli-verified-tests.log",
+      "scope": "final installed CLI startup guards, fake-harness environment, provisioning/pass-through guards, manager output budget including real stdio, skill and projection embeds, operation command surface",
+      "sha256": "511401a3b29fede127ff231d9a4fb16e58a17036875b0d8d829915912777e9f6",
+      "test_summaries": [
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 8,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0
+        },
+        {
+          "passed": 4,
+          "failed": 0
+        },
+        {
+          "passed": 9,
+          "failed": 0
+        }
+      ]
+    },
+    {
+      "log": "management-cli-fast-verified.log",
+      "scope": "fast Python/lint/docs gate; subsequent final startup relocation and its malformed-config fixture are covered by CLI integration, final documentation checked separately",
+      "sha256": "e7a4a5e3cfee27ee8f6234a35e354e21bc6d30541de535ff7f7bc71e88b84ef5",
+      "test_summaries": []
+    }
+  ],
+  "not_done": [
+    "integrated workspace HTTP and UI acceptance",
+    "live GitHub publication through the service"
+  ]
+}

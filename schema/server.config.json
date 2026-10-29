@@ -23,6 +23,16 @@
         "null"
       ]
     },
+    "managed_knowledge": {
+      "$ref": "#/$defs/ManagedKnowledge",
+      "default": {
+        "enabled": false,
+        "root": null,
+        "max_workspaces": 100,
+        "max_source_bytes": 67108864,
+        "max_upload_bytes": 8388608
+      }
+    },
     "repos": {
       "type": "object",
       "additionalProperties": {
@@ -301,6 +311,47 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "ManagedKnowledge": {
+      "description": "Operator-owned storage for repository-free console projects.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Explicit operator opt-in; disabled by default.",
+          "type": "boolean",
+          "default": false
+        },
+        "root": {
+          "description": "Absolute server-owned root; defaults to `data_dir/knowledge`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_workspaces": {
+          "description": "Maximum workspace allocations per tenant.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 100
+        },
+        "max_source_bytes": {
+          "description": "Maximum original source bytes per workspace.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 67108864
+        },
+        "max_upload_bytes": {
+          "description": "Maximum size of one source upload.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 8388608
+        }
+      },
+      "additionalProperties": false
+    },
     "FileToken": {
       "type": "object",
       "properties": {
@@ -495,6 +546,30 @@
             "kind"
           ],
           "additionalProperties": false
+        },
+        {
+          "description": "A delegated paired credential retaining its verified issuing identity.",
+          "type": "object",
+          "properties": {
+            "subject": {
+              "description": "Stable issuing subject, never a generated device name.",
+              "type": "string"
+            },
+            "origin": {
+              "description": "Original verified authentication provenance.",
+              "$ref": "#/$defs/AuthenticationOrigin"
+            },
+            "kind": {
+              "type": "string",
+              "const": "paired"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subject",
+            "origin"
+          ]
         },
         {
           "description": "A Google-signed ID token matched an exact operator-configured binding.",

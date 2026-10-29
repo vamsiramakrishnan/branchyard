@@ -94,6 +94,47 @@ pub fn create(
     request: &LinkRequest,
     now_ms: u64,
 ) -> Result<(Link, String), String> {
+    create_inner(config, store, request, None, now_ms)
+}
+
+/// Issue a device link as an authenticated principal, preserving its subject.
+/// The original issuer must still exist, and requested grants must fit its policy.
+pub fn create_delegated(
+    config: &Config,
+    store: &dyn CompanionStore,
+    request: &LinkRequest,
+    issuer: &Principal,
+    now_ms: u64,
+) -> Result<(Link, String), String> {
+    if !crate::auth::origin_allowed(config, issuer) {
+        return Err(
+            "this identity has no current configured or Google issuer for delegation; \
+             create the target device link directly with by token new --link, or pair \
+             from a current configured credential"
+                .into(),
+        );
+    }
+    if request.tenant != issuer.tenant
+        || request.scopes.iter().any(|scope| !issuer.allows(scope))
+        || issuer.repos.as_ref().is_some_and(|allowed| {
+            request
+                .repos
+                .as_ref()
+                .is_none_or(|requested| requested.iter().any(|repo| !allowed.contains(repo)))
+        })
+    {
+        return Err("a paired credential cannot exceed its issuing identity's grants".into());
+    }
+    create_inner(config, store, request, Some(issuer), now_ms)
+}
+
+fn create_inner(
+    config: &Config,
+    store: &dyn CompanionStore,
+    request: &LinkRequest,
+    issuer: Option<&Principal>,
+    now_ms: u64,
+) -> Result<(Link, String), String> {
     let base = base_url(config, request.public_url.as_deref())?;
     let ttl = request.ttl.unwrap_or(DEFAULT_TTL);
     if ttl > MAX_TTL {
@@ -111,13 +152,16 @@ pub fn create(
         .name
         .clone()
         .unwrap_or_else(|| format!("phone-{}", &branchyard_client::new_key()[..6]));
-    let principal = Principal {
+    let mut principal = Principal {
         origin: Default::default(),
         name: name.clone(),
         tenant: request.tenant.clone(),
         scopes: request.scopes.iter().cloned().collect(),
         repos: request.repos.as_ref().map(|r| r.iter().cloned().collect()),
     };
+    if let Some(issuer) = issuer {
+        principal.origin = issuer.delegated_to(name.clone()).origin;
+    }
     config::check_principal(&principal)?;
     if config
         .all_credentials()
@@ -314,6 +358,93 @@ pub fn revoke(config: &Config, name: &str, tenant: Option<&str>, program: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegated_links_reject_an_unbound_legacy_issuer_before_persisting() {
+        let mut config = Config::new("/nonexistent/unused".into());
+        let store = super::super::store::SqliteCompanion::memory();
+        let legacy = Principal::default_for("legacy-operator-link");
+        let request = LinkRequest {
+            name: Some("child-device".into()),
+            tenant: legacy.tenant.clone(),
+            scopes: vec!["read".into()],
+            repos: None,
+            ttl: None,
+            code_ttl: None,
+            public_url: Some("https://by.example.com".into()),
+            qr: false,
+        };
+        let result = create_delegated(&config, &store, &request, &legacy, 1_000);
+        assert!(
+            result.is_err(),
+            "unbound delegation must not generate a link"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("no current configured or Google issuer"),
+            "{error}"
+        );
+        assert!(error.contains("by token new --link"), "{error}");
+        assert!(store.tokens().unwrap().1.is_empty());
+        config.credentials.push(crate::config::Credential {
+            token_sha256: sha256_hex(b"hermetic-configured-issuer"),
+            principal: legacy.clone(),
+        });
+        assert!(create_delegated(&config, &store, &request, &legacy, 1_000).is_ok());
+    }
+
+    #[test]
+    fn delegated_pairing_preserves_subject_and_never_expands_policy() {
+        let mut config = Config::new("/nonexistent/unused".into());
+        let store = super::super::store::SqliteCompanion::memory();
+        let mut issuer = Principal::default_for("human");
+        issuer.origin = crate::config::AuthenticationOrigin::GoogleIdToken {
+            issuer: "https://accounts.google.com".into(),
+            subject: "verified-subject".into(),
+            audience: "audience".into(),
+        };
+        issuer.repos = Some(["app".to_owned()].into_iter().collect());
+        let mut current = issuer.clone();
+        current.origin = crate::config::AuthenticationOrigin::Configured;
+        config.google_identity = Some(crate::config::GoogleIdTokenConfig {
+            audience: "audience".into(),
+            bindings: vec![crate::config::GoogleIdentityBinding {
+                issuer: "https://accounts.google.com".into(),
+                subject: "verified-subject".into(),
+                principal: current,
+            }],
+        });
+        let mut request = LinkRequest {
+            name: Some("generated-phone".into()),
+            tenant: issuer.tenant.clone(),
+            scopes: vec!["read".into()],
+            repos: Some(vec!["app".into()]),
+            ttl: None,
+            code_ttl: None,
+            public_url: Some("https://by.example.com".into()),
+            qr: false,
+        };
+        let (_, code) = create_delegated(&config, &store, &request, &issuer, 1_000).unwrap();
+        let paired = store
+            .redeem(&sha256_hex(code.as_bytes()), "test-hash", None, 1_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            paired.principal.connector_subject(),
+            issuer.connector_subject()
+        );
+        assert_eq!(paired.principal.name, "generated-phone");
+        assert!(matches!(
+            paired.principal.origin,
+            crate::config::AuthenticationOrigin::Paired { .. }
+        ));
+        assert!(!paired.principal.allows("run"));
+        request.repos = None;
+        assert!(create_delegated(&config, &store, &request, &issuer, 1_002).is_err());
+        request.repos = Some(vec!["app".into()]);
+        request.tenant = "another-tenant".into();
+        assert!(create_delegated(&config, &store, &request, &issuer, 1_002).is_err());
+    }
 
     #[test]
     fn durations_parse_with_a_unit() {

@@ -1485,6 +1485,25 @@ impl Backend for Sqlite {
         })
     }
 
+    fn execution_host(&self, name: &str) -> Result<Option<String>, Error> {
+        self.query(|conn| {
+            let text = conn.query_row(
+                "SELECT s.intent FROM steps s JOIN branches b ON b.incarnation = s.incarnation \
+                 WHERE b.name = ?1 AND s.step = 'start' ORDER BY s.turn DESC LIMIT 1",
+                params![name], |row| row.get::<_, String>(0),
+            ).optional().map_err(|error| db("execution host", error))?;
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let intent: Value = decode("start", &text)?;
+            Ok(intent
+                .get("host")
+                .and_then(Value::as_str)
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned))
+        })
+    }
+
     fn record_process(&self, fence: &Fence, process: &ProcessRow) -> Result<(), Error> {
         self.tx(true, |tx| {
             check(tx, fence)?;
@@ -2160,26 +2179,38 @@ fn sandbox_rows(
     Ok(found)
 }
 
-impl SandboxBackend for Sqlite {
-    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
-        self.tx(true, |tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO sandboxes \
+fn write_sandbox(conn: &Connection, row: &SandboxRow) -> Result<(), Error> {
+    conn.execute(
+        "INSERT OR REPLACE INTO sandboxes \
                  (branch, incarnation, kind, provider, name, turn, detail, used_ms) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    row.branch,
-                    row.incarnation,
-                    row.kind.as_str(),
-                    row.provider,
-                    row.name,
-                    row.turn.map(i64::from),
-                    row.detail,
-                    to_db("used_ms", row.used_ms)?
-                ],
-            )
-            .map_err(|e| db("sandbox", e))?;
-            Ok(())
+        params![
+            row.branch,
+            row.incarnation,
+            row.kind.as_str(),
+            row.provider,
+            row.name,
+            row.turn.map(i64::from),
+            row.detail,
+            to_db("used_ms", row.used_ms)?
+        ],
+    )
+    .map_err(|e| db("sandbox", e))?;
+    Ok(())
+}
+
+impl SandboxBackend for Sqlite {
+    fn put_sandbox(&self, row: &SandboxRow) -> Result<(), Error> {
+        self.tx(true, |tx| write_sandbox(tx, row))
+    }
+
+    fn put_sandbox_fenced(&self, row: &SandboxRow, fence: &Fence) -> Result<(), Error> {
+        self.tx(true, |tx| {
+            check(tx, fence)?;
+            if row.incarnation != fence.incarnation || row.branch != fence.branch {
+                return Err(Error::Fenced(fence.branch.clone()));
+            }
+            write_sandbox(tx, row)
         })
     }
 

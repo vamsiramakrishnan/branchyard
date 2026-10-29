@@ -622,8 +622,7 @@ pub(crate) async fn owner(app: &Arc<App>, token_sha256: &str) -> Option<Principa
         .await
         .ok()?
         .ok()??;
-    token
-        .usable_at(branchyard_support::time::now_ms())
+    crate::auth::paired_allowed(&app.config, &token, branchyard_support::time::now_ms())
         .then_some(token.principal)
 }
 

@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "Branchyard for Claude Code: guided setup, delegation and artifact skills.",
-    "version": "0.2.1"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "branchyard",
       "source": "./plugins/branchyard",
       "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI.",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "license": "Apache-2.0",
       "category": "development"
     }

@@ -19,7 +19,7 @@ import substrate_gke as gke
 ROOT = Path(__file__).resolve().parents[1]
 
 FAKE = r"""
-import json, os, sys
+import io, json, os, sys, tarfile
 from pathlib import Path
 args = sys.argv[1:]
 tool = Path(sys.argv[0]).name
@@ -27,7 +27,8 @@ state_path = Path(os.environ["FAKE_STATE"])
 state = json.loads(state_path.read_text())
 with Path(os.environ["FAKE_LOG"]).open("a") as log:
     log.write(json.dumps({"tool": tool, "args": args, "context": os.environ.get("KUBECTL_CONTEXT"),
-                          "kubeconfig": os.environ.get("KUBECONFIG"), "version": os.environ.get("VERSION")}) + "\n")
+                          "kubeconfig": os.environ.get("KUBECONFIG"), "version": os.environ.get("VERSION"),
+                          "cwd": os.getcwd(), "out": os.environ.get("OUT")}) + "\n")
 def done(value=""):
     state_path.write_text(json.dumps(state))
     print(json.dumps(value) if isinstance(value, (dict, list)) else value)
@@ -41,6 +42,17 @@ def flag(prefix):
 if tool == "git":
     if args[0] == "rev-parse": done(state["pin"])
     if args[0] == "status": done(state.get("dirty", ""))
+    if args[0] == "archive":
+        members = {"go.mod": "module github.com/agent-substrate/substrate\n",
+                   "manifests/ate-install/components/agentgateway/kustomization.yaml":
+                       "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\nresources: []\n"}
+        if state.get("unsafe_archive"): members["../escaped"] = "must not escape"
+        with tarfile.open(flag("--output"), "w") as archive:
+            for name, value in members.items():
+                payload = value.encode()
+                entry = tarfile.TarInfo(name); entry.size = len(payload)
+                archive.addfile(entry, io.BytesIO(payload))
+        done()
     done("1d7ca8c")
 if tool == "go":
     if args == ["version"]: done(state.get("go_version", "go version go1.27.3 linux/amd64"))
@@ -58,6 +70,12 @@ if tool == "go":
         state["fail_install"] = False
         fail("private-token-should-not-appear-in-output")
     done("installed")
+if tool == "bash" and "install-microvm-deps.sh" in " ".join(args) and os.environ.get("OUT"):
+    out = Path(os.environ["OUT"]); out.mkdir(parents=True, exist_ok=True)
+    (out / "generated-asset").write_text("fake native asset")
+    if state.get("fail_microvm_assets"):
+        state["fail_microvm_assets"] = False
+        fail("asset setup interrupted")
 if tool in ("docker", "bash"): done()
 if tool == "kubectl":
     if "get" in args and ("namespace" in args or "workerpool" in args):
@@ -98,15 +116,26 @@ if tool == "gcloud":
         if verb == "describe":
             if state.get("describe_failure"): fail(state["describe_failure"])
             if state[kind] is None: fail("NOT_FOUND")
+            if kind == "bucket" and state.get("fail_bucket_describe_after_create") and state.get("bucket_created"):
+                state["fail_bucket_describe_after_create"] = False
+                fail("temporary metadata failure after bucket creation")
             if kind == "bucket" and "--raw" not in args:
                 done({"name": "test-snapshots", "location": state[kind]["location"],
                       "uniform_bucket_level_access": True, "labels": state[kind].get("labels", {})})
             done(state[kind])
         if verb == "create":
+            if kind == "bucket" and flag("--labels"):
+                fail("unrecognized arguments: --labels", 2)
             if state[kind] is not None: fail("ALREADY_EXISTS")
             state[kind] = state["desired_" + kind]
+            if kind == "bucket":
+                state[kind].pop("labels", None)
+                state["bucket_created"] = True
             done()
         if verb == "update":
+            if kind == "bucket" and state.get("fail_bucket_label"):
+                state["fail_bucket_label"] = False
+                fail("interrupted before ownership label")
             field = "resourceLabels" if kind == "cluster" else "labels"
             state[kind].setdefault(field, {}).update(dict(x.split("=", 1) for x in flag("--update-labels").split(",")))
             done()
@@ -178,8 +207,10 @@ class SubstrateGke(unittest.TestCase):
             ],
         }
         bucket = {
+            "name": "test-snapshots",
             "projectNumber": "12345",
             "location": "US-CENTRAL1",
+            "timeCreated": "2026-10-29T11:00:00.000Z",
             "iamConfiguration": {"uniformBucketLevelAccess": {"enabled": True}},
             "labels": labels,
         }
@@ -259,6 +290,152 @@ class SubstrateGke(unittest.TestCase):
         self.assertIn("--context=gke_test-project_us-central1-a_test-substrate", install["args"])
         self.assertEqual(install["version"], "1d7ca8c")
         self.assertTrue(all(call["context"] == install["context"] for call in self.calls()))
+
+    def test_agentgateway_plan_is_offline_and_names_the_compatible_image(self):
+        self.source.rmdir()
+        result = self.invoke("--atenet-dataplane=agentgateway")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["agentgateway_image"], gke.AGENTGATEWAY_IMAGE)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse((self.path / "state").exists())
+
+    def test_agentgateway_export_is_private_pristine_and_reused_without_docker(self):
+        (self.bin / "docker").unlink()
+        sentinel = self.source / "ignored-credential"
+        sentinel.write_text("must not copy untracked or ignored files")
+        first = self.invoke("--atenet-dataplane=agentgateway", "--apply")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        exported = self.path / "state/agentgateway-source"
+        self.assertEqual(exported.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((exported / sentinel.name).exists())
+        self.assertEqual(list(self.source.iterdir()), [sentinel])
+        component = exported / "manifests/ate-install/components/agentgateway"
+        overlay = json.loads((component / "kustomization.yaml").read_text())
+        image = overlay["images"][0]
+        self.assertEqual(f"{image['newName']}:{image['newTag']}@{image['digest']}", gke.AGENTGATEWAY_IMAGE)
+        self.assertEqual(overlay["components"], ["../agentgateway-pinned-base"])
+        self.assertIn(
+            "resources: []", (component.with_name("agentgateway-pinned-base") / "kustomization.yaml").read_text()
+        )
+        second = self.invoke("--atenet-dataplane=agentgateway", "--apply")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        archives = [call for call in self.calls() if call["tool"] == "git" and call["args"][0] == "archive"]
+        self.assertEqual(len(archives), 1)
+        installs = [call for call in self.calls() if call["tool"] == "go" and "run" in call["args"]]
+        self.assertTrue(installs)
+        self.assertTrue(all(call["cwd"] == str(exported) for call in installs))
+        self.assertTrue(all("--atenet-dataplane=agentgateway" in call["args"] for call in installs))
+        self.assertFalse(any(call["tool"] == "docker" for call in self.calls()))
+        self.assertEqual(json.loads(first.stdout)["agentgateway_image"], gke.AGENTGATEWAY_IMAGE)
+
+    def test_modified_or_unowned_private_source_is_refused_before_cloud_access(self):
+        self.assertEqual(self.invoke("--atenet-dataplane=agentgateway", "--apply").returncode, 0)
+        exported = self.path / "state/agentgateway-source"
+        for change in ("modified", "unowned"):
+            with self.subTest(change=change):
+                if change == "modified":
+                    (exported / "go.mod").write_text("changed")
+                else:
+                    (exported / ".branchyard-source.json").unlink()
+                self.log.unlink()
+                result = self.invoke("--atenet-dataplane=agentgateway", "--apply")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("unowned or modified", result.stderr)
+                self.assertFalse(any(call["tool"] in {"gcloud", "kubectl"} for call in self.calls()))
+
+    def test_agentgateway_microvm_assets_use_git_source_and_private_output_on_retry(self):
+        self.state["fail_microvm_assets"] = True
+        self.save()
+        flags = ("--atenet-dataplane=agentgateway", "--runtime=microvm", "--apply")
+        first = self.invoke(*flags)
+        self.assertEqual(first.returncode, 1)
+        second = self.invoke(*flags)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        scripts = [call for call in self.calls() if call["tool"] == "bash"]
+        self.assertEqual(len(scripts), 2)
+        self.assertTrue(all(call["cwd"] == str(self.source) for call in scripts))
+        self.assertTrue(all(call["out"] == str(self.path / "state/microvm-assets") for call in scripts))
+        self.assertTrue((self.path / "state/microvm-assets/generated-asset").exists())
+        self.assertFalse(list(self.source.iterdir()))
+        exported = self.path / "state/agentgateway-source"
+        installs = [call for call in self.calls() if call["tool"] == "go" and "run" in call["args"]]
+        self.assertTrue(all(call["cwd"] == str(exported) and call["out"] is None for call in installs))
+
+    def test_source_archive_cannot_escape_its_private_staging_directory(self):
+        self.state["unsafe_archive"] = True
+        self.save()
+        result = self.invoke("--atenet-dataplane=agentgateway", "--apply")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not prepare private agentgateway source", result.stderr)
+        self.assertFalse((self.path / "state/agentgateway-source").exists())
+        self.assertFalse(any(path.name == "escaped" for path in self.path.rglob("*")))
+        self.assertEqual(self.mutations(), [])
+
+    def test_bucket_create_uses_supported_cli_and_private_receipt(self):
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bucket_calls = [call["args"] for call in self.calls() if call["args"][:2] == ["storage", "buckets"]]
+        created = next(args for args in bucket_calls if args[2] == "create")
+        self.assertFalse(any(arg.startswith("--labels=") for arg in created))
+        updated = next(args for args in bucket_calls if args[2] == "update")
+        self.assertIn("--update-labels=branchyard-deployment=test-substrate", updated)
+        receipt_path = self.path / "state/bucket-creation.json"
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt["phase"], "created")
+        self.assertEqual(receipt["receipt"]["timeCreated"], self.state["desired_bucket"]["timeCreated"])
+        self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+
+    def test_bucket_label_failure_resumes_only_its_recorded_creation(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        failed = self.invoke("--apply")
+        self.assertEqual(failed.returncode, 1)
+        self.assertFalse(json.loads(self.state_path.read_text())["bucket"].get("labels"))
+        resumed = self.invoke("--apply")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        creates = [call for call in self.calls() if call["args"][:3] == ["storage", "buckets", "create"]]
+        self.assertEqual(len(creates), 1)
+
+    def test_bucket_receipt_refuses_a_replacement_before_mutation(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        self.state = json.loads(self.state_path.read_text())
+        self.state["bucket"]["timeCreated"] = "2026-10-29T12:00:00.000Z"
+        self.save()
+        self.log.unlink()
+        refused = self.invoke("--apply")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("no branchyard-deployment label", refused.stderr)
+        self.assertEqual(self.mutations(), [])
+
+    def test_bucket_without_creation_receipt_requires_review_after_a_crash(self):
+        self.state["fail_bucket_describe_after_create"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        intent = json.loads((self.path / "state/bucket-creation.json").read_text())
+        self.assertEqual(intent["phase"], "creating")
+        self.log.unlink()
+        refused = self.invoke("--apply")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("no branchyard-deployment label", refused.stderr)
+        self.assertEqual(self.mutations(), [])
+
+    def test_invalid_or_foreign_bucket_receipts_cannot_authorize_labeling(self):
+        self.state["fail_bucket_label"] = True
+        self.save()
+        self.assertEqual(self.invoke("--apply").returncode, 1)
+        receipt_path = self.path / "state/bucket-creation.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["target"]["project"] = "another-project"
+        for contents in (json.dumps(receipt), "invalid record"):
+            with self.subTest(contents=contents):
+                receipt_path.write_text(contents)
+                self.log.unlink(missing_ok=True)
+                refused = self.invoke("--apply")
+                self.assertEqual(refused.returncode, 1)
+                self.assertEqual(self.mutations(), [])
 
     def test_failure_resumes_without_duplicate_resources_or_secret_output(self):
         self.state["fail_install"] = True

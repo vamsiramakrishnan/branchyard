@@ -434,6 +434,10 @@ pub async fn start(config: Config) -> Result<Running, String> {
     #[cfg(test)]
     let credentials = credentials.with_google_jwks(config.google_jwks_url.as_deref());
     let app = Arc::new(App {
+        preview: Arc::new(
+            crate::preview::PreviewService::new(config.data_dir.join("previews"))
+                .map_err(|error| error.body.message)?,
+        ),
         sync: sync.clone(),
         companion,
         repos,
@@ -443,7 +447,15 @@ pub async fn start(config: Config) -> Result<Running, String> {
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
         triggers: hub,
+        runtime: Default::default(),
+        pull_requests: Default::default(),
     });
+    crate::console::services::install(&app).map_err(|error| {
+        format!(
+            "could not initialize workspace services: {}",
+            error.body.message
+        )
+    })?;
     registry
         .start(Arc::new(crate::work::AppExecutor(app.clone())))
         .map_err(|e| format!("could not start the operation dispatcher: {e}"))?;
@@ -706,27 +718,7 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     for (name, path) in &config.repos {
         let yard = open_yard(config, name, path)
             .map_err(|e| format!("repository {name} at {}: {e}", path.display()))?;
-        // Only an operator's configuration lets a repository's scripts run;
-        // see docs/workspace.md.
-        if !config.allow_workspace_scripts.allows(name) {
-            yard.deny_workspace_scripts();
-        }
-        if let Some(gateway) = crate::connectors::gateway_for(config, name) {
-            yard.use_connectors(gateway);
-        }
-        // The model gateway its branches' turns may use, and each
-        // principal's ceiling (docs/model-gateway.md).
-        if let Some(gateway) = crate::models::gateway_for(config, name)
-            .map_err(|e| format!("repository {name}: {e}"))?
-        {
-            yard.use_models(gateway);
-        }
-        yard.use_ceilings(config.actor_policy(&config.ceilings));
-        // The administrator's locked approvals and the people's
-        // (docs/effects.md#approvals).
-        let mut approvals = config.approvals.clone();
-        approvals.people = config.actor_policy(&approvals.people);
-        yard.use_approvals(approvals);
+        configure_yard(config, name, &yard)?;
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(
@@ -744,7 +736,17 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         max_running: config.max_running,
         lease: config.operation_lease,
         poll: config.poll_interval,
-        repos: config.repos.iter().map(|(name, _)| name.clone()).collect(),
+        repos: config
+            .repos
+            .iter()
+            .map(|(name, _)| name.clone())
+            .chain(
+                config
+                    .managed_knowledge
+                    .enabled
+                    .then(|| crate::console::MANAGED_REPO.to_owned()),
+            )
+            .collect(),
         exclusive: config.database.is_none(),
         labels: config.labels.clone(),
         inventory: config.inventory.then(|| {
@@ -765,9 +767,39 @@ fn open_state(config: &Config) -> Result<Opened, String> {
     Ok((repos, registry))
 }
 
+/// Apply operator policy identically to registered and managed task yards.
+pub(crate) fn configure_yard(config: &Config, name: &str, yard: &Yard) -> Result<(), String> {
+    // Only an operator's configuration lets a repository's scripts run;
+    // see docs/workspace.md.
+    if !config.allow_workspace_scripts.allows(name) {
+        yard.deny_workspace_scripts();
+    }
+    if let Some(gateway) = crate::connectors::gateway_for(config, name) {
+        yard.use_connectors(gateway);
+    }
+    // The model gateway its branches' turns may use, and each
+    // principal's ceiling (docs/model-gateway.md).
+    if let Some(gateway) =
+        crate::models::gateway_for(config, name).map_err(|e| format!("repository {name}: {e}"))?
+    {
+        yard.use_models(gateway);
+    }
+    yard.use_ceilings(config.actor_policy(&config.ceilings));
+    // The administrator's locked approvals and the people's
+    // (docs/effects.md#approvals).
+    let mut approvals = config.approvals.clone();
+    approvals.people = config.actor_policy(&approvals.people);
+    yard.use_approvals(approvals);
+    Ok(())
+}
+
 /// A served repository, with its state in the configured database or in
 /// its own `.branchyard/state.db`.
-fn open_yard(config: &Config, name: &str, path: &std::path::Path) -> Result<Yard, String> {
+pub(crate) fn open_yard(
+    config: &Config,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<Yard, String> {
     match &config.database {
         None => Yard::open(path).map_err(|e| e.to_string()),
         #[cfg(feature = "postgres")]
@@ -1142,6 +1174,7 @@ mod shutdown_lines {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::fd::AsFd;
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
@@ -1164,9 +1197,18 @@ mod tests {
         );
         let live = bind_unix(&path).err().unwrap();
         assert!(live.contains("already listens"), "{live}");
+        // Forked helpers can retain a CLOEXEC duplicate until exec. Dropping
+        // this process's listener does not make that inherited listener stale.
+        let inherited = listener.as_fd().try_clone_to_owned().unwrap();
         drop(listener);
-        // The file a stopped server left is replaced.
-        assert!(bind_unix(&path).is_ok());
+        let live = bind_unix(&path).err().unwrap();
+        assert!(live.contains("already listens"), "{live}");
+        drop(inherited);
+        // Other tests may be between fork and exec when we close our handles.
+        // Wait for their inherited descriptors before replacing the stale file.
+        let replacement =
+            branchyard_testkit::wait::until("stale Unix socket rebind", || bind_unix(&path));
+        drop(replacement);
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "not a socket").unwrap();
         assert!(bind_unix(&path).err().unwrap().contains("not a socket"));

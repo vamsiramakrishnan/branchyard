@@ -70,22 +70,48 @@ class Install(Scratch):
 
 
 class Hook(Scratch):
-    def run_hook(self, verdict):
+    def run_hook(self, verdict, env=None, script=None):
         (self.root / "tools").mkdir()
-        (self.root / "tools" / "check.py").write_text(f"import sys\nsys.exit({verdict})\n")
+        (self.root / "tools" / "check.py").write_text(
+            script if script is not None else f"import sys\nsys.exit({verdict})\n"
+        )
         (self.root / ".githooks").mkdir()
         (self.root / ".githooks" / "pre-push").write_text(install_hooks.HOOK)
         return subprocess.run(
-            ["sh", ".githooks/pre-push"], cwd=self.root, stdin=subprocess.DEVNULL, capture_output=True, text=True
+            ["sh", ".githooks/pre-push"],
+            cwd=self.root,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
+
+    def test_hook_git_context_cannot_redirect_scratch_repository_checks(self):
+        other = self.root / "other"
+        other.mkdir()
+        self.assertEqual(git(other, "init", "-q").returncode, 0)
+        env = dict(os.environ)
+        env.update(
+            GIT_DIR=str(self.root / ".git"), GIT_WORK_TREE=str(self.root), GIT_INDEX_FILE=str(self.root / ".git/index")
+        )
+        script = """import os, subprocess
+from pathlib import Path
+for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+    assert name not in os.environ, name
+actual = subprocess.check_output(['git', '-C', 'other', 'rev-parse', '--show-toplevel'], text=True).strip()
+assert actual == str(Path('other').resolve()), actual
+"""
+        done = self.run_hook(0, env=env, script=script)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_passing_check_lets_the_push_through(self):
         self.assertEqual(self.run_hook(0).returncode, 0)
 
-    def test_a_failing_check_refuses_the_push_and_names_the_bypass(self):
+    def test_a_failing_check_refuses_the_push_and_names_recovery(self):
         done = self.run_hook(1)
         self.assertEqual(done.returncode, 1)
-        self.assertIn("git push --no-verify", done.stderr)
+        self.assertIn("python3 tools/check.py --fast", done.stderr)
+        self.assertNotIn("--no-verify", done.stderr)
 
 
 class RealTree(unittest.TestCase):

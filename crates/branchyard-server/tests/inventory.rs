@@ -61,7 +61,10 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
     let report = advertised(&client, 1);
     assert!(report.workers[0].this);
     assert_eq!(report.workers[0].repos, ["app"]);
-    assert!(report.workers[0].labels.is_empty());
+    assert_eq!(
+        report.workers[0].labels,
+        [format!("worker-host:{}", report.workers[0].host)]
+    );
 
     // Work that requires Codex waits, and says why.
     let mut needs = task("WRITE needs.txt=1", "needs-codex");
@@ -91,7 +94,13 @@ fn a_worker_advertises_its_harnesses_and_work_follows_them_on_sqlite() {
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
     let report = advertised(&client, 1);
     let me = report.workers.iter().find(|w| w.this).unwrap();
-    assert_eq!(me.labels, ["harness:codex"]);
+    assert_eq!(
+        me.labels,
+        [
+            "harness:codex".to_owned(),
+            format!("worker-host:{}", branchyard::process_identity().0)
+        ]
+    );
     let codex = me.inventory.as_ref().unwrap().get("codex").unwrap();
     assert_eq!(codex.version.as_deref(), Some("1.2.3"));
 
@@ -130,7 +139,10 @@ fn a_server_without_inventory_advertises_none() {
     });
     let report = client.inventory().unwrap();
     assert_eq!(report.workers[0].inventory, None);
-    assert!(report.workers[0].labels.is_empty());
+    assert_eq!(
+        report.workers[0].labels,
+        [format!("worker-host:{}", report.workers[0].host)]
+    );
 }
 
 #[cfg(feature = "postgres")]
@@ -192,8 +204,12 @@ mod postgres {
         let report = advertised(&client, 2);
         assert_eq!(report.workers.len(), 2, "{report:?}");
         assert!(report.workers[0].this);
-        assert!(report.workers[0].labels.is_empty());
-        assert_eq!(report.workers[1].labels, ["harness:codex"]);
+        let host = format!("worker-host:{}", branchyard::process_identity().0);
+        assert_eq!(
+            report.workers[0].labels.as_slice(),
+            std::slice::from_ref(&host)
+        );
+        assert_eq!(report.workers[1].labels, ["harness:codex".to_owned(), host]);
         // A task that runs Codex by name is steered to it.
         let steered = client
             .repo("app")

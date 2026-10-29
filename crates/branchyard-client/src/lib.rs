@@ -48,11 +48,13 @@ pub mod companion;
 pub mod effects_api;
 pub mod http;
 pub mod knowledge_api;
+pub mod manager_api;
 #[cfg(feature = "schema")]
 pub mod schema;
 pub mod sse;
 pub mod storage_api;
 pub mod triggers;
+pub mod workspace_api;
 
 use std::fmt;
 use std::io::BufReader;

@@ -527,6 +527,65 @@ pub(crate) struct Wanted<'a> {
     pub environment: Option<&'a crate::environments::SandboxEnvironment>,
 }
 
+/// Take only a branch's retained allocation, preserving it on resume failure.
+/// Interactive access must never replace vanished state with a fresh sandbox.
+pub(crate) fn acquire_retained(
+    store: &Store,
+    provider: &dyn SandboxProvider,
+    journal: &dyn Fn(&str) -> Result<(), String>,
+    wanted: Wanted<'_>,
+) -> Result<Acquired, String> {
+    let row = store
+        .sandboxes()
+        .sandboxes(&wanted.record.info.name)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|row| {
+            row.kind == SandboxKind::Kept
+                && row.incarnation == wanted.fence.incarnation
+                && row.provider == wanted.key
+        })
+        .ok_or_else(|| "the workspace has no retained allocation".to_owned())?;
+    if lifecycle(wanted.record.provider.as_ref())
+        .and_then(|policy| policy.expired(&row, now_ms()))
+        .is_some()
+    {
+        return Err("the retained workspace has expired; run a new turn before opening it".into());
+    }
+    let taken = store
+        .sandboxes()
+        .take_sandbox(&row.branch, row.kind, &row.name)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "the retained allocation was claimed elsewhere".to_owned())?;
+    let result = (|| {
+        let info = provider
+            .inspect(&taken.name)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the retained provider allocation no longer exists".to_owned())?;
+        journal(&taken.name)?;
+        if info.state != SandboxState::Running {
+            provider
+                .resume(&taken.name)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(Acquired {
+            name: taken.name.clone(),
+            origin: SandboxOrigin::Resumed,
+        })
+    })();
+    if result.is_err() {
+        store
+            .sandboxes()
+            .put_sandbox_fenced(&taken, wanted.fence)
+            .map_err(|error| {
+                format!(
+                    "could not restore the retained allocation record after failed access: {error}"
+                )
+            })?;
+    }
+    result
+}
+
 /// Get the turn's sandbox for `record` through `provider`: the branch's
 /// kept one, resumed; else one branched from its seed's snapshot; else a
 /// fresh one from `spec`. `journal` is called with the sandbox's name

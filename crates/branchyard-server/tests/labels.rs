@@ -37,7 +37,11 @@ fn labeled_work_waits_for_a_worker_that_carries_its_labels_and_says_why() {
     assert_eq!(waiting.state, OperationState::Queued);
     let reason = waiting.waiting.unwrap();
     assert!(reason.contains("gpu, linux"), "{reason}");
-    assert!(reason.contains("[linux]"), "{reason}");
+    let host = branchyard::process_identity().0;
+    assert!(
+        reason.contains(&format!("[linux, worker-host:{host}]")),
+        "{reason}"
+    );
     let listed = client.repo("app").operations(Some("needs-gpu")).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, op.id);

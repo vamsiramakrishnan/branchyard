@@ -122,6 +122,8 @@ pub(crate) enum SandboxPlan {
     /// [`snapshots::acquire`].
     #[default]
     Default,
+    /// An interactive helper may resume only this branch's existing allocation.
+    Retained,
     /// A sandbox made for this turn already (a fan's branch of its prepared
     /// sandbox), whose `sandbox` step is journaled.
     Handed { name: String, origin: SandboxOrigin },
@@ -350,6 +352,43 @@ fn journal_sandbox(yard: &Yard, fence: &Fence, name: &str, extra: Value) -> Resu
 }
 
 impl Placement {
+    /// Stop owning cleanup after a workspace lease was lost. Recovery owns it.
+    pub(crate) fn detach_workspace(&mut self) {
+        match &mut self.kind {
+            Kind::Local(_) => {}
+            Kind::Sandbox { released, .. } => *released = true,
+            Kind::Substrate(actor) => actor.released = true,
+        }
+        self.service = None;
+    }
+
+    /// Execute an operator-controlled workspace helper through this placement.
+    pub(crate) fn exec_workspace(
+        &self,
+        argv: Vec<String>,
+        env: BTreeMap<OsString, OsString>,
+    ) -> Result<Box<dyn branchyard_sandbox::Process>, String> {
+        let spec = branchyard_sandbox::ExecSpec {
+            argv,
+            cwd: self.cwd().into(),
+            env,
+            writable: self.writable.clone(),
+        };
+        match &self.kind {
+            Kind::Local(_) => branchyard_runtime::LocalProvider::spawn(&spec)
+                .map(|process| Box::new(process) as Box<dyn branchyard_sandbox::Process>)
+                .map_err(|error| error.to_string()),
+            Kind::Sandbox { provider, name, .. } => provider
+                .exec(name, &spec)
+                .map_err(|error| error.to_string()),
+            Kind::Substrate(actor) => actor
+                .provider
+                .provider()
+                .exec(&actor.name, &spec)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     /// Prepare the record's provider: for a sandbox, get it now (kept,
     /// branched, handed over or fresh, as `plan` and the store say). A
     /// failure is the turn's failure reason.
@@ -411,10 +450,15 @@ impl Placement {
                     },
                 }
             }
-            SandboxPlan::Default => {
+            SandboxPlan::Default | SandboxPlan::Retained => {
                 let store = yard.store();
                 let environment = environment(yard, record, &key);
-                snapshots::acquire(
+                let acquire = if matches!(plan, SandboxPlan::Retained) {
+                    snapshots::acquire_retained
+                } else {
+                    snapshots::acquire
+                };
+                acquire(
                     &store,
                     provider.as_ref(),
                     &journal,
@@ -531,6 +575,19 @@ impl Placement {
         plan: &SandboxPlan,
         how: Copied<'_>,
     ) -> Result<Placement, String> {
+        // Copy inputs before the initial guest upload. Sandbox setup happens
+        // afterward, and its local copy alone cannot reach a copied worktree.
+        if let Some(workspace) = record.workspace.as_ref().filter(|state| !state.ready) {
+            let copied = crate::workspace::copy(
+                yard.root(),
+                &record.info.worktree,
+                &workspace.spec.copy,
+                None,
+            );
+            if !copied.ok {
+                return Err(copied.failure());
+            }
+        }
         let home = record
             .home
             .clone()
@@ -565,9 +622,14 @@ impl Placement {
                         }
                     })
             }),
-            SandboxPlan::Default => {
+            SandboxPlan::Default | SandboxPlan::Retained => {
                 let environment = environment(yard, record, &key);
-                snapshots::acquire(
+                let acquire = if matches!(plan, SandboxPlan::Retained) {
+                    snapshots::acquire_retained
+                } else {
+                    snapshots::acquire
+                };
+                acquire(
                     &store,
                     remote.provider(),
                     &journal,
@@ -727,6 +789,9 @@ impl Placement {
 
     /// Add a variable to the harness's environment.
     pub fn set_env(&mut self, name: &str, value: &str) {
+        if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return;
+        }
         match &mut self.kind {
             Kind::Local(env) => *env = env.clone().set(name, value),
             Kind::Sandbox { env, .. } => {
@@ -917,6 +982,9 @@ pub(crate) fn sandbox_env(
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let mut env = BTreeMap::from([(OsString::from("HOME"), OsString::from(home))]);
     for name in pass_env {
+        if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return Err("the operator manager token cannot be passed to a sandbox".into());
+        }
         let value = std::env::var_os(name)
             .ok_or_else(|| format!("{name} is to be passed to the sandbox but is not set"))?;
         env.insert(name.into(), value);
@@ -1042,6 +1110,20 @@ pub(crate) fn private_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_pass_through_refuses_operator_manager_credentials_before_reading_them() {
+        for name in [
+            branchyard_support::MANAGER_TOKEN_ENV,
+            "branchyard_manager_token",
+        ] {
+            let error = sandbox_env("/home/agent", &[name.into()]).unwrap_err();
+            assert_eq!(
+                error,
+                "the operator manager token cannot be passed to a sandbox"
+            );
+        }
+    }
 
     #[test]
     fn sandbox_names_fit_the_runtime() {

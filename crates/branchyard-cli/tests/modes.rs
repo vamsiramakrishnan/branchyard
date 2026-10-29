@@ -25,6 +25,42 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+#[test]
+fn knowledge_console_launch_needs_no_repository_and_stays_explicit() {
+    let scratch = branchyard_testkit::Scratch::new("knowledge-console-launch");
+    let run = |args: &[&str]| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_by"));
+        branchyard_testkit::hermetic(&mut command)
+            .current_dir(scratch.path())
+            .env("XDG_CONFIG_HOME", scratch.path().join("config"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let refused = run(&["serve", "--app", "--check"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("repository"),
+        "{}",
+        stderr(&refused)
+    );
+    let checked = run(&["serve", "--app", "--knowledge", "--check"]);
+    assert!(checked.status.success(), "{}", stderr(&checked));
+    assert!(stdout(&checked).contains("configuration ok"));
+    assert!(!scratch.path().join(".branchyard").exists());
+    assert!(!scratch.path().join(".git").exists());
+    for arguments in [
+        vec!["serve", "--help"],
+        vec!["help", "serve"],
+        vec!["worker", "--help"],
+        vec!["help", "worker"],
+    ] {
+        let help = run(&arguments);
+        assert!(help.status.success(), "{}", stderr(&help));
+        assert!(stdout(&help).contains("--knowledge"), "{}", stdout(&help));
+    }
+}
+
 /// The line of stderr that begins `by: `, which says where the run happens.
 fn banner(out: &Output) -> String {
     stderr(out)

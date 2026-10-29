@@ -65,11 +65,11 @@
     }
   },
   "tests": {
-    "total": 2887,
-    "ignored": 33,
+    "total": 3074,
+    "ignored": 34,
     "by_crate": {
       "branchyard": {
-        "tests": 928,
+        "tests": 953,
         "ignored": 17
       },
       "branchyard-bridge": {
@@ -77,11 +77,11 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 732,
+        "tests": 735,
         "ignored": 3
       },
       "branchyard-client": {
-        "tests": 21,
+        "tests": 30,
         "ignored": 0
       },
       "branchyard-config": {
@@ -101,7 +101,7 @@
         "ignored": 0
       },
       "branchyard-mcp": {
-        "tests": 27,
+        "tests": 39,
         "ignored": 0
       },
       "branchyard-microsandbox": {
@@ -121,7 +121,7 @@
         "ignored": 0
       },
       "branchyard-runtime": {
-        "tests": 49,
+        "tests": 50,
         "ignored": 0
       },
       "branchyard-sandbox": {
@@ -129,8 +129,8 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 293,
-        "ignored": 0
+        "tests": 430,
+        "ignored": 1
       },
       "branchyard-setup": {
         "tests": 89,
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 91,
+    "route_count": 123,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -181,6 +181,8 @@
       "/v1/inventory",
       "/v1/operations",
       "/v1/operations/{id}",
+      "/v1/projects",
+      "/v1/projects/{project}",
       "/v1/repos",
       "/v1/repos/{repo}/approvals",
       "/v1/repos/{repo}/approvals/{id}/allow",
@@ -191,6 +193,8 @@
       "/v1/repos/{repo}/branches/{branch}/artifacts",
       "/v1/repos/{repo}/branches/{branch}/artifacts/{id}",
       "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/content",
+      "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview",
+      "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/preview/assets/{asset}",
       "/v1/repos/{repo}/branches/{branch}/artifacts/{id}/share",
       "/v1/repos/{repo}/branches/{branch}/ask",
       "/v1/repos/{repo}/branches/{branch}/cancel",
@@ -255,7 +259,35 @@
       "/v1/triggers/{t}/fire/{token}",
       "/v1/triggers/{t}/runs",
       "/v1/triggers/{t}/secret",
-      "/v1/triggers/{t}/test"
+      "/v1/triggers/{t}/test",
+      "/v1/workspaces",
+      "/v1/workspaces/{workspace}",
+      "/v1/workspaces/{workspace}/actions/{action}",
+      "/v1/workspaces/{workspace}/artifacts",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/content",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/preview",
+      "/v1/workspaces/{workspace}/artifacts/{artifact}/preview/assets/{asset}",
+      "/v1/workspaces/{workspace}/comments",
+      "/v1/workspaces/{workspace}/finalize",
+      "/v1/workspaces/{workspace}/members",
+      "/v1/workspaces/{workspace}/members/{subject}",
+      "/v1/workspaces/{workspace}/presence",
+      "/v1/workspaces/{workspace}/sessions",
+      "/v1/workspaces/{workspace}/sessions/{session}/cancel",
+      "/v1/workspaces/{workspace}/sessions/{session}/messages",
+      "/v1/workspaces/{workspace}/sessions/{session}/pr",
+      "/v1/workspaces/{workspace}/sessions/{session}/pr/refresh",
+      "/v1/workspaces/{workspace}/sessions/{session}/runtime",
+      "/v1/workspaces/{workspace}/sessions/{session}/runtime/actions/{action}",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/input",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/output",
+      "/v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/resize",
+      "/v1/workspaces/{workspace}/sources",
+      "/v1/workspaces/{workspace}/sources/{source}/content",
+      "/v1/workspaces/{workspace}/sources/{source}/preview",
+      "/v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}"
     ]
   },
   "runtime": {

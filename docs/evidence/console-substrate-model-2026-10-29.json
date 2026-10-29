@@ -1,0 +1,211 @@
+{
+  "date": "2026-10-29T13:29:01Z",
+  "evidence": "live authenticated console HTTP and one native AGY model turn in a real GKE Substrate gVisor Actor, controlled from GCE",
+  "status": "passed",
+  "source_context": "7bd810bd",
+  "input_discovery_fix": "cf0592ce",
+  "binaries": {
+    "by": {
+      "sha256": "17761de4fca9538114ad18f3cbd2f2accd6b9ba535b6225c2a6462dfcdb9dd6b",
+      "version": "by 0.3.0"
+    },
+    "branchyard-server": {
+      "sha256": "91b3da87cb9f02bb2bf6804f41bbea72fa979a01784c9c423e2b564c67d3196f",
+      "version": "branchyard-server 0.3.0"
+    }
+  },
+  "harness": {
+    "name": "antigravity",
+    "executable": "agy",
+    "guest_version": "1.4.9",
+    "guest_version_evidence": "Signed native smoke against the identical immutable template before this turn; see substrate-gke-2026-10-29.json. The host-side AGY 1.4.10 binary was not used for this remote turn.",
+    "model": "gemini-3.8-flash-low"
+  },
+  "provider": {
+    "kind": "substrate",
+    "atespace": "branchyard",
+    "template": "agy-gvisor",
+    "actor_image": "ghcr.io/vamsiramakrishnan/branchyard-agy@sha256:46e177cc5e874614a04cbe2b06b6df374ab50296557f27ef77246f609dbc158d",
+    "egress_mode": "explicit unrestricted",
+    "credentials": "GEMINI_API_KEY by explicit environment-name grant; no OpenAI key, protected legacy credential or Gemini CLI"
+  },
+  "workspace_id": "01M63XHZ35R88P9224MYDV48QY",
+  "session_id": "s-01m63xhzbzwwe9yywky16mzf2p",
+  "native_session": "8f5328a0-6097-47fa-b679-099ddc7a1adb",
+  "operation_id": "op_eb89a7c5ca9e411baf083751",
+  "actor": "by-s-01m63xhzbzwwe9yywky16mzf2p-01m63xhzjxz2apybrpm2bpbmkt",
+  "native_turns": 1,
+  "native_tool_calls": 5,
+  "first_native_tool": {
+    "name": "read_file",
+    "args": {
+      "Path": "/workspace/.console-inputs/01M63XHZ35R88P9224MYDV48QY/s-01m63xhzbzwwe9yywky16mzf2p/INDEX.md"
+    }
+  },
+  "input_index": {
+    "session": "8f5328a0-6097-47fa-b679-099ddc7a1adb",
+    "provider": "substrate",
+    "harness": "antigravity",
+    "model": "gemini-3.8-flash-low",
+    "turns": 1,
+    "prompt_contains_exact_index": true,
+    "index_path": ".console-inputs/01M63XHZ35R88P9224MYDV48QY/s-01m63xhzbzwwe9yywky16mzf2p/INDEX.md",
+    "index_sha256": "2894ec7c205707750235dc6f1967b59ff0162e8265513a2a210d82dd169f1a2d",
+    "bytes": 640,
+    "no_source_contents": true
+  },
+  "source": {
+    "id": "01M63XHZBR70VWFAVECPER4RER",
+    "sha256": "22a42a6c95e4ec0a0d838ce10ac39f29c95b8a0bdab895f2dd582964414e9882",
+    "original_preserved": true,
+    "bytes": 70
+  },
+  "result": {
+    "value": {
+      "answer": "WorkflowAutomation: 15000, ManagedAgent: 21000, TOTAL: 36000"
+    },
+    "result_event": 24,
+    "result_error": null,
+    "git_candidate": null,
+    "native_status": "no_changes"
+  },
+  "artifact": {
+    "id": "art1",
+    "name": "annual-net-summary.csv",
+    "media_type": "text/csv",
+    "bytes": 86,
+    "download_sha256": "3025a1480e72b073fcf66a5d5937a3ce3e1a3e3e0f6f2f8ea79c1ade2caf48d8",
+    "storage_digest": {
+      "algorithm": "blake3",
+      "value": "f1bf9f30f824f6cacc375bcc0d3dd9d728f1c718665a83058f3d658187b68531"
+    },
+    "producer": "s-01m63xhzbzwwe9yywky16mzf2p",
+    "turn": 1,
+    "manifest_sha256": "2f1462057fc7847f955ee2ade481cf575b71ce5d71ef7f6c7c03419a4627333e",
+    "computed_values": {
+      "WorkflowAutomation": 15000,
+      "ManagedAgent": 21000,
+      "TOTAL": 36000
+    },
+    "authenticated_preview": {
+      "status": "passed",
+      "kind": "table",
+      "format": "csv",
+      "columns": [
+        "initiative",
+        "annual_net_usd"
+      ],
+      "rows": [
+        [
+          "WorkflowAutomation",
+          "15000"
+        ],
+        [
+          "ManagedAgent",
+          "21000"
+        ],
+        [
+          "TOTAL",
+          "36000"
+        ]
+      ],
+      "sheets": [],
+      "sheet": null,
+      "offset": 0,
+      "next_offset": null,
+      "warnings": []
+    },
+    "acceptance": {
+      "workspace_id": "01M63XHZ35R88P9224MYDV48QY",
+      "revision": 5,
+      "artifacts": [
+        "art1"
+      ],
+      "code_integration": "independent"
+    }
+  },
+  "runtime_after_default_destroy": {
+    "status": 200,
+    "response": {
+      "runtime": {
+        "provider": "substrate",
+        "allocation": null,
+        "remote": true,
+        "owner_host": "branchyard-validation-01/98af505e-0203-46ee-bda3-24f26d2025c2",
+        "port": 24614
+      },
+      "state": "absent",
+      "reason": null,
+      "can_pause": false,
+      "can_resume": false,
+      "can_suspend": false,
+      "can_destroy": false,
+      "terminal_available": false,
+      "terminal_reason": "this workspace has no retained remote allocation",
+      "preserves_sources": true,
+      "preserves_deliverables": true,
+      "terminal_persistent": false
+    }
+  },
+  "terminal_after_default_destroy": {
+    "status": 422,
+    "response": {
+      "error": {
+        "code": "unsupported",
+        "message": "unsupported: this branch has no retained remote allocation; enable pause retention before its next turn"
+      }
+    }
+  },
+  "capability_limit": "This attempt used destroy-on-exit. An absent allocation cannot provide a terminal, pause, resume or suspend; this does not claim those retained-allocation features are unsupported by Substrate.",
+  "cleanup": {
+    "owned_server_port": 8799,
+    "owned_server_exit": 0,
+    "native_all_atespace_actors": [],
+    "native_observed_at": "2026-10-29T13:29:52Z",
+    "worker_capacity_free": true,
+    "independent_native_record": "gke-final-pre-cleanup-native.log",
+    "infrastructure_cleanup": "Handed to the guarded GKE cleanup task after preserving all model and file evidence. This record does not assert completion of infrastructure deletion.",
+    "independent_artifact_check": "gke-model-artifact-independent-check.json verifies CSV bytes, computed values, preview rows and INDEX SHA256 against downloaded records."
+  },
+  "credential_file_scan": {
+    "scope": "owned files below64MiB",
+    "matches": []
+  },
+  "preserved_records": {
+    "directory": "branchyard-console-work-20261029/live-artifacts-substrate-model-indexed",
+    "files": {
+      "report.json": "d5eb9304ff59640edc1ec975acf7ec09a07e96c4bbefcd3cca499c1a3951574b",
+      "native.json": "39662ea72183f781ffdc8c14aa19b12a8d1f5a053b01732055aad178228f2d75",
+      "protocol.json": "1c4e4e743d626417e5355af896708cf26ae1844dd200bba448862b45b89c85e2",
+      "INDEX.md": "2894ec7c205707750235dc6f1967b59ff0162e8265513a2a210d82dd169f1a2d",
+      "annual-net-summary.csv": "3025a1480e72b073fcf66a5d5937a3ce3e1a3e3e0f6f2f8ea79c1ade2caf48d8"
+    },
+    "redacted_native_transcript": "live-substrate-indexed-transcript-redacted.json",
+    "redacted_native_transcript_bytes": 8429
+  },
+  "friction": [
+    {
+      "problem": "Pinned Substrate workers used SPIFFE Actor certificates, while the installed egress gateway required the removed ActorIdentity extension. The first model turn failed before tools with reset connections.",
+      "evidence": "Worker atunnel CONNECT403: actor certificate has no ActorIdentity. Same-Actor model-free TLS/HTTPS probes failed before and passed after the image-only fix.",
+      "resolution": "Updated only the owned egress gateway to the verified official compatible image; details and upstream references are in substrate-gke-2026-10-29.json.",
+      "compatible_egress_image": "cr.agentgateway.dev/agentgateway:v0.0.0-alpha.9e78d1da@sha256:8177311eb0444df2829cc00410147e960a3bd7261492f2c8d52b48be6d693a45"
+    },
+    {
+      "problem": "The next model turn searched capability directories for its CSV until the600s bound. Input paths were only in standing instructions; workspace.copy also ran on the host after the guest worktree upload, leaving selected inputs absent in copied guests.",
+      "resolution": "One bounded metadata index is linked in the actual native prompt and copied with selected immutable bytes. Declared copies are staged before the first guest upload.",
+      "hermetic_evidence": "The native-prompt regression failed before its hint; a copied fake Substrate native tool then failed to find the index before the transport fix. All3 focused regressions pass, with source SHA256, artifact BLAKE3, hostile metadata, unrelated-source exclusion, digest mismatch rejection and index-size coverage.",
+      "live_evidence": "The first corrected native tool opened the exact /workspace/.console-inputs/.../INDEX.md, then the source; one Python command wrote the output and manifest. The main operation settled in about33s."
+    },
+    {
+      "problem": "A queued operation can settle while the harness has no valid deliverable, so operation state alone is insufficient acceptance evidence.",
+      "resolution": "Qualification checked native result_event/result_error, captured producer/turn, downloaded bytes, computed values and explicit current-revision acceptance."
+    }
+  ],
+  "not_done": [
+    "Retained allocation PTY, pause, suspend, resume and memory checkpoint/tag workflows in a real cluster",
+    "Substrate follow-up/resume, concurrent model writers, crash recovery or production load",
+    "DOCX/XLSX/PPTX authoring inside this Substrate Actor; those formats ran with the local provider on GCE in the separate knowledge-work record",
+    "Other harness/model combinations, connector consent or WIF identity inheritance",
+    "Provider billing and complete provider request accounting"
+  ]
+}

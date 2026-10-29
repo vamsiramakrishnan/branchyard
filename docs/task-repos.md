@@ -41,6 +41,32 @@ The record continues the lineage, as checkpoints do. A rewind to checkpoint N pu
 - **A task with no files** (`by task new --no-files`) has the same kind of repository, starting from an empty tree: its conversation and the files its attempts write are its results.
 - **Large and binary files** in a task's own repository are not stored in git history: see below.
 
+### Durable server allocation
+
+Servers reserve task identity before allocating a private repository. Call
+`tasks::reserve(&NewTask)` with an explicit operator-owned `home` and persist the
+returned `TaskReservation` in the same transaction as queue admission. Reservation
+performs no filesystem writes. It freezes the ID, creation time, options and
+absolute location. `work_root()` identifies the exact yard to resolve after a
+restart; never return this host path to browser clients.
+
+`tasks::initialize_reserved` initializes or resumes that location under an
+operating-system lock. An immutable local intent rejects reuse of an ID with
+different options. Partial initialization stays in place for retry. Once the
+initial commit exists, recovery preserves it rather than taking another folder
+snapshot. Once the task record exists, replay returns the task without changing
+its attempts, branches or native conversations. `TaskReservation::inspect`
+reads a completed task without creating anything. None of these calls starts a
+model turn; queue recovery must reconcile uncertain turns through the existing
+execution machinery.
+
+For an existing registered repository, `tasks::reserve_repository` allocates a
+`Task` record without touching the yard. Persist that record with admission and
+publish it using `tasks::initialize_repository`. It compares the immutable intent
+and returns the current task on replay. Each isolated session then supplies
+`TaskOptions::join_task` with the reserved task ID. Reserving again always creates
+a new identity, so retries must use the original persisted reservation.
+
 ### Attempts on a folder, and accepting one
 
 Attempts never touch your folder. Each runs in its own worktree of the task's repository (`work/.branchyard/worktrees/<attempt>`), from `main`, like any branch. To accept one (`by task accept`), Branchyard:

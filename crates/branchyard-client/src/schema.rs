@@ -108,6 +108,37 @@ pub fn contract() -> Value {
     entry::<api::OperationState>("OperationState", &mut types);
     entry::<api::OperationResult>("OperationResult", &mut types);
     entry::<api::Operation>("Operation", &mut types);
+    entry::<api::OperationView>("OperationView", &mut types);
+    entry::<crate::workspace_api::ProjectSource>("workspace.ProjectSource", &mut types);
+    entry::<crate::workspace_api::ResultMode>("workspace.ResultMode", &mut types);
+    entry::<crate::workspace_api::SessionAccess>("workspace.SessionAccess", &mut types);
+    entry::<crate::workspace_api::Role>("workspace.Role", &mut types);
+    entry::<crate::workspace_api::Project>("workspace.Project", &mut types);
+    entry::<crate::workspace_api::CreateProjectRequest>(
+        "workspace.CreateProjectRequest",
+        &mut types,
+    );
+    entry::<crate::workspace_api::CreateWorkspaceRequest>(
+        "workspace.CreateWorkspaceRequest",
+        &mut types,
+    );
+    entry::<crate::workspace_api::Workspace>("workspace.Workspace", &mut types);
+    entry::<crate::workspace_api::Session>("workspace.Session", &mut types);
+    entry::<crate::workspace_api::StartSessionRequest>("workspace.StartSessionRequest", &mut types);
+    entry::<crate::workspace_api::MessageRequest>("workspace.MessageRequest", &mut types);
+    entry::<crate::workspace_api::Message>("workspace.Message", &mut types);
+    entry::<crate::workspace_api::MessagePage>("workspace.MessagePage", &mut types);
+    entry::<crate::workspace_api::Source>("workspace.Source", &mut types);
+    entry::<crate::workspace_api::FinalizeRequest>("workspace.FinalizeRequest", &mut types);
+    entry::<crate::workspace_api::Member>("workspace.Member", &mut types);
+    entry::<crate::workspace_api::MemberRequest>("workspace.MemberRequest", &mut types);
+    entry::<crate::workspace_api::Comment>("workspace.Comment", &mut types);
+    entry::<crate::workspace_api::CommentRequest>("workspace.CommentRequest", &mut types);
+    entry::<crate::workspace_api::Presence>("workspace.Presence", &mut types);
+    entry::<crate::workspace_api::WorkspaceOperation>("workspace.WorkspaceOperation", &mut types);
+    entry::<crate::workspace_api::ProjectList>("workspace.ProjectList", &mut types);
+    entry::<crate::workspace_api::WorkspaceList>("workspace.WorkspaceList", &mut types);
+    entry::<crate::workspace_api::SessionList>("workspace.SessionList", &mut types);
     entry::<api::ErrorBody>("ErrorBody", &mut types);
     entry::<api::ErrorResponse>("ErrorResponse", &mut types);
     entry::<api::FeedEntry>("FeedEntry", &mut types);

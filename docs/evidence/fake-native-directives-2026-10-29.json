@@ -1,0 +1,53 @@
+{
+  "date": "2026-10-29",
+  "scope": "hermetic fake ACP protocol and managed console sessions; no model or cloud calls",
+  "source_base": "c6083547fdab2b314b4dce8804319458328f7254",
+  "ci_failure": {
+    "run": 40960255350,
+    "job": 123751519380,
+    "test": "named_writer_sessions_keep_separate_attempts_and_native_conversations",
+    "observed": "operation remained Running for 60 seconds with a live fake agent",
+    "historical_task_id_available": false,
+    "exact_historical_trigger_proven": false
+  },
+  "reproducer": {
+    "transport": "real fake-agent JSON-RPC stdio; input closed after one submitted prompt",
+    "ordinary_prompt": "WHOAMI",
+    "path_prompt": "Skills and tooling are available. Read /evaluation/HANG/tasks/task/INDEX.md\n\nWHOAMI",
+    "before_prompt_response_received": {
+      "ordinary": true,
+      "capability_path": false,
+      "explicit_hold": false
+    },
+    "after_prompt_response_received": {
+      "ordinary": true,
+      "capability_path": true,
+      "explicit_hold": false
+    }
+  },
+  "grammar": "Directives require complete whitespace-delimited words; HANG WRITE remains composed and PERMISSION_BY_ID still requests permission. ENV arguments follow the exact ENV word.",
+  "real_provider_code_changed": false,
+  "operation_timeout_changed": false,
+  "not_done": [
+    "recover the failed CI task ID or runner state"
+  ],
+  "verification": {
+    "runtime_fake_agent": {
+      "command": "cargo test -p branchyard-runtime --bin fake-acp-agent --locked --offline",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    "console_foundation": {
+      "command": "cargo test -p branchyard-server --features schema --test console_foundation --locked --offline",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    "strict_clippy": [
+      "branchyard-runtime --bin fake-acp-agent",
+      "branchyard-server --features schema --test console_foundation"
+    ],
+    "genuine_hold_cancellation_and_membership_recheck": "passed"
+  }
+}

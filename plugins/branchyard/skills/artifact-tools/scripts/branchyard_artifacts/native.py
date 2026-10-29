@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -10,9 +12,186 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from .common import ArtifactError, Unavailable, library, load_json, output_file, report, request
 from .doctor import uno_python
+
+MAX_RENDER_PAGES = 500
+MAX_RENDER_DIMENSION = 2048
+MAX_RENDER_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_RENDER_PIXELS = 16_777_216
+RENDER_TIMEOUT_SECONDS = 60
+
+
+def write_hardened_profile(profile_dir: Path) -> str:
+    """Create a fresh per-call LibreOffice user profile with macros and link updates disabled."""
+    user_dir = profile_dir / "user"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    xcu = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<oor:items xmlns:oor="http://openoffice.org/2001/registry" '
+        'xmlns:xs="http://www.w3.org/2001/XMLSchema" '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n'
+        '  <item oor:path="/org.openoffice.Office.Common/Security/Scripting">'
+        '<prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>\n'
+        '  <item oor:path="/org.openoffice.Office.Common/Security/Scripting">'
+        '<prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>\n'
+        '  <item oor:path="/org.openoffice.Office.Calc/Content/Update">'
+        '<prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>\n'
+        '  <item oor:path="/org.openoffice.Office.Writer/Content/Update">'
+        '<prop oor:name="Link" oor:op="fuse"><value>0</value></prop></item>\n'
+        "</oor:items>\n"
+    )
+    (user_dir / "registrymodifications.xcu").write_text(xcu, encoding="utf-8")
+    return profile_dir.as_uri()
+
+
+def render_page(
+    path: Path,
+    out_image: Path,
+    *,
+    page: int = 1,
+    max_pages: int = MAX_RENDER_PAGES,
+    max_dimension: int = MAX_RENDER_DIMENSION,
+    max_output_bytes: int = MAX_RENDER_IMAGE_BYTES,
+    timeout: int = RENDER_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Render and verify a single bounded page without rasterizing the entire document."""
+    if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+        raise ArtifactError("page must be a positive 1-based integer")
+    if page > max_pages:
+        raise ArtifactError("Requested page " + str(page) + " exceeds the " + str(max_pages) + "-page limit")
+    suffix = path.suffix.lower()
+    raster = shutil.which("pdftoppm")
+    office = shutil.which("libreoffice") or shutil.which("soffice")
+    if not raster or (suffix != ".pdf" and not office):
+        raise Unavailable(
+            "Page preview requires pdftoppm (Poppler) and, for Office documents, LibreOffice; "
+            "install poppler-utils and libreoffice or use the branchyard-artifacts runtime image"
+        )
+    pypdf = library("pypdf")
+    pil_image = library("PIL.Image")
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="branchyard-page-render-") as temporary:
+        work = Path(temporary)
+        input_dir = work / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        staged_input = input_dir / path.name
+        shutil.copyfile(path, staged_input)
+        if suffix == ".pdf":
+            pdf = staged_input
+        else:
+            profile = write_hardened_profile(work / "profile")
+            try:
+                subprocess.run(
+                    [
+                        str(office),
+                        "-env:UserInstallation=" + profile,
+                        "--headless",
+                        "--nolockcheck",
+                        "--nodefault",
+                        "--nofirststartwizard",
+                        "--norestore",
+                        "--convert-to",
+                        "pdf",
+                        "--outdir",
+                        str(work),
+                        str(staged_input),
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise ArtifactError("LibreOffice conversion timed out") from error
+            except (OSError, subprocess.SubprocessError) as error:
+                raise ArtifactError("LibreOffice failed to convert " + escape(path.name) + " to PDF") from error
+            pdf = work / (path.stem + ".pdf")
+            if not pdf.is_file() or pdf.stat().st_size == 0:
+                raise ArtifactError("LibreOffice completed without producing the requested PDF")
+        try:
+            reader = pypdf.PdfReader(str(pdf), strict=True)
+        except Exception as error:
+            if isinstance(error, (ArtifactError, Unavailable)):
+                raise
+            raise ArtifactError("Unable to read PDF page structure: " + str(error)) from error
+        if reader.is_encrypted:
+            raise ArtifactError("Encrypted PDF requires an explicit decryption workflow")
+        count = len(reader.pages)
+        if count < 1:
+            raise ArtifactError("Renderer produced no pages")
+        if count > max_pages:
+            raise ArtifactError(
+                "Document page count (" + str(count) + ") exceeds the " + str(max_pages) + "-page limit"
+            )
+        if page > count:
+            raise ArtifactError("Requested page " + str(page) + " exceeds document page count (" + str(count) + ")")
+        target_page = reader.pages[page - 1]
+        width_pt = float(target_page.mediabox.width)
+        height_pt = float(target_page.mediabox.height)
+        if not math.isfinite(width_pt) or not math.isfinite(height_pt) or width_pt <= 0 or height_pt <= 0:
+            raise ArtifactError("PDF page has invalid dimensions")
+        dpi = min(96, max(18, int(max_dimension * 72.0 / max(width_pt, height_pt))))
+        try:
+            subprocess.run(
+                [
+                    str(raster),
+                    "-f",
+                    str(page),
+                    "-l",
+                    str(page),
+                    "-r",
+                    str(dpi),
+                    "-scale-to",
+                    str(max_dimension),
+                    "-png",
+                    str(pdf),
+                    str(work / "page"),
+                ],
+                capture_output=True,
+                check=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ArtifactError("Poppler page rasterization timed out") from error
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ArtifactError("Poppler failed to rasterize page " + str(page)) from error
+        images = sorted(work.glob("page*.png"))
+        if len(images) != 1:
+            raise ArtifactError("Raster page output differs from the requested single page")
+        raw_png = images[0].read_bytes()
+        if not raw_png or len(raw_png) > max_output_bytes:
+            raise ArtifactError("Rendered page image exceeds the output byte limit")
+        try:
+            with pil_image.open(io.BytesIO(raw_png)) as verified:
+                if verified.width <= 0 or verified.height <= 0 or verified.width * verified.height > MAX_RENDER_PIXELS:
+                    raise ArtifactError("Rendered page dimensions exceed preview pixel bounds")
+                verified.verify()
+            with pil_image.open(io.BytesIO(raw_png)) as decoded:
+                decoded.load()
+                if decoded.width > max_dimension or decoded.height > max_dimension:
+                    decoded.thumbnail((max_dimension, max_dimension))
+                    warnings.append("Scaled rendered page within " + str(max_dimension) + "px dimension bound")
+                    buffer = io.BytesIO()
+                    decoded.save(buffer, format="PNG")
+                    raw_png = buffer.getvalue()
+                width, height = decoded.width, decoded.height
+        except Exception as error:
+            if isinstance(error, (ArtifactError, Unavailable)):
+                raise
+            raise ArtifactError("Rendered PNG failed image verification") from error
+        if not raw_png or len(raw_png) > max_output_bytes:
+            raise ArtifactError("Rendered page image exceeds the output byte limit")
+        out_image.parent.mkdir(parents=True, exist_ok=True)
+        with output_file(out_image) as staged:
+            staged.write_bytes(raw_png)
+    return {
+        "pages": count,
+        "width": width,
+        "height": height,
+        "warnings": warnings,
+    }
 
 
 def render(path: Path, out: Path) -> dict[str, Any]:
@@ -30,7 +209,7 @@ def render(path: Path, out: Path) -> dict[str, Any]:
             pdf = work / "preview.pdf"
             shutil.copyfile(path, pdf)
         else:
-            profile = (work / "profile").as_uri()
+            profile = write_hardened_profile(work / "profile")
             subprocess.run(
                 [
                     str(office),

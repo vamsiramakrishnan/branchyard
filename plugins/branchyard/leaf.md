@@ -59,6 +59,20 @@ The same operations are the `branchyard` MCP server's tools, and the
 `branchyard` Python module's functions. Anything else, such as another
 branch's work, is refused with the reason.
 
+The external workspace manager, `by mcp manager --url URL --token-file FILE`,
+is an operator command and refuses managed turns. Its separate HTTP credential
+does not expand your branch's permissions. Use your branch-scoped tools here.
+The operator-only `BRANCHYARD_MANAGER_TOKEN` is never forwarded to harnesses.
+An operator starts a repository-free console with `by serve --app --knowledge`.
+This opt-in keeps configured storage and quotas and does not expand your grant.
+Its `workspace_action` needs `revision` from `inspect_workspace`. On
+`revision_conflict`, inspect again before explicitly proposing a new action with
+a new key. Never refresh and resubmit automatically.
+Operator sessions for a harness without routed tool approvals require explicit
+`unapproved_tools` acknowledgment and server permission. It defaults to false.
+That manager bounds its JSON responses and returns an explicit error for large
+results. Keep large documents in artifacts and return a focused answer here.
+
 ## Substrate setup and readiness
 
 `by substrate setup --image IMAGE --storage URI --plan` previews the saved
@@ -77,3 +91,6 @@ forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
 `--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
 connection flags. See the Substrate setup documentation for image and pool prerequisites.
+For GKE, an operator can use `tools/substrate_gke.py --atenet-dataplane=agentgateway`
+with the required target options. This pins a compatible gateway before installation
+from a private source export; the default Envoy path is unchanged.

@@ -10,8 +10,34 @@ Surfaces:
 - **HTTP**: the server's API (`by serve`; see [the server reference](server.md)).
 - **client**: `branchyard-client`, the typed Rust client of that API.
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
+- **workspace manager MCP**: an external operator agent starts `by mcp manager --url URL --token-file FILE`, with optional `--ca-file FILE`. Its separate HTTP credential reaches the same authorized project, workspace, session, artifact, lifecycle and operation actions as the console. It refuses managed harness turns and never adds account authority to the delegation tools. See [workspace management](workspace-management.md).
 
-The server registers <!-- fact:http.route_count -->91<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->123<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+
+The external manager bounds each tool's text and structured JSON payload to
+32 KiB. Larger responses return an explicit error with small identifiers and
+cursors. Artifact previews default to 25 rows. Narrow the preview or request a
+focused calculation instead of loading a large document into the lead's context.
+
+The manager's `workspace_action` requires `revision` from `inspect_workspace`,
+alongside the workspace, action and idempotency key. A `revision_conflict` is
+returned without an automatic retry. Inspect again before explicitly proposing
+a new action with a new key.
+
+The PR gateway exposes `GET /v1/workspaces/{workspace}/sessions/{session}/pr`
+for cached PR/check observations. `POST /v1/workspaces/{workspace}/sessions/{session}/pr`
+accepts optional `title`, `base` and `draft`; `POST /v1/workspaces/{workspace}/sessions/{session}/pr/refresh`
+accepts `{}`. Both POST routes require `Idempotency-Key` and return the existing
+durable operation envelope with status 202. The embedding server supplies live
+console authorization and queue callbacks. See [workspace management](workspace-management.md).
+
+The standard server now installs the runtime and PR gateways. Session creation
+accepts a typed `provider` subject to the ordinary operator allowlist. Resource
+actions and PR jobs use native branch locks and the shared durable queue, pinned
+to their execution host. Successful operations expose `result.runtime` or
+`result.pull_request`. Uncertain publication stays interrupted on same-key retry.
+Profiles without routed tool approvals also need explicit `unapproved_tools`
+acknowledgment, default false, plus the server operator's permission.
 
 **yes** means supported; **no** gives the reason; a server opt-in is named where the server's operator must allow something first.
 
@@ -212,6 +238,13 @@ A server-only addition: identity, scopes and quotas are meaningful only where mo
 | `by worker` | needed a token like a server | needs no `tokens` or `credentials`: it runs each operation as the principal recorded when it was admitted |
 
 ## Changed with the clap command line
+
+An operator can launch a repository-free console with `by serve --app --knowledge`.
+The same `--knowledge` opt-in is available to `branchyard-server` and `by worker`;
+workers still need their existing database configuration. Without an explicit
+repository or configuration, this mode stores state in the launch directory's
+`.branchyard/server` and managed work in its `knowledge/` directory. Configured
+roots and quotas retain their values. Managed knowledge remains disabled by default.
 
 Every `by` command, flag and JSON output is unchanged; the parsing around them is stricter and the help is generated. See [command line](cli.md).
 
@@ -951,6 +984,9 @@ forwarded TLS accepts `--substrate-server-name NAME`. Actor egress is explicit:
 `--substrate-egress deny`, `--substrate-egress unrestricted`, or repeatable
 `--substrate-allow-host HOST`. Saved `[substrate]` configuration avoids repeating
 connection flags. See the Substrate setup documentation for image and pool prerequisites.
+For GKE, an operator can use `tools/substrate_gke.py --atenet-dataplane=agentgateway`
+with the required target options. This pins a compatible gateway before installation
+from a private source export; the default Envoy path is unchanged.
 
 ## Cooperative native harness teams
 

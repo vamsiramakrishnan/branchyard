@@ -1,0 +1,98 @@
+# Console validation and setup notes, 29 October 2026
+
+This record covers the 0.3.0 release candidate on `feat/workspace-console`.
+The desktop UI was merged at `51fb6af4`, the workspace UI at `4e0c74bb`,
+and the permission and preview integration at `321b01a5`. The workspace merge
+had one conflict in `docs/README.md`; the resolution kept both the preview
+component guide and the deterministic fixture guide. Publication is pending.
+
+Hermetic verification on the integrated tree passed the companion HTTP suite
+with nine tests, the desktop browser test, the workspace browser test, and the
+server library suite with 255 passed and one existing ignored test. The
+companion library filter passed 19 tests. Browser previews use explicit fake
+metadata and PNG responses. Fake agents produce the captured files; original
+bytes, downloads, session continuation and acceptance use the real server.
+Not done in these results: live models, native document conversion, remote
+provider execution, Safari, Firefox, a real phone or a screen reader.
+
+A separate live GCE run on 29 October used Docker 29.1.3, Python 3.11.14,
+LibreOffice 7.4.7.2 and Poppler 22.12.0. The recorded server identifies itself
+as 0.2.1; this is evidence for the converter patch, not the final 0.3.0 binary.
+CSV tables, XLSX tables and pages, DOCX pages and PPTX pages returned authenticated
+HTTP 200 responses. Original SHA-256 values were unchanged, unauthenticated
+requests were refused, the temporary server stopped, and no preview containers
+remained running. See the [converter record](evidence/console-document-gce-2026-10-29.json).
+Not done in that record: a model turn, a browser workflow, GKE conversion or
+production load testing.
+
+The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. The corrected GKE/Substrate model workflow also passed; all owned temporary cloud resources were verified removed. Publication is pending. See the [cleanup record](evidence/substrate-gke-2026-10-29.json) for exact resource checks.
+The earlier GKE smoke check exercised the native Control API, an actor, a
+byte-preserving file round trip and AGY 1.4.9's version command using the 0.3.0
+CLI. The later model workflow is recorded separately below. Not done: final release
+publication and an Agent Compute Engine preview run, which is excluded because
+preview access is unavailable.
+
+An initial live console run on GKE created an actor and copied its inputs,
+but AGY's model request failed before any response, usage or tool call. Worker
+atunnel logs show the egress gateway returning `403 Forbidden: actor certificate
+has no ActorIdentity`. The native actor was destroyed after the failure;
+there was no local fallback and no artifact acceptance. A compatible upstream gateway image restored verified TLS in the same model-free actor. A later bounded run exposed missing input discovery and an upload ordering bug. After both fixes, AGY 1.4.9 with `gemini-3.8-flash-low` completed a native turn in about 33 seconds and five tools. It read the guest input index first, verified the copied source, produced a CSV with the expected totals, and passed capture, authenticated preview, download and acceptance. See the [live Substrate record](evidence/console-substrate-model-2026-10-29.json). Not done: retained-allocation terminals, pause/resume, live microVM installation or other model combinations.
+
+## Friction found during setup
+
+| What failed | Cause | Resolution or remaining work |
+|---|---|---|
+| Fast checks could not find ruff | The system Python did not have CI's tools | Use a private environment with `ruff==0.15.8` and `mypy==2.4.0`. |
+| The workspace browser could not create its Office fixtures | Its Python lacked the artifact libraries | Install the pinned artifact requirements in the environment used to run the test. A skipped browser run is not a pass. |
+| An original UI test expected every workspace preview to return 404 | The UI branch predates the mounted preview routes | Test successful table and page previews explicitly, and retain a separate older-server 404 case. |
+| A viewer was offered writer actions | Token scope checks omitted workspace membership | Read `current_role` and `capabilities.can_run` before offering uploads, sessions, continuation or acceptance. The server remains authoritative. |
+| AGY start requests could not acknowledge tool-approval limitations | Permission policy and harness approval support are separate contracts | Add a separate, unchecked acknowledgment. The operator must permit it too; reviewers remain constrained. |
+| A session form stayed disabled after initialization completed | Readiness was captured only when the form opened | Recompute the Start button's state when workspace data changes. |
+| The GCE Python had no pip, ensurepip or venv support | Minimal host Python packaging | Bootstrap an owned virtual environment with uv and install the hash-pinned artifact requirements there. |
+| Bubblewrap failed while configuring loopback | The host's AppArmor user-namespace policy restricted capabilities | Keep host policy unchanged. Explicitly configure the bounded Docker renderer; never fall back to unsandboxed conversion. |
+| LibreOffice exited without a PDF in the container | The `gen` backend attempted to open an X display | Use the headless `svp` backend. |
+| Parallel Rust tests intermittently reported no Git author | A fixture changed global Git environment variables while other tests ran | Remove the fixture mutation and run verification with an explicit sterile Git environment. |
+| The stale Unix socket test intermittently refused a rebind after dropping its listener | A concurrent fork can retain a close-on-exec listener descriptor until exec | Keep refusing live duplicated listeners. Use the shared wait for the last owner to close before testing stale-socket replacement. The [descriptor probe and server regression](evidence/unix-socket-teardown-2026-10-29.json) preserve the private-directory and regular-file checks. |
+| An ordinary fake-agent prompt could hang after capability paths were prepended | Fake directives matched substrings in paths and generated task IDs, so a path containing `HANG` could hold the turn open | Match complete directive words and retain composed commands. The session regression uses a managed path containing directive names for both initial turns and continuation; stage diagnostics print only names and operation IDs. The [protocol probe](evidence/fake-native-directives-2026-10-29.json) distinguishes the reproduced trigger from the original CI timeout, whose task ID was not retained. |
+| A pre-push check read fixture commits from the integration repository | Git exports repository and index context into hooks; nested checks inherited it | Clear every Git-local environment variable before checks start. A regression proves another scratch repository stays separate. The refused push's fixture commit was retained under a backup reference, and the branch and index were restored to the saved integration commit without rewriting working files. |
+| Operation reads exposed a hidden repository name or failed on a controller without its files | The console guard reused local source resolution before the existing opaque visibility check | Check current repository grants and durable workspace membership independently of a local yard. Hidden operations retain `404 unknown_operation`, and native file access still requires the source. |
+| A cancellation test reported an exited check as alive | Its `/proc` file disappeared between a directory probe and a negated `grep` | Use the shared process-aware wait and require both a deliberately blocked check and its child to exit. Production cancellation behavior is unchanged. |
+| A managed conversation showed the operator's storage path | The message response copied native text without the redaction used by other workspace views | Redact the configured managed root in the response only. HTTP tests cover configured and default roots, unchanged repository messages, cursors and original native event bytes. |
+| macOS ARM packaging never obtained a runner | `macos-14` was in GitHub's scheduled 29 October retirement outage | Move both builds and native installer checks to `macos-15`; keep Intel on `macos-15-intel`. |
+| A schema test could not validate an operation response | A generic JSON root concealed the actual operation shape | Use the typed flat operation response and namespaced workspace schema roots. |
+| Bucket creation rejected `--labels` | The installed gcloud required a separate label update | Create, retain the exact creation receipt, then update labels. Refuse to adopt an ambiguous pre-existing bucket. |
+| The evaluation database allocated 500 GiB | The pinned upstream database manifest has a separate PVC | Use the supported smaller evaluation override, record PVC/PV identities and verify disk reclamation during cleanup. |
+| A Ready Substrate worker had no scheduling capacity after replacing the empty database | Upstream reports worker capacity once at process startup | Replace only the owned worker Pod after verifying its UID and empty assignment state; confirm capacity registration before retrying. |
+| Concurrent session admission returned an internal revision conflict | Workspace and tenant-quota compare-and-set updates competed | Retry rolled-back admission conflicts with the same request key after revalidating access, state and quota. The synchronized regression now passes on the integrated source. |
+| An AGY follow-up lost its original tool permissions | Console continuation rebuilt the default-deny policy instead of retaining the session policy | Persist and reapply the validated session policy while preserving current operator and caller checks. Command-requiring allow, deny, legacy-session and reviewer regressions now pass. The stale-result guard refused acceptance after the incomplete turn. |
+| Manager archive and restore requests were refused | The manager's lifecycle body omitted the workspace revision required by the server | Require an unsigned revision in the typed manager action and MCP schema, forward it exactly and return stale conflicts without automatic retries. |
+| A remote model searched capability files instead of finding its selected CSV | Input paths were only in standing configuration, and staged source names were opaque IDs | Add a bounded per-attempt input index and its exact relative path in the initial native prompt. Preserve source grants, immutable bytes and digest algorithms; do not inline source contents or the full catalog. The local, copied fake-provider and real GKE model checks now pass. |
+| Copied guests could not open selected inputs | The initial worktree upload ran before workspace input copies were staged | Stage validated workspace copies before the initial upload. The copied-provider regression reads and hashes the granted bytes, and the real GKE model reads the same index and source. |
+
+## Remaining product gaps
+
+The console's new-session form supports model selection and explicit tool
+acknowledgment. Remote provider options currently use the typed API, Python
+client or manager MCP; a local executable list is not proof that a remote
+worker, template or model login is ready. Operator-approved execution presets
+would give the browser a useful remote selector without asking users to enter
+server credential paths.
+
+Source names currently use an ASCII header representation. Preserve arbitrary
+Unicode titles through an explicit encoded metadata contract before claiming
+full filename support. Source preview routes exist; the Sources panel currently
+offers downloads. Active application previews need a separate origin and are
+not served as trusted console HTML.
+
+Legacy repository-wide lists and event streams require access to every
+workspace sharing that repository, because those responses do not yet filter
+each native record. Branch-specific and workspace routes keep their own
+membership checks. Per-resource filtering is needed before those aggregate
+routes can support people with different workspace memberships on one repository.
+
+Use the [workspace manager](workspace-management.md),
+[runtime guide](workspace-runtime.md), [preview guide](artifact-previews.md) and
+[GKE guide](substrate-gke.md) for the supported controls. The earlier
+[remote validation record](remote-validation-2026-10-28.md) covers its own
+Microsandbox, recipe and model runs; it does not replace validation of this
+release candidate.

@@ -1030,6 +1030,9 @@ fn run(
     if let Some(parent) = &turn.options.trace_parent {
         placement.set_env(crate::ENV_TRACEPARENT, parent);
     }
+    // An operator's manager credential never belongs to a native agent turn,
+    // including provider pass-through and provisioned environment entries.
+    placement.remove_env(branchyard_support::MANAGER_TOKEN_ENV);
     // The branch's network policy: its proxy's variables last, so nothing
     // above replaces them, and its namespace when the harness starts. The
     // proxy lives with the placement, after the harness is gone.
@@ -1533,6 +1536,13 @@ fn run(
                     })?;
                 }
                 recorder.record(Activity::Prompt(submission.prompt.clone()))?;
+                // Observers can apply a durable cancellation intent at this last
+                // boundary. Do not send a model prompt after that cancellation.
+                if let Some(by) = store.backend().cancel_requested(fence)? {
+                    crate::inbox::abandon_submit(&store, fence, &submission)?;
+                    kill = true;
+                    break End::cancelled(by);
+                }
                 let prompt = format!("{}\n\n{}", provisioned.capabilities, submission.prompt);
                 match session.submit(&prompt) {
                     Ok(n) => {

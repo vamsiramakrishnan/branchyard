@@ -603,6 +603,51 @@ fn mcp_lists_its_tools_without_a_branch_or_a_token() {
 }
 
 #[test]
+fn mcp_manager_help_and_child_guard_work_without_a_repository() {
+    let repo = Repo::new();
+    // Operator startup must not parse the current directory's task defaults.
+    fs::write(repo.dir.join("branchyard.toml"), "[invalid toml").unwrap();
+    let help = repo.outside(&["mcp", "manager", "--help"]);
+    assert!(help.status.success(), "{}", stderr(&help));
+    assert!(stdout(&help).contains("--token-file <FILE>"));
+    assert!(stdout(&help).contains("--ca-file <FILE>"));
+    for reserved in [branchyard::ENV_BRANCH, branchyard::ENV_TOKEN] {
+        let out = branchyard_testkit::hermetic(&mut Command::new(env!("CARGO_BIN_EXE_by")))
+            .args([
+                "mcp",
+                "manager",
+                "--url",
+                "http://127.0.0.1:1",
+                "--token-file",
+            ])
+            .arg(repo.dir.join("does-not-exist.token"))
+            .arg("--json")
+            .current_dir(&repo.dir)
+            .env(reserved, "fixture-managed-authority")
+            .env(
+                branchyard_support::MANAGER_TOKEN_ENV,
+                "fixture-operator-secret",
+            )
+            .output()
+            .unwrap();
+        let error = envelope(&out);
+        assert_eq!(out.status.code(), Some(3), "{error}");
+        assert_eq!(error["kind"], "config");
+        assert!(
+            error["message"].as_str().unwrap().contains("managed"),
+            "{error}"
+        );
+        assert_eq!(error["next"], serde_json::json!(["by mcp manager --help"]));
+        assert!(!stdout(&out).contains("fixture-operator-secret"));
+        assert!(!stderr(&out).contains("fixture-operator-secret"));
+        assert!(
+            !stdout(&out).contains("does-not-exist"),
+            "guard must precede token loading: {error}"
+        );
+    }
+}
+
+#[test]
 fn a_profile_that_cannot_route_approvals_says_how_to_allow_it() {
     let repo = Repo::new();
     // A PATH with git, sh and a `pi` that only knows its version: the

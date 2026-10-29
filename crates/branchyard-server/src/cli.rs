@@ -254,8 +254,11 @@ struct Flags {
     /// the current directory)
     #[arg(long = "repo", value_name = "NAME=PATH", value_parser = repo)]
     repos: Vec<(String, PathBuf)>,
+    /// Enable repository-free knowledge projects in the console
+    #[arg(long, help_heading = "Companion")]
+    knowledge: bool,
     /// Operation registry and activity feeds (default: .branchyard/server in the first
-    /// repository)
+    /// repository, or the current directory with --knowledge)
     #[arg(long, value_name = "DIR")]
     data_dir: Option<PathBuf>,
     /// Accept the token on the first line of FILE; repeatable (default: DATA-DIR/token,
@@ -651,9 +654,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         None => config::Partial::default(),
     };
     let mut warnings = std::mem::take(&mut partial.warnings);
+    partial.managed_knowledge.enabled |= flags.knowledge;
     let mut repos = partial.repos;
     repos.extend(flags.repos);
-    if repos.is_empty() {
+    if repos.is_empty() && !partial.managed_knowledge.enabled {
         if flags.config.is_some() {
             return Err("the configuration serves no repositories".into());
         }
@@ -666,7 +670,15 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
         None if flags.config.is_some() => {
             return Err("the configuration needs data_dir".into());
         }
-        None => repos[0].1.join(".branchyard").join("server"),
+        None => match repos.first() {
+            Some((_, root)) => root.join(".branchyard").join("server"),
+            None => std::env::current_dir()
+                .map_err(|error| {
+                    format!("cannot find the knowledge service launch directory: {error}")
+                })?
+                .join(".branchyard")
+                .join("server"),
+        },
     };
     let mut tokens = partial.tokens;
     let mut token_files = flags.token_files;
@@ -716,6 +728,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.repos = repos;
     config.tokens = tokens;
     config.default_token_file = default_token_file;
+    config.managed_knowledge = partial.managed_knowledge;
     config.principals = partial.principals;
     config.credentials = partial.credentials;
     config.google_identity = partial.google_identity;
@@ -1206,6 +1219,69 @@ mod tests {
         assert!(serve.contains("\n  token "), "{serve}");
         assert!(help("branchyard-server").contains("--webhook-events <KINDS>"));
         command("branchyard-server").debug_assert();
+    }
+
+    #[test]
+    fn knowledge_console_flag_enables_repository_free_launch_without_writes() {
+        let flags = parse(&args("--app --knowledge --check")).unwrap();
+        assert!(flags.knowledge);
+        let (config, _) = build(flags).unwrap();
+        assert!(config.app.enabled && config.managed_knowledge.enabled);
+        assert!(config.repos.is_empty());
+        assert!(!config.allow_client_commands);
+        assert_eq!(
+            config.data_dir,
+            std::env::current_dir().unwrap().join(".branchyard/server")
+        );
+        assert!(config.managed_knowledge.root.is_none());
+        assert!(config.validate().is_ok());
+        assert!(!parse(&args("--check")).unwrap().knowledge);
+        assert!(
+            parse(&args("--worker --knowledge --check"))
+                .unwrap()
+                .knowledge
+        );
+        for program in ["by serve", "by worker", "branchyard-server"] {
+            assert!(help(program).contains("--knowledge"));
+        }
+    }
+
+    #[test]
+    fn knowledge_flag_keeps_configured_storage_and_quotas_and_default_opt_in() {
+        let scratch = branchyard_testkit::Scratch::new("knowledge-cli");
+        let file = scratch.path().join("server.json");
+        let root = scratch.path().join("originals");
+        let settings = serde_json::json!({
+            "data_dir":"state", "repos":{},
+            "managed_knowledge":{"enabled":false,"root":root,"max_workspaces":7,"max_source_bytes":2000,"max_upload_bytes":1000}
+        });
+        fs::write(&file, settings.to_string()).unwrap();
+        let mut arguments = vec!["--config".into(), file.display().to_string()];
+        assert!(resolve(&arguments)
+            .unwrap_err()
+            .contains("serves no repositories"));
+        arguments.push("--knowledge".into());
+        let config = resolve(&arguments).unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.data_dir, scratch.path().join("state"));
+        assert_eq!(config.managed_knowledge.root, Some(root.clone()));
+        assert_eq!(config.managed_knowledge.max_workspaces, 7);
+        assert_eq!(config.managed_knowledge.max_source_bytes, 2000);
+        assert_eq!(config.managed_knowledge.max_upload_bytes, 1000);
+        assert!(config.repos.is_empty());
+        let explicit = scratch.path().join("explicit");
+        arguments.extend(["--data-dir".into(), explicit.display().to_string()]);
+        assert_eq!(resolve(&arguments).unwrap().data_dir, explicit);
+        assert!(!scratch.path().join("state").exists());
+        assert!(!root.exists());
+        let mut invalid = settings;
+        invalid["managed_knowledge"]["max_upload_bytes"] = serde_json::json!(0);
+        fs::write(&file, invalid.to_string()).unwrap();
+        assert!(resolve(&arguments)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .contains("quotas must be positive"));
     }
 
     #[test]

@@ -863,6 +863,12 @@ impl OperationState {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OperationResult {
+    /// Workspace provider state after a queued resource action; never a model replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Value>,
+    /// Complete bounded PR publication or refresh result, including forge review metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<Value>,
     /// Branches a task, send or fork ran, in request order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<BranchInfo>,
@@ -979,6 +985,21 @@ pub struct BranchEvents {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchList {
     pub branches: Vec<BranchInfo>,
+}
+
+/// An operation response with optional, durable workspace ownership.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperationView {
+    /// The ordinary operation envelope, without another nesting layer.
+    #[serde(flatten)]
+    pub operation: Operation,
+    /// Stable workspace identity when this operation belongs to one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Named session identity when this operation acts on one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// `GET /v1/repos/{repo}/operations[?branch=NAME]`: the caller's tenant's
@@ -1135,6 +1156,27 @@ mod tests {
     use super::*;
     use branchyard::{BranchStatus, PermissionKey, PermissionRequest};
     use serde_json::json;
+
+    #[test]
+    fn operation_views_keep_flat_legacy_and_workspace_ownership() {
+        let legacy = json!({
+            "id":"operation-test", "repo":"app", "kind":"task", "state":"queued",
+            "branches":[], "cursor":0, "created_at_ms":1
+        });
+        for ownership in [None, Some(("workspace-test", "session-test"))] {
+            let mut value = legacy.clone();
+            if let Some((workspace, session)) = ownership {
+                value["workspace_id"] = json!(workspace);
+                value["session_id"] = json!(session);
+            }
+            let view: OperationView = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(view.operation.id, "operation-test");
+            assert_eq!(view.workspace_id.as_deref(), ownership.map(|pair| pair.0));
+            assert_eq!(serde_json::to_value(&view).unwrap(), value);
+            let client: Operation = serde_json::from_value(value).unwrap();
+            assert_eq!(client, view.operation);
+        }
+    }
 
     #[test]
     fn a_preset_follows_the_request_rules_and_sets_the_default() {

@@ -29,6 +29,7 @@ pub mod large;
 
 mod folder;
 mod repo;
+mod reservation;
 
 use std::fs;
 use std::io::Write;
@@ -48,6 +49,9 @@ use branchyard_support::time::now_ms;
 pub use folder::{accept_owned, create, home_tasks, open_home, remove_home, Accepted, NewTask};
 pub use large::{ChunkStore, Pointer};
 pub use repo::{reachable_chunks, TaskRepo};
+pub use reservation::{
+    initialize_repository, initialize_reserved, reserve, reserve_repository, TaskReservation,
+};
 
 /// The directory of a task's record, at the top of a record commit.
 pub const TASK_DIR: &str = ".task";

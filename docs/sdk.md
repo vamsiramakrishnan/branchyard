@@ -24,7 +24,7 @@ cargo install --locked --path crates/branchyard-cli     # `by`, onto PATH
 pip install ./sdk/python                                # branchyard and branchyard_client
 ```
 
-`pip install ./branchyard-sdk` does the same from the extracted release archive (`unzip branchyard-sdk-0.2.1.zip` first), and `pip install branchyard-0.2.1-py3-none-any.whl` installs the downloaded release wheel ([distribution](distribution.md#prebuilt-binaries)). `by` is found from `BRANCHYARD_BY`, else `PATH`; a missing one is a `LocalError` that gives the published single-command installer. [`sdk/python/README.md`](../sdk/python/README.md) is this install and the first run in one page.
+`pip install ./branchyard-sdk` does the same from the extracted release archive (`unzip branchyard-sdk-0.3.0.zip` first), and `pip install branchyard-0.3.0-py3-none-any.whl` installs the downloaded release wheel ([distribution](distribution.md#prebuilt-binaries)). `by` is found from `BRANCHYARD_BY`, else `PATH`; a missing one is a `LocalError` that gives the published single-command installer. [`sdk/python/README.md`](../sdk/python/README.md) is this install and the first run in one page.
 
 `sdk/python/pyproject.toml` builds with setuptools 77 or later, which reads its SPDX `license` (pip fetches one, or `--no-build-isolation` uses the one installed), and installs the two top-level modules, `branchyard` and `branchyard_client`, with no dependencies. Its version is the workspace's in PEP 440's spelling (`0.1.0rc1` for `0.1.0-rc.1`): `tools/release_version.py` checks it with every other version field and `tools/package.py` refuses to build the archives when the two differ ([the version](distribution.md#the-version)), and `tests/test_distribution.py` checks it, builds the project from the extracted archive and imports both modules from what was built. Nothing needs installing inside a harness: a delegated turn gets both modules written to `.branchyard/sdk/python/`, first on its `PYTHONPATH` ([delegation](delegation.md#python)), so `import branchyard` works there as it did, and `import branchyard_client` too.
 
@@ -82,6 +82,13 @@ for step in plan.todo:                        # the steps that are not ready, in
 `Local(".").up(yes=True)` then installs what the `[harnesses]` policy allows and lists what only a person can do (log in, set a key) ([up](up.md)); `Local(".").doctor()` is `by doctor`.
 
 ## The HTTP client
+
+For workspace conversations, `Client.start_workspace_session` accepts the existing
+typed backend options through `provider`. The server still checks its provider
+allowlist. Runtime resource operations expose their saved state in
+`operation.result.runtime`; PR operations retain their output in
+`operation.result.pull_request`. An interrupted PR publication requires forge
+inspection before a new request. Reuse the original key to recover its operation.
 
 For a service that is not on the machine that does the work, or that outlives a run: serve the repository, then connect.
 

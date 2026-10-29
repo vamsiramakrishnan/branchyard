@@ -36,7 +36,7 @@
 
 use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -223,6 +223,7 @@ pub struct Registry {
 struct State {
     /// Operations this process runs, by ID, with their claim's fence.
     running: HashMap<String, i64>,
+    running_controls: HashSet<String>,
     /// Set by [`Registry::start`]; cleared at close.
     executor: Option<Arc<dyn Executor>>,
     accepting: bool,
@@ -279,6 +280,7 @@ impl Registry {
             },
             state: Mutex::new(State {
                 running: HashMap::new(),
+                running_controls: HashSet::new(),
                 executor: None,
                 accepting: true,
                 closed: false,
@@ -319,15 +321,56 @@ impl Registry {
         self.store.services()
     }
 
+    /// Read console metadata. Authorization remains the caller's responsibility.
+    pub fn console_get(
+        &self,
+        collection: crate::console_store::Collection,
+        id: &str,
+    ) -> Result<Option<crate::console_store::Record>, ApiError> {
+        self.store
+            .console_get(collection, id)
+            .map_err(console_error)
+    }
+
+    /// List one tenant's console metadata.
+    pub fn console_list(
+        &self,
+        collection: crate::console_store::Collection,
+        tenant: &str,
+    ) -> Result<Vec<crate::console_store::Record>, ApiError> {
+        self.store
+            .console_list(collection, tenant)
+            .map_err(console_error)
+    }
+
+    /// Internal ownership lookup across tenants, for legacy resource guards only.
+    pub(crate) fn console_list_all(
+        &self,
+        collection: crate::console_store::Collection,
+    ) -> Result<Vec<crate::console_store::Record>, ApiError> {
+        self.store
+            .console_list_all(collection)
+            .map_err(console_error)
+    }
+
+    /// Commit a revision-checked metadata batch.
+    pub fn console_mutate(
+        &self,
+        mutations: &[crate::console_store::Mutation],
+    ) -> Result<(), ApiError> {
+        self.store.console_mutate(mutations).map_err(console_error)
+    }
+
     /// This worker's harness inventory, once detected.
     pub fn inventory(&self) -> Option<branchyard::inventory::Inventory> {
         self.inventory.lock_recovering("inventory").clone()
     }
 
-    /// The labels this worker claims with: its configured ones and those
-    /// its inventory derives (`harness:<id>`).
+    /// The labels this worker claims with: its host/boot, configured ones
+    /// and those its inventory derives (`harness:<id>`).
     pub fn labels(&self) -> Vec<String> {
         let mut labels = self.options.labels.clone();
+        labels.push(format!("worker-host:{}", self.worker.host));
         if let Some(inventory) = self.inventory() {
             labels.extend(inventory.labels());
         }
@@ -539,8 +582,18 @@ impl Registry {
     /// Admit a new operation durably, with `work` describing what to run,
     /// or return the one an earlier request with the same key created
     /// (`true`).
-    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn submit(&self, new: NewOperation, work: Value) -> Result<(Operation, bool), ApiError> {
+        self.submit_console(new, work, &[])
+    }
+
+    /// Admit console metadata and work atomically through the existing queue.
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
+    pub fn submit_console(
+        &self,
+        new: NewOperation,
+        work: Value,
+        mutations: &[crate::console_store::Mutation],
+    ) -> Result<(Operation, bool), ApiError> {
         if let Some(idem) = &new.idempotency {
             if let Some(existing) = self.replay(idem, &new.principal.tenant)? {
                 return Ok((existing, true));
@@ -587,12 +640,76 @@ impl Registry {
             creates: new.creates,
             trace: span.as_ref().map(|s| s.context().traceparent()),
         };
-        let admitted = self.store.admit(&stored, &work, &new.quota).map_err(|e| {
-            if let Some(span) = &mut span {
-                span.fail(e.to_string());
+        let mut mutations = mutations.to_vec();
+        if work.get("kind").and_then(Value::as_str) == Some("console") {
+            let workspace_id = work
+                .get("command")
+                .and_then(|command| command.get("workspace_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::bad_request("console work requires workspace_id"))?;
+            let command = &work["command"];
+            for mutation in &mut mutations {
+                let crate::console_store::Mutation::Put { record, expected } = mutation else {
+                    continue;
+                };
+                let operation_field = match record.collection {
+                    crate::console_store::Collection::Sessions
+                        if command.get("action").and_then(Value::as_str) == Some("control")
+                            && command.get("control").and_then(Value::as_str) == Some("cancel")
+                            && command.get("session_id").and_then(Value::as_str)
+                                == Some(record.id.as_str())
+                            && record.body.get("workspace_id").and_then(Value::as_str)
+                                == Some(workspace_id) =>
+                    {
+                        Some("_cancel_operation_id")
+                    }
+                    crate::console_store::Collection::Sessions
+                        if expected.is_none()
+                            && command.get("session_id").and_then(Value::as_str)
+                                == Some(record.id.as_str())
+                            && record.body.get("workspace_id").and_then(Value::as_str)
+                                == Some(workspace_id) =>
+                    {
+                        Some("operation_id")
+                    }
+                    crate::console_store::Collection::Workspaces
+                        if matches!(
+                            command.get("action").and_then(Value::as_str),
+                            Some("initialize" | "lifecycle")
+                        ) && record.id == workspace_id =>
+                    {
+                        Some("_operation_id")
+                    }
+                    _ => None,
+                };
+                if let Some(field) = operation_field {
+                    record
+                        .body
+                        .as_object_mut()
+                        .ok_or_else(|| ApiError::bad_request("console metadata must be an object"))?
+                        .insert(field.into(), Value::String(stored.operation.id.clone()));
+                }
             }
-            ApiError::internal(format!("could not record the operation: {e}"))
-        })?;
+            mutations.push(crate::console_store::Mutation::Put {
+                record: crate::console_store::Record {
+                    collection: crate::console_store::Collection::Bindings,
+                    id: format!("operation:{}", stored.operation.id),
+                    tenant: stored.tenant().into(),
+                    revision: 1,
+                    body: serde_json::json!({"workspace_id":workspace_id,"operation_id":stored.operation.id,"repo":stored.operation.repo}),
+                },
+                expected: None,
+            });
+        }
+        let admitted = self
+            .store
+            .admit_console(&stored, &work, &new.quota, &mutations)
+            .map_err(|e| {
+                if let Some(span) = &mut span {
+                    span.fail(e.to_string());
+                }
+                console_error(e)
+            })?;
         if let (Some(span), false) = (&mut span, admitted == Admission::Admitted) {
             span.set("by.admitted", false);
         }
@@ -645,14 +762,19 @@ impl Registry {
                 beaten = Some(Instant::now());
                 advertised = detected;
             }
-            let (free, executor) = {
+            let (free, control_free, executor) = {
                 let mut state = self.lock();
                 if state.closed || !state.accepting {
                     return;
                 }
                 state.admitted = false;
                 (
-                    state.running.len() < self.options.max_running,
+                    state
+                        .running
+                        .len()
+                        .saturating_sub(state.running_controls.len())
+                        < self.options.max_running,
+                    state.running_controls.is_empty(),
                     state.executor.clone(),
                 )
             };
@@ -660,6 +782,22 @@ impl Registry {
             if renewed.elapsed() >= renew_every {
                 self.renew();
                 renewed = Instant::now();
+            }
+            if control_free {
+                match self.store.claim_control(
+                    &self.worker,
+                    &self.options.repos,
+                    &self.labels(),
+                    self.options.lease,
+                    &self.options.scheduling,
+                ) {
+                    Ok(Some(claim)) => {
+                        self.claimed(&claim);
+                        self.run(claim, executor.clone());
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!(error = %e, "could not claim a control operation"),
+                }
             }
             if free {
                 match self.store.claim_next(
@@ -776,6 +914,9 @@ impl Registry {
                 return;
             }
             state.running.insert(id.clone(), claim.fence);
+            if crate::store::control_work(&claim.work) {
+                state.running_controls.insert(id.clone());
+            }
         }
         let registry = self.clone();
         let fence = claim.fence;
@@ -866,6 +1007,9 @@ impl Registry {
         drop(span);
         let (outcome, result, error) = match finished.result {
             Ok(result) => (OperationState::Succeeded, Some(result), None),
+            Err(error) if error.code == "pr_effect_uncertain" => {
+                (OperationState::Interrupted, None, Some(error))
+            }
             Err(error) => (OperationState::Failed, None, Some(error)),
         };
         stored.operation.state = outcome;
@@ -916,6 +1060,7 @@ impl Registry {
     fn done(&self, id: &str) {
         let mut state = self.lock();
         state.running.remove(id);
+        state.running_controls.remove(id);
         state.finished += 1;
         drop(state);
         self.changed.notify_all();
@@ -1016,6 +1161,7 @@ impl Registry {
             let mut state = self.lock();
             state.accepting = false;
             state.executor = None;
+            state.running_controls.clear();
             state.running.drain().collect()
         };
         let mut count = 0;
@@ -1125,11 +1271,103 @@ impl Drop for Hold {
     }
 }
 
+fn console_error(error: io::Error) -> ApiError {
+    if error.kind() == io::ErrorKind::AlreadyExists {
+        ApiError::new(StatusCode::CONFLICT, "revision_conflict", error.to_string())
+    } else {
+        ApiError::internal(format!("could not persist console metadata: {error}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::{MemoryStore, SqliteStore};
     use std::sync::mpsc;
+
+    #[test]
+    fn core_execution_host_labels_prevent_foreign_dispatcher_claims() {
+        let registry = Registry::open(
+            Box::new(SqliteStore::memory()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        assert_eq!(registry.worker().host, branchyard::process_identity().0);
+        let required = format!("worker-host:{}", registry.worker().host);
+        assert!(registry.labels().contains(&required));
+        let mut request = new(Some("host-bound"), &["a"]);
+        request.requires = vec![required];
+        let (operation, _) = registry.submit(request, Value::Null).unwrap();
+        let foreign = Worker {
+            id: "foreign-dispatcher".into(),
+            host: "another-host-and-boot".into(),
+            ..registry.worker().clone()
+        };
+        assert!(registry
+            .store
+            .claim(
+                &foreign,
+                &["r".into()],
+                &["worker-host:another-host-and-boot".into()],
+                DEFAULT_LEASE
+            )
+            .unwrap()
+            .is_none());
+        let claim = registry
+            .store
+            .claim(
+                registry.worker(),
+                &["r".into()],
+                &registry.labels(),
+                DEFAULT_LEASE,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.operation.operation.id, operation.id);
+        registry.close();
+    }
+
+    #[test]
+    fn ambiguous_pr_effect_is_interrupted_and_same_key_never_executes_it_again() {
+        struct Uncertain(std::sync::atomic::AtomicUsize);
+        impl Executor for Uncertain {
+            fn execute(&self, _: &StoredOperation, _: &Value) -> Finished {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Finished {
+                    result: Err(ErrorBody {
+                        code: "pr_effect_uncertain".into(),
+                        message: "inspect forge state before another publication".into(),
+                        detail: Some(serde_json::json!({"unknown_effect":true})),
+                    }),
+                    end_cursor: None,
+                }
+            }
+        }
+        let registry = Registry::open(
+            Box::new(SqliteStore::memory()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        let executor = Arc::new(Uncertain(std::sync::atomic::AtomicUsize::new(0)));
+        registry.start(executor.clone()).unwrap();
+        let (operation, _) = registry
+            .submit(new(Some("uncertain"), &["a"]), Value::Null)
+            .unwrap();
+        branchyard_testkit::wait::until("uncertain PR outcome to be recorded", || {
+            registry
+                .get(&operation.id)
+                .unwrap()
+                .is_some_and(|op| op.state == OperationState::Interrupted)
+        });
+        let (replayed, was_replay) = registry
+            .submit(new(Some("uncertain"), &["a"]), Value::Null)
+            .unwrap();
+        assert!(was_replay);
+        assert_eq!(replayed.id, operation.id);
+        assert_eq!(replayed.state, OperationState::Interrupted);
+        assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        registry.close();
+    }
 
     /// Runs work `{"n": N}` by recording N; `{"wait": true}` blocks until
     /// released.
@@ -1207,6 +1445,110 @@ mod tests {
     }
 
     #[test]
+    fn console_admission_binds_operation_and_replay_keeps_original_metadata() {
+        use crate::console_store::{Collection, Mutation, Record};
+        let registry = Registry::open(Box::new(MemoryStore::default()), options(1)).unwrap();
+        let row = Record {
+            collection: Collection::Workspaces,
+            id: "workspace".into(),
+            tenant: "default".into(),
+            revision: 1,
+            body: serde_json::json!({"id":"workspace"}),
+        };
+        let work = serde_json::json!({"kind":"console","command":{"action":"initialize","workspace_id":"workspace"}});
+        let (operation, replayed) = registry
+            .submit_console(
+                new(Some("console"), &[]),
+                work.clone(),
+                &[Mutation::Put {
+                    record: row.clone(),
+                    expected: None,
+                }],
+            )
+            .unwrap();
+        assert!(!replayed);
+        let binding = registry
+            .console_get(Collection::Bindings, &format!("operation:{}", operation.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.tenant, "default");
+        assert_eq!(binding.body["workspace_id"], "workspace");
+        let (again, replayed) = registry
+            .submit_console(new(Some("console"), &[]), work, &[])
+            .unwrap();
+        assert!(replayed);
+        assert_eq!(again.id, operation.id);
+        assert_eq!(
+            registry
+                .console_list_all(Collection::Bindings)
+                .unwrap()
+                .len(),
+            1
+        );
+        let workspace = registry
+            .console_get(Collection::Workspaces, "workspace")
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace.body["_operation_id"], operation.id);
+        let session_row = Record {
+            collection: Collection::Sessions,
+            id: "session".into(),
+            tenant: "default".into(),
+            revision: 1,
+            body: serde_json::json!({"workspace_id":"workspace","branch":"session"}),
+        };
+        let (session_operation, _) = registry.submit_console(
+            new(Some("session"), &[]),
+            serde_json::json!({"kind":"console","command":{"action":"start","workspace_id":"workspace","session_id":"session"}}),
+            &[Mutation::Put {record:session_row,expected:None}],
+        ).unwrap();
+        let session = registry
+            .console_get(Collection::Sessions, "session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.body["operation_id"], session_operation.id);
+        assert_eq!(session.revision, 1);
+        let mut cancellation = session.clone();
+        cancellation.revision = 2;
+        cancellation.body["_cancel_requested"] = serde_json::json!(true);
+        let (cancel, _) = registry.submit_console(
+            new(Some("cancel"), &[]),
+            serde_json::json!({"kind":"console","command":{"action":"control","control":"cancel","workspace_id":"workspace","session_id":"session"}}),
+            &[Mutation::Put {record:cancellation,expected:Some(1)}],
+        ).unwrap();
+        let cancelled = registry
+            .console_get(Collection::Sessions, "session")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.body["_cancel_operation_id"], cancel.id);
+        assert_eq!(cancelled.body["operation_id"], session_operation.id);
+        assert_eq!(cancelled.revision, 2);
+        let mut lifecycle_workspace = workspace.clone();
+        lifecycle_workspace.revision = 2;
+        lifecycle_workspace.body["state"] = serde_json::json!("archiving");
+        let (lifecycle,_) = registry.submit_console(
+            new(Some("archive"),&[]),
+            serde_json::json!({"kind":"console","command":{"action":"lifecycle","intent":"archive","workspace_id":"workspace"}}),
+            &[Mutation::Put {record:lifecycle_workspace,expected:Some(1)}],
+        ).unwrap();
+        let updated = registry
+            .console_get(Collection::Workspaces, "workspace")
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.body["_operation_id"], lifecycle.id);
+        assert_eq!(updated.revision, 2);
+        let error = registry
+            .submit_console(
+                new(Some("bad"), &[]),
+                serde_json::json!({"kind":"console","command":{}}),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(registry.store.by_key("c", "bad").unwrap().is_none());
+    }
+
+    #[test]
     fn a_repeated_key_returns_the_first_operation_and_runs_once() {
         let (registry, recorder) = started(Box::new(MemoryStore::default()), 2);
         let (first, replayed) = registry
@@ -1226,6 +1568,30 @@ mod tests {
         other.idempotency.as_mut().unwrap().fingerprint = "g".into();
         let error = registry.submit(other, Value::Null).unwrap_err();
         assert_eq!(error.body.code, "idempotency_key_reused");
+        registry.close();
+    }
+
+    #[test]
+    fn short_control_lane_runs_while_normal_capacity_is_full() {
+        let (registry, recorder) = started(Box::new(MemoryStore::default()), 1);
+        let (release, gate) = mpsc::channel();
+        *recorder.gate.lock().unwrap() = Some(gate);
+        registry
+            .submit(
+                new(Some("held"), &["held"]),
+                serde_json::json!({"wait":true}),
+            )
+            .unwrap();
+        branchyard_testkit::wait::until("normal operation to fill the worker slot", || {
+            recorder.gate.lock().unwrap().is_none()
+        });
+        let (control,_) = registry.submit_console(new(Some("control"),&[]),serde_json::json!({"kind":"console","command":{"action":"control","control":"cancel","workspace_id":"w"},"n":2}),&[]).unwrap();
+        branchyard_testkit::wait::until("control to run despite saturated normal capacity", || {
+            registry.get(&control.id).unwrap().unwrap().state == OperationState::Succeeded
+        });
+        assert!(recorder.ran.lock().unwrap().contains(&2));
+        release.send(()).unwrap();
+        assert!(registry.wait_idle(Duration::from_secs(5)));
         registry.close();
     }
 

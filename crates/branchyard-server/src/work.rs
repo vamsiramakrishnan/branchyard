@@ -34,6 +34,14 @@ use crate::store::StoredOperation;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Work {
+    /// Durable workspace command using native task/attempt execution.
+    Console {
+        /// Native action bound to its admitted workspace and session.
+        command: crate::console::ConsoleWork,
+        /// Captured credential reference; no bearer token is stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<crate::companion::Verified>,
+    },
     /// `POST /v1/repos/{repo}/tasks`.
     Task { request: TaskRequest },
     /// `POST .../branches/{branch}/send`.
@@ -107,6 +115,7 @@ pub enum Work {
 impl Work {
     pub fn kind(&self) -> OperationKind {
         match self {
+            Work::Console { command, .. } => command.operation_kind(),
             Work::Task { .. } => OperationKind::Task,
             Work::Send { .. } => OperationKind::Send,
             Work::Fork { .. } => OperationKind::Fork,
@@ -146,6 +155,10 @@ impl Work {
             tenant: p.tenant.clone(),
         });
         match self {
+            Work::Console { .. } => Err(*ApiError::internal(
+                "console work must resolve its workspace before execution",
+            )
+            .body),
             Work::Task { request } => {
                 let options = TaskOptions {
                     actor: actor.clone(),
@@ -375,6 +388,43 @@ impl Executor for AppExecutor {
                 end_cursor: None,
             };
         }
+        if let Ok(Work::Console {
+            command,
+            credential,
+        }) = serde_json::from_value::<Work>(work.clone())
+        {
+            let Some(principal) = stored.principal.clone() else {
+                return Finished {
+                    result: Err(*ApiError::unauthorized().body),
+                    end_cursor: None,
+                };
+            };
+            let caller = crate::api::Caller::authenticated(principal, credential);
+            if let Err(error) = app.check_caller(&caller) {
+                return Finished {
+                    result: Err(*error.body),
+                    end_cursor: None,
+                };
+            }
+            return crate::console::execute(app, stored, command, caller);
+        }
+        // Membership may have changed while this operation waited in the queue.
+        // The durable admitting principal, never the worker identity, must still
+        // be allowed to act on every workspace-bound resource before any effect.
+        let principal = stored.principal.clone().unwrap_or_else(|| {
+            crate::config::Principal::default_for("unattributed-legacy-operation")
+        });
+        if let Err(refused) = crate::console::auth::authorize_operation(
+            app,
+            &crate::api::Caller::new(principal),
+            operation,
+            scope_for(operation.kind),
+        ) {
+            return Finished {
+                result: Err(*refused.body),
+                end_cursor: None,
+            };
+        }
         let Some(repo) = app.repos.get(&operation.repo) else {
             // The repositories its principal may use, and no one else's.
             let served: Vec<&str> = app
@@ -491,7 +541,7 @@ const LEASE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is cancelled, naming the loss, and cancelled again each poll while the
 /// run lasts, so a turn starting after the loss stops too. Returns the
 /// run's result and, when a lease was lost, why.
-fn run_under_leases<T>(
+pub(crate) fn run_under_leases<T>(
     app: &App,
     repo: &RepoState,
     branches: &[String],
@@ -658,18 +708,13 @@ fn admitted_principal_allowed(
     };
     crate::config::check_principal(principal)
         .map_err(|why| ApiError::new(StatusCode::FORBIDDEN, "principal_invalid", why))?;
-    if matches!(
-        principal.origin,
-        crate::config::AuthenticationOrigin::GoogleIdToken { .. }
-    ) && !config
-        .google_identity
-        .as_ref()
-        .is_some_and(|config| config.still_allows(principal))
+    if principal.origin != crate::config::AuthenticationOrigin::Configured
+        && !crate::auth::origin_allowed(config, principal)
     {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "identity_binding_revoked",
-            "the admitted external identity binding changed or was removed",
+            "the admitted identity's issuing policy changed or was removed",
         ));
     }
     let repo = &stored.operation.repo;
@@ -1153,6 +1198,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queued_paired_google_work_cannot_outlive_its_issuer_binding() {
+        use crate::config::{
+            AuthenticationOrigin, Config, GoogleIdTokenConfig, GoogleIdentityBinding, Principal,
+        };
+        let mut issuer = Principal::default_for("operator-display");
+        issuer.repos = Some(["app".to_owned(), "other".to_owned()].into_iter().collect());
+        let mut config = Config::new(std::path::PathBuf::new());
+        config.google_identity = Some(GoogleIdTokenConfig {
+            audience: "server".into(),
+            bindings: vec![GoogleIdentityBinding {
+                issuer: "https://accounts.google.com".into(),
+                subject: "paired-external".into(),
+                principal: issuer.clone(),
+            }],
+        });
+        issuer.origin = AuthenticationOrigin::GoogleIdToken {
+            issuer: "https://accounts.google.com".into(),
+            subject: "paired-external".into(),
+            audience: "server".into(),
+        };
+        let mut phone = issuer.delegated_to("phone".into());
+        phone.scopes = ["run".into()].into_iter().collect();
+        phone.repos = Some(["app".to_owned()].into_iter().collect());
+        let stored: StoredOperation = serde_json::from_value(serde_json::json!({"operation":{"id":"paired-queued","repo":"app","kind":"task","state":"queued","branches":[],"cursor":0,"created_at_ms":0},"principal":phone.delegated_to("tablet".into()),"tenant":"default"})).unwrap();
+        assert!(admitted_principal_allowed(&config, &stored).is_ok());
+        config.google_identity = None;
+        assert_eq!(
+            admitted_principal_allowed(&config, &stored)
+                .unwrap_err()
+                .body
+                .code,
+            "identity_binding_revoked"
+        );
+    }
+
+    #[test]
     fn queued_external_work_rechecks_binding_after_durable_round_trip() {
         use crate::config::{
             AuthenticationOrigin, Config, GoogleIdTokenConfig, GoogleIdentityBinding, Principal,
@@ -1287,5 +1368,45 @@ mod tests {
         assert_eq!(request.depends_on, ["lib"]);
         assert_eq!(request.after, branchyard::After::Integrated);
         assert_eq!(request.bindings[0].access, branchyard::Access::ReadOnly);
+    }
+}
+
+#[cfg(test)]
+mod captured_credentials {
+    use super::*;
+
+    #[test]
+    fn console_queue_round_trip_retains_exact_credential_without_changing_subject() {
+        let principal = crate::config::Principal::default_for("alice");
+        let verified = crate::companion::Verified {
+            token_sha256: crate::config::sha256_hex(b"inert-test-credential"),
+            expires_at_ms: Some(123_456),
+        };
+        let caller = crate::api::Caller::authenticated(principal.clone(), Some(verified.clone()));
+        assert_eq!(
+            caller.idempotency_scope(),
+            crate::api::Caller::new(principal).idempotency_scope()
+        );
+        assert_eq!(caller.verified(), Some(&verified));
+        let work = Work::Console {
+            command: crate::console::ConsoleWork::Initialize {
+                workspace_id: "workspace-test".into(),
+            },
+            credential: caller.verified().cloned(),
+        };
+        let encoded = serde_json::to_string(&work).unwrap();
+        assert!(!encoded.contains("inert-test-credential"));
+        assert_eq!(serde_json::from_str::<Work>(&encoded).unwrap(), work);
+        let legacy = serde_json::json!({
+            "kind":"console",
+            "command":{"action":"initialize","workspace_id":"workspace-test"}
+        });
+        assert!(matches!(
+            serde_json::from_value::<Work>(legacy).unwrap(),
+            Work::Console {
+                credential: None,
+                ..
+            }
+        ));
     }
 }
