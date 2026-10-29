@@ -25,7 +25,7 @@ remained running. See the [converter record](evidence/console-document-gce-2026-
 Not done in that record: a model turn, a browser workflow, GKE conversion or
 production load testing.
 
-The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. The corrected GKE/Substrate model workflow also passed; final cloud cleanup and publication remain in progress.
+The integrated PostgreSQL suite passed all 22 tests against a private Unix-socket database. Schema freshness, shipped skill checks, Rustdoc with warnings denied and Clippy also passed. The missing-documentation gate caught one new command field; adding its comment restored the existing limit without raising it. The corrected live GCE console workflow passed parallel document production, same-session continuation, output acceptance, restart persistence and archive/restore. The corrected GKE/Substrate model workflow also passed; all owned temporary cloud resources were verified removed. Publication is pending. See the [cleanup record](evidence/substrate-gke-2026-10-29.json) for exact resource checks.
 The GKE check has exercised the native Control API, an actor, a
 byte-preserving file round trip and AGY 1.4.9's version command using the 0.3.0
 CLI. That model-free smoke check does not qualify a model workflow. Live model

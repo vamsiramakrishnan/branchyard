@@ -36,6 +36,14 @@ Use `by watch` to follow tasks, or [organize a team](docs/cooperative-teams.md) 
 
 ## Work with documents and data
 
+Open a browser console from a directory that does not need to be a Git repository:
+
+```sh
+by serve --app --knowledge
+```
+
+Open the printed URL, create a knowledge project and upload your sources. Start named sessions, inspect their conversations, preview the documents they produce and accept the outputs you keep. Each session has its own working copy. See the [console guide](docs/companion.md#projects-and-workspaces) for credentials, permissions and preview setup.
+
 The [skills](plugins/branchyard/skills/INDEX.md) cover sources, tables, data cleaning, calculations and editable documents. Design skills guide layouts and charts. The [parallel deck example](examples/rigs/parallel-deck.toml) lets workers draft separate sections, then assembles one presentation.
 
 Install the required packages before using the [document tools](docs/artifact-toolkit.md#installed-skills-and-runtime). Office previews require LibreOffice and Poppler. Google Workspace work needs a connected account and your permission to access the documents. See [knowledge work](docs/knowledge-skills.md) and [collecting output files](docs/artifact-capture.md).
