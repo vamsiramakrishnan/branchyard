@@ -29,10 +29,15 @@ const XLSX = 'backlog_metrics.xlsx';
 const DOCX = 'backlog_report.docx';
 const PPTX = 'backlog_briefing.pptx';
 const NOTES = 'meeting-notes.rtf';
+// CSV's bytes under a name with accents, an apostrophe and parentheses
+// (which encodeURIComponent leaves bare), CJK and an emoji.
+const UNICODE = 'Étude d\'été (T3) — 季度报告 📊.csv';
+const UNICODE_ENCODED = 'UTF-8\'\'%C3%89tude%20d%27%C3%A9t%C3%A9%20%28T3%29%20%E2%80%94%20%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A%20%F0%9F%93%8A.csv';
 // The answers a working server may give for each format, whether or not this
 // machine has the document renderer; anything else is a failure of the page.
 const ALLOWED = {
   [CSV]: ['table', 'renderer unavailable'],
+  [UNICODE]: ['table', 'renderer unavailable'],
   [XLSX]: ['table', 'renderer unavailable'],
   [DOCX]: ['pages', 'conversion failed', 'renderer unavailable'],
   [PPTX]: ['pages', 'conversion failed', 'renderer unavailable'],
@@ -276,6 +281,8 @@ let browser = null;
   await sources.nth(2).waitFor();
   const sourceId = {};
   for (const name of [CSV, DOCX, NOTES]) sourceId[name] = await sources.filter({ hasText: name }).getAttribute('data-source');
+  const notesMeta = await sources.filter({ hasText: NOTES }).locator('.item-meta').innerText();
+  if (!notesMeta.startsWith('RTF · ')) throw new Error(`the RTF source shows ${JSON.stringify(notesMeta)}, not its format`);
   const sourcePath = (name) => `/v1/workspaces/${ws}/sources/${sourceId[name]}/preview`;
   const sourceName = (name) => sources.filter({ hasText: name }).locator('button.file-name');
   await page.getByRole('button', { name: 'Upload sources', exact: true }).focus();
@@ -290,6 +297,24 @@ let browser = null;
   await expectShown(NOTES, notes);
   if (await sourceName(CSV).getAttribute('aria-pressed') !== 'false') throw new Error('the previous source is still marked previewed');
   sameBytes(await downloaded(() => page.getByRole('button', { name: 'Download original', exact: true }).click()), NOTES, 'the unsupported source\'s original');
+  const [unicodeUpload] = await Promise.all([
+    page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === `/v1/workspaces/${ws}/sources`, TURN),
+    page.setInputFiles('#source-file', { name: UNICODE, mimeType: 'text/csv', buffer: fixture(CSV) }),
+  ]);
+  const titleHeaders = unicodeUpload.headers();
+  if (titleHeaders['x-source-title-encoded'] !== UNICODE_ENCODED) throw new Error(`the upload sent X-Source-Title-Encoded ${titleHeaders['x-source-title-encoded']}`);
+  if (titleHeaders['x-source-title'] !== '_tude d\'_t_ (T3) _ ____ _.csv') throw new Error(`the upload sent X-Source-Title ${titleHeaders['x-source-title']}`);
+  await sources.nth(3).waitFor();
+  const unicodeName = sourceName(UNICODE);
+  if (await unicodeName.textContent() !== UNICODE) throw new Error(`the source is listed as ${JSON.stringify(await unicodeName.textContent())}`);
+  sourceId[UNICODE] = await sources.filter({ hasText: UNICODE }).getAttribute('data-source');
+  const unicodeSource = await previewed(() => unicodeName.click(), sourcePath(UNICODE));
+  await expectShown(UNICODE, unicodeSource);
+  const previewTitle = await page.locator('#preview-title').textContent();
+  if (previewTitle !== UNICODE) throw new Error(`the preview is titled ${JSON.stringify(previewTitle)}`);
+  told('Unicode-titled CSV source', unicodeSource);
+  if (shots) await page.screenshot({ path: `${shots}/unicode-source.png` });
+  sameBytes(await downloaded(() => page.getByRole('button', { name: `Download ${UNICODE}`, exact: true }).click()), CSV, 'the Unicode-titled source');
   // Held, never answered, so each preview is still loading when the page moves on.
   await page.route(SOURCE_PREVIEW, () => {});
   const dropped = (name) => page.waitForEvent('requestfailed', { predicate: (r) => new URL(r.url()).pathname === sourcePath(name), ...TURN });

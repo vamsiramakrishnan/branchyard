@@ -104,11 +104,7 @@ async fn upload(
             "source must be nonempty and within the configured upload limit",
         ));
     }
-    let title = headers
-        .get("x-source-title")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty() && v.len() <= 512)
-        .ok_or_else(|| ApiError::bad_request("X-Source-Title is required, at most 512 bytes"))?;
+    let title = super::titles::upload_title(&headers)?;
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -167,7 +163,7 @@ async fn upload(
         },
     }
 }
-fn content(data: Vec<u8>, media: &str) -> Result<Response, ApiError> {
+fn content(data: Vec<u8>, media: &str, name: &str) -> Result<Response, ApiError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -177,7 +173,7 @@ fn content(data: Vec<u8>, media: &str) -> Result<Response, ApiError> {
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_static("attachment"),
+        super::titles::attachment(name)?,
     );
     headers.insert(
         "x-content-type-options",
@@ -205,7 +201,7 @@ async fn download(
     Extension(caller): Extension<Caller>,
 ) -> Result<Response, ApiError> {
     let (metadata, original) = source_original(&app, &caller, &wid, &sid)?;
-    content(original, &metadata.media_type)
+    content(original, &metadata.media_type, &metadata.title)
 }
 
 pub(super) fn selection(
@@ -519,7 +515,7 @@ async fn artifact_content(
         .map_err(sdk)?;
     let data = std::fs::read(temp.path()).map_err(io)?;
 
-    content(data, &artifact.media_type)
+    content(data, &artifact.media_type, &artifact.name)
 }
 pub(super) async fn finalize(
     State(app): State<Shared>,

@@ -1895,8 +1895,8 @@
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
   }
 
-  // Short names for formats people know; any other shows its media type,
-  // which a row's tooltip always gives in full.
+  // Short names for formats people know; any other shows its file name's
+  // extension, and a row's tooltip always gives the media type in full.
   const FORMATS = {
     'text/csv': 'CSV',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
@@ -1909,11 +1909,33 @@
     'image/png': 'PNG',
     'image/jpeg': 'JPEG',
   };
-  const formatOf = (type) => FORMATS[(type || '').split(';')[0].trim().toLowerCase()] || type || 'File';
+  function formatOf(type, name) {
+    const known = FORMATS[(type || '').split(';')[0].trim().toLowerCase()];
+    if (known) return known;
+    const extension = /\.([a-z0-9]{1,8})$/i.exec(name || '');
+    return extension ? extension[1].toUpperCase() : 'File';
+  }
 
-  // The server reads a source's title from a header, which carries printable
-  // ASCII only: accents are dropped and any other character becomes `_`.
-  const asciiTitle = (name) => name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '_').slice(0, 512);
+  // A source's title travels as an RFC 8187 extended value, so any name
+  // arrives as written. encodeURIComponent would leave ' ( ) * bare, which
+  // attr-char excludes, so each UTF-8 byte outside attr-char is escaped
+  // here. X-Source-Title keeps an ASCII copy for a server that reads only it.
+  const ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/;
+  const encodedTitle = (name) => `UTF-8''${Array.from(new TextEncoder().encode(name), (byte) => {
+    const c = String.fromCharCode(byte);
+    return ATTR_CHAR.test(c) ? c : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+  }).join('')}`;
+  const asciiTitle = (name) => name.replace(/[^\x20-\x7e]/gu, '_');
+  // The server keeps a title to 512 UTF-8 bytes, so a longer name keeps its
+  // extension and loses whole characters from the end of the rest.
+  const utf8Length = (text) => new TextEncoder().encode(text).length;
+  function sourceTitle(name) {
+    if (utf8Length(name) <= 512) return name;
+    const extension = (/\.[a-z0-9]{1,8}$/i.exec(name) || [''])[0];
+    const stem = Array.from(name.slice(0, name.length - extension.length));
+    while (stem.length && utf8Length(stem.join('') + extension) > 512) stem.pop();
+    return stem.join('') + extension;
+  }
 
   // A session's native status once its turn exists. Before that it has no
   // `status_detail`, and `status` is its admission operation's state.
@@ -2462,13 +2484,15 @@
     let unsent = [];
     for (const [i, file] of files.entries()) {
       let source = null;
+      const title = sourceTitle(file.name);
       try {
         source = await revised(v, `Could not upload ${file.name}`, (revision) => call(`${workspacePath(v.id)}/sources`, {
           method: 'POST',
           headers: {
             Accept: 'application/json',
             'Content-Type': file.type || 'application/octet-stream',
-            'X-Source-Title': asciiTitle(file.name),
+            'X-Source-Title-Encoded': encodedTitle(title),
+            'X-Source-Title': asciiTitle(title),
             'X-Workspace-Revision': String(revision),
             'Idempotency-Key': key(),
           },
@@ -2549,7 +2573,7 @@
       return h('li', { class: 'file-item', 'data-source': src.id },
         h('div', { class: 'file-main' },
           previewButton(v, { key: `source:${src.id}`, name: src.title, mediaType: src.media_type, base }),
-          h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
+          h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type, src.title)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
         h('button', { type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`, onclick: () => download(`${base}/content`, src.title) }));
     })
       : h('li', { class: 'muted pad', text: 'No sources yet. Upload the documents this workspace\'s sessions should read; each new session gets the ones you tick.' }));
@@ -2625,7 +2649,7 @@
         box,
         h('div', { class: 'file-main' },
           previewButton(v, { key: `output:${a.id}`, name: a.name, mediaType: a.media_type, base: `${workspacePath(v.id)}/artifacts/${enc(a.id)}` }),
-          h('span', { class: 'item-meta', id: note, title: a.media_type, text: `${formatOf(a.media_type)} · ${size(a.size)} · ${meaning.note(a)}` })),
+          h('span', { class: 'item-meta', id: note, title: a.media_type, text: `${formatOf(a.media_type, a.name)} · ${size(a.size)} · ${meaning.note(a)}` })),
         meaning.tag ? h('span', { class: `tag tag-${st}` }, st === 'accepted' ? checkMark(false) : null, meaning.tag) : null);
     };
     const group = (g) => {

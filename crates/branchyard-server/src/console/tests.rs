@@ -4,6 +4,7 @@ mod discovery;
 mod inputs;
 mod presets;
 mod services;
+mod titles;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

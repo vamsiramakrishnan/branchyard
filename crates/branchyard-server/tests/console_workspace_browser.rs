@@ -1,14 +1,15 @@
 //! The console's knowledge workspaces in headless Chromium against a real
 //! server with managed knowledge on: a knowledge-only token loads the
 //! console, a paired browser creates a project and a workspace, uploads
-//! sources, runs two fake-agent sessions (one steered, cancelled and
-//! resumed), finds four captured outputs, previews sources and outputs with
-//! whatever this server's renderer answers (a table or page where it renders,
-//! otherwise the matching unavailable, unsupported or failed state),
-//! downloads and accepts the actual immutable originals, continues a session
-//! so a stale page's acceptance of an earlier turn's output is refused, and
-//! the branch routes still work beside it. Driven by Playwright
-//! (`console_workspace_browser.js`) with documents from
+//! sources (one under a Unicode name that is listed, previewed and
+//! downloaded exactly), runs two fake-agent sessions (one steered,
+//! cancelled and resumed), finds four captured outputs, previews sources
+//! and outputs with whatever this server's renderer answers (a table or
+//! page where it renders, otherwise the matching unavailable, unsupported
+//! or failed state), downloads and accepts the actual immutable originals,
+//! continues a session so a stale page's acceptance of an earlier turn's
+//! output is refused, and the branch routes still work beside it. Driven
+//! by Playwright (`console_workspace_browser.js`) with documents from
 //! `tools/console_fixtures.py`; skipped, saying so, when
 //! Node or Playwright's module is not installed. `BY_TEST_PLAYWRIGHT`
 //! names the module's directory; otherwise `$(npm root -g)/playwright` is

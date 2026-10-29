@@ -12,6 +12,7 @@ pub(crate) mod services;
 pub(crate) mod sources;
 #[cfg(test)]
 mod tests;
+mod titles;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};

@@ -71,6 +71,8 @@ jiff = { workspace = true, features = ["default"] }
 # rustls).
 ring = { workspace = true }
 base64 = { workspace = true }
+# RFC 8187 source titles and download names (docs/server.md).
+percent-encoding = { workspace = true }
 
 [dev-dependencies]
 branchyard-bridge = { path = "../branchyard-bridge" }

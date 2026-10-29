@@ -842,8 +842,8 @@ fields. Poll the existing operation route to determine its outcome.
 | `POST /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close` | Close the handle and terminate its shell process group |
 | `POST /v1/workspaces/{workspace}/actions/{action}` | Archive or restore at `{revision}`; unsupported provider actions return structured capability reasons |
 | `GET /v1/workspaces/{workspace}/sources` | List immutable original source metadata |
-| `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
-| `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment |
+| `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title-Encoded` or `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
+| `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment named by the title |
 | `GET /v1/workspaces/{workspace}/sources/{source}/preview` | Render a bounded original source after checking current membership |
 | `GET /v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}` | Read a derived page image under the same source grant |
 | `GET /v1/workspaces/{workspace}/artifacts` | List native immutable artifacts owned by this workspace |
@@ -869,6 +869,28 @@ A reviewer additionally selects frozen artifact IDs and runs under the
 intersection of the original policy and the engine's read-only policy. Separate
 sessions retain separate native conversations; continuation never substitutes a
 fresh native session.
+
+A source's title travels in one of two headers. `X-Source-Title` holds visible
+ASCII, 1 to 512 bytes. `X-Source-Title-Encoded` holds any title as an
+[RFC 8187](https://www.rfc-editor.org/rfc/rfc8187) extended value: `UTF-8`, an
+optional language tag of letters, digits and `-` that is ignored, and the
+percent-encoded UTF-8 title, as in
+`UTF-8''%C3%89tude%20de%20march%C3%A9.xlsx`. When the encoded header is present,
+the server reads only it and ignores `X-Source-Title`. An invalid encoded title is
+refused and never replaced by the ASCII one, so a client sends an ASCII copy in
+`X-Source-Title` for older servers. The encoded value is at most 4 KiB, and after
+the charset and language it holds only `attr-char` and `%` followed by two hex
+digits. It must decode to valid UTF-8 of 1 to 512 bytes, with no control
+character (Unicode category Cc, C1 included) and no bidirectional override or
+isolate (U+202A to U+202E, U+2066 to U+2069). Any other value is
+`400 invalid_source_title`, and the message names the rule it broke. The title is
+stored as decoded, without normalisation, and the upload's idempotency
+fingerprint covers the decoded title. A source or artifact download sends
+`Content-Disposition: attachment; filename="<fallback>"; filename*=UTF-8''<encoded>`
+([RFC 6266](https://www.rfc-editor.org/rfc/rfc6266)). Both parameters name the
+title's or artifact name's last segment after any `/` or `\`; a name that ends
+in one of them is sent as a bare `attachment`. The quoted fallback has `_` in
+place of each non-ASCII character, control, `"` and `\`.
 
 Finalization requires immutable artifacts from completed workspace producers with
 a valid deliverable contract and valid current-turn output. An earlier turn's

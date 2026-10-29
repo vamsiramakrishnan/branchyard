@@ -90,6 +90,12 @@ allowlist. Runtime resource operations expose their saved state in
 `operation.result.pull_request`. An interrupted PR publication requires forge
 inspection before a new request. Reuse the original key to recover its operation.
 
+`Client.upload_workspace_source(workspace, data, title, revision=...)` accepts any
+Unicode title within the server's title rules. It sends the title in `X-Source-Title-Encoded` as an RFC 8187
+value, so the server stores it as written, and an ASCII copy in `X-Source-Title`
+with `_` for each other character, which a server without the encoded header
+reads instead ([source titles](server.md#durable-workspace-console)).
+
 For a service that is not on the machine that does the work, or that outlives a run: serve the repository, then connect.
 
 ```sh
@@ -125,7 +131,7 @@ Every refusal is a `BranchyardError` subclass carrying the server's stable `code
 | `NotFoundError` | `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger`, `unknown_checkpoint`, `unknown_knowledge`, `unknown_message`, `not_found` |
 | `DeniedError` | `denied` (the envelope or a branch's authority refused), `scope_required`, `repo_not_allowed` |
 | `NotAllowedError` | what the server's operator did not allow: `connectors_not_configured`, `delegation_not_allowed`, `command_not_allowed`, `provider_not_allowed`, `secret_not_allowed`, `unapproved_tools_not_allowed`, ... |
-| `InvalidRequestError` | `invalid_request`, `invalid_name`, `unknown_harness`, `cursor_out_of_range`, `body_too_large`, ... |
+| `InvalidRequestError` | `invalid_request`, `invalid_name`, `unknown_harness`, `cursor_out_of_range`, `body_too_large`, `invalid_source_title`, ... |
 | `BranchBusyError` | `branch_busy`; `.holder` is the operation that holds the branch |
 | `RunningError` | `running` (a turn runs in another engine; a wait that timed out) |
 | `NotRunningError`, `SteerRefusedError` | `not_running`, `steer_refused`: a steer with no turn to join, or one the turn did not take |

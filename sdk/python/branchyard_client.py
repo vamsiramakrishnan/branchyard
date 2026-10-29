@@ -437,6 +437,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "unsupported_media_type": InvalidRequestError,
     "body_too_large": InvalidRequestError,
     "invalid_pairing_code": InvalidRequestError,
+    "invalid_source_title": InvalidRequestError,
     "branch_busy": BranchBusyError,
     "running": RunningError,
     "not_running": NotRunningError,
@@ -1502,8 +1503,11 @@ class Client:
         media_type: str = "application/octet-stream",
         key: Optional[str] = None,
     ) -> Record:
-        """Upload original bytes at revision, retaining the server's media type
-        and title header contract. This does not read any client filesystem path."""
+        """Upload original bytes at revision under title, which may be any
+        Unicode text: it travels in X-Source-Title-Encoded as an RFC 8187
+        value, beside an ASCII copy in X-Source-Title (each other character
+        `_`) that a server without the encoded header reads instead. This does
+        not read any client filesystem path."""
         return Record(
             self.request(
                 "POST",
@@ -1511,7 +1515,8 @@ class Client:
                 data,
                 key=key or new_key(),
                 headers={
-                    "X-Source-Title": title,
+                    "X-Source-Title-Encoded": "UTF-8''" + urllib.parse.quote(title, safe="!#$&+^`|"),
+                    "X-Source-Title": re.sub(r"[^\x20-\x7e]", "_", title),
                     "X-Workspace-Revision": str(revision),
                     "Content-Type": media_type,
                 },

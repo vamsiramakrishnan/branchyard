@@ -924,6 +924,7 @@ dependencies = [
  "hyper-util",
  "jiff",
  "jsonwebtoken",
+ "percent-encoding",
  "postgres",
  "prost",
  "reqwest",

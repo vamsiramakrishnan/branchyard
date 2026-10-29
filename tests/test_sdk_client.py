@@ -1041,7 +1041,12 @@ class WorkspaceRequests(unittest.TestCase):
             "/v1/workspaces/w1/sources",
             original,
             key="upload",
-            headers={"X-Source-Title": "Quarterly source", "X-Workspace-Revision": "7", "Content-Type": "text/csv"},
+            headers={
+                "X-Source-Title-Encoded": "UTF-8''Quarterly%20source",
+                "X-Source-Title": "Quarterly source",
+                "X-Workspace-Revision": "7",
+                "Content-Type": "text/csv",
+            },
         )
         self.assertEqual(result.digest, "abc")
         self.assertEqual(
@@ -1235,6 +1240,37 @@ class WorkspaceRequests(unittest.TestCase):
 
 
 class WorkspaceTransport(ServerCase):
+    def test_a_unicode_source_title_travels_encoded_beside_an_ascii_fallback(self):
+        source = "/v1/workspaces/w1/sources"
+        self.fake.always("POST", source, 200, {"id": "src1"})
+        titles = {
+            "Étude d'été (T3) — 季度报告 📊.csv": (
+                "UTF-8''%C3%89tude%20d%27%C3%A9t%C3%A9%20%28T3%29%20%E2%80%94%20"
+                "%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A%20%F0%9F%93%8A.csv",
+                "_tude d'_t_ (T3) _ ____ _.csv",
+            ),
+            'reports/Q3\\Board "draft"*.txt': (
+                "UTF-8''reports%2FQ3%5CBoard%20%22draft%22%2A.txt",
+                'reports/Q3\\Board "draft"*.txt',
+            ),
+            "attr-char !#$&+^`|~._ stays": (
+                "UTF-8''attr-char%20!#$&+^`|~._%20stays",
+                "attr-char !#$&+^`|~._ stays",
+            ),
+        }
+        for title in titles:
+            self.client.upload_workspace_source("w1", b"x", title, revision=1)
+        for (_, _, headers, _), (encoded, fallback) in zip(self.requests("POST", source), titles.values(), strict=True):
+            self.assertEqual(headers["x-source-title-encoded"], encoded)
+            self.assertEqual(headers["x-source-title"], fallback)
+
+    def test_a_refused_source_title_is_an_invalid_request(self):
+        source = "/v1/workspaces/w1/sources"
+        self.fake.answer("POST", source, (400, _error("invalid_source_title", "decodes to 513 bytes")))
+        with self.assertRaises(bc.InvalidRequestError) as raised:
+            self.client.upload_workspace_source("w1", b"x", "a" * 513, revision=1)
+        self.assertEqual(raised.exception.code, "invalid_source_title")
+
     def test_source_upload_download_and_revision_delete_use_authenticated_http(self):
         source = "/v1/workspaces/w1/sources"
         original = b"name,value\noriginal,\xff\n"
@@ -1245,6 +1281,7 @@ class WorkspaceTransport(ServerCase):
         ((_, _, headers, body),) = self.requests("POST", source)
         self.assertEqual(body, original)
         self.assertEqual(headers["authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(headers["x-source-title-encoded"], "UTF-8''Input.csv")
         self.assertEqual(headers["x-source-title"], "Input.csv")
         self.assertEqual(headers["x-workspace-revision"], "3")
         self.assertEqual(headers["content-type"], "text/csv")
