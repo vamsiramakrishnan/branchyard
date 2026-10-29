@@ -98,7 +98,7 @@ pub fn create(
 }
 
 /// Issue a device link as an authenticated principal, preserving its subject.
-/// Requested grants must be subsets of the verified issuer's existing grants.
+/// The original issuer must still exist, and requested grants must fit its policy.
 pub fn create_delegated(
     config: &Config,
     store: &dyn CompanionStore,
@@ -106,6 +106,14 @@ pub fn create_delegated(
     issuer: &Principal,
     now_ms: u64,
 ) -> Result<(Link, String), String> {
+    if !crate::auth::origin_allowed(config, issuer) {
+        return Err(
+            "this identity has no current configured or Google issuer for delegation; \
+             create the target device link directly with by token new --link, or pair \
+             from a current configured credential"
+                .into(),
+        );
+    }
     if request.tenant != issuer.tenant
         || request.scopes.iter().any(|scope| !issuer.allows(scope))
         || issuer.repos.as_ref().is_some_and(|allowed| {
@@ -352,8 +360,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn delegated_links_reject_an_unbound_legacy_issuer_before_persisting() {
+        let mut config = Config::new("/nonexistent/unused".into());
+        let store = super::super::store::SqliteCompanion::memory();
+        let legacy = Principal::default_for("legacy-operator-link");
+        let request = LinkRequest {
+            name: Some("child-device".into()),
+            tenant: legacy.tenant.clone(),
+            scopes: vec!["read".into()],
+            repos: None,
+            ttl: None,
+            code_ttl: None,
+            public_url: Some("https://by.example.com".into()),
+            qr: false,
+        };
+        let result = create_delegated(&config, &store, &request, &legacy, 1_000);
+        assert!(
+            result.is_err(),
+            "unbound delegation must not generate a link"
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("no current configured or Google issuer"),
+            "{error}"
+        );
+        assert!(error.contains("by token new --link"), "{error}");
+        assert!(store.tokens().unwrap().1.is_empty());
+        config.credentials.push(crate::config::Credential {
+            token_sha256: sha256_hex(b"hermetic-configured-issuer"),
+            principal: legacy.clone(),
+        });
+        assert!(create_delegated(&config, &store, &request, &legacy, 1_000).is_ok());
+    }
+
+    #[test]
     fn delegated_pairing_preserves_subject_and_never_expands_policy() {
-        let config = Config::new("/nonexistent/unused".into());
+        let mut config = Config::new("/nonexistent/unused".into());
         let store = super::super::store::SqliteCompanion::memory();
         let mut issuer = Principal::default_for("human");
         issuer.origin = crate::config::AuthenticationOrigin::GoogleIdToken {
@@ -362,6 +404,16 @@ mod tests {
             audience: "audience".into(),
         };
         issuer.repos = Some(["app".to_owned()].into_iter().collect());
+        let mut current = issuer.clone();
+        current.origin = crate::config::AuthenticationOrigin::Configured;
+        config.google_identity = Some(crate::config::GoogleIdTokenConfig {
+            audience: "audience".into(),
+            bindings: vec![crate::config::GoogleIdentityBinding {
+                issuer: "https://accounts.google.com".into(),
+                subject: "verified-subject".into(),
+                principal: current,
+            }],
+        });
         let mut request = LinkRequest {
             name: Some("generated-phone".into()),
             tenant: issuer.tenant.clone(),
