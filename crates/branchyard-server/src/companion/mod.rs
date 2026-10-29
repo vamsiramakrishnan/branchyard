@@ -211,7 +211,9 @@ pub(crate) async fn verify_paired(
         .await
         .ok()?
         .ok()??;
-    if !token.usable_at(branchyard_support::time::now_ms()) {
+    if crate::config::check_principal(&token.principal).is_err()
+        || !token.usable_at(branchyard_support::time::now_ms())
+    {
         return None;
     }
     Some((

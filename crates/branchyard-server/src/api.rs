@@ -108,9 +108,10 @@ impl Caller {
     /// `tenant/subject`, so two tenants' principals of one name never
     /// share a key.
     pub fn idempotency_scope(&self) -> String {
+        let subject = self.0.connector_subject();
         match self.tenant() == crate::config::DEFAULT_TENANT {
-            true => self.name().to_owned(),
-            false => format!("{}/{}", self.tenant(), self.name()),
+            true => subject,
+            false => format!("{}/{subject}", self.tenant()),
         }
     }
 }
@@ -936,12 +937,15 @@ async fn metrics_route(State(app): State<Shared>, headers: HeaderMap) -> Respons
     let header = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    let operator = app
-        .credentials
-        .verify(header)
+    let principal = match app.credentials.verify(header) {
+        Some(principal) => Some(principal.clone()),
+        None => app.credentials.verify_google(header).await,
+    };
+    let operator = principal
+        .as_ref()
         .is_some_and(|principal| principal.allows("admin"));
     if !operator && !metrics_token_matches(metrics, header) {
-        return match app.credentials.verify(header) {
+        return match principal {
             Some(_) => scope_required("admin").into_response(),
             None => ApiError::unauthorized().into_response(),
         };
@@ -1092,10 +1096,25 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    // A configured credential, else (with the companion on) a paired token.
-    let verified = match app.credentials.verify(header) {
-        Some(principal) => Some((principal.clone(), crate::companion::configured(header))),
-        None => crate::companion::verify_paired(&app, header).await,
+    let verified = if let Some(principal) = app.credentials.verify(header) {
+        Some((
+            principal.clone(),
+            Some(crate::companion::configured(header)),
+        ))
+    } else if let Some(principal) = app.credentials.verify_google(header).await {
+        if request.uri().path().starts_with("/v1/app/") {
+            return ApiError::new(
+                StatusCode::FORBIDDEN,
+                "machine_pairing_unsupported",
+                "Google workload credentials cannot use companion pairing or push subscriptions",
+            )
+            .into_response();
+        }
+        Some((principal, None))
+    } else {
+        crate::companion::verify_paired(&app, header)
+            .await
+            .map(|(principal, verified)| (principal, Some(verified)))
     };
     match verified {
         Some((principal, verified)) => {
@@ -1105,9 +1124,14 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
             }
             let caller = Caller(principal);
             request.extensions_mut().insert(caller);
-            request.extensions_mut().insert(verified.clone());
+            if let Some(verified) = &verified {
+                request.extensions_mut().insert(verified.clone());
+            }
             let response = next.run(request).await;
-            crate::companion::bound(&app, &verified, response)
+            match verified {
+                Some(verified) => crate::companion::bound(&app, &verified, response),
+                None => response,
+            }
         }
         None => ApiError::unauthorized().into_response(),
     }

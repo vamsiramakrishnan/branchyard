@@ -64,6 +64,7 @@ fn a_server_describes_itself_and_its_services_and_takes_registrations() {
     config.principals.insert(
         "reader".into(),
         Principal {
+            origin: Default::default(),
             name: "reader".into(),
             tenant: "default".into(),
             scopes: ["read"].into_iter().map(String::from).collect(),

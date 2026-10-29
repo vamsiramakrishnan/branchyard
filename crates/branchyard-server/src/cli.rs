@@ -676,6 +676,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     if tokens.is_empty()
         && token_files.is_empty()
         && partial.credentials.is_empty()
+        && partial.google_identity.is_none()
         && !flags.worker
     {
         let path = data_dir.join("token");
@@ -717,6 +718,7 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.default_token_file = default_token_file;
     config.principals = partial.principals;
     config.credentials = partial.credentials;
+    config.google_identity = partial.google_identity;
     config.tenants = partial.tenants;
     config.tls = match (flags.tls_cert, flags.tls_key) {
         (Some(cert), Some(key)) => Some(TlsFiles { cert, key }),
@@ -1320,6 +1322,17 @@ mod tests {
             !dir.join("data/token").exists(),
             "no default token beside credentials"
         );
+
+        std::fs::write(&file, serde_json::json!({
+            "data_dir":"data", "repos":{"app":"app"},
+            "google_identity":{"audience":"https://branchyard.example", "bindings":[{"issuer":"https://accounts.google.com", "subject":"fake-subject", "principal":{"name":"ci", "tenant":"acme", "scopes":["read"]}}]}
+        }).to_string()).unwrap();
+        let (google, _) = build(parse(&args(&config_arg)).unwrap()).unwrap();
+        assert!(google.tokens.is_empty() && google.credentials.is_empty());
+        assert!(google.default_token_file.is_none());
+        assert!(google.google_identity.is_some());
+        assert!(!dir.join("data/token").exists());
+        google.validate().unwrap();
 
         // A worker needs no credential at all.
         std::fs::write(

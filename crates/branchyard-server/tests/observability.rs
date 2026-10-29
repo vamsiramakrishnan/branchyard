@@ -110,6 +110,7 @@ fn metrics_config(f: &Fixture, listen: bool) -> branchyard_server::Config {
     config.principals.insert(
         "reader".into(),
         Principal {
+            origin: Default::default(),
             name: "reader".into(),
             tenant: "default".into(),
             scopes: ["read", "run"].into_iter().map(String::from).collect(),

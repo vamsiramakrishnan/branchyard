@@ -56,6 +56,7 @@ fn scopes_are_enforced_per_endpoint() {
     config.principals.insert(
         "reader".into(),
         Principal {
+            origin: Default::default(),
             name: "reader".into(),
             tenant: "default".into(),
             scopes: ["read"].into_iter().map(String::from).collect(),
@@ -65,6 +66,7 @@ fn scopes_are_enforced_per_endpoint() {
     config.principals.insert(
         "runner".into(),
         Principal {
+            origin: Default::default(),
             name: "runner".into(),
             tenant: "default".into(),
             scopes: ["read", "run"].into_iter().map(String::from).collect(),
@@ -160,6 +162,7 @@ fn cross_tenant_isolation() {
     config.principals.insert(
         "acme".into(),
         Principal {
+            origin: Default::default(),
             name: "acme".into(),
             tenant: "acme".into(),
             scopes: ["read", "run", "merge", "admin"]
@@ -172,6 +175,7 @@ fn cross_tenant_isolation() {
     config.principals.insert(
         "globex".into(),
         Principal {
+            origin: Default::default(),
             name: "globex".into(),
             tenant: "globex".into(),
             scopes: ["read", "run", "merge", "admin"]
@@ -418,6 +422,7 @@ fn credentials_and_scoped_tokens_compose() {
     config.credentials.push(Credential {
         token_sha256: branchyard_server::config::sha256_hex(secret.as_bytes()),
         principal: Principal {
+            origin: Default::default(),
             name: "svc".into(),
             tenant: "svc-tenant".into(),
             scopes: ["read"].into_iter().map(String::from).collect(),
@@ -553,6 +558,7 @@ fn every_read_needs_the_read_scope() {
     config.principals.insert(
         "blind".into(),
         Principal {
+            origin: Default::default(),
             name: "blind".into(),
             tenant: "default".into(),
             scopes: ["run", "merge", "admin"]

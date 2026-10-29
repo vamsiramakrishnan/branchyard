@@ -429,12 +429,16 @@ pub async fn start(config: Config) -> Result<Running, String> {
     if let Some(sync) = &sync {
         sync.start()?;
     }
+    let credentials =
+        Credentials::new(config.all_credentials()).with_google(config.google_identity.clone());
+    #[cfg(test)]
+    let credentials = credentials.with_google_jwks(config.google_jwks_url.as_deref());
     let app = Arc::new(App {
         sync: sync.clone(),
         companion,
         repos,
         registry: registry.clone(),
-        credentials: Credentials::new(config.all_credentials()),
+        credentials,
         config,
         shutdown: shutdown_rx.clone(),
         storage_idem: crate::storage_routes::StorageIdem::default(),
@@ -717,10 +721,12 @@ fn open_state(config: &Config) -> Result<Opened, String> {
         {
             yard.use_models(gateway);
         }
-        yard.use_ceilings(config.ceilings.clone());
+        yard.use_ceilings(config.actor_policy(&config.ceilings));
         // The administrator's locked approvals and the people's
         // (docs/effects.md#approvals).
-        yard.use_approvals(config.approvals.clone());
+        let mut approvals = config.approvals.clone();
+        approvals.people = config.actor_policy(&approvals.people);
+        yard.use_approvals(approvals);
         let feed = Feed::open(yard.clone())
             .map_err(|e| format!("reading the event feed of {name}: {e}"))?;
         repos.insert(

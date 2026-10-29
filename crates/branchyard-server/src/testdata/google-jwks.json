@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "alg": "RS256",
+      "use": "sig",
+      "kid": "fake-google-key",
+      "n": "slf84MXwdfSBxBdB1Be0GUWTBy9BHOTxDVdwCu3jznZRL_SrgGjKr2dgGS4SZjrmpdaYu-KNDLhx_9tvdIzqugauIUAy7G49MWPzNJIYPN2reyOilw7FDV6BZI0QOkWMqdr1eqggBAeA7_1TvjiVLUbtLPTS5GY6Jv55GIwgFlBBHAumEG2T429NK7j_FDqP34zz0L5O-z3Uv6AZyHNlEf5oZdZ5B-qMO_amJK4S-SQIfskB8HHrVuSorWwHv1kBFNDxwW2l7pG5nAant2oivECcwB8SFnDR_erTNkVbRWAbqK5WWzL5gJOhSXpHi8FByUaeZDpKfEWexrGrjo1DmQ",
+      "e": "AQAB"
+    }
+  ]
+}

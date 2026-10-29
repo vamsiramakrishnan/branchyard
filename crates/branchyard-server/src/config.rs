@@ -95,6 +95,10 @@ pub fn check_scope_name(name: &str) -> Result<(), String> {
 }
 
 pub(crate) fn check_principal(principal: &Principal) -> Result<(), String> {
+    if principal.origin == AuthenticationOrigin::Configured && principal.name.starts_with("google:")
+    {
+        return Err("the google: principal prefix is reserved for authenticated external identities; rename this static principal".into());
+    }
     if principal.name.is_empty() || principal.name.len() > 128 {
         return Err(format!(
             "principal {:?} is not a usable subject name",
@@ -128,13 +132,115 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// How a principal authenticated, persisted with queued work without its bearer.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuthenticationOrigin {
+    /// A configured or paired static credential. Never an external user assertion.
+    #[default]
+    Configured,
+    /// A Google-signed ID token matched an exact operator-configured binding.
+    GoogleIdToken {
+        /// The verified Google issuer.
+        issuer: String,
+        /// The verified external subject, never a display name or email.
+        subject: String,
+        /// The server audience against which the token was verified.
+        audience: String,
+    },
+}
+
+/// An exact external identity mapped to existing server authorization policy.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleIdentityBinding {
+    /// Exact Google issuer, including its scheme when present.
+    pub issuer: String,
+    /// Exact Google subject identifier. No wildcard or email matching.
+    pub subject: String,
+    /// Operator-controlled tenant, scopes and repository policy.
+    pub principal: Principal,
+}
+
+/// Google-only ID-token admission, independent of Google API access tokens.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleIdTokenConfig {
+    /// Exact audience identifying this Branchyard server.
+    pub audience: String,
+    /// The only external identities admitted by this server.
+    pub bindings: Vec<GoogleIdentityBinding>,
+}
+
+impl GoogleIdTokenConfig {
+    /// Validate the trusted mapping before any token is accepted.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.audience.is_empty() || self.audience.len() > 2048 || self.bindings.is_empty() {
+            return Err("google_identity requires an audience and at least one binding".into());
+        }
+        let mut identities = BTreeSet::new();
+        for binding in &self.bindings {
+            if !matches!(
+                binding.issuer.as_str(),
+                "https://accounts.google.com" | "accounts.google.com"
+            ) || binding.subject.is_empty()
+                || binding.subject.len() > 256
+                || binding.subject.chars().any(char::is_control)
+            {
+                return Err(
+                    "google_identity requires an exact Google issuer and nonempty bounded subject"
+                        .into(),
+                );
+            }
+            check_principal(&binding.principal)?;
+            if binding.principal.origin != AuthenticationOrigin::Configured {
+                return Err(
+                    "google_identity binding principal must not supply authentication provenance"
+                        .into(),
+                );
+            }
+            if !identities.insert((&binding.issuer, &binding.subject)) {
+                return Err("google_identity has duplicate issuer and subject bindings".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Recheck the admitted identity and exact policy against this worker's config.
+    pub fn still_allows(&self, principal: &Principal) -> bool {
+        let AuthenticationOrigin::GoogleIdToken {
+            issuer,
+            subject,
+            audience,
+        } = &principal.origin
+        else {
+            return false;
+        };
+        if audience != &self.audience {
+            return false;
+        }
+        let mut policy = principal.clone();
+        policy.origin = AuthenticationOrigin::Configured;
+        self.bindings.iter().any(|binding| {
+            &binding.issuer == issuer && &binding.subject == subject && binding.principal == policy
+        })
+    }
+}
+
 /// Who a verified bearer token acts as: a tenant, a subject name, the
 /// scopes it holds, and, optionally, a narrower repository allowlist than
 /// its tenant's. Requests never carry a `tenant_id`; a principal's tenant
 /// comes only from the credential that authenticated it. See
 /// `docs/server.md#identity-and-scopes`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
+    /// Authenticated origin, defaulting to static for older records.
+    #[serde(default)]
+    pub origin: AuthenticationOrigin,
     /// The subject this credential names, such as an operator or a CI
     /// system; distinct from the tenant. Used for idempotency scoping and
     /// audit, and appears in `Debug` and logs (never the token itself).
@@ -153,10 +259,25 @@ impl Principal {
     /// keeping single-token configurations working unchanged.
     pub fn default_for(name: &str) -> Principal {
         Principal {
+            origin: Default::default(),
             name: name.to_owned(),
             tenant: DEFAULT_TENANT.to_owned(),
             scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
             repos: None,
+        }
+    }
+
+    /// Stable gateway subject: external identities cannot collapse into display names.
+    /// The digest is over a canonical JSON array of verified issuer and subject.
+    pub fn connector_subject(&self) -> String {
+        match &self.origin {
+            AuthenticationOrigin::Configured => self.name.clone(),
+            AuthenticationOrigin::GoogleIdToken {
+                issuer, subject, ..
+            } => {
+                let identity = serde_json::json!([issuer, subject]).to_string();
+                format!("google:{}", sha256_hex(identity.as_bytes()))
+            }
         }
     }
 
@@ -336,6 +457,10 @@ pub struct Config {
     /// Credentials naming their principal by a token hash directly,
     /// alongside `tokens`.
     pub credentials: Vec<Credential>,
+    /// Optional Google-only verified caller admission.
+    pub google_identity: Option<GoogleIdTokenConfig>,
+    #[cfg(test)]
+    pub(crate) google_jwks_url: Option<String>,
     /// Each tenant's resource ceilings and repositories, keyed by tenant
     /// name. A tenant a principal names but that has no entry here has no
     /// configured limits (unlimited) and, by default, every repository.
@@ -605,6 +730,9 @@ impl Config {
             default_token_file: None,
             principals: BTreeMap::new(),
             credentials: Vec::new(),
+            google_identity: None,
+            #[cfg(test)]
+            google_jwks_url: None,
             tenants: BTreeMap::new(),
             tls: None,
             insecure_bind: false,
@@ -679,6 +807,28 @@ impl Config {
         self.tenants.get(tenant).cloned().unwrap_or_default()
     }
 
+    /// Apply configured name-based policy to the corresponding authenticated subjects.
+    pub(crate) fn actor_policy<T: Clone>(
+        &self,
+        policies: &BTreeMap<String, T>,
+    ) -> BTreeMap<String, T> {
+        let mut expanded = policies.clone();
+        if let Some(google) = &self.google_identity {
+            for binding in &google.bindings {
+                if let Some(policy) = policies.get(&binding.principal.name) {
+                    let mut principal = binding.principal.clone();
+                    principal.origin = AuthenticationOrigin::GoogleIdToken {
+                        issuer: binding.issuer.clone(),
+                        subject: binding.subject.clone(),
+                        audience: google.audience.clone(),
+                    };
+                    expanded.insert(principal.connector_subject(), policy.clone());
+                }
+            }
+        }
+        expanded
+    }
+
     /// Every credential this server accepts: `tokens` (hashed here, so the
     /// verifier never holds a plaintext secret) with their principal, plus
     /// `credentials` directly.
@@ -715,7 +865,14 @@ impl Config {
             }
         }
         self.app.validate()?;
-        if self.tokens.is_empty() && self.credentials.is_empty() && !self.worker_only {
+        if let Some(identity) = &self.google_identity {
+            identity.validate()?;
+        }
+        if self.tokens.is_empty()
+            && self.credentials.is_empty()
+            && self.google_identity.is_none()
+            && !self.worker_only
+        {
             return Err("no tokens or credentials configured; every request needs one".into());
         }
         for (name, _) in &self.repos {
@@ -754,6 +911,7 @@ impl Config {
             return Err(format!("repository {} is configured twice", pair[0]));
         }
         for token in &self.tokens {
+            check_principal(&self.principal_for(&token.name))?;
             if token.secret.len() < 16 {
                 return Err(format!(
                     "token {} is shorter than 16 characters",
@@ -768,6 +926,11 @@ impl Config {
                 ));
             }
             check_principal(principal)?;
+            if principal.origin != AuthenticationOrigin::Configured {
+                return Err(
+                    "configured principal cannot assert an external authentication origin".into(),
+                );
+            }
         }
         // Every accepted secret, plaintext or hashed, is one entry: the
         // same secret twice could name two principals, and the verifier
@@ -805,6 +968,11 @@ impl Config {
                 return Err(format!("credential {hash} is configured twice"));
             }
             check_principal(&credential.principal)?;
+            if credential.principal.origin != AuthenticationOrigin::Configured {
+                return Err(
+                    "configured credential cannot assert an external authentication origin".into(),
+                );
+            }
         }
         for name in self.tenants.keys() {
             check_tenant_name(name)?;
@@ -1026,6 +1194,7 @@ pub(crate) struct FileConfig {
     tokens: Vec<FileToken>,
     #[serde(default)]
     credentials: Vec<FileCredential>,
+    google_identity: Option<GoogleIdTokenConfig>,
     #[serde(default)]
     tenants: BTreeMap<String, FileTenantPolicy>,
     tls: Option<FileTls>,
@@ -1410,7 +1579,7 @@ pub(crate) struct FileTls {
     key: PathBuf,
 }
 
-/// The configuration file's JSON Schema, built from [`FileConfig`] with
+/// The configuration file's JSON Schema, built from `FileConfig` with
 /// `schemars` rather than hand-maintained; see `schema/server.config.json`
 /// (freshness checked by `tests/server_config_schema.rs`) and
 /// `tools/schema-gen`.
@@ -1439,6 +1608,8 @@ pub struct Partial {
     pub tokens: Vec<Token>,
     pub principals: BTreeMap<String, Principal>,
     pub credentials: Vec<Credential>,
+    /// Optional Google-only verified caller admission.
+    pub google_identity: Option<GoogleIdTokenConfig>,
     pub tenants: BTreeMap<String, TenantPolicy>,
     pub tls: Option<TlsFiles>,
     pub max_body_bytes: Option<usize>,
@@ -1536,6 +1707,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         };
         if token.tenant.is_some() || !token.scopes.is_empty() || token.repos.is_some() {
             let principal = Principal {
+                origin: Default::default(),
                 name: token.name.clone(),
                 tenant: token.tenant.unwrap_or_else(|| DEFAULT_TENANT.to_owned()),
                 scopes: match token.scopes.is_empty() {
@@ -1559,6 +1731,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         credentials.push(Credential {
             token_sha256: credential.token_sha256,
             principal: Principal {
+                origin: Default::default(),
                 name,
                 tenant: credential.tenant,
                 scopes: match credential.scopes.is_empty() {
@@ -1696,6 +1869,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         tokens,
         principals,
         credentials,
+        google_identity: file.google_identity,
         tenants,
         tls: file.tls.map(|t| TlsFiles {
             cert: resolve(t.cert),
