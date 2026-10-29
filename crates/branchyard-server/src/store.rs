@@ -3336,6 +3336,183 @@ impl OperationStore for MemoryStore {
     }
 }
 
+impl SqliteStore {
+    fn claim_filtered(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+        control: bool,
+    ) -> io::Result<Option<Claim>> {
+        let repos = serde_json::to_string(repos)?;
+        let labels = serde_json::to_string(labels)?;
+        self.immediate(|tx| {
+            let clock = sqlite_now();
+            let now = scheduling.at_ms();
+            sqlite_reap(tx, worker, clock)?;
+            // Each tenant's usage per unit of weight, from its live claims
+            // and its decayed recent ones: computed here, inside the
+            // immediate transaction, and looked up by the order below.
+            let shares = sqlite_shares(tx, scheduling, clock, now)?;
+            let next: Option<(String, i64, String, Option<String>, String)> = tx
+                .query_row(
+                    "SELECT id, attempt, work, worker, tenant FROM operation_queue \
+                     WHERE repo IN (SELECT value FROM json_each(?1)) \
+                       AND (lease_until IS NULL OR lease_until <= ?2) \
+                       AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
+                           WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
+                       AND COALESCE(json_extract(work, '$.kind') = 'console' AND \
+                           json_extract(work, '$.command.action') = 'control', 0) = ?7 \
+                     ORDER BY priority \
+                         + COALESCE(MAX(?4 - enqueued_ms, 0) / NULLIF(?5, 0), 0) DESC, \
+                       COALESCE((SELECT s.value FROM json_each(?6) s WHERE s.key = tenant), \
+                           json_extract(?6, '$.\"\"')), \
+                       seq \
+                     LIMIT 1",
+                    rusqlite::params![
+                        repos,
+                        clock,
+                        labels,
+                        now,
+                        scheduling.aging_ms(),
+                        serde_json::to_string(&shares)?,
+                        control
+                    ],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()
+                .map_err(sql)?;
+            let Some((id, attempt, work, prior, tenant)) = next else {
+                return Ok((None, false));
+            };
+            let fence = attempt + 1;
+            tx.execute(
+                "UPDATE operation_queue SET attempt = ?2, worker = ?3, host = ?4, pid = ?5, \
+                 start = ?6, lease_until = ?7 WHERE id = ?1",
+                rusqlite::params![
+                    id,
+                    fence,
+                    worker.id,
+                    worker.host,
+                    worker.pid,
+                    worker.start,
+                    clock.saturating_add(ms(lease))
+                ],
+            )
+            .map_err(sql)?;
+            sqlite_count_claim(tx, scheduling, &tenant, now)?;
+            let operation = sqlite_op(tx, "SELECT id, body FROM operations WHERE id = ?1", &id)?
+                .ok_or_else(|| io::Error::other(format!("queued operation {id} has no record")))?;
+            let work = serde_json::from_str(&work)?;
+            Ok((
+                Some(Claim {
+                    operation,
+                    work,
+                    fence,
+                    took_over: prior.is_some(),
+                }),
+                true,
+            ))
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresStore {
+    fn claim_filtered(
+        &self,
+        worker: &Worker,
+        repos: &[String],
+        labels: &[String],
+        lease: Duration,
+        scheduling: &Scheduling,
+        control: bool,
+    ) -> io::Result<Option<Claim>> {
+        let worker = worker.clone();
+        let repos = repos.to_vec();
+        let labels = labels.to_vec();
+        let lease = pg_lease(lease);
+        let now = scheduling.at_ms();
+        let aging = scheduling.aging_ms();
+        let window = ms(scheduling.window);
+        let (tenants, weights) = scheduling.weight_arrays();
+        // Claims whose process is gone from this host need not wait for
+        // their lease. The PID is checked here, outside the connection's
+        // closure, so a stored one that is no PID is an error naming it.
+        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
+            Ok(c.query(
+                "SELECT id, attempt, pid, start FROM by_operation_queue \
+                 WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
+                   AND lease_until > clock_timestamp()",
+                &[&worker.host, &worker.id],
+            )?
+            .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+            .collect())
+        })?;
+        let mut gone = Vec::new();
+        for (id, attempt, pid, start) in local {
+            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
+                gone.push((id, attempt));
+            }
+        }
+        let claimed = self.with(move |c| {
+            for (id, attempt) in &gone {
+                c.execute(
+                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
+                     WHERE id = $1 AND attempt = $2",
+                    &[id, attempt],
+                )?;
+            }
+            let pid = i64::from(worker.pid);
+            let rows = c.query(
+                PG_CLAIM,
+                &[
+                    &repos,
+                    &worker.id,
+                    &worker.host,
+                    &pid,
+                    &worker.start,
+                    &(lease as f64),
+                    &labels,
+                    &aging,
+                    &now,
+                    &window,
+                    &tenants,
+                    &weights,
+                    &control,
+                ],
+            )?;
+            Ok(rows.first().map(|row| {
+                let (id, fence, work, body, took_over): (String, i64, String, String, bool) =
+                    (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
+                (id, fence, work, body, took_over)
+            }))
+        })?;
+        let Some((id, fence, work, body, took_over)) = claimed else {
+            return Ok(None);
+        };
+        Ok(Some(Claim {
+            operation: parse_op(&id, &body, "")?,
+            work: serde_json::from_str(&work)?,
+            fence,
+            took_over,
+        }))
+    }
+}
+
+/// Whether queued work only delivers a short cancellation or steering request.
+pub(crate) fn control_work(work: &Value) -> bool {
+    work.get("kind").and_then(Value::as_str) == Some("console")
+        && work
+            .get("command")
+            .and_then(|command| command.get("action"))
+            .and_then(Value::as_str)
+            == Some("control")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3942,181 +4119,4 @@ mod tests {
             Admission::Admitted
         );
     }
-}
-
-impl SqliteStore {
-    fn claim_filtered(
-        &self,
-        worker: &Worker,
-        repos: &[String],
-        labels: &[String],
-        lease: Duration,
-        scheduling: &Scheduling,
-        control: bool,
-    ) -> io::Result<Option<Claim>> {
-        let repos = serde_json::to_string(repos)?;
-        let labels = serde_json::to_string(labels)?;
-        self.immediate(|tx| {
-            let clock = sqlite_now();
-            let now = scheduling.at_ms();
-            sqlite_reap(tx, worker, clock)?;
-            // Each tenant's usage per unit of weight, from its live claims
-            // and its decayed recent ones: computed here, inside the
-            // immediate transaction, and looked up by the order below.
-            let shares = sqlite_shares(tx, scheduling, clock, now)?;
-            let next: Option<(String, i64, String, Option<String>, String)> = tx
-                .query_row(
-                    "SELECT id, attempt, work, worker, tenant FROM operation_queue \
-                     WHERE repo IN (SELECT value FROM json_each(?1)) \
-                       AND (lease_until IS NULL OR lease_until <= ?2) \
-                       AND NOT EXISTS (SELECT 1 FROM json_each(requires) r \
-                           WHERE r.value NOT IN (SELECT value FROM json_each(?3))) \
-                       AND COALESCE(json_extract(work, '$.kind') = 'console' AND \
-                           json_extract(work, '$.command.action') = 'control', 0) = ?7 \
-                     ORDER BY priority \
-                         + COALESCE(MAX(?4 - enqueued_ms, 0) / NULLIF(?5, 0), 0) DESC, \
-                       COALESCE((SELECT s.value FROM json_each(?6) s WHERE s.key = tenant), \
-                           json_extract(?6, '$.\"\"')), \
-                       seq \
-                     LIMIT 1",
-                    rusqlite::params![
-                        repos,
-                        clock,
-                        labels,
-                        now,
-                        scheduling.aging_ms(),
-                        serde_json::to_string(&shares)?,
-                        control
-                    ],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-                )
-                .optional()
-                .map_err(sql)?;
-            let Some((id, attempt, work, prior, tenant)) = next else {
-                return Ok((None, false));
-            };
-            let fence = attempt + 1;
-            tx.execute(
-                "UPDATE operation_queue SET attempt = ?2, worker = ?3, host = ?4, pid = ?5, \
-                 start = ?6, lease_until = ?7 WHERE id = ?1",
-                rusqlite::params![
-                    id,
-                    fence,
-                    worker.id,
-                    worker.host,
-                    worker.pid,
-                    worker.start,
-                    clock.saturating_add(ms(lease))
-                ],
-            )
-            .map_err(sql)?;
-            sqlite_count_claim(tx, scheduling, &tenant, now)?;
-            let operation = sqlite_op(tx, "SELECT id, body FROM operations WHERE id = ?1", &id)?
-                .ok_or_else(|| io::Error::other(format!("queued operation {id} has no record")))?;
-            let work = serde_json::from_str(&work)?;
-            Ok((
-                Some(Claim {
-                    operation,
-                    work,
-                    fence,
-                    took_over: prior.is_some(),
-                }),
-                true,
-            ))
-        })
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl PostgresStore {
-    fn claim_filtered(
-        &self,
-        worker: &Worker,
-        repos: &[String],
-        labels: &[String],
-        lease: Duration,
-        scheduling: &Scheduling,
-        control: bool,
-    ) -> io::Result<Option<Claim>> {
-        let worker = worker.clone();
-        let repos = repos.to_vec();
-        let labels = labels.to_vec();
-        let lease = pg_lease(lease);
-        let now = scheduling.at_ms();
-        let aging = scheduling.aging_ms();
-        let window = ms(scheduling.window);
-        let (tenants, weights) = scheduling.weight_arrays();
-        // Claims whose process is gone from this host need not wait for
-        // their lease. The PID is checked here, outside the connection's
-        // closure, so a stored one that is no PID is an error naming it.
-        let local: Vec<(String, i64, i64, String)> = self.with(|c| {
-            Ok(c.query(
-                "SELECT id, attempt, pid, start FROM by_operation_queue \
-                 WHERE host = $1 AND worker IS NOT NULL AND worker <> $2 \
-                   AND lease_until > clock_timestamp()",
-                &[&worker.host, &worker.id],
-            )?
-            .iter()
-            .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
-            .collect())
-        })?;
-        let mut gone = Vec::new();
-        for (id, attempt, pid, start) in local {
-            if branchyard::process_gone(&worker.host, from_db_u32("pid", pid)?, &start) {
-                gone.push((id, attempt));
-            }
-        }
-        let claimed = self.with(move |c| {
-            for (id, attempt) in &gone {
-                c.execute(
-                    "UPDATE by_operation_queue SET worker = NULL, lease_until = NULL \
-                     WHERE id = $1 AND attempt = $2",
-                    &[id, attempt],
-                )?;
-            }
-            let pid = i64::from(worker.pid);
-            let rows = c.query(
-                PG_CLAIM,
-                &[
-                    &repos,
-                    &worker.id,
-                    &worker.host,
-                    &pid,
-                    &worker.start,
-                    &(lease as f64),
-                    &labels,
-                    &aging,
-                    &now,
-                    &window,
-                    &tenants,
-                    &weights,
-                    &control,
-                ],
-            )?;
-            Ok(rows.first().map(|row| {
-                let (id, fence, work, body, took_over): (String, i64, String, String, bool) =
-                    (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
-                (id, fence, work, body, took_over)
-            }))
-        })?;
-        let Some((id, fence, work, body, took_over)) = claimed else {
-            return Ok(None);
-        };
-        Ok(Some(Claim {
-            operation: parse_op(&id, &body, "")?,
-            work: serde_json::from_str(&work)?,
-            fence,
-            took_over,
-        }))
-    }
-}
-
-/// Whether queued work only delivers a short cancellation or steering request.
-pub(crate) fn control_work(work: &Value) -> bool {
-    work.get("kind").and_then(Value::as_str) == Some("console")
-        && work
-            .get("command")
-            .and_then(|command| command.get("action"))
-            .and_then(Value::as_str)
-            == Some("control")
 }
