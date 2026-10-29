@@ -62,6 +62,11 @@ version; partial environments are not selected.
 Linked cache paths are refused. Setup does not install system packages: native rendering and pivots need the image below or an
 explicit system installation of LibreOffice, poppler, fonts and python3-uno.
 
+If setup reports that `ensurepip` is unavailable on Debian or Ubuntu, install
+the `python3-venv` package for your Python version, then rerun setup. For example,
+Python 3.12 needs `python3.12-venv`. Setup reports this requirement; it does not
+install operating-system packages for you.
+
 Install the optional libraries explicitly from a checkout:
 
 ```sh

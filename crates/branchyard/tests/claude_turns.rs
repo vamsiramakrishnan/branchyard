@@ -307,19 +307,21 @@ answers='"n1"'
     );
 }
 
-/// The turn's limits bound the hold: at `max_duration` the engine
-/// interrupts, Claude Code answers, and the turn ends with the outcome it
-/// was held with, not over its limit, with a warning naming the task still
-/// running.
+/// Cutting a completed turn's hold keeps its outcome and warns once with
+/// the background task that is still running.
 #[test]
-fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
+fn a_cut_hold_warns_once_naming_the_running_tasks() {
     let f = Fixture::new();
-    let turn = format!("{CHECK_RUNNING}\n{}", result(0.01));
+    // A zero hold cap cuts only after the result arrives. A short turn-wide
+    // duration can instead expire during startup, before there is an outcome
+    // to preserve. The child-branch test below covers a duration cutting a hold.
+    // Keep the same task ID before and after the result: the cut may precede
+    // the stand-in's post-result background-task refresh.
+    let turn = format!("{}\n{}", CHECK_RUNNING.replace("c1", "b1"), result(0.01));
     let options = TaskOptions {
-        budget: Budget::default().duration(Duration::from_secs(1)),
+        budget: Budget::default().hold_cap(Duration::ZERO),
         ..stand_in(&f, &turn)
     };
-    let started = Instant::now();
     let branch = f
         .yard
         .task("go")
@@ -327,16 +329,11 @@ fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
         .name("cut")
         .run()
         .unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(8),
-        "{:?}",
-        started.elapsed()
-    );
     assert_eq!(branch.info().status, BranchStatus::NoChanges);
     assert!(
         warnings(&f, "cut")
             .iter()
-            .any(|w| w.contains("duration limit while held open")),
+            .any(|w| w.contains("with no duration limit; ending the hold")),
         "{:?}",
         warnings(&f, "cut")
     );
@@ -345,8 +342,6 @@ fn a_limit_ends_the_hold_with_a_warning_naming_the_running_tasks() {
         .filter(|w| w.contains("ended with Claude Code's background tasks still running"))
         .collect();
     assert_eq!(cut.len(), 1, "{:?}", harness_warnings(&f, "cut"));
-    // The stand-in reports its own `sleep` running once its turn's frames
-    // are out, so that is the set the limit cut off.
     assert!(cut[0].contains("(b1)"), "{cut:?}");
 }
 
