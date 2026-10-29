@@ -11,9 +11,9 @@ description = "Branchyard's setup interview: declarative questions, detected def
 workspace = true
 
 [dependencies]
-branchyard-config = { version = "0.2.1", path = "../branchyard-config" }
-branchyard-harness = { version = "0.2.1", path = "../branchyard-harness" }
-branchyard-provision = { version = "0.2.1", path = "../branchyard-provision" }
+branchyard-config = { version = "0.3.0", path = "../branchyard-config" }
+branchyard-harness = { version = "0.3.0", path = "../branchyard-harness" }
+branchyard-provision = { version = "0.3.0", path = "../branchyard-provision" }
 hex = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

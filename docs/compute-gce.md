@@ -54,8 +54,8 @@ by compute gce \
   --name=branchyard-worker \
   --directory="$PWD" \
   --tunnel-through-iap \
-  --version=0.2.1 \
-  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.2.1
+  --version=0.3.0 \
+  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.3.0
 ```
 
 The planner contacts no cloud service, runs no provider commands and creates no
