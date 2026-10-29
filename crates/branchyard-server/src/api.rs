@@ -1354,12 +1354,24 @@ async fn harnesses(
     if !caller.0.allows("read") {
         return Err(scope_required("read"));
     }
-    let yard = app
-        .visible_repos(&caller)
-        .next()
-        .map(|r| r.yard.clone())
-        .ok_or_else(|| ApiError::internal("no repositories"))?;
-    let list = blocking(move || yard.harnesses()).await?;
+    if app.visible_repos(&caller).next().is_none() {
+        crate::console::knowledge_allowed(&app, &caller)?;
+    }
+    let list = blocking(move || -> Result<_, ApiError> {
+        let mut list = branchyard::harnesses();
+        for profile in &mut list {
+            let identity = if profile.default {
+                profile.harness.as_str()
+            } else {
+                profile.profile.as_str()
+            };
+            if let Some(command) = app.command(None, &[Some(identity)])? {
+                profile.available = branchyard::check_harness_command(identity, &command).is_ok();
+            }
+        }
+        Ok(list)
+    })
+    .await??;
     Ok(Json(HarnessList { harnesses: list }))
 }
 

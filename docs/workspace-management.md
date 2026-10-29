@@ -36,6 +36,13 @@ code integration and deliverable acceptance separate.
 
 Use `list_harnesses` and `worker_inventory` to check reported readiness before
 selecting an agent. Catalog presence does not establish live qualification.
+Harness discovery also serves read-scoped knowledge-only callers whose principal
+and tenant permit managed storage. It opens no yard. A configured executable can
+be available even when the native harness binary is absent from the server's
+`PATH`; a broken configured override is unavailable. Default profiles use their
+harness name when started, and other profiles use their explicit profile ID.
+These are local command checks. Worker login metadata and remote provider
+readiness remain separate observations.
 Use the listed manager tools to discover projects, create workspaces, start and
 continue native sessions, inspect immutable sources and artifacts, request
 bounded document previews, accept deliverables, and observe operations. Each

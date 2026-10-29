@@ -1,5 +1,6 @@
 //! Socket-free HTTP and durable worker regressions, using only the fake agent.
 
+mod discovery;
 mod services;
 
 use std::collections::BTreeMap;

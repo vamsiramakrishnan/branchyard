@@ -21,7 +21,7 @@ use crate::console_store::{Collection, Mutation, Record};
 use crate::error::ApiError;
 
 pub(crate) use execution::execute;
-pub(crate) use routes::router;
+pub(crate) use routes::{knowledge_allowed, router};
 pub(crate) use runtime::operation_value;
 pub use runtime::ConsoleWork;
 /// Queue routing name for operator-enabled private task yards.

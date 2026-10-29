@@ -55,7 +55,8 @@ fn project_access(app: &App, caller: &Caller, p: &Record, required: &str) -> Res
     }
     Ok(())
 }
-pub(super) fn knowledge_allowed(app: &App, caller: &Caller) -> Result<(), ApiError> {
+/// Require enabled knowledge storage and both principal and tenant source grants.
+pub(crate) fn knowledge_allowed(app: &App, caller: &Caller) -> Result<(), ApiError> {
     if !app.config.managed_knowledge.enabled {
         return Err(ApiError::new(
             axum::http::StatusCode::FORBIDDEN,
