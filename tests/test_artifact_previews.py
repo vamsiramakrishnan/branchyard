@@ -496,6 +496,28 @@ shutil.copyfile({str(template_png)!r}, prefix.parent / f"{{prefix.name}}-{{first
             self.assertEqual(call["first"], 2)
             self.assertEqual(call["last"], 2)
 
+    def test_huge_pdf_page_is_bounded_before_rasterization(self) -> None:
+        from pypdf import PdfWriter
+
+        bin_dir, log_file = self.install_fake_converters(pdf_pages=1)
+        source = self.root / "huge.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=1_000_000, height=1_000_000)
+        with source.open("wb") as stream:
+            writer.write(stream)
+
+        def fake_which(name: str) -> str | None:
+            candidate = bin_dir / name
+            return str(candidate) if candidate.is_file() else None
+
+        with mock.patch("shutil.which", side_effect=fake_which):
+            preview.preview(source, self.root / "huge-preview")
+        raster = next(json.loads(line) for line in log_file.read_text().splitlines() if '"pdftoppm"' in line)
+        self.assertIn("-scale-to", raster["args"])
+        scale = int(raster["args"][raster["args"].index("-scale-to") + 1])
+        self.assertGreater(scale, 0)
+        self.assertLessEqual(scale, preview.MAX_PREVIEW_DIMENSION)
+
     def test_oversized_rendered_page_is_scaled_and_converter_failures_leave_no_partial_outputs(self) -> None:
         bin_dir, _ = self.install_fake_converters(pdf_pages=2, png_size=(1200, 900))
         pdf_file = self.make_pdf("scale.pdf", pages=2)

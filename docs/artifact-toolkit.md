@@ -187,6 +187,8 @@ stored formula strings rather than fabricated or stale cached values, and a
 warning notes that formulas were not evaluated. Rows, columns and per-cell text
 are bounded, with explicit truncation warnings and offset pagination.
 
+Poppler limits raster dimensions before allocating an image, including for PDFs
+with unusually large pages.
 Page previews (`kind: "pages"`) convert Office files to PDF in a fresh
 per-call LibreOffice user profile with macros disabled (`MacroSecurityLevel=3`)
 and external link updates disabled, then rasterize only the requested 1-based

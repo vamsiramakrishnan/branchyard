@@ -208,6 +208,7 @@ STEPS = (
     Step("test_artifact_assets", "controls", (PY, "tests/test_artifact_assets.py")),
     Step("test_artifact_bootstrap", "controls", (PY, "tests/test_artifact_bootstrap.py")),
     Step("test_artifacts", "controls", (PY, "tests/test_artifacts.py")),
+    Step("test_artifact_previews", "controls", (PY, "tests/test_artifact_previews.py")),
     Step("test_knowledge_evidence", "controls", (PY, "tests/test_knowledge_evidence.py")),
     Step("test_knowledge_analysis", "controls", (PY, "tests/test_knowledge_analysis.py")),
     Step("test_knowledge_cli", "controls", (PY, "tests/test_knowledge_cli.py")),

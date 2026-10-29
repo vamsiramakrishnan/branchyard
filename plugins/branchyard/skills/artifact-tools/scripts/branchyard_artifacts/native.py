@@ -143,6 +143,8 @@ def render_page(
                     str(page),
                     "-r",
                     str(dpi),
+                    "-scale-to",
+                    str(max_dimension),
                     "-png",
                     str(pdf),
                     str(work / "page"),
