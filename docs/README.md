@@ -94,6 +94,7 @@ Why it is built this way. Some pages describe a target rather than what exists; 
 | [Provisioning](provisioning.md) | How is a harness's home prepared before each turn: secrets, MCP servers, instructions, model, effort and telemetry, translated from Scion's provisioners, and what is not ported? |
 | [Artifact toolkit](artifact-toolkit.md) | How do atomic document skills create, revise, render and validate DOCX, XLSX, PDF and PPTX files, and assemble independent slide sections? |
 | [Artifact capture](artifact-capture.md) | How are declared output files collected after a producing turn and published before accepting its deliverable? |
+| [Artifact preview component](artifact-preview-component.md) | How does the console's drop-in preview of CSV, XLSX, DOCX, PPTX, PDF, image and text outputs fetch with the page's token, and what does it render? |
 | [Native identity](identity.md) | How do Google ADC, verified server callers and connector accounts preserve native IAM and upstream permissions? |
 | [Atomic knowledge validation, 29 October 2026](atomic-knowledge-validation-2026-10-29.md) | Which document, source-free harness, WIF, IAM and protected MCP checks actually ran, and what setup friction did they expose? |
 | [Model gateway](model-gateway.md) | How does a harness's model call go through Branchyard on the turn's token, with the key held back, weighted backends, fallbacks, budgets and exact cost? |

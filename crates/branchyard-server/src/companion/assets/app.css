@@ -389,6 +389,88 @@ dialog::backdrop { background: rgba(0, 0, 0, .4); }
 }
 @keyframes rise { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
 
+/* A workspace: session tabs over the conversation, and an inspector of
+   sources, outputs and details. The preview component reads the page's
+   tokens through its own hooks. */
+:root {
+  --by-surface-bg: var(--paper);
+  --by-surface-fg: var(--ink);
+  --by-text-muted: var(--ink-3);
+  --by-border-color: var(--line);
+  --by-header-bg: var(--wash);
+  --by-accent-color: var(--green);
+  --by-accent-hover: var(--green-hover);
+}
+.by-artifact-preview {
+  --by-preview-accent-text: var(--on-green);
+  --by-preview-btn-bg: var(--paper);
+  --by-preview-btn-border: var(--line);
+  --by-preview-btn-hover: var(--wash);
+  --by-preview-table-stripe: var(--wash);
+  --by-preview-focus-ring: var(--focus);
+}
+.sessions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 8px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.session-tab {
+  display: inline-flex; align-items: center; gap: 7px; flex: none; min-height: 28px; padding: 3px 10px;
+  border-radius: 7px; color: var(--ink-3); text-decoration: none; font-weight: 550; white-space: nowrap;
+}
+.session-tab:hover { background: var(--wash); color: var(--ink); }
+.session-tab[aria-current="page"] { background: var(--wash-2); color: var(--ink); font-weight: 650; }
+.session-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+button.new-session { flex: none; min-height: 28px; padding: 3px 10px; color: var(--green-text); }
+button.new-session[aria-pressed="true"] { background: var(--wash-2); color: var(--ink); }
+.session-form { width: 100%; max-width: 760px; margin: 0 auto; }
+.session-form h2 { font-size: 15px; margin: 14px 0 0; }
+.choices { border: 0; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.choices legend { font-weight: 600; padding: 0; margin-bottom: 6px; }
+.choices .toggle, .choices-row .toggle { max-width: 100%; }
+.choices .toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.choices-row { margin-top: 14px; }
+.new-workspace { margin-top: 20px; padding: 2px 16px 14px; }
+.new-workspace label.block { margin-top: 10px; }
+.inline-form { flex-wrap: nowrap; }
+.inline-form input { flex: 1; min-width: 0; }
+.panel-tools { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line-2); }
+.drop {
+  flex: 1; min-width: 0; padding: 6px 10px; border: 1px dashed var(--field); border-radius: 8px;
+  color: var(--ink-3); font-size: 12px; text-align: center;
+}
+.drop.over { border-color: var(--focus); color: var(--ink); background: var(--wash); }
+.file-list { list-style: none; margin: 0; padding: 4px 0; }
+.file-item, .output-row {
+  display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 16px;
+  border-bottom: 1px solid var(--line-2);
+}
+.file-item:last-child, .output-row:last-child { border-bottom: 0; }
+.output-row:has(.output-name[aria-pressed="true"]) { background: var(--wash); }
+.file-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.file-title, .output-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-main .item-meta { margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+button.output-name {
+  display: block; min-height: 0; padding: 0; border: 0; border-radius: 4px; background: transparent;
+  color: var(--blue-text); text-align: left; max-width: 100%;
+}
+button.output-name:hover { background: transparent; text-decoration: underline; }
+button.output-name[aria-pressed="true"] { color: var(--ink); }
+.tag-accepted { display: inline-flex; align-items: center; gap: 4px; flex: none; background: var(--add-bg); color: var(--add-text); }
+.tag-accepted svg.check { width: 12px; height: 12px; }
+.preview:not(:empty) { border-top: 1px solid var(--line); }
+.preview-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px 8px; }
+.preview-head h3 { flex: 1; min-width: 0; margin: 0; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-host { padding: 0 16px 16px; }
+.preview-missing {
+  display: flex; flex-direction: column; gap: 4px; padding: 16px; border: 1px dashed var(--field);
+  border-radius: 12px; background: var(--wash); color: var(--ink-2);
+}
+.preview-missing-title { color: var(--ink); font-size: 15px; font-weight: 650; }
+.strip-error { flex-basis: 100%; font-size: 12px; }
+.menu-list { min-width: 200px; }
+.menu-item:has(.menu-why) { flex-direction: column; align-items: flex-start; gap: 0; white-space: normal; text-align: left; }
+.menu-why { font-size: 11px; font-weight: 400; color: var(--ink-3); overflow-wrap: anywhere; }
+
 /* Wide: three panes, each scrolling on its own */
 @media (min-width: 760px) {
   .app { height: 100vh; height: 100dvh; overflow: hidden; }
@@ -429,6 +511,11 @@ dialog::backdrop { background: rgba(0, 0, 0, .4); }
   .strip h1 { white-space: normal; overflow-wrap: anywhere; }
   .strip .state { margin-right: auto; }
   .convo { padding: 16px; }
+  .sessions { padding: 6px 12px; }
+  .session-tab, button.new-session { min-height: 40px; }
+  .panel-tools { flex-wrap: wrap; }
+  .drop { flex-basis: 100%; }
+  .inline-form { flex-wrap: wrap; }
   .you { max-width: 92%; }
   .composer { margin: 0 12px 12px; }
   button, .button { min-height: 40px; }
