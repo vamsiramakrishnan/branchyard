@@ -19561,6 +19561,12 @@
     "OperationResult": {
       "type": "object",
       "properties": {
+        "runtime": {
+          "description": "Workspace provider state after a queued resource action; never a model replay."
+        },
+        "pull_request": {
+          "description": "Complete bounded PR publication or refresh result, including forge review metadata."
+        },
         "branches": {
           "type": "array",
           "items": {
@@ -21396,6 +21402,12 @@
         "OperationResult": {
           "type": "object",
           "properties": {
+            "runtime": {
+              "description": "Workspace provider state after a queued resource action; never a model replay."
+            },
+            "pull_request": {
+              "description": "Complete bounded PR publication or refresh result, including forge review metadata."
+            },
             "branches": {
               "type": "array",
               "items": {
@@ -23260,6 +23272,12 @@
         "OperationResult": {
           "type": "object",
           "properties": {
+            "runtime": {
+              "description": "Workspace provider state after a queued resource action; never a model replay."
+            },
+            "pull_request": {
+              "description": "Complete bounded PR publication or refresh result, including forge review metadata."
+            },
             "branches": {
               "type": "array",
               "items": {
@@ -25899,6 +25917,21 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "unapproved_tools": {
+          "type": "boolean",
+          "description": "Explicitly acknowledge a harness that cannot enforce tool permissions.\nFalse by default, and refused unless the operator also permits it."
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Existing typed execution backend; still subject to operator provider policy."
+        },
         "name": {
           "type": "string",
           "description": "Human title."
@@ -26000,6 +26033,436 @@
       "title": "StartSessionRequest",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$defs": {
+        "Provider": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "local"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A local process as your user; no isolation. The default."
+            },
+            {
+              "$ref": "#/$defs/SandboxOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "microsandbox"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A Microsandbox microVM per turn, booted from an image that has the\nharness installed. Needs a build with the `microsandbox` feature and\na Linux host with KVM."
+            },
+            {
+              "$ref": "#/$defs/SubstrateOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "substrate"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "An Agent Substrate actor per turn, from a template that runs the\nBranchyard bridge and has the harness installed. Unqualified: see\n`docs/substrate.md`."
+            },
+            {
+              "$ref": "#/$defs/RecipeOptions",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "recipe"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "A machine an environment recipe's scripts make, per turn (or kept\npaused between turns when the recipe can suspend and resume),\nreached over ssh or the recipe's exec command; the worktree and the\nprivate home are copied in and back. See `docs/recipes.md`."
+            }
+          ],
+          "description": "Where a branch's harness runs.\n\nSerialized as an object tagged by `kind`, such as `{\"kind\": \"local\"}` or\n`{\"kind\": \"microsandbox\", \"image\": \"...\", ...}`."
+        },
+        "SandboxKeep": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "destroy",
+              "description": "Destroyed: every turn gets a fresh one."
+            },
+            {
+              "type": "string",
+              "const": "pause",
+              "description": "Paused and recorded, and resumed by the next turn, when the provider\ncan pause; destroyed otherwise, saying why."
+            }
+          ],
+          "description": "What happens to a branch's sandbox when a turn ends."
+        },
+        "SandboxOptions": {
+          "type": "object",
+          "properties": {
+            "image": {
+              "type": "string",
+              "description": "OCI image reference. The harness executable must be installed in it\nand on its `PATH`, or named by an absolute guest path in\n[`TaskOptions::command`]."
+            },
+            "cpus": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "memory_mib": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the sandbox, such as\n`ANTHROPIC_API_KEY`. Nothing else is: not your login, not your\n`HOME`. Names are stored with the branch; values are not.",
+              "default": []
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's microVM when a turn ends: destroyed\n(the default), or paused and resumed by the next turn. Needs\n[`SandboxOptions::live_branch`]; see `docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept sandbox, how many checkpoints keep a provider snapshot\nas well (the newest; older ones are released). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept (paused) sandboxes of this provider in the\nrepository; parking one more destroys the least recently used.\nUnset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            },
+            "live_branch": {
+              "type": "boolean",
+              "description": "Opt in to the Microsandbox SDK's pause, resume, live branching and\nfull-memory snapshots, which are declared only then: unqualified\nuntil they pass on a KVM host."
+            }
+          },
+          "required": [
+            "image"
+          ],
+          "description": "A sandboxed harness's image, limits and credentials."
+        },
+        "SubstrateEgress": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "deny"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Deny outgoing connections."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "allow_hosts"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "hosts"
+              ],
+              "additionalProperties": false,
+              "description": "Allow DNS names, optionally beginning with `*.` for one subdomain label."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "unrestricted"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false,
+              "description": "Allow all destinations, selected explicitly by the operator."
+            }
+          ],
+          "description": "The destinations actors may reach through Substrate's egress gateway."
+        },
+        "SubstrateOptions": {
+          "type": "object",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "description": "The `Control` API, as `https://host:port`, or `http://host:port` on\nloopback or with [`SubstrateOptions::insecure`]."
+            },
+            "router": {
+              "type": "string",
+              "description": "The router base URL. The bridge requests carry the actor routing\nheader. Use `https://` or `wss://`, or `http://` or `ws://` on\nloopback or with [`SubstrateOptions::insecure`]."
+            },
+            "atespace": {
+              "type": "string",
+              "description": "The atespace actors are created in. Empty means `default`.",
+              "default": ""
+            },
+            "template": {
+              "type": "string",
+              "description": "An actor template that runs `branchyard-bridge` with the public half\nof [`SubstrateOptions::key`], with git and the harness installed."
+            },
+            "key": {
+              "type": "string",
+              "description": "The host's bridge signing key, from `branchyard-bridge keygen`. The\npath is stored with the branch; the key is not."
+            },
+            "api_token_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Path to a Control bearer token, reread for every RPC.",
+              "default": null
+            },
+            "server_name": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Verified TLS service name for Control, also through a port-forward.",
+              "default": null
+            },
+            "egress": {
+              "$ref": "#/$defs/SubstrateEgress",
+              "description": "Outgoing connections actors may make through Substrate.",
+              "default": {
+                "mode": "deny"
+              }
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed in the actor. Empty means `/workspace`.",
+              "default": ""
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` in the actor. Empty means `/branchyard/home`.",
+              "default": ""
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process into the actor, such as\n`ANTHROPIC_API_KEY`. Names are stored with the branch; values are\nnot.",
+              "default": []
+            },
+            "ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS `Control` API, and for the\nrouter unless [`SubstrateOptions::router_ca`] is set. Unset trusts\nthe public roots bundled at build time.",
+              "default": null
+            },
+            "client_cert": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "A PEM client certificate and key for the `Control` API (mutual TLS).",
+              "default": null
+            },
+            "client_key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "router_ca": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "PEM certificate authorities for a TLS router.",
+              "default": null
+            },
+            "insecure": {
+              "type": "boolean",
+              "description": "Allow a `Control` endpoint or router in the clear to a host other\nthan loopback, sending credentials and code unencrypted.",
+              "default": false
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "What happens to the branch's actor when a turn ends: deleted (the\ndefault), or paused (`PauseActor`) and resumed by the next turn. See\n`docs/sandbox-snapshots.md`."
+            },
+            "snapshots": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "With a kept actor, how many checkpoints keep a tag as well (the\nnewest; older tags are deleted). Unset: 3. 0: none."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept actors in the repository for this cluster;\nparking one more deletes the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            }
+          },
+          "required": [
+            "endpoint",
+            "router",
+            "template",
+            "key"
+          ],
+          "description": "Where an Agent Substrate cluster is and how a harness runs in it.\n\nEach turn creates an actor from [`SubstrateOptions::template`], copies the\nworktree into it at [`SubstrateOptions::workdir`] and the branch's private\nhome to [`SubstrateOptions::home`], runs the harness there through the\nbridge, copies both back and deletes the actor. See `docs/substrate.md`."
+        },
+        "RecipeOptions": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "The recipe's name, `[recipes.NAME]`."
+            },
+            "create": {
+              "type": "string",
+              "description": "Prints the new machine's result (`create`)."
+            },
+            "suspend": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resume": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "destroy": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "As written: `\"none\"` disables it."
+            },
+            "timeout_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Per script; unset: 900."
+            },
+            "digest": {
+              "type": "string",
+              "description": "The SHA-256 of the commands that were trusted, for messages."
+            },
+            "workdir": {
+              "type": "string",
+              "description": "Where the worktree is placed on the machine. Empty means\n`/tmp/branchyard/<branch>-<8 hex>/workspace`, unique to this\nrepository's branch."
+            },
+            "home": {
+              "type": "string",
+              "description": "The harness's `HOME` on the machine. Empty means the same directory's\n`home`."
+            },
+            "pass_env": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Variables copied by name from this process to the machine. Names\nare stored with the branch; values are not."
+            },
+            "keep": {
+              "$ref": "#/$defs/SandboxKeep",
+              "description": "Destroy the machine when a turn ends (the default), or suspend it\nfor the next turn; pausing needs both `suspend` and `resume`."
+            },
+            "max_paused": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "At most this many kept machines of this recipe in the repository;\nparking one more destroys the least recently used. Unset: 4."
+            },
+            "max_kept_secs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "A kept sandbox unused for longer than this many seconds is\ndestroyed instead of resumed: by the branch's next turn, or by the\nnext turn ending on this provider. Unset: kept until `max_paused`\nevicts it. See `docs/sandbox-snapshots.md`."
+            }
+          },
+          "required": [
+            "name",
+            "create"
+          ],
+          "description": "An environment recipe a branch's harness runs on, as it was trusted when\nthe branch was given it: its commands are stored with the branch, so\nevery later turn, its recovery and its removal run what was trusted,\nnot what the configuration says by then. Resolved and trust-checked by\nthe caller (`by run --provider recipe:NAME`); see `docs/recipes.md`."
+        },
         "PolicySpec": {
           "type": "object",
           "additionalProperties": false,
@@ -27181,6 +27644,12 @@
         "OperationResult": {
           "type": "object",
           "properties": {
+            "runtime": {
+              "description": "Workspace provider state after a queued resource action; never a model replay."
+            },
+            "pull_request": {
+              "description": "Complete bounded PR publication or refresh result, including forge review metadata."
+            },
             "branches": {
               "type": "array",
               "items": {
@@ -41153,6 +41622,12 @@
         "OperationResult": {
           "type": "object",
           "properties": {
+            "runtime": {
+              "description": "Workspace provider state after a queued resource action; never a model replay."
+            },
+            "pull_request": {
+              "description": "Complete bounded PR publication or refresh result, including forge review metadata."
+            },
             "branches": {
               "type": "array",
               "items": {
