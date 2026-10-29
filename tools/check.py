@@ -26,7 +26,14 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
-TARGETS = ("tools", "tests", "sdk/python/branchyard_client.py", "sdk/python/branchyard_artifacts", "examples/python")
+TARGETS = (
+    "tools",
+    "tests",
+    "sdk/python/branchyard_client.py",
+    "sdk/python/branchyard_artifacts",
+    "crates/branchyard/src/contract/capture/read_file.py",
+    "examples/python",
+)
 TAIL_LINES = 20
 # A check only reads. These make the schema generators and the catalog rewrite what they compare.
 REWRITE_VARIABLES = ("BY_UPDATE_SCHEMA", "BRANCHYARD_BLESS")
