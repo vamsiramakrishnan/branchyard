@@ -247,6 +247,235 @@ fn cross_tenant_isolation() {
     assert_eq!(denied.code(), Some("repo_not_allowed"));
 }
 
+fn disjoint_repository_principals(f: &Fixture) -> branchyard_server::Config {
+    let mut config = f.config();
+    config.repos.push(("appb".into(), f.extra_repo("appb")));
+    config.tokens = vec![
+        Token {
+            name: "reader-a".into(),
+            secret: "reader-a-token-0123456789".into(),
+        },
+        Token {
+            name: "runner-b".into(),
+            secret: "runner-b-token-0123456789".into(),
+        },
+    ];
+    for (name, repo) in [("reader-a", "app"), ("runner-b", "appb")] {
+        let mut principal = Principal::default_for(name);
+        principal.tenant = "shared".into();
+        principal.repos = Some([repo.to_owned()].into_iter().collect());
+        config.principals.insert(name.into(), principal);
+    }
+    config.tenants.insert(
+        "shared".into(),
+        TenantPolicy {
+            repos: Some(["app".to_owned(), "appb".to_owned()].into_iter().collect()),
+            ..TenantPolicy::default()
+        },
+    );
+    config
+}
+
+/// A tenant can own several repositories while its individual credentials
+/// reach only one. An operation ID does not bypass that narrower grant.
+#[test]
+fn operation_reads_respect_disjoint_repository_grants_within_one_tenant() {
+    let f = Fixture::new();
+    let server = Server::start(disjoint_repository_principals(&f));
+    let reader =
+        branchyard_client::Client::new(&server.url(), "reader-a-token-0123456789").unwrap();
+    let runner =
+        branchyard_client::Client::new(&server.url(), "runner-b-token-0123456789").unwrap();
+    let admitted = runner
+        .repo("appb")
+        .submit_task(
+            &task("WRITE private.txt=synthetic-private-result", "private-b"),
+            &new_key(),
+        )
+        .unwrap();
+    let completed = await_operation(&runner, &admitted.id);
+    assert_eq!(completed.state, OperationState::Succeeded);
+    let (status, _, body) = raw(
+        server.addr,
+        &common::get(
+            &format!("/v1/operations/{}", admitted.id),
+            Some("reader-a-token-0123456789"),
+        ),
+    );
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "unknown_operation");
+    assert_eq!(
+        json(&body).as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["error"]
+    );
+    assert!(json(&body)["error"].get("detail").is_none());
+    assert!(!body.contains("private-b"));
+    assert_eq!(runner.operation(&admitted.id).unwrap().id, admitted.id);
+    // Related branch reads and cancellation already enforce repository access.
+    assert_eq!(
+        reader.repo("appb").branches().unwrap_err().code(),
+        Some("repo_not_allowed")
+    );
+    assert_eq!(
+        reader.repo("appb").cancel("private-b").unwrap_err().code(),
+        Some("repo_not_allowed")
+    );
+}
+
+/// Reconciliation and direct reads use the request's current allowlists,
+/// even when a durable operation was admitted under a wider credential.
+#[test]
+fn operation_reads_recheck_current_principal_and_tenant_repository_allowlists() {
+    for narrow_tenant in [false, true] {
+        let f = Fixture::new();
+        let mut config = f.config();
+        config.repos.push(("appb".into(), f.extra_repo("appb")));
+        let server = Server::start(config.clone());
+        let client = server.client();
+        let hidden_key = new_key();
+        let hidden = client
+            .repo("appb")
+            .submit_task(
+                &task("WRITE private.txt=synthetic-private-result", "private-b"),
+                &hidden_key,
+            )
+            .unwrap();
+        assert_eq!(
+            await_operation(&client, &hidden.id).state,
+            OperationState::Succeeded
+        );
+        let visible_key = new_key();
+        let visible = client
+            .repo("app")
+            .submit_task(&task("WRITE visible.txt=ok", "visible-a"), &visible_key)
+            .unwrap();
+        assert_eq!(
+            await_operation(&client, &visible.id).state,
+            OperationState::Succeeded
+        );
+        server.stop();
+        let allowed = Some(["app".to_owned()].into_iter().collect());
+        if narrow_tenant {
+            config.tenants.insert(
+                "default".into(),
+                TenantPolicy {
+                    repos: allowed,
+                    ..TenantPolicy::default()
+                },
+            );
+        } else {
+            let mut principal = Principal::default_for("tester");
+            principal.repos = allowed;
+            config.principals.insert("tester".into(), principal);
+        }
+        let server = Server::start(config);
+        let client = server.client();
+        assert_eq!(client.operation(&visible.id).unwrap().id, visible.id);
+        assert_eq!(
+            client.operation_by_key(&visible_key).unwrap().id,
+            visible.id
+        );
+        for path in [
+            format!("/v1/operations/{}", hidden.id),
+            format!("/v1/operations/{}?wait=1", hidden.id),
+            format!("/v1/operations?idempotency_key={hidden_key}"),
+        ] {
+            let (status, _, body) = raw(server.addr, &common::get(&path, Some(TOKEN)));
+            assert_eq!(status, 404, "tenant={narrow_tenant}, {path}: {body}");
+            assert_eq!(json(&body)["error"]["code"], "unknown_operation");
+            assert!(!body.contains("private-b"));
+        }
+    }
+}
+
+/// A global lookup can reconcile an operation on any server sharing its
+/// store. Repository authorization does not require a local served yard.
+#[test]
+fn operation_reads_keep_authorized_shared_store_and_same_tenant_reader_access() {
+    let f = Fixture::new();
+    let mut config = f.config();
+    config.repos.push(("appb".into(), f.extra_repo("appb")));
+    let server = Server::start(config.clone());
+    let client = server.client();
+    let key = new_key();
+    let admitted = client
+        .repo("appb")
+        .submit_task(
+            &task("WRITE result.txt=shared-result", "remote-result"),
+            &key,
+        )
+        .unwrap();
+    assert_eq!(
+        await_operation(&client, &admitted.id).state,
+        OperationState::Succeeded
+    );
+    server.stop();
+    config.repos.retain(|(name, _)| name == "app");
+    config.tokens.push(Token {
+        name: "reader-b".into(),
+        secret: "reader-b-token-0123456789".into(),
+    });
+    let mut principal = Principal::default_for("reader-b");
+    principal.scopes = ["read".to_owned()].into_iter().collect();
+    principal.repos = Some(["appb".to_owned()].into_iter().collect());
+    config.principals.insert("reader-b".into(), principal);
+    let server = Server::start(config);
+    let client = server.client();
+    let reader =
+        branchyard_client::Client::new(&server.url(), "reader-b-token-0123456789").unwrap();
+    assert_eq!(client.repos().unwrap().len(), 1);
+    assert_eq!(client.operation(&admitted.id).unwrap().id, admitted.id);
+    assert_eq!(client.operation_by_key(&key).unwrap().id, admitted.id);
+    assert_eq!(reader.operation(&admitted.id).unwrap().id, admitted.id);
+    let (status, _, body) = raw(
+        server.addr,
+        &common::get(
+            &format!("/v1/operations/{}?wait=0", admitted.id),
+            Some("reader-b-token-0123456789"),
+        ),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["id"], admitted.id);
+}
+
+/// Hidden running operations return unknown immediately, without consuming
+/// their long-poll timeout or revealing whether the task is still running.
+#[test]
+fn operation_reads_hide_unavailable_repositories_before_long_polling() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let f = Fixture::new();
+    let server = Server::start(disjoint_repository_principals(&f));
+    let runner =
+        branchyard_client::Client::new(&server.url(), "runner-b-token-0123456789").unwrap();
+    let op = runner
+        .repo("appb")
+        .submit_task(&task("HANG", "held"), &new_key())
+        .unwrap();
+    wait::until("the remote prompt to be submitted", || {
+        runner.repo("appb").events("held", 0).is_ok_and(|page| {
+            page.events
+                .iter()
+                .any(|e| matches!(e.activity, branchyard::Activity::Prompt(_)))
+        })
+    });
+    let addr = server.addr;
+    let path = format!("/v1/operations/{}?wait=30", op.id);
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let result = raw(addr, &common::get(&path, Some("reader-a-token-0123456789")));
+        sender.send(result).unwrap();
+    });
+    let response = receiver.recv_timeout(Duration::from_secs(5));
+    runner.repo("appb").cancel("held").unwrap();
+    await_operation(&runner, &op.id);
+    reader.join().unwrap();
+    let (status, _, body) = response.expect("hidden operations must not wait for the running task");
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(json(&body)["error"]["code"], "unknown_operation");
+}
+
 /// `max_running`, reserved atomically at admission (so two requests racing
 /// past the limit cannot both start) and released the moment the turn
 /// ends.
