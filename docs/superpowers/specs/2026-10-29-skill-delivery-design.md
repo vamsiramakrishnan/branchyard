@@ -76,8 +76,11 @@ Sending skills once per actor per digest only saves anything for kept actors, wh
 2. **Next**: the runtime stage in the actor image (built and pushed by the release workflow, so it ships with a release, not from this work); the server-managed store (workspace, personal, team) in SQLite and PostgreSQL, its routes, SDK methods, CLI and console section, per-caller resolution, and the write refusals above.
 3. **Later, if the timings justify it**: transfer changes for Substrate.
 
-## Decisions for the owner
+## Decisions
 
-- The repository folder: `.agents/skills/` (proposed, for interoperability) or a Branchyard-only folder.
-- Repository skills on servers: off unless the operator allows them (proposed).
-- For the next step: personal skills on by default once the store exists; team skills without approval by default; precedence workspace, repository, personal, team.
+The owner decided on 29 October 2026:
+
+- Personal and team skills are on by default once the server-managed store exists, and team skills need no approval by default; an operator setting can require an administrator to approve each team skill's digest.
+- Precedence between custom layers: workspace, then repository (project), then personal, then team.
+
+Still proposed, not yet decided: `.agents/skills/` as the repository folder, and repository skills off on servers unless the operator allows them.
