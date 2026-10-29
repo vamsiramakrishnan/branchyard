@@ -75,6 +75,14 @@ nested virtualization, no release channel, no node auto-upgrade and both require
 certificate beta APIs. The default is two `c3-standard-4` nodes with 100 GB disks.
 Use `--machine-type=n2-standard-8 --nodes=1`, for example, to specify another
 supported footprint. `--network` and `--subnet` default to `default`.
+The node disk size does not limit application volumes. The pinned upstream
+bundled PostgreSQL manifest requests a separate **500 GiB** persistent volume.
+The helper currently has no database-size option. Include that volume in the
+cost review before applying. A smaller evaluation database needs an explicit
+upstream Kustomize storage override; the upstream kind overlay also reduces
+this request for testing. Reducing storage changes available database I/O
+capacity, so a small evaluation volume does not establish production throughput.
+
 `--private-nodes` requires existing outbound connectivity, such as Cloud NAT;
 `--master-cidr` selects the control-plane CIDR. The helper does not configure NAT
 or routes to a private Kubernetes endpoint.
@@ -239,7 +247,13 @@ the live command record is `/home/user/branchyard-console-work-20261029/gke-stat
 Keep the redacted run records before deleting a temporary deployment. Read its
 resource names from `deployment.json` and remove only resources dedicated to
 that test; adopted resources may serve other work. Stop its actors and local
-connection processes, then delete the cluster, repository and snapshot bucket:
+connection processes first. Before deleting the cluster,
+record each owned database claim UID, PV UID and CSI disk handle. Delete only
+the owned database controller and claim while Kubernetes is still running,
+wait for its `Delete` reclaim policy to remove the PV, and verify that exact
+Compute Engine disk is absent. A node boot disk's auto-delete setting does not
+cover a database PVC, and cluster deletion alone can leave that disk behind.
+After disk reclamation, delete the cluster, repository and snapshot bucket:
 
 ```sh
 gcloud container clusters delete CLUSTER --project=PROJECT --zone=ZONE
