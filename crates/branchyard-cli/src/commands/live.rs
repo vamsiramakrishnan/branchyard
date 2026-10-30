@@ -180,6 +180,9 @@ impl Live {
             fleet: task.fleet.clone(),
             join_task: None,
             deny: task.deny.clone(),
+            // A command that creates branches from a revision sets the
+            // person's decision (`skills_cmd::gate`); the others inherit.
+            repository_skills: branchyard::SkillGate::default(),
         })
     }
 

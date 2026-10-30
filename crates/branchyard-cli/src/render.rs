@@ -4,8 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+use branchyard::skills::Layer;
 use branchyard::{
-    Activity, BranchInfo, BranchStatus, CandidateInfo, Event, HarnessInfo, RecordedEvent,
+    Activity, BranchInfo, BranchStatus, CandidateInfo, Event, HarnessInfo, RecordedEvent, SkillSet,
     TurnOutcome, Usage,
 };
 use serde_json::Value;
@@ -442,6 +443,30 @@ pub fn workspace_line(report: &branchyard::WorkspaceReport, style: Style) -> Str
     style.paint(tone, &line)
 }
 
+/// A turn's skills in its `provisioned:` line: the set's digest, how many
+/// built-in skills and each custom one's label, and the repository skills
+/// withheld and why. Nothing for an empty record.
+fn skills_parts(skills: &SkillSet) -> Vec<String> {
+    let mut parts = Vec::new();
+    if !skills.entries.is_empty() {
+        let (built_in, custom): (Vec<_>, Vec<_>) = skills
+            .entries
+            .iter()
+            .partition(|entry| entry.layer == Layer::BuiltIn);
+        let mut named = vec![format!("{} built-in", built_in.len())];
+        named.extend(custom.iter().map(|entry| entry.label()));
+        parts.push(format!(
+            "skills {} ({})",
+            skills.set.get(..12).unwrap_or(&skills.set),
+            named.join(", ")
+        ));
+    }
+    if let Some(withheld) = &skills.withheld {
+        parts.push(format!("repository skills withheld: {}", withheld.reason));
+    }
+    parts
+}
+
 /// One line for recorded activity. Message deltas are text, not lines, and
 /// return `None`.
 pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
@@ -496,6 +521,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
             unused_secrets,
             connectors,
             knowledge,
+            skills,
             managed,
             permissions,
         } => {
@@ -581,6 +607,7 @@ pub fn activity_line(activity: &Activity, style: Style) -> Option<String> {
                     exposed.join(", ")
                 ));
             }
+            parts.extend(skills_parts(skills));
             style.paint(Tone::Dim, &format!("provisioned: {}", parts.join("; ")))
         }
         Activity::Steered { by, text, .. } => style.paint(
@@ -2185,6 +2212,7 @@ mod tests {
                     turn: 3,
                     method: SnapshotMethod::LiveBranch,
                 },
+                placed: None,
             }),
             "sandbox: branched from a's checkpoint 3 (microsandbox live branch)"
         );
@@ -2195,6 +2223,7 @@ mod tests {
                 origin: SandboxOrigin::Fresh {
                     reason: Some("provider can't branch: it declares neither".into()),
                 },
+                placed: None,
             }),
             "sandbox: fresh (provider can't branch: it declares neither)"
         );
@@ -2240,6 +2269,7 @@ mod tests {
                 unused_secrets: Vec::new(),
                 connectors: Vec::new(),
                 knowledge: Vec::new(),
+                skills: SkillSet::default(),
                 managed: None,
                 permissions: None,
             };
@@ -2280,6 +2310,7 @@ mod tests {
             unused_secrets: Vec::new(),
             connectors: Vec::new(),
             knowledge: Vec::new(),
+            skills: SkillSet::default(),
             managed: None,
             permissions: None,
         };
@@ -2287,6 +2318,67 @@ mod tests {
             activity_line(&provisioned, PLAIN).unwrap(),
             "provisioned: auth zai; set OPENAI_API_KEY, OPENAI_BASE_URL; ZAI_API_KEY (as \
              OPENAI_API_KEY), GH_TOKEN in the environment of its tool commands"
+        );
+    }
+
+    #[test]
+    fn a_turns_skills_name_their_set_and_the_repository_skills_withheld() {
+        use branchyard::skills::SkillEntry;
+        let entry = |layer, name: &str| SkillEntry {
+            layer,
+            name: name.into(),
+            digest: "0".repeat(64),
+        };
+        let provisioned = |skills| Activity::Provisioned {
+            auth: None,
+            files: Vec::new(),
+            env: vec!["A".into()],
+            secrets: Vec::new(),
+            unused_secrets: Vec::new(),
+            connectors: Vec::new(),
+            knowledge: Vec::new(),
+            skills,
+            managed: None,
+            permissions: None,
+        };
+        let staged = SkillSet {
+            set: "3f2a9c1d0e4b5a6978".into(),
+            entries: vec![
+                entry(Layer::BuiltIn, "pdf"),
+                entry(Layer::BuiltIn, "docx"),
+                entry(Layer::Repository, "style-guide"),
+            ],
+            withheld: None,
+        };
+        assert_eq!(
+            activity_line(&provisioned(staged.clone()), PLAIN).unwrap(),
+            "provisioned: set A; skills 3f2a9c1d0e4b (2 built-in, repository:style-guide)"
+        );
+        let withheld = SkillSet {
+            entries: staged.entries[..2].to_vec(),
+            withheld: Some(branchyard::WithheldSkills {
+                entries: vec![entry(Layer::Repository, "style-guide")],
+                reason: "you have not trusted this repository's skills".into(),
+            }),
+            ..staged
+        };
+        assert_eq!(
+            activity_line(&provisioned(withheld.clone()), PLAIN).unwrap(),
+            "provisioned: set A; skills 3f2a9c1d0e4b (2 built-in); repository skills withheld: \
+             you have not trusted this repository's skills"
+        );
+        let recorded = crate::json::recorded(&RecordedEvent {
+            at_ms: 1,
+            activity: provisioned(withheld),
+        });
+        assert_eq!(
+            recorded["skills"]["withheld"]["reason"],
+            "you have not trusted this repository's skills"
+        );
+        assert_eq!(recorded["skills"]["entries"][0]["layer"], "built_in");
+        assert_eq!(
+            activity_line(&provisioned(SkillSet::default()), PLAIN).unwrap(),
+            "provisioned: set A"
         );
     }
 

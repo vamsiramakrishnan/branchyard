@@ -1283,7 +1283,7 @@ fn tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-fn plural(n: usize, word: &str) -> String {
+pub(crate) fn plural(n: usize, word: &str) -> String {
     match n {
         1 => format!("1 {word}"),
         n => format!("{n} {word}s"),

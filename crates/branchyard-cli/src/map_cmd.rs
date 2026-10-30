@@ -283,9 +283,11 @@ fn run_local(
         crate::usage::guard(&[harness])?;
     }
     let workspace = commands::workspace(env, &yard)?;
+    let repository_skills = crate::skills_cmd::gate(yard.root());
     let live = commands::Live::start_to(env, task, true, json, None);
     let options = TaskOptions {
         workspace,
+        repository_skills,
         ..live.options(task)?
     };
     let mut map = MapOptions {

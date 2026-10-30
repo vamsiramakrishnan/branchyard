@@ -448,10 +448,12 @@ pub(crate) fn remove_noting(
         remove_credentials(&store, &record)?;
     }
     remove_home(&store, &record)?;
-    // Its private temporary directory, which nothing else uses, and its
-    // egress proxy's certificate authority.
+    // Its private temporary directory, which nothing else uses, its
+    // egress proxy's certificate authority, and the skills staged for it
+    // when it had no private home.
     branchyard_support::cleanup_dir(store.tmp(name));
     branchyard_support::cleanup_dir(store.egress(name));
+    branchyard_support::cleanup_dir(crate::capabilities::cache(store.dir(), name));
     Ok(teardown)
 }
 

@@ -422,13 +422,24 @@ fn a_turn_on_a_recipe_machine_produces_a_candidate_that_merges() {
     // the recipe, and the machine was destroyed when the turn ended.
     let machine = match &sandbox_events(&branch)[0] {
         SandboxEvent::Started {
-            provider, sandbox, ..
+            provider,
+            sandbox,
+            placed: Some(placed),
+            ..
         } => {
             assert_eq!(provider, "recipe");
+            assert!(placed.worktree_push.bytes > 0, "{placed:?}");
             sandbox.clone()
         }
         other => panic!("{other:?}"),
     };
+    assert!(
+        sandbox_events(&branch)
+            .iter()
+            .any(|e| matches!(e, SandboxEvent::Returned { sandbox, .. } if *sandbox == machine)),
+        "{:?}",
+        sandbox_events(&branch)
+    );
     assert_eq!(
         log(&f),
         [format!("create {machine}"), format!("destroy {machine}")]
@@ -561,7 +572,11 @@ fn a_kept_machine_is_suspended_resumed_and_destroyed_with_the_branch() {
         other => panic!("{other:?}"),
     };
     assert!(
-        matches!(&events[1], SandboxEvent::Kept { .. }),
+        matches!(&events[1], SandboxEvent::Returned { .. }),
+        "the home comes back before the machine is suspended: {events:?}"
+    );
+    assert!(
+        matches!(&events[2], SandboxEvent::Kept { .. }),
         "{events:?}"
     );
     assert_eq!(

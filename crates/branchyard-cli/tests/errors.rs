@@ -470,6 +470,7 @@ fn every_branch_command_reports_an_unknown_branch_as_json() {
         &["check", missing, "--json"],
         &["inspect", missing, "--json"],
         &["wait", missing, "--json"],
+        &["skills", "ls", missing, "--json"],
     ];
     // A command with no JSON output refuses `--json` as a usage error, in
     // JSON, with clap's exit status.

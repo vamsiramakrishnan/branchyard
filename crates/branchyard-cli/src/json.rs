@@ -198,6 +198,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             unused_secrets,
             connectors,
             knowledge,
+            skills,
             managed,
             permissions,
         } => json!({
@@ -209,6 +210,7 @@ pub fn recorded(recorded: &RecordedEvent) -> Value {
             "unused_secrets": unused_secrets,
             "connectors": connectors,
             "knowledge": knowledge,
+            "skills": skills,
             "managed": managed,
             "permissions": permissions,
         }),

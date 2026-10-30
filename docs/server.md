@@ -100,6 +100,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "by_path": "/usr/local/bin/by",
   "allow_unapproved_tools": false,
   "allow_workspace_scripts": ["app"],
+  "allow_repository_skills": ["app"],
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard",
   "labels": ["linux", "gpu"],
@@ -118,13 +119,15 @@ Configuration file (relative paths resolve against the file's directory; unknown
 
 `allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
 
+`allow_repository_skills` (`true`, or a list of served repositories) stages a repository's own skills, `.agents/skills/` read from each new branch's base commit, beside the built-in skills of the branches this server creates. Off by default: every other repository's branches withhold them, and each turn's `provisioned` event says why. Neither a request nor the repository's `branchyard.toml` can turn it on. See [your repository's skills](knowledge-skills.md#your-repositorys-skills).
+
 `app` (`true`, or its settings) turns on the [web companion](companion.md#setting-it-up): the page at `/app/`, pairing links and Web Push.
 
 `allow_trigger_prechecks` (`true`, or a list of served repositories) is the same decision for [triggers](triggers.md): a trigger's precheck command runs, as the server's user, only for those repositories, and a trigger with one is refused (`403 precheck_not_allowed`) elsewhere. `public_url` is the base of every event trigger's webhook URL, for a server behind a proxy.
 
 `execution_presets` names the environments a workspace session may run in, and `require_workspace_execution_presets` makes workspace sessions name one; see [execution presets](#execution-presets).
 
-The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts` or `allow_trigger_prechecks` entry naming a repository it does not serve, a `public_url` that is not `http://` or `https://`, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, an [execution preset](#execution-presets) that cannot run as written or `require_workspace_execution_presets` without one, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts`, `allow_repository_skills` or `allow_trigger_prechecks` entry naming a repository it does not serve, a `public_url` that is not `http://` or `https://`, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, an [execution preset](#execution-presets) that cannot run as written or `require_workspace_execution_presets` without one, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown, the same for both: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once. The log says each step: at the signal `shutting down: 8 running operations may finish within 60s (signal again to stop waiting); 2 queued stay queued for the next start`, and as the process ends `stopped: 7 finished within the grace period; 1 recorded interrupted; 2 left in the queue for the next start, or another server on the database` (a `WARN` line when something was interrupted; `nothing is running` and `nothing was running` for an idle server). A `by --remote` command following one of those operations waits through the restart ([remote mode](#remote-mode-in-by)).
 

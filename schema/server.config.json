@@ -155,6 +155,17 @@
         }
       ]
     },
+    "allow_repository_skills": {
+      "description": "Stage served repositories' own skills (`.agents/skills/` at a new\nbranch's base commit) for new branches: `true` for every\nrepository, or a list of repository names. Off by default; see\ndocs/knowledge-skills.md.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FileWorkspaceScripts"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "secrets": {
       "type": "object",
       "additionalProperties": {

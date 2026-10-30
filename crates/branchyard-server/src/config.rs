@@ -18,6 +18,7 @@
 //!   "by_path": "/usr/local/bin/by",
 //!   "allow_unapproved_tools": false,
 //!   "allow_workspace_scripts": ["app"],
+//!   "allow_repository_skills": ["app"],
 //!   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
 //!   "database": "postgres://branchyard@db/branchyard"
 //! }
@@ -735,6 +736,11 @@ pub struct Config {
     /// this server runs for new branches. None by default; a request can
     /// never ask for them. See `docs/workspace.md`.
     pub allow_workspace_scripts: WorkspaceScripts,
+    /// Which served repositories' own skills (`.agents/skills/` at a new
+    /// branch's base commit) this server stages for new branches. None by
+    /// default; neither a request nor the repository's branchyard.toml can
+    /// ask for them. See `docs/knowledge-skills.md`.
+    pub allow_repository_skills: WorkspaceScripts,
     /// Secrets a request may name, and where this server reads each: a
     /// variable of its own environment or a file. A request names secrets
     /// only; it never chooses a source. Empty by default.
@@ -975,6 +981,7 @@ impl Config {
             by_path: None,
             allow_unapproved_tools: false,
             allow_workspace_scripts: WorkspaceScripts::Denied,
+            allow_repository_skills: WorkspaceScripts::Denied,
             secrets: BTreeMap::new(),
             execution_presets: Vec::new(),
             require_workspace_execution_presets: false,
@@ -1139,11 +1146,17 @@ impl Config {
                 }
             }
         }
-        if let WorkspaceScripts::Repos(allowed) = &self.allow_workspace_scripts {
+        for (field, allowed) in [
+            ("allow_workspace_scripts", &self.allow_workspace_scripts),
+            ("allow_repository_skills", &self.allow_repository_skills),
+        ] {
+            let WorkspaceScripts::Repos(allowed) = allowed else {
+                continue;
+            };
             for name in allowed {
                 if !self.repos.iter().any(|(repo, _)| repo == name) {
                     return Err(format!(
-                        "allow_workspace_scripts names {name}, which this server does not serve"
+                        "{field} names {name}, which this server does not serve"
                     ));
                 }
             }
@@ -1582,6 +1595,11 @@ pub(crate) struct FileConfig {
     /// for new branches: `true` for every repository, or a list of
     /// repository names. Off by default; see docs/workspace.md.
     allow_workspace_scripts: Option<FileWorkspaceScripts>,
+    /// Stage served repositories' own skills (`.agents/skills/` at a new
+    /// branch's base commit) for new branches: `true` for every
+    /// repository, or a list of repository names. Off by default; see
+    /// docs/knowledge-skills.md.
+    allow_repository_skills: Option<FileWorkspaceScripts>,
     #[serde(default)]
     secrets: BTreeMap<String, String>,
     /// Operator-approved environments a workspace session may name by ID;
@@ -1999,6 +2017,8 @@ pub struct Partial {
     pub by_path: Option<PathBuf>,
     pub allow_unapproved_tools: bool,
     pub allow_workspace_scripts: WorkspaceScripts,
+    /// `allow_repository_skills`, as the file sets it.
+    pub allow_repository_skills: WorkspaceScripts,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
     /// `execution_presets`, their relative paths resolved.
     pub execution_presets: Vec<ExecutionPreset>,
@@ -2270,6 +2290,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         by_path: file.by_path.map(resolve),
         allow_unapproved_tools: file.allow_unapproved_tools,
         allow_workspace_scripts: scripts(file.allow_workspace_scripts),
+        allow_repository_skills: scripts(file.allow_repository_skills),
         secrets: file
             .secrets
             .into_iter()

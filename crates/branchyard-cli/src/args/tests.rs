@@ -1432,6 +1432,31 @@ fn workspace_actions_parse_with_json_anywhere() {
 }
 
 #[test]
+fn skills_actions_parse_with_json_anywhere() {
+    let skills = |line: &str| match parse_str(line).unwrap() {
+        Command::Skills { json, action } => (json, action),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        skills("skills ls"),
+        (false, SkillsAction::Ls { branch: None })
+    );
+    assert_eq!(
+        skills("skills --json ls b"),
+        (
+            true,
+            SkillsAction::Ls {
+                branch: Some("b".into())
+            }
+        )
+    );
+    assert_eq!(skills("skills trust --json"), (true, SkillsAction::Trust));
+    assert_eq!(skills("skills untrust"), (false, SkillsAction::Untrust));
+    assert!(err("skills").contains("Usage"));
+    assert!(err("skills trust b").contains("unexpected argument"));
+}
+
+#[test]
 fn env_actions_parse() {
     let env = |line: &str| match parse_str(line).unwrap() {
         Command::Env { json, action } => (json, action),

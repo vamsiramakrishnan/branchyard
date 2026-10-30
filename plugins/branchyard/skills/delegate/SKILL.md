@@ -367,6 +367,12 @@ your children commits your work the same way. Write scratch files under
 `$TMPDIR`, a directory private to your branch, not in `/tmp`, which other
 branches share.
 
+`by skills ls` shows the skills your branch runs with: the built-in ones and,
+when a person trusted them or a server's operator allows them, the
+repository's `.agents/skills/` from the commit your branch started at. They are fixed when the branch is created and your
+children inherit them, so a skill you edit or commit is not one until a person
+merges it and trusts the new set with `by skills trust`, outside any branch.
+
 ## Before you finish
 
 Finish your native work before returning a final answer. For a structured

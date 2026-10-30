@@ -55,6 +55,7 @@ pub mod logins;
 pub mod models;
 pub mod network;
 pub mod permissions;
+pub mod skillset;
 pub mod toml;
 
 mod antigravity;

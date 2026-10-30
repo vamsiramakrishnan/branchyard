@@ -837,6 +837,7 @@ dependencies = [
 name = "branchyard-provision"
 version = "0.3.0"
 dependencies = [
+ "blake3",
  "branchyard-controls",
  "branchyard-harness",
  "branchyard-support",

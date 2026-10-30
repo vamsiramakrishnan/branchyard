@@ -427,10 +427,13 @@ fn trust_row(resolved: &workspace_cmd::Resolved) -> Check {
             "review it with `by workspace show`, then run `by workspace trust`",
         ),
         TrustState::Changed => {
-            let before = workspace_cmd::trusted_digest(&resolved.root.display().to_string())
-                .ok()
-                .flatten()
-                .map_or_else(String::new, |d| format!("trusted digest {}, ", short(&d)));
+            let before = workspace_cmd::trusted_digest(
+                workspace_cmd::TrustSection::Repositories,
+                &resolved.root.display().to_string(),
+            )
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |d| format!("trusted digest {}, ", short(&d)));
             Check::warn(
                 NAME,
                 format!(

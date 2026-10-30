@@ -362,7 +362,7 @@ A sandboxed branch can keep its sandbox between turns and branch new sandboxes f
 | Surface | Before | Now |
 |---|---|---|
 | `SandboxOptions::keep`, `snapshots`, `max_paused`, `max_kept_secs`, `live_branch`; `SubstrateOptions::keep`, `snapshots`, `max_paused`, `max_kept_secs`; `RecipeOptions::keep`, `max_paused`, `max_kept_secs` | none | `--keep-sandbox pause\|destroy`, `--sandbox-snapshots N`, `--max-paused N`, `--max-kept-minutes N` (with `--provider microsandbox`, `substrate` or `recipe:NAME`), `--live-branch` (Microsandbox); `keep`, `snapshots`, `max_paused`, `max_kept_minutes`, `live_branch` in `[microsandbox]`; in the `provider` object over HTTP and `by --remote`, under the server's `--allow-provider`; inherited by forks and delegated children with the provider |
-| `Activity::Sandbox` (`SandboxEvent`, `SandboxOrigin`) | none | each turn's sandbox and where it came from (fresh with a reason, resumed, branched from a checkpoint, a fan's prepared one), kept, not kept, evicted beyond `max_paused`, expired past `max_kept_minutes`, a snapshot released or not taken; `sandbox` in `by log --json`, a `sandbox:` line in `by`'s output, and in every event stream |
+| `Activity::Sandbox` (`SandboxEvent`, `SandboxOrigin`, `Placed`, `Transfer`) | none | each turn's sandbox and where it came from (fresh with a reason, resumed, branched from a checkpoint, a fan's prepared one), for a copied sandbox how long it took to be ready and the bytes and duration of the worktree and home copies in (`placed`) and of the home coming back (`returned`), kept, not kept, evicted beyond `max_paused`, expired past `max_kept_minutes`, a snapshot released or not taken; `sandbox` in `by log --json`, a `sandbox:` line in `by`'s output, and in every event stream |
 | `Checkpoint::sandbox` (`SandboxSnapshot`) | none | the provider snapshot taken with a checkpoint: provider, handle, scope, consistency, method; in `schema/contract.json` |
 | `WorkspaceReport::ran_in`, `inherited_from`; `RanIn` | none | where setup or teardown ran (host or sandbox), and the branch whose setup a branched sandbox inherited |
 | `by fork --at N`, `Branch::fork`, `fork_at`, `rewind`, a delegated child, a rig seat, a graph dependent, `by fan` | a fresh sandbox, git and setup | the matching provider snapshot first, then the fresh path, saying which; `by fan` runs setup once when its provider can live-branch |
@@ -1008,3 +1008,20 @@ from a private source export; the default Envoy path is unchanged.
 
 [Cooperative teams](cooperative-teams.md) describes coding and knowledge examples,
 native harness autonomy, check and judge boundaries, and the current remote-check limit.
+
+## Added with repository skills
+
+A repository's `.agents/skills/` are text its writers committed, so they take the trust decision workspace scripts take: a person trusts a set by its digest through `by`, a server's operator allows them with `allow_repository_skills`. See [knowledge and skills](knowledge-skills.md).
+
+| Operation | SDK | by | by --remote | HTTP | client | delegation |
+|---|---|---|---|---|---|---|
+| List the skills a new branch here runs with: the built-in ones and the repository's at HEAD, each with its label, digest and description, the set digest and its trust state (trusted, not trusted, changed since you trusted it, refused with the reason, or none) | `branchyard::skills::built_in`, `branchyard::skills::read` | `skills ls [--json]` (`built_in`, `repository.state`, `repository.skills`, `uncommitted`); notes on standard error when `.agents/skills` has uncommitted changes, which do not count | no: it reads your own trust decisions; refused | no | no | inside a harness, the same command shows its own branch's set |
+| List the set fixed for a branch, staged or withheld and why | `Yard::branch_skills` (`BranchSkills`) | `skills ls BRANCH [--json]` (`repository.state` is `staged`, `withheld` with its `reason`, or `none`) | no; refused | no | no | `by skills ls` with `$BRANCHYARD_BRANCH` |
+| Trust the repository's skills at HEAD, or forget that decision | `TaskOptions::repository_skills` (`SkillGate::Trusted` with the set digest) | `skills trust [--json]`, `skills untrust [--json]`; kept in the trust file's `skills` map (`trusted-workspaces.json`, `BRANCHYARD_TRUST_FILE`); `by run`, `fan`, `map` and `rig run` pass the decision to the branches they create | no: a server stages them only when its operator allows them (`allow_repository_skills`); refused | no | no | no: a harness can never trust; refused with `denied` |
+
+| Surface | Before | Now |
+|---|---|---|
+| `Activity::Provisioned::skills` (`SkillSet`, `WithheldSkills`, `SkillEntry`, `Layer`) | `provisioned` recorded only when something was provisioned | recorded on every turn that reaches provisioning, with `skills`: each staged skill's `layer`, `name` and `digest`, the set's digest `set`, and `withheld` (the repository's skills found and not staged, with the `reason`); `skills` in `by log --json` and `schema/contract.json`; `by log`: `skills 3f2a9c1d0e4b (<n> built-in, repository:style-guide)`, `repository skills withheld: …` |
+| `TaskOptions::repository_skills` (`SkillGate::Withheld`, `Trusted`, `Allowed`) | none | read when `run`, a fan or `run_attempts` creates a branch: its repository's `.agents/skills/` at the base commit are staged when allowed, else withheld with the reason; fixed with the branch (`BranchSkills`) and inherited by forks, reincarnations and delegated children; withheld by default |
+| `allow_repository_skills` in the server's JSON config | none | `true` or served repository names (`schema/server.config.json`); the server stages those repositories' skills for the branches it creates, and withholds every other's; never from a request or the repository's `branchyard.toml` |
+| `by rm`, `Yard::remove` | the branch's skill cache stayed | also delete `.branchyard/capabilities/<blake3 of the branch name>/` |

@@ -253,6 +253,80 @@ fn a_provisioned_home_goes_into_the_actor_and_comes_back() {
     assert_eq!(mode, 0o600);
 }
 
+/// The figures the transfer's design waits on: how long the actor took to
+/// be ready and what each copy carried.
+#[test]
+fn a_turn_in_an_actor_records_what_its_copies_carried() {
+    use branchyard::SandboxEvent;
+    let f = Fixture::new();
+    let (fake, substrate) = cluster(&f);
+    std::env::set_var(
+        "BY_TEST_SUBSTRATE_PLACED_OPENAI",
+        "sk-proj-placed-SECRET-0123456789",
+    );
+    let branch = f
+        .task("SH printf back > \"$HOME/came-back\"")
+        .options(TaskOptions {
+            harness: Some("codex-acp".into()),
+            provision: Some(Provisioning {
+                secrets: vec![SecretSource::parse(
+                    "OPENAI_API_KEY=BY_TEST_SUBSTRATE_PLACED_OPENAI",
+                )
+                .unwrap()],
+                ..Provisioning::default()
+            }),
+            ..options(&f, &substrate)
+        })
+        .name("measured")
+        .policy(Policy::allow_all())
+        .run()
+        .unwrap();
+    let events: Vec<SandboxEvent> = branch
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.activity {
+            Activity::Sandbox(event) => Some(*event),
+            _ => None,
+        })
+        .collect();
+    let (actor, placed) = match &events[0] {
+        SandboxEvent::Started {
+            sandbox,
+            placed: Some(placed),
+            ..
+        } => (sandbox.clone(), *placed),
+        other => panic!("{other:?}"),
+    };
+    assert!(placed.worktree_push.bytes > 0, "{placed:?}");
+    assert!(
+        placed.home_push.bytes > 0,
+        "the provisioned home was sent: {placed:?}"
+    );
+    let home_pull = events
+        .iter()
+        .find_map(|e| match e {
+            SandboxEvent::Returned {
+                provider,
+                sandbox,
+                home_pull,
+            } => {
+                assert_eq!((provider.as_str(), sandbox), ("substrate", &actor));
+                Some(*home_pull)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no returned event: {events:?}"));
+    assert_eq!(
+        home_pull.bytes,
+        placed.home_push.bytes + 4,
+        "the home came back with the harness's 4-byte file: {placed:?}"
+    );
+    let lines: Vec<String> = events.iter().map(SandboxEvent::describe).collect();
+    assert!(lines[0].contains("; ready in "), "{lines:?}");
+    assert!(fake.actor_names().is_empty());
+}
+
 #[test]
 fn a_local_branch_forks_into_an_actor_with_its_secrets() {
     let f = Fixture::new();
@@ -542,7 +616,11 @@ fn a_kept_actor_is_paused_resumed_tagged_and_forked_from_its_tag() {
         other => panic!("{other:?}"),
     };
     assert!(
-        matches!(&events[1], SandboxEvent::Kept { .. }),
+        matches!(&events[1], SandboxEvent::Returned { sandbox, .. } if *sandbox == actor),
+        "the home comes back before the actor is paused: {events:?}"
+    );
+    assert!(
+        matches!(&events[2], SandboxEvent::Kept { .. }),
         "{events:?}"
     );
     assert_eq!(

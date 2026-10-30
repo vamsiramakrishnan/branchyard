@@ -99,6 +99,10 @@ pub(crate) struct NewBranch<'a> {
     pub task: Option<crate::tasks::Joining>,
     /// Tools it is denied outright, stored with it; see [`Record::deny`].
     pub deny: Vec<String>,
+    /// The repository skills it runs with: fixed from its base for a branch
+    /// created from a revision, its parent's otherwise; see
+    /// `crate::skills`.
+    pub skills: Option<crate::skills::BranchSkills>,
 }
 
 /// `kept`, then each of `added` not already in it.
@@ -195,6 +199,7 @@ pub(crate) fn new_record(store: &crate::state::Store, new: NewBranch<'_>) -> Res
         wakes: 0,
         lost: None,
         landing: None,
+        skills: new.skills,
     })
 }
 
@@ -449,6 +454,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
+    let skills = crate::skills::fix(&yard.root, &base, &options.repository_skills);
     let store = yard.store();
     let joining = crate::tasks::joining(yard, prompt, options, "run")?;
     let name = names::reserve(&store, &yard.root, options.name.as_deref(), prompt, &[])?.remove(0);
@@ -468,6 +474,7 @@ pub(crate) fn run(yard: &Yard, prompt: &str, options: &TaskOptions) -> Result<Br
             grant,
             depth: 0,
             deny: options.deny.clone(),
+            skills,
             provision: options.provision.clone(),
             workspace: options.workspace.clone(),
             seed: None,
@@ -526,6 +533,7 @@ pub(crate) fn run_on(
     crate::provisioning::check(options.provision.as_ref(), new_home_private(options))?;
     crate::egress::check(options.provision.as_ref(), options.provider.as_ref())?;
     let base = resolve_base(yard, options.base.as_deref())?;
+    let skills = crate::skills::fix(&yard.root, &base, &options.repository_skills);
     let store = yard.store();
     let origin = if harnesses.len() > 1 { "fan" } else { "run" };
     let joining = crate::tasks::joining(yard, prompt, options, origin)?;
@@ -555,6 +563,7 @@ pub(crate) fn run_on(
                 grant: grant.clone(),
                 depth: 0,
                 deny: options.deny.clone(),
+                skills: skills.clone(),
                 provision: options.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -677,6 +686,7 @@ pub(crate) fn run_attempts(
     }
     let first = first_prompt(prompt, options);
     let base = resolve_base(yard, options.base.as_deref())?;
+    let skills = crate::skills::fix(&yard.root, &base, &options.repository_skills);
     let store = yard.store();
     let labels: Vec<&str> = specs.iter().filter_map(|s| s.label.as_deref()).collect();
     if !labels.is_empty() && labels.len() != specs.len() {
@@ -713,6 +723,7 @@ pub(crate) fn run_attempts(
                 grant: grant.clone(),
                 depth: 0,
                 deny: options.deny.clone(),
+                skills: skills.clone(),
                 provision: o.provision.clone(),
                 workspace: options.workspace.clone(),
                 seed: None,
@@ -1545,6 +1556,7 @@ pub(crate) fn fork(
             grant,
             depth: 0,
             deny: with_denials(&parent.deny, &options.deny),
+            skills: parent.skills.clone(),
             provision,
             workspace: options
                 .workspace
@@ -1710,6 +1722,7 @@ pub(crate) fn reincarnate_with(
             grant,
             depth: 0,
             deny: with_denials(&parent.deny, &options.deny),
+            skills: parent.skills.clone(),
             provision,
             workspace: options
                 .workspace

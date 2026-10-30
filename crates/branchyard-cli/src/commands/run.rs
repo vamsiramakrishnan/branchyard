@@ -100,9 +100,11 @@ pub(crate) fn run_admitted(
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let task = &task;
     let workspace = workspace(env, &yard)?;
+    let repository_skills = crate::skills_cmd::gate(yard.root());
     let live = Live::start_to(env, task, task.delegate.is_some(), json, None);
     let mut options = TaskOptions {
         workspace,
+        repository_skills,
         ..live.options(task)?
     };
     if let Some(id) = join {
@@ -230,10 +232,12 @@ pub fn fan(
     let (prompt, task, issue) = crate::pr::issue_task(prompt, task, Some(&yard))?;
     let (prompt, task) = (prompt.as_str(), &task);
     let workspace = workspace(env, &yard)?;
+    let repository_skills = crate::skills_cmd::gate(yard.root());
     let live = Live::start_to(env, task, true, route.json, None);
     let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
     let mut options = TaskOptions {
         workspace,
+        repository_skills,
         ..live.options(task)?
     };
     if let Some(task_id) = &private_task {

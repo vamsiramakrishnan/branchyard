@@ -22,6 +22,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::commands::{print, Env, Failure, Outcome, Target};
+use crate::workspace_cmd::TrustSection;
 use crate::{setup_io, workspace_cmd};
 
 pub const RECIPE_EXAMPLES: &str = "\
@@ -155,7 +156,10 @@ fn resolve_all(root: &Path) -> Result<BTreeMap<String, Resolved>, Failure> {
             let digest = recipe.digest();
             let trust = match origin {
                 Origin::User => Trust::NotNeeded,
-                Origin::Project => match workspace_cmd::trusted_digest(&trust_key(root, &name))? {
+                Origin::Project => match workspace_cmd::trusted_digest(
+                    TrustSection::Repositories,
+                    &trust_key(root, &name),
+                )? {
                     Some(trusted) if trusted == digest => Trust::Trusted,
                     Some(_) => Trust::Changed,
                     None => Trust::Untrusted,
@@ -273,7 +277,7 @@ fn require_trust(env: &Env, r: &Resolved) -> Result<(), Failure> {
             r.name
         ))?;
         if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes") {
-            return workspace_cmd::record_trust(&r.key(), &r.digest);
+            return workspace_cmd::record_trust(TrustSection::Repositories, &r.key(), &r.digest);
         }
         return Err(
             crate::errors::Report::new("denied", "not trusted; nothing ran")
@@ -339,7 +343,7 @@ pub fn main(env: &Env, target: &Target, action: &RecipeAction, json: bool) -> Ou
                     r.file.display()
                 ));
             }
-            workspace_cmd::record_trust(&r.key(), &r.digest)?;
+            workspace_cmd::record_trust(TrustSection::Repositories, &r.key(), &r.digest)?;
             match json {
                 true => print(&format!(
                     "{:#}\n",
@@ -353,7 +357,8 @@ pub fn main(env: &Env, target: &Target, action: &RecipeAction, json: bool) -> Ou
             }
         }
         RecipeAction::Untrust { name } => {
-            let removed = workspace_cmd::forget_trust(&trust_key(&root, name))?;
+            let removed =
+                workspace_cmd::forget_trust(TrustSection::Repositories, &trust_key(&root, name))?;
             match json {
                 true => print(&format!(
                     "{:#}\n",

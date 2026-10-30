@@ -15,6 +15,10 @@
 //! On a terminal, `by run` (and fan, fork, reincarnate, rig) asks once;
 //! otherwise it refuses and points to `by workspace trust`. A harness on a
 //! branch (`BRANCHYARD_BRANCH` set) can never trust anything.
+//!
+//! The same file keeps, in its `skills` map, the set digest of each
+//! repository's skills a person trusted (`by skills trust`; see
+//! `crate::skills_cmd`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -50,6 +54,35 @@ struct TrustFile {
     /// By canonical repository root.
     #[serde(default)]
     repositories: BTreeMap<String, Trusted>,
+    /// The repository skills trusted, by canonical repository root.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    skills: BTreeMap<String, Trusted>,
+}
+
+/// Which of the trust file's maps a decision is kept in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrustSection {
+    /// A repository's `[workspace]`, or one of its recipes under a key of
+    /// its own.
+    Repositories,
+    /// A repository's skill set (`by skills trust`).
+    Skills,
+}
+
+impl TrustSection {
+    fn of(self, file: &TrustFile) -> &BTreeMap<String, Trusted> {
+        match self {
+            TrustSection::Repositories => &file.repositories,
+            TrustSection::Skills => &file.skills,
+        }
+    }
+
+    fn of_mut(self, file: &mut TrustFile) -> &mut BTreeMap<String, Trusted> {
+        match self {
+            TrustSection::Repositories => &mut file.repositories,
+            TrustSection::Skills => &mut file.skills,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -201,7 +234,7 @@ pub fn pool_spec(pool: &config::PoolConfig) -> branchyard::PoolSpec {
 
 /// The repository root spelled as the trust file and the user file's
 /// `[projects]` keys are: canonical.
-fn canonical(path: &Path) -> PathBuf {
+pub(crate) fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -1079,22 +1112,22 @@ fn kill(env: &Env, branch: Option<&str>, port: Option<u16>, yes: bool, json: boo
     print(&format!("sent SIGTERM to {}\n", described.join(", ")))
 }
 
-/// The digest trusted under `key` in the trust file, if any: for trust
-/// decisions about something other than a repository's `[workspace]`,
-/// such as one of its `[recipes]` (docs/recipes.md), whose keys are the
+/// The digest trusted under `key` in `section` of the trust file, if any:
+/// a repository's skills, or something else than its `[workspace]`, such
+/// as one of its `[recipes]` (docs/recipes.md), whose keys are the
 /// repository's canonical root with a suffix of their own.
-pub(crate) fn trusted_digest(key: &str) -> Result<Option<String>, Failure> {
-    Ok(read_trust()?
-        .repositories
+pub(crate) fn trusted_digest(section: TrustSection, key: &str) -> Result<Option<String>, Failure> {
+    Ok(section
+        .of(&read_trust()?)
         .get(key)
         .map(|t| t.digest.clone()))
 }
 
-/// Record `digest` as trusted under `key`.
-pub(crate) fn record_trust(key: &str, digest: &str) -> Result<(), Failure> {
+/// Record `digest` as trusted under `key` in `section`.
+pub(crate) fn record_trust(section: TrustSection, key: &str, digest: &str) -> Result<(), Failure> {
     let mut file = read_trust()?;
     file.version = TRUST_VERSION;
-    file.repositories.insert(
+    section.of_mut(&mut file).insert(
         key.to_owned(),
         Trusted {
             digest: digest.to_owned(),
@@ -1104,13 +1137,41 @@ pub(crate) fn record_trust(key: &str, digest: &str) -> Result<(), Failure> {
     write_trust(&file)
 }
 
-/// Forget the decision under `key`; whether there was one.
-pub(crate) fn forget_trust(key: &str) -> Result<bool, Failure> {
+/// Forget the decision under `key` in `section`; whether there was one.
+pub(crate) fn forget_trust(section: TrustSection, key: &str) -> Result<bool, Failure> {
     let mut file = read_trust()?;
-    let removed = file.repositories.remove(key).is_some();
+    let removed = section.of_mut(&mut file).remove(key).is_some();
     if removed {
         file.version = TRUST_VERSION;
         write_trust(&file)?;
     }
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trust_file_without_skills_reads_and_one_without_skill_decisions_writes_none() {
+        let old = r#"{"version": 1, "repositories": {"/r": {"digest": "d", "trusted_at": 1}}}"#;
+        let mut file: TrustFile = serde_json::from_str(old).unwrap();
+        assert!(file.skills.is_empty());
+        assert_eq!(
+            TrustSection::Repositories.of(&file)["/r"].digest,
+            "d".to_owned()
+        );
+        let written = serde_json::to_value(&file).unwrap();
+        assert!(written.get("skills").is_none(), "{written}");
+        TrustSection::Skills.of_mut(&mut file).insert(
+            "/r".into(),
+            Trusted {
+                digest: "s".into(),
+                trusted_at: 2,
+            },
+        );
+        let written = serde_json::to_value(&file).unwrap();
+        assert_eq!(written["skills"]["/r"]["digest"], "s");
+        assert_eq!(written["repositories"]["/r"]["digest"], "d");
+    }
 }

@@ -55,6 +55,11 @@ A tool your branch's policy refuses was denied by the branch that delegated
 to you; say so in your answer rather than
 working around it.
 
+`by skills ls` shows the skills your branch runs with, fixed when it was
+created: the built-in ones and the repository's `.agents/skills/`, staged or
+withheld and why. Trusting a repository's skills (`by skills trust`) is a
+person's decision, made outside any branch; it is refused here.
+
 The same operations are the `branchyard` MCP server's tools, and the
 `branchyard` Python module's functions. Anything else, such as another
 branch's work, is refused with the reason.

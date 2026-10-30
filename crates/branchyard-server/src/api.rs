@@ -705,7 +705,23 @@ impl App {
             delegation,
             delegation_cli: self.config.by_path.clone(),
             unapproved_tools,
+            repository_skills: self.repository_skills(repo),
             ..TaskOptions::default()
+        }
+    }
+
+    /// Whether a new branch of `repo` stages the repository's own skills:
+    /// only when this server's operator allows them
+    /// (`allow_repository_skills`), never because a request or the
+    /// repository asks.
+    fn repository_skills(&self, repo: &RepoState) -> branchyard::SkillGate {
+        match self.config.allow_repository_skills.allows(&repo.name) {
+            true => branchyard::SkillGate::Allowed,
+            false => branchyard::SkillGate::Withheld(format!(
+                "this server does not stage {}'s own skills; its operator can allow them \
+                 with allow_repository_skills in the server's configuration",
+                repo.name
+            )),
         }
     }
 }

@@ -293,6 +293,16 @@ Examples:
 runs setup before its first turn and teardown when it is removed. Its scripts
 never run until you trust them; see docs/workspace.md.";
 
+pub(crate) const SKILLS_EXAMPLES: &str = "\
+Examples:
+  by skills ls
+  by skills trust
+  by skills ls fix-the-flaky-test --json
+
+A repository's skills are .agents/skills/<name>/SKILL.md, read from the commit
+a new branch starts at. New branches withhold them until you trust the set,
+and again after it changes; see docs/knowledge-skills.md.";
+
 pub(crate) const ENV_EXAMPLES: &str = "\
 Examples:
   by env list

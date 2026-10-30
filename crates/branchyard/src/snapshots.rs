@@ -172,6 +172,40 @@ pub enum SandboxOrigin {
     },
 }
 
+/// The bytes and duration of one copy into or out of a copied sandbox.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Transfer {
+    /// The size of what was copied: the git bundle for a worktree, the
+    /// regular files of the tree for a home.
+    pub bytes: u64,
+    /// How long the copy took, in milliseconds.
+    pub ms: u64,
+}
+
+impl Transfer {
+    /// `48213 bytes in 301 ms`.
+    fn describe(&self) -> String {
+        format!("{} bytes in {} ms", self.bytes, self.ms)
+    }
+}
+
+/// How a copied sandbox (a Substrate actor, a recipe's machine) was made
+/// ready for the turn.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placed {
+    /// Milliseconds from asking for the sandbox (after the workspace's
+    /// input files were copied on this host) to its being created, resumed
+    /// or handed over, before anything was copied in.
+    pub ready_ms: u64,
+    /// The worktree's copy in: the size of the git bundle sent, and the
+    /// whole push (snapshot, bundle, the sandbox's fetch and checkout).
+    pub worktree_push: Transfer,
+    /// The private home's copy in.
+    pub home_push: Transfer,
+}
+
 /// What happened to a branch's sandbox, as [`Activity::Sandbox`].
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +216,22 @@ pub enum SandboxEvent {
         provider: String,
         sandbox: String,
         origin: SandboxOrigin,
+        /// How long a copied sandbox (Substrate, a recipe) took to be ready
+        /// and what was copied into it; `None` for Microsandbox, which
+        /// mounts the worktree and home.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placed: Option<Placed>,
+    },
+    /// A copied sandbox's home, brought back to the branch's private home
+    /// when the turn ended. Not recorded when that copy failed: the turn
+    /// warns instead.
+    Returned {
+        /// `substrate` or `recipe`.
+        provider: String,
+        /// The sandbox the home came back from.
+        sandbox: String,
+        /// The home's copy out: the size of the regular files received.
+        home_pull: Transfer,
     },
     /// Paused and recorded when the turn ended, for the next turn.
     Kept { provider: String, sandbox: String },
@@ -231,51 +281,71 @@ impl SandboxEvent {
                 provider,
                 sandbox,
                 origin,
-            } => match origin {
-                SandboxOrigin::Fresh { reason: None } => {
-                    format!("sandbox: fresh ({provider} {sandbox})")
-                }
-                SandboxOrigin::Fresh {
-                    reason: Some(reason),
-                } => format!("sandbox: fresh ({reason})"),
-                SandboxOrigin::Resumed => {
-                    format!("sandbox: resumed the kept {provider} sandbox {sandbox}")
-                }
-                SandboxOrigin::Branched {
-                    branch,
-                    turn,
-                    method,
-                } => format!(
-                    "sandbox: branched from {branch}'s checkpoint {turn} ({provider} {})",
-                    method.describe()
-                ),
-                SandboxOrigin::Prepared { branch, method } => format!(
+                placed,
+            } => {
+                let line = match origin {
+                    SandboxOrigin::Fresh { reason: None } => {
+                        format!("sandbox: fresh ({provider} {sandbox})")
+                    }
+                    SandboxOrigin::Fresh {
+                        reason: Some(reason),
+                    } => format!("sandbox: fresh ({reason})"),
+                    SandboxOrigin::Resumed => {
+                        format!("sandbox: resumed the kept {provider} sandbox {sandbox}")
+                    }
+                    SandboxOrigin::Branched {
+                        branch,
+                        turn,
+                        method,
+                    } => format!(
+                        "sandbox: branched from {branch}'s checkpoint {turn} ({provider} {})",
+                        method.describe()
+                    ),
+                    SandboxOrigin::Prepared { branch, method } => format!(
                     "sandbox: branched from the fan's prepared sandbox, set up once in {branch}'s \
                      worktree ({provider} {})",
                     method.describe()
                 ),
-                SandboxOrigin::Environment {
-                    key,
-                    used: None,
-                    method,
-                    ..
-                } => format!(
-                    "sandbox: branched from prepared environment {} ({provider} {})",
-                    &key[..key.len().min(12)],
-                    method.describe()
-                ),
-                SandboxOrigin::Environment {
-                    used: Some(used),
-                    method,
-                    reason,
-                    ..
-                } => format!(
-                    "sandbox: branched from the last good environment {} ({provider} {}): {}",
-                    &used[..used.len().min(12)],
-                    method.describe(),
-                    reason.as_deref().unwrap_or("its own build failed")
-                ),
-            },
+                    SandboxOrigin::Environment {
+                        key,
+                        used: None,
+                        method,
+                        ..
+                    } => format!(
+                        "sandbox: branched from prepared environment {} ({provider} {})",
+                        &key[..key.len().min(12)],
+                        method.describe()
+                    ),
+                    SandboxOrigin::Environment {
+                        used: Some(used),
+                        method,
+                        reason,
+                        ..
+                    } => format!(
+                        "sandbox: branched from the last good environment {} ({provider} {}): {}",
+                        &used[..used.len().min(12)],
+                        method.describe(),
+                        reason.as_deref().unwrap_or("its own build failed")
+                    ),
+                };
+                match placed {
+                    None => line,
+                    Some(placed) => format!(
+                        "{line}; ready in {} ms, sent the worktree ({}) and the home ({})",
+                        placed.ready_ms,
+                        placed.worktree_push.describe(),
+                        placed.home_push.describe()
+                    ),
+                }
+            }
+            SandboxEvent::Returned {
+                provider,
+                sandbox,
+                home_pull,
+            } => format!(
+                "sandbox: brought the home back from {provider} {sandbox} ({})",
+                home_pull.describe()
+            ),
             SandboxEvent::Kept { provider, sandbox } => {
                 format!("sandbox: kept paused for the next turn ({provider} {sandbox})")
             }
@@ -1612,6 +1682,7 @@ mod tests {
             provider: "microsandbox".into(),
             sandbox: "by-x-1".into(),
             origin,
+            placed: None,
         };
         assert_eq!(
             started(SandboxOrigin::Branched {
@@ -1632,5 +1703,73 @@ mod tests {
         let json = serde_json::to_value(started(SandboxOrigin::Resumed)).unwrap();
         assert_eq!(json["event"], "started");
         assert_eq!(json["origin"]["from"], "resumed");
+    }
+
+    #[test]
+    fn a_copied_start_and_its_home_coming_back_carry_their_figures() {
+        let started = SandboxEvent::Started {
+            provider: "substrate".into(),
+            sandbox: "by-a-1".into(),
+            origin: SandboxOrigin::Fresh { reason: None },
+            placed: Some(Placed {
+                ready_ms: 812,
+                worktree_push: Transfer {
+                    bytes: 48213,
+                    ms: 301,
+                },
+                home_push: Transfer {
+                    bytes: 2048,
+                    ms: 40,
+                },
+            }),
+        };
+        assert_eq!(
+            started.describe(),
+            "sandbox: fresh (substrate by-a-1); ready in 812 ms, sent the worktree (48213 bytes \
+             in 301 ms) and the home (2048 bytes in 40 ms)"
+        );
+        let json = serde_json::to_value(&started).unwrap();
+        assert_eq!(json["placed"]["worktree_push"]["bytes"], 48213);
+        assert_eq!(json["placed"]["home_push"]["ms"], 40);
+        assert_eq!(
+            serde_json::from_value::<SandboxEvent>(json).unwrap(),
+            started
+        );
+
+        let returned = SandboxEvent::Returned {
+            provider: "recipe".into(),
+            sandbox: "by-a-2".into(),
+            home_pull: Transfer {
+                bytes: 4096,
+                ms: 35,
+            },
+        };
+        assert_eq!(
+            returned.describe(),
+            "sandbox: brought the home back from recipe by-a-2 (4096 bytes in 35 ms)"
+        );
+        let json = serde_json::to_value(&returned).unwrap();
+        assert_eq!(json["event"], "returned");
+        assert_eq!(json["home_pull"]["bytes"], 4096);
+        assert_eq!(
+            serde_json::from_value::<SandboxEvent>(json).unwrap(),
+            returned
+        );
+    }
+
+    #[test]
+    fn a_start_recorded_without_placement_figures_reads_and_writes_none() {
+        let old = json!({
+            "event": "started",
+            "provider": "microsandbox",
+            "sandbox": "by-a-1",
+            "origin": { "from": "resumed" },
+        });
+        let event: SandboxEvent = serde_json::from_value(old.clone()).unwrap();
+        assert!(
+            matches!(&event, SandboxEvent::Started { placed: None, .. }),
+            "{event:?}"
+        );
+        assert_eq!(serde_json::to_value(&event).unwrap(), old);
     }
 }

@@ -84,6 +84,7 @@ mod rig;
 mod services_cmd;
 mod setup_cmd;
 mod setup_io;
+mod skills_cmd;
 mod ssh_remote;
 mod stats_cmd;
 mod substrate_cmd;
@@ -635,6 +636,7 @@ fn dispatch(env: &Env, target: &Target, command: Command) -> commands::Outcome {
         Command::Undo(u) => effects_cmd::undo(env, target, &u),
         Command::Workspace { json, action } => workspace_cmd::main(env, target, &action, json),
         Command::Recipe { json, action } => recipe_cmd::main(env, target, &action, json),
+        Command::Skills { json, action } => skills_cmd::main(target, &action, json),
         Command::Env { json, action } => env_cmd::main(env, target, &action, json),
         Command::Trigger { json, action } => trigger_cmd::main(env, target, &action, json),
         Command::Rm {
