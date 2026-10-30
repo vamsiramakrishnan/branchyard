@@ -4,6 +4,13 @@
 
 Run several AI agents at once, each on its own branch, then review and merge only what passes.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/console-branches-dark.png">
+  <img src="assets/screenshots/console-branches.png" alt="The Branchyard console in a desktop browser. The sidebar sorts a Rust library's branches into Needs you, Running, Ready and Done. The open branch, parser-fix, shows the request, the agent's reply and its tool calls, a Merge button at the top, its two changed files and the first file's diff.">
+</picture>
+
+<sub>A scripted agent produced the demo data in these screenshots, and no model ran. [How to regenerate them](assets/screenshots/README.md).</sub>
+
 ## Why
 
 One coding agent in one checkout works. Two agents in the same checkout overwrite each other's files, and you lose track of which change came from which request. When a task finishes, you still have to find its changes, run the tests and decide whether to merge.
@@ -51,6 +58,8 @@ Use your project's test command in place of `cargo test`. The agent works on the
 
 `by serve --app` serves a console for the repository you run it in. `by serve token new --link` prints a link that signs a browser in. The console lists tasks by what they need from you, shows each task's conversation and diff, and puts the one next step, such as Merge, at the top. It works on a phone too. The [console guide](docs/companion.md) covers pairing, permissions and notifications.
 
+<p align="center"><img src="assets/screenshots/console-phone.png" width="260" alt="The parser-fix branch in the console on a phone, in one column, with Merge at the top and the agent's reply below."></p>
+
 ## Work with documents and data
 
 Start the console from any directory, which does not need to be a Git repository:
@@ -60,6 +69,11 @@ by serve --app --knowledge
 ```
 
 Open the printed URL, create a knowledge project and upload your sources. Start one or more named sessions, follow their conversations, preview the documents they produce and accept the ones you keep. Each session works in its own copy. The [console guide](docs/companion.md#projects-and-workspaces) covers credentials, permissions and preview setup.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/console-workspace-dark.png">
+  <img src="assets/screenshots/console-workspace.png" alt="A knowledge workspace in the console. Tabs name its two sessions, the open session answers questions about customer churn from two uploaded exports, and the Outputs tab previews the CSV table it published.">
+</picture>
 
 The [skills](plugins/branchyard/skills/INDEX.md) teach agents to work with sources, tables, data cleaning, calculations and editable documents, and the design skills guide layouts and charts. In the [parallel deck example](examples/rigs/parallel-deck.toml), several workers draft separate sections and one assembles the presentation.
 
