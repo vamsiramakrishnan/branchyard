@@ -25507,6 +25507,13 @@
                 "null"
               ],
               "description": "Stable verified subject that admitted the session."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Execution preset the session started with."
             }
           },
           "required": [
@@ -25805,6 +25812,13 @@
             "null"
           ],
           "description": "Stable verified subject that admitted the session."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Execution preset the session started with."
         }
       },
       "required": [
@@ -25930,7 +25944,14 @@
               "type": "null"
             }
           ],
-          "description": "Existing typed execution backend; still subject to operator provider policy."
+          "description": "Existing typed execution backend; still subject to operator provider policy.\nRefused beside `preset`."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Operator execution preset ID from `GET /v1/execution-presets`. The\nserver supplies its provider, secrets and worker labels; the request\nmay then not carry `provider` or `provision`."
         },
         "name": {
           "type": "string",
@@ -29698,6 +29719,13 @@
                 "null"
               ],
               "description": "Stable verified subject that admitted the session."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Execution preset the session started with."
             }
           },
           "required": [
@@ -30014,6 +30042,13 @@
                 "null"
               ],
               "description": "Stable verified subject that admitted the session."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Execution preset the session started with."
             }
           },
           "required": [
@@ -30117,6 +30152,810 @@
             "manifest"
           ],
           "description": "Bounded files collected from a producer's worktree after provider transfer."
+        }
+      }
+    },
+    "workspace.PresetOrigin": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "operator",
+          "description": "Written by the operator in `execution_presets`."
+        },
+        {
+          "type": "string",
+          "const": "default",
+          "description": "The implicit `local` preset of a server that configures none."
+        }
+      ],
+      "description": "Where an execution preset came from.",
+      "title": "PresetOrigin",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "workspace.ReadyState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "ready",
+          "description": "Checked and usable."
+        },
+        {
+          "type": "string",
+          "const": "not_ready",
+          "description": "Checked and not usable from where it was measured."
+        },
+        {
+          "type": "string",
+          "const": "unknown",
+          "description": "Not checked before a session starts."
+        }
+      ],
+      "description": "What a readiness value found.",
+      "title": "ReadyState",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "workspace.ReadinessScope": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "api_host",
+          "description": "The server answering the request, which may not be the worker that\nruns the session."
+        },
+        {
+          "type": "string",
+          "const": "environment",
+          "description": "The preset's execution environment."
+        }
+      ],
+      "description": "Where a readiness value was measured.",
+      "title": "ReadinessScope",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "workspace.PresetCredentials": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "configured",
+          "description": "The preset supplies a secret the harness accepts as its key."
+        },
+        {
+          "type": "string",
+          "const": "none",
+          "description": "The preset supplies no key for the harness."
+        }
+      ],
+      "description": "Whether a preset supplies a harness's key.",
+      "title": "PresetCredentials",
+      "$schema": "https://json-schema.org/draft/2020-12/schema"
+    },
+    "workspace.Readiness": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ReadyState",
+          "description": "What was found."
+        },
+        "scope": {
+          "$ref": "#/$defs/ReadinessScope",
+          "description": "Where it was measured."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Fixed text chosen by the server; never an error message, path,\nendpoint or secret name."
+        },
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fixed text saying what an operator can do, when anything."
+        },
+        "checked_ms_ago": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Age of a cached check, in milliseconds."
+        }
+      },
+      "required": [
+        "state",
+        "scope",
+        "reason"
+      ],
+      "description": "One readiness observation. It informs a person and never refuses a start.",
+      "title": "Readiness",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ReadyState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ready",
+              "description": "Checked and usable."
+            },
+            {
+              "type": "string",
+              "const": "not_ready",
+              "description": "Checked and not usable from where it was measured."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "Not checked before a session starts."
+            }
+          ],
+          "description": "What a readiness value found."
+        },
+        "ReadinessScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "api_host",
+              "description": "The server answering the request, which may not be the worker that\nruns the session."
+            },
+            {
+              "type": "string",
+              "const": "environment",
+              "description": "The preset's execution environment."
+            }
+          ],
+          "description": "Where a readiness value was measured."
+        }
+      }
+    },
+    "workspace.PresetHarnessView": {
+      "type": "object",
+      "properties": {
+        "harness": {
+          "type": "string",
+          "description": "Harness or profile ID a session start names."
+        },
+        "models": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Models a session may choose; absent means it may not choose one."
+        },
+        "default_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Model a session that names none runs."
+        },
+        "tool_approvals": {
+          "type": "boolean",
+          "description": "The harness routes tool permission requests to the session's policy."
+        },
+        "writer": {
+          "type": "boolean",
+          "description": "A writer session can start on it."
+        },
+        "reviewer": {
+          "type": "boolean",
+          "description": "A reviewer session can start on it."
+        },
+        "effort": {
+          "type": "boolean",
+          "description": "A session may choose an effort."
+        },
+        "credentials": {
+          "$ref": "#/$defs/PresetCredentials",
+          "description": "Whether the preset supplies the harness's key."
+        },
+        "executable": {
+          "$ref": "#/$defs/Readiness",
+          "description": "Whether the harness's executable is where the session runs."
+        },
+        "auth": {
+          "$ref": "#/$defs/Readiness",
+          "description": "Whether the harness can sign in; verified when a session starts."
+        }
+      },
+      "required": [
+        "harness",
+        "tool_approvals",
+        "writer",
+        "reviewer",
+        "effort",
+        "credentials",
+        "executable",
+        "auth"
+      ],
+      "description": "A harness an execution preset offers.",
+      "title": "PresetHarnessView",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "PresetCredentials": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "configured",
+              "description": "The preset supplies a secret the harness accepts as its key."
+            },
+            {
+              "type": "string",
+              "const": "none",
+              "description": "The preset supplies no key for the harness."
+            }
+          ],
+          "description": "Whether a preset supplies a harness's key."
+        },
+        "Readiness": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReadyState",
+              "description": "What was found."
+            },
+            "scope": {
+              "$ref": "#/$defs/ReadinessScope",
+              "description": "Where it was measured."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Fixed text chosen by the server; never an error message, path,\nendpoint or secret name."
+            },
+            "action": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Fixed text saying what an operator can do, when anything."
+            },
+            "checked_ms_ago": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Age of a cached check, in milliseconds."
+            }
+          },
+          "required": [
+            "state",
+            "scope",
+            "reason"
+          ],
+          "description": "One readiness observation. It informs a person and never refuses a start."
+        },
+        "ReadyState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ready",
+              "description": "Checked and usable."
+            },
+            {
+              "type": "string",
+              "const": "not_ready",
+              "description": "Checked and not usable from where it was measured."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "Not checked before a session starts."
+            }
+          ],
+          "description": "What a readiness value found."
+        },
+        "ReadinessScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "api_host",
+              "description": "The server answering the request, which may not be the worker that\nruns the session."
+            },
+            {
+              "type": "string",
+              "const": "environment",
+              "description": "The preset's execution environment."
+            }
+          ],
+          "description": "Where a readiness value was measured."
+        }
+      }
+    },
+    "workspace.ExecutionPresetView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "ID a session start names."
+        },
+        "label": {
+          "type": "string",
+          "description": "Plain-language name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Plain-language description."
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider kind: `local`, `substrate` or `microsandbox`."
+        },
+        "origin": {
+          "$ref": "#/$defs/PresetOrigin",
+          "description": "Operator-written or the implicit default."
+        },
+        "can_start": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the caller's workspace role can start a session on it; only\nwhen the request named a workspace."
+        },
+        "harnesses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PresetHarnessView"
+          },
+          "description": "Harnesses it offers."
+        },
+        "environment": {
+          "$ref": "#/$defs/Readiness",
+          "description": "Whether the environment's settings are usable."
+        },
+        "reachability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Readiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether the environment can be reached; only for remote ones."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "description",
+        "provider",
+        "origin",
+        "harnesses",
+        "environment"
+      ],
+      "description": "An execution preset as the console offers it.",
+      "title": "ExecutionPresetView",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "PresetOrigin": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "operator",
+              "description": "Written by the operator in `execution_presets`."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The implicit `local` preset of a server that configures none."
+            }
+          ],
+          "description": "Where an execution preset came from."
+        },
+        "PresetHarnessView": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID a session start names."
+            },
+            "models": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Models a session may choose; absent means it may not choose one."
+            },
+            "default_model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model a session that names none runs."
+            },
+            "tool_approvals": {
+              "type": "boolean",
+              "description": "The harness routes tool permission requests to the session's policy."
+            },
+            "writer": {
+              "type": "boolean",
+              "description": "A writer session can start on it."
+            },
+            "reviewer": {
+              "type": "boolean",
+              "description": "A reviewer session can start on it."
+            },
+            "effort": {
+              "type": "boolean",
+              "description": "A session may choose an effort."
+            },
+            "credentials": {
+              "$ref": "#/$defs/PresetCredentials",
+              "description": "Whether the preset supplies the harness's key."
+            },
+            "executable": {
+              "$ref": "#/$defs/Readiness",
+              "description": "Whether the harness's executable is where the session runs."
+            },
+            "auth": {
+              "$ref": "#/$defs/Readiness",
+              "description": "Whether the harness can sign in; verified when a session starts."
+            }
+          },
+          "required": [
+            "harness",
+            "tool_approvals",
+            "writer",
+            "reviewer",
+            "effort",
+            "credentials",
+            "executable",
+            "auth"
+          ],
+          "description": "A harness an execution preset offers."
+        },
+        "PresetCredentials": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "configured",
+              "description": "The preset supplies a secret the harness accepts as its key."
+            },
+            {
+              "type": "string",
+              "const": "none",
+              "description": "The preset supplies no key for the harness."
+            }
+          ],
+          "description": "Whether a preset supplies a harness's key."
+        },
+        "Readiness": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReadyState",
+              "description": "What was found."
+            },
+            "scope": {
+              "$ref": "#/$defs/ReadinessScope",
+              "description": "Where it was measured."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Fixed text chosen by the server; never an error message, path,\nendpoint or secret name."
+            },
+            "action": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Fixed text saying what an operator can do, when anything."
+            },
+            "checked_ms_ago": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Age of a cached check, in milliseconds."
+            }
+          },
+          "required": [
+            "state",
+            "scope",
+            "reason"
+          ],
+          "description": "One readiness observation. It informs a person and never refuses a start."
+        },
+        "ReadyState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ready",
+              "description": "Checked and usable."
+            },
+            {
+              "type": "string",
+              "const": "not_ready",
+              "description": "Checked and not usable from where it was measured."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "Not checked before a session starts."
+            }
+          ],
+          "description": "What a readiness value found."
+        },
+        "ReadinessScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "api_host",
+              "description": "The server answering the request, which may not be the worker that\nruns the session."
+            },
+            {
+              "type": "string",
+              "const": "environment",
+              "description": "The preset's execution environment."
+            }
+          ],
+          "description": "Where a readiness value was measured."
+        }
+      }
+    },
+    "workspace.ExecutionPresetList": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "Workspace session starts must name a preset."
+        },
+        "presets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExecutionPresetView"
+          },
+          "description": "Presets offered to the caller's tenant."
+        }
+      },
+      "required": [
+        "required",
+        "presets"
+      ],
+      "description": "`GET /v1/execution-presets` response.",
+      "title": "ExecutionPresetList",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ExecutionPresetView": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "ID a session start names."
+            },
+            "label": {
+              "type": "string",
+              "description": "Plain-language name."
+            },
+            "description": {
+              "type": "string",
+              "description": "Plain-language description."
+            },
+            "provider": {
+              "type": "string",
+              "description": "Provider kind: `local`, `substrate` or `microsandbox`."
+            },
+            "origin": {
+              "$ref": "#/$defs/PresetOrigin",
+              "description": "Operator-written or the implicit default."
+            },
+            "can_start": {
+              "type": [
+                "boolean",
+                "null"
+              ],
+              "description": "Whether the caller's workspace role can start a session on it; only\nwhen the request named a workspace."
+            },
+            "harnesses": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PresetHarnessView"
+              },
+              "description": "Harnesses it offers."
+            },
+            "environment": {
+              "$ref": "#/$defs/Readiness",
+              "description": "Whether the environment's settings are usable."
+            },
+            "reachability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Readiness"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the environment can be reached; only for remote ones."
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "description",
+            "provider",
+            "origin",
+            "harnesses",
+            "environment"
+          ],
+          "description": "An execution preset as the console offers it."
+        },
+        "PresetOrigin": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "operator",
+              "description": "Written by the operator in `execution_presets`."
+            },
+            {
+              "type": "string",
+              "const": "default",
+              "description": "The implicit `local` preset of a server that configures none."
+            }
+          ],
+          "description": "Where an execution preset came from."
+        },
+        "PresetHarnessView": {
+          "type": "object",
+          "properties": {
+            "harness": {
+              "type": "string",
+              "description": "Harness or profile ID a session start names."
+            },
+            "models": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "description": "Models a session may choose; absent means it may not choose one."
+            },
+            "default_model": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Model a session that names none runs."
+            },
+            "tool_approvals": {
+              "type": "boolean",
+              "description": "The harness routes tool permission requests to the session's policy."
+            },
+            "writer": {
+              "type": "boolean",
+              "description": "A writer session can start on it."
+            },
+            "reviewer": {
+              "type": "boolean",
+              "description": "A reviewer session can start on it."
+            },
+            "effort": {
+              "type": "boolean",
+              "description": "A session may choose an effort."
+            },
+            "credentials": {
+              "$ref": "#/$defs/PresetCredentials",
+              "description": "Whether the preset supplies the harness's key."
+            },
+            "executable": {
+              "$ref": "#/$defs/Readiness",
+              "description": "Whether the harness's executable is where the session runs."
+            },
+            "auth": {
+              "$ref": "#/$defs/Readiness",
+              "description": "Whether the harness can sign in; verified when a session starts."
+            }
+          },
+          "required": [
+            "harness",
+            "tool_approvals",
+            "writer",
+            "reviewer",
+            "effort",
+            "credentials",
+            "executable",
+            "auth"
+          ],
+          "description": "A harness an execution preset offers."
+        },
+        "PresetCredentials": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "configured",
+              "description": "The preset supplies a secret the harness accepts as its key."
+            },
+            {
+              "type": "string",
+              "const": "none",
+              "description": "The preset supplies no key for the harness."
+            }
+          ],
+          "description": "Whether a preset supplies a harness's key."
+        },
+        "Readiness": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "$ref": "#/$defs/ReadyState",
+              "description": "What was found."
+            },
+            "scope": {
+              "$ref": "#/$defs/ReadinessScope",
+              "description": "Where it was measured."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Fixed text chosen by the server; never an error message, path,\nendpoint or secret name."
+            },
+            "action": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Fixed text saying what an operator can do, when anything."
+            },
+            "checked_ms_ago": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Age of a cached check, in milliseconds."
+            }
+          },
+          "required": [
+            "state",
+            "scope",
+            "reason"
+          ],
+          "description": "One readiness observation. It informs a person and never refuses a start."
+        },
+        "ReadyState": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "ready",
+              "description": "Checked and usable."
+            },
+            {
+              "type": "string",
+              "const": "not_ready",
+              "description": "Checked and not usable from where it was measured."
+            },
+            {
+              "type": "string",
+              "const": "unknown",
+              "description": "Not checked before a session starts."
+            }
+          ],
+          "description": "What a readiness value found."
+        },
+        "ReadinessScope": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "api_host",
+              "description": "The server answering the request, which may not be the worker that\nruns the session."
+            },
+            {
+              "type": "string",
+              "const": "environment",
+              "description": "The preset's execution environment."
+            }
+          ],
+          "description": "Where a readiness value was measured."
         }
       }
     },

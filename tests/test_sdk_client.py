@@ -872,6 +872,43 @@ class WorkspaceRequests(unittest.TestCase):
             query=None,
         )
 
+    def test_execution_presets_are_discovered_and_named_on_session_start(self):
+        c = self.client
+        offered = {"required": True, "presets": [{"id": "substrate-gke", "can_start": True}]}
+        listed = self.assert_request(
+            lambda: c.execution_presets("w /1"),
+            offered,
+            "GET",
+            "/v1/execution-presets",
+            query={"workspace": "w /1"},
+        )
+        self.assertTrue(listed.required)
+        self.assertEqual(listed.presets[0]["id"], "substrate-gke")
+        self.assert_request(
+            c.execution_presets,
+            {"required": False, "presets": []},
+            "GET",
+            "/v1/execution-presets",
+            query={"workspace": None},
+        )
+        self.assert_request(
+            lambda: c.start_workspace_session(
+                "w1", "Analyst", "Summarise", harness="antigravity", preset="substrate-gke", key="preset"
+            ),
+            self.operation(),
+            "POST",
+            "/v1/workspaces/w1/sessions",
+            {
+                "name": "Analyst",
+                "prompt": "Summarise",
+                "harness": "antigravity",
+                "preset": "substrate-gke",
+                "access": "writer",
+            },
+            key="preset",
+            query=None,
+        )
+
     def test_native_messages_cancellation_lifecycle_and_acceptance_keep_their_contracts(self):
         c = self.client
         page = {"messages": [{"id": "s1:4", "role": "assistant", "text": "Evidence", "time": 12}], "next_cursor": "5"}
@@ -3101,6 +3138,7 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
         lambda c, _r: c.send_workspace_message("w1", "s1", "Continue"),
     ],
     "/v1/workspaces/{workspace}/sessions/{session}/cancel": [lambda c, _r: c.cancel_workspace_session("w1", "s1")],
+    "/v1/execution-presets": [lambda c, _r: c.execution_presets(), lambda c, _r: c.execution_presets("w1")],
     "/v1/workspaces/{workspace}/actions/{action}": [lambda c, _r: c.workspace_action("w1", "archive", revision=1)],
     "/v1/workspaces/{workspace}/finalize": [lambda c, _r: c.finalize_workspace("w1", ["a1"], revision=1)],
     "/v1/workspaces/{workspace}/members": [lambda c, _r: c.workspace_members("w1")],

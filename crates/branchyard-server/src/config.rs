@@ -533,6 +533,120 @@ impl Default for ManagedKnowledge {
     }
 }
 
+/// An operator-approved execution environment for workspace sessions, one
+/// entry of `execution_presets`. A session start names its `id`; the server
+/// supplies the provider, secrets and worker labels, and then applies the
+/// same checks as to any request. See docs/server.md#execution-presets.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ExecutionPreset {
+    /// Stable ID a session start names: 1 to 64 of a-z, 0-9 and '-'.
+    pub id: String,
+    /// Plain-language name for the console.
+    pub label: String,
+    /// Plain-language description for the console.
+    #[serde(default)]
+    pub description: String,
+    /// The environment, in the form of a request's `provider`: `local`,
+    /// `substrate` or `microsandbox`. Its kind must be in `allow_providers`
+    /// (`local` always is). Relative paths resolve against this file's
+    /// directory.
+    pub provider: branchyard::Provider,
+    /// Harness or profile IDs a session may choose, matched exactly.
+    pub harnesses: Vec<PresetHarness>,
+    /// Names in `secrets` added to the session's provisioning.
+    #[serde(default)]
+    pub secrets: Vec<String>,
+    /// Tenants that may use this preset. Absent: every tenant.
+    #[serde(default)]
+    pub tenants: Option<Vec<String>>,
+    /// Worker labels every turn of the session requires, so it runs only
+    /// where this environment's files are.
+    #[serde(default)]
+    pub require_labels: Vec<String>,
+    /// The provider as the file wrote it, when resolving its relative paths
+    /// changed it: error projection hides both forms.
+    #[serde(skip)]
+    pub written: Option<branchyard::Provider>,
+}
+
+/// One harness an execution preset offers, and the models it may run.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PresetHarness {
+    /// A harness or profile ID, matched exactly: `claude-code` does not
+    /// admit `claude-code-acp`.
+    pub harness: String,
+    /// Models a session may choose. Absent: a session may not choose one.
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// The model a session runs when it names none. Default: the first of
+    /// `models`.
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+impl PresetHarness {
+    /// The model a session that names none runs: `default_model`, else the
+    /// first of `models`, else the harness's own choice.
+    pub fn default_model(&self) -> Option<&str> {
+        self.default_model
+            .as_deref()
+            .or_else(|| self.models.as_ref()?.first().map(String::as_str))
+    }
+}
+
+/// A Substrate provider's options. Read through the provider's JSON form:
+/// only `crates/branchyard/src/providers/` names a `Provider` variant
+/// (`crates/branchyard/tests/provider_seam.rs`).
+pub(crate) fn substrate_options(
+    provider: &branchyard::Provider,
+) -> Option<branchyard::SubstrateOptions> {
+    if provider.label() != "substrate" {
+        return None;
+    }
+    serde_json::to_value(provider)
+        .and_then(serde_json::from_value)
+        .ok()
+}
+
+/// `preset` with its Substrate paths resolved by `resolve`, keeping the
+/// provider as written when that changed it.
+fn resolve_preset(
+    mut preset: ExecutionPreset,
+    resolve: impl Fn(PathBuf) -> PathBuf,
+) -> ExecutionPreset {
+    let Some(written) = substrate_options(&preset.provider) else {
+        return preset;
+    };
+    let mut options = written.clone();
+    options.key = resolve(options.key);
+    for path in [
+        &mut options.api_token_file,
+        &mut options.ca,
+        &mut options.client_cert,
+        &mut options.client_key,
+        &mut options.router_ca,
+    ] {
+        *path = path.take().map(&resolve);
+    }
+    if options != written {
+        preset.written = Some(preset.provider.clone());
+        preset.provider = branchyard::Provider::substrate(options);
+    }
+    preset
+}
+
+/// An execution preset ID: 1 to 64 of a-z, 0-9 and '-'.
+fn valid_preset_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// A resolved server configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -625,6 +739,14 @@ pub struct Config {
     /// variable of its own environment or a file. A request names secrets
     /// only; it never chooses a source. Empty by default.
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
+    /// Operator-approved environments a workspace session may name
+    /// (`execution_presets`). Empty by default: the console then offers one
+    /// implicit `local` preset.
+    pub execution_presets: Vec<ExecutionPreset>,
+    /// Workspace session starts must name an execution preset and may not
+    /// carry `provider` or `provision`. Off by default; needs at least one
+    /// preset.
+    pub require_workspace_execution_presets: bool,
     /// A PostgreSQL URL: keep branch state and operations there instead of
     /// SQLite. Only in a build with the `postgres` feature.
     pub database: Option<String>,
@@ -854,6 +976,8 @@ impl Config {
             allow_unapproved_tools: false,
             allow_workspace_scripts: WorkspaceScripts::Denied,
             secrets: BTreeMap::new(),
+            execution_presets: Vec::new(),
+            require_workspace_execution_presets: false,
             database: None,
             poll_interval: Duration::from_millis(500),
             recover_interval: crate::serve::RECOVER_EVERY,
@@ -1099,6 +1223,7 @@ impl Config {
         for provider in &self.allow_providers {
             check_provider_name(provider)?;
         }
+        self.check_execution_presets()?;
         if let Some(by) = &self.by_path {
             if !by.is_file() {
                 return Err(format!("by_path {} is not a file", by.display()));
@@ -1213,6 +1338,125 @@ impl Config {
              replay the tokens.",
             self.listen
         )))
+    }
+
+    /// Refuse an execution preset that could not run as written, after the
+    /// flags merged `allow_providers` and `secrets` in.
+    fn check_execution_presets(&self) -> Result<(), String> {
+        if self.require_workspace_execution_presets && self.execution_presets.is_empty() {
+            return Err(
+                "require_workspace_execution_presets needs at least one execution_presets entry"
+                    .into(),
+            );
+        }
+        let mut ids = BTreeSet::new();
+        for preset in &self.execution_presets {
+            let id = &preset.id;
+            if !valid_preset_id(id) {
+                return Err(format!(
+                    "execution preset {id:?} is not an ID: 1 to 64 of a-z, 0-9 and '-'"
+                ));
+            }
+            if !ids.insert(id) {
+                return Err(format!("execution preset {id} is configured twice"));
+            }
+            let fail = |what: String| Err(format!("execution preset {id}: {what}"));
+            if preset.label.trim().is_empty() {
+                return fail("label is empty".into());
+            }
+            let kind = preset.provider.label();
+            if kind.starts_with("recipe") {
+                return fail(
+                    "a server never runs environment recipes (docs/recipes.md); use local, \
+                     substrate or microsandbox"
+                        .into(),
+                );
+            }
+            if kind != "local" && !self.allow_providers.contains(&kind) {
+                return fail(format!(
+                    "its provider {kind} is not in allow_providers; allow it with \
+                     --allow-provider {kind}"
+                ));
+            }
+            if let Some(options) = substrate_options(&preset.provider) {
+                let paths = [
+                    Some(&options.key),
+                    options.api_token_file.as_ref(),
+                    options.ca.as_ref(),
+                    options.client_cert.as_ref(),
+                    options.client_key.as_ref(),
+                    options.router_ca.as_ref(),
+                ];
+                if let Some(path) = paths.into_iter().flatten().find(|p| !p.is_absolute()) {
+                    return fail(format!(
+                        "{} must be an absolute path on this server",
+                        path.display()
+                    ));
+                }
+            }
+            if preset.harnesses.is_empty() {
+                return fail("lists no harnesses".into());
+            }
+            let mut harnesses = BTreeSet::new();
+            for harness in &preset.harnesses {
+                let name = &harness.harness;
+                if branchyard::harness_profile(name).is_err() {
+                    return fail(format!(
+                        "{name:?} is not a harness or profile; see `by harnesses --profiles`"
+                    ));
+                }
+                if !harnesses.insert(name) {
+                    return fail(format!("lists harness {name} twice"));
+                }
+                if let Some(models) = &harness.models {
+                    if models.is_empty() || models.iter().any(|m| m.trim().is_empty()) {
+                        return fail(format!(
+                            "harness {name}: models must name models; omit it to let the \
+                             harness choose"
+                        ));
+                    }
+                }
+                match (&harness.models, &harness.default_model) {
+                    (Some(models), Some(default)) if !models.contains(default) => {
+                        return fail(format!(
+                            "harness {name}: default_model {default} is not among its models"
+                        ))
+                    }
+                    (None, Some(default)) if default.trim().is_empty() => {
+                        return fail(format!("harness {name}: default_model is empty"))
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(secret) = preset
+                .secrets
+                .iter()
+                .find(|s| !self.secrets.contains_key(*s))
+            {
+                return fail(format!(
+                    "secret {secret} is not in secrets; define it with --secret {secret}"
+                ));
+            }
+            if let Some(tenants) = &preset.tenants {
+                if tenants.is_empty() {
+                    return fail("tenants is empty; omit it for every tenant".into());
+                }
+                for tenant in tenants {
+                    check_tenant_name(tenant)?;
+                }
+            }
+            if let Some(bad) = preset
+                .require_labels
+                .iter()
+                .find(|l| !crate::store::valid_label(l))
+            {
+                return fail(format!(
+                    "require_labels: {bad:?} is not a worker label: 1 to 63 of a-z, 0-9, '.', \
+                     '_', '-' and ':', starting with a letter or digit"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1340,6 +1584,15 @@ pub(crate) struct FileConfig {
     allow_workspace_scripts: Option<FileWorkspaceScripts>,
     #[serde(default)]
     secrets: BTreeMap<String, String>,
+    /// Operator-approved environments a workspace session may name by ID;
+    /// the server supplies their provider, secrets and worker labels. See
+    /// docs/server.md#execution-presets.
+    #[serde(default)]
+    execution_presets: Vec<ExecutionPreset>,
+    /// Workspace session starts must name one of `execution_presets` and
+    /// may not carry `provider` or `provision`. Default false.
+    #[serde(default)]
+    require_workspace_execution_presets: bool,
     database: Option<String>,
     /// The labels this server's worker carries; it claims only operations
     /// whose `require_labels` are all among them. See
@@ -1747,6 +2000,10 @@ pub struct Partial {
     pub allow_unapproved_tools: bool,
     pub allow_workspace_scripts: WorkspaceScripts,
     pub secrets: BTreeMap<String, branchyard::SecretSource>,
+    /// `execution_presets`, their relative paths resolved.
+    pub execution_presets: Vec<ExecutionPreset>,
+    /// `require_workspace_execution_presets`.
+    pub require_workspace_execution_presets: bool,
     pub database: Option<String>,
     pub labels: Vec<String>,
     pub inventory: Option<bool>,
@@ -2022,6 +2279,12 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                 Ok((name, resolve_secret(secret, dir)))
             })
             .collect::<Result<_, String>>()?,
+        execution_presets: file
+            .execution_presets
+            .into_iter()
+            .map(|preset| resolve_preset(preset, resolve))
+            .collect(),
+        require_workspace_execution_presets: file.require_workspace_execution_presets,
         database: file.database,
         labels: file.labels,
         inventory: file.inventory,
@@ -2485,6 +2748,193 @@ mod managed_knowledge_tests {
                 _ => invalid.managed_knowledge.max_upload_bytes = 0,
             }
             assert!(invalid.validate().unwrap_err().contains("positive"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod execution_presets_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn preset(value: serde_json::Value) -> ExecutionPreset {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// A knowledge server with a local and a Substrate preset that validate.
+    fn config() -> Config {
+        let mut config = Config::new(PathBuf::from("/operator/data"));
+        config.managed_knowledge.enabled = true;
+        config.tokens.push(Token {
+            name: "operator".into(),
+            secret: "execution-preset-test-token".into(),
+        });
+        config.allow_providers.insert("substrate".into());
+        config.secrets.insert(
+            "GEMINI_API_KEY".into(),
+            parse_secret("GEMINI_API_KEY").unwrap(),
+        );
+        config.execution_presets = vec![
+            preset(
+                json!({"id":"local","label":"This server","provider":{"kind":"local"},
+                "harnesses":[{"harness":"antigravity","models":["gemini-3.8-flash-low"]},{"harness":"claude-code"}],
+                "secrets":["GEMINI_API_KEY"]}),
+            ),
+            preset(json!({"id":"substrate-gke","label":"Substrate on GKE",
+                "provider":{"kind":"substrate","endpoint":"https://control.internal.example",
+                    "router":"https://router.internal.example","template":"harnesses",
+                    "key":"/operator/substrate/bridge.key"},
+                "harnesses":[{"harness":"antigravity"}],"tenants":["research"],
+                "require_labels":["substrate-gke"]})),
+        ];
+        config
+    }
+
+    #[test]
+    fn a_configuration_file_resolves_preset_paths_and_check_merges_the_flags() {
+        let scratch = branchyard_testkit::Scratch::new("execution-presets-config");
+        let dir = scratch.path();
+        let file = dir.join("server.json");
+        let settings = json!({
+            "data_dir": "state",
+            "managed_knowledge": {"enabled": true},
+            "tokens": [{"name": "operator", "token": "execution-preset-test-token"}],
+            "require_workspace_execution_presets": true,
+            "execution_presets": [
+                {"id": "local", "label": "This server", "provider": {"kind": "local"},
+                 "harnesses": [{"harness": "claude-code"}]},
+                {"id": "substrate-gke", "label": "Substrate on GKE",
+                 "provider": {"kind": "substrate", "endpoint": "https://control.internal.example",
+                    "router": "https://router.internal.example", "template": "harnesses",
+                    "key": "substrate/bridge.key", "api_token_file": "substrate/api.token",
+                    "ca": "substrate/ca.pem"},
+                 "harnesses": [{"harness": "antigravity", "models": ["gemini-3.8-flash-low"]}],
+                 "secrets": ["GEMINI_API_KEY"]}
+            ]
+        });
+        fs::write(&file, settings.to_string()).unwrap();
+        let args = |extra: &[&str]| {
+            let mut args = vec!["--config".to_owned(), file.display().to_string()];
+            args.extend(extra.iter().map(|arg| (*arg).to_owned()));
+            args
+        };
+        assert!(crate::cli::check(&args(&[])).unwrap_err().contains(
+            "execution preset substrate-gke: its provider substrate is not in allow_providers"
+        ));
+        assert!(crate::cli::check(&args(&["--allow-provider", "substrate"]))
+            .unwrap_err()
+            .contains("secret GEMINI_API_KEY is not in secrets"));
+        let flags = [
+            "--allow-provider",
+            "substrate",
+            "--secret",
+            "GEMINI_API_KEY",
+        ];
+        crate::cli::check(&args(&flags)).unwrap();
+        let config = crate::cli::resolve(&args(&flags)).unwrap();
+        assert!(config.require_workspace_execution_presets);
+        let [local, remote] = config.execution_presets.as_slice() else {
+            panic!("two presets: {:?}", config.execution_presets);
+        };
+        assert!(local.written.is_none());
+        let resolved = substrate_options(&remote.provider).unwrap();
+        assert_eq!(resolved.key, dir.join("substrate/bridge.key"));
+        assert_eq!(
+            resolved.api_token_file,
+            Some(dir.join("substrate/api.token"))
+        );
+        assert_eq!(resolved.ca, Some(dir.join("substrate/ca.pem")));
+        let written = substrate_options(remote.written.as_ref().unwrap()).unwrap();
+        assert_eq!(written.key, PathBuf::from("substrate/bridge.key"));
+        assert_eq!(
+            remote.harnesses[0].default_model(),
+            Some("gemini-3.8-flash-low")
+        );
+        assert_eq!(local.harnesses[0].default_model(), None);
+        fs::write(
+            &file,
+            json!({"execution_presets": [], "presets": []}).to_string(),
+        )
+        .unwrap();
+        assert!(load_file(&file)
+            .unwrap_err()
+            .contains("unknown field `presets`"));
+    }
+
+    #[test]
+    fn each_unusable_preset_is_refused_naming_what_to_change() {
+        assert_eq!(config().validate(), Ok(None));
+        type Change = fn(&mut Config);
+        let cases: [(Change, &str); 15] = [
+            (
+                |c| {
+                    c.execution_presets.clear();
+                    c.require_workspace_execution_presets = true;
+                },
+                "require_workspace_execution_presets needs at least one execution_presets entry",
+            ),
+            (|c| c.execution_presets[0].id = "This_Server".into(), "is not an ID"),
+            (
+                |c| c.execution_presets[1].id = "local".into(),
+                "execution preset local is configured twice",
+            ),
+            (|c| c.execution_presets[0].label = " ".into(), "local: label is empty"),
+            (
+                |c| c.allow_providers.clear(),
+                "its provider substrate is not in allow_providers; allow it with --allow-provider substrate",
+            ),
+            (
+                |c| {
+                    c.execution_presets[0].provider = serde_json::from_value(
+                        json!({"kind":"recipe","name":"vm","create":"make-vm"}),
+                    )
+                    .unwrap();
+                },
+                "never runs environment recipes",
+            ),
+            (
+                |c| {
+                    let mut options = substrate_options(&c.execution_presets[1].provider).unwrap();
+                    options.key = "bridge.key".into();
+                    c.execution_presets[1].provider = branchyard::Provider::substrate(options);
+                },
+                "bridge.key must be an absolute path",
+            ),
+            (|c| c.execution_presets[1].harnesses.clear(), "lists no harnesses"),
+            (
+                |c| c.execution_presets[1].harnesses[0].harness = "no-such-harness".into(),
+                "\"no-such-harness\" is not a harness or profile",
+            ),
+            (
+                |c| {
+                    let again = c.execution_presets[0].harnesses[0].clone();
+                    c.execution_presets[0].harnesses.push(again);
+                },
+                "lists harness antigravity twice",
+            ),
+            (
+                |c| c.execution_presets[0].harnesses[0].models = Some(Vec::new()),
+                "models must name models",
+            ),
+            (
+                |c| c.execution_presets[0].harnesses[0].default_model = Some("other".into()),
+                "default_model other is not among its models",
+            ),
+            (|c| c.secrets.clear(), "secret GEMINI_API_KEY is not in secrets"),
+            (
+                |c| c.execution_presets[1].tenants = Some(Vec::new()),
+                "tenants is empty; omit it for every tenant",
+            ),
+            (
+                |c| c.execution_presets[1].require_labels = vec!["Not A Label".into()],
+                "\"Not A Label\" is not a worker label",
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut config = config();
+            change(&mut config);
+            let error = config.validate().unwrap_err();
+            assert!(error.contains(expected), "{expected:?} in {error:?}");
         }
     }
 }

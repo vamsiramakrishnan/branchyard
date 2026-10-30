@@ -2,6 +2,7 @@
 
 mod discovery;
 mod inputs;
+mod presets;
 mod services;
 
 use std::collections::BTreeMap;

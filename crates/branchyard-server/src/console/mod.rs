@@ -2,6 +2,7 @@
 pub(crate) mod auth;
 mod collaboration;
 mod execution;
+mod presets;
 mod previews;
 mod quotas;
 mod routes;

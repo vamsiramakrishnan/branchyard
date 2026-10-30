@@ -1334,6 +1334,13 @@ class Client:
         wait for initialization before starting sessions or uploading sources."""
         return self._operation("/v1/workspaces", {"project_id": project, "title": title}, key)
 
+    def execution_presets(self, workspace: Optional[str] = None) -> Record:
+        """Operator execution presets offered to this tenant: `required` and
+        `presets`, each with its harnesses and readiness. With `workspace`,
+        the caller must be a member and each preset says in `can_start`
+        whether its role can start a session there."""
+        return Record(self.get("/v1/execution-presets", workspace=workspace))
+
     def workspace_sessions(self, workspace: str) -> list[Record]:
         """Named native attempts with their current result and provenance."""
         return [Record(value) for value in self.get(self._workspace(workspace, "/sessions")).get("sessions", [])]
@@ -1345,6 +1352,7 @@ class Client:
         prompt: str,
         *,
         harness: str,
+        preset: Optional[str] = None,
         provider: Optional[JSON] = None,
         unapproved_tools: Optional[bool] = None,
         model: Optional[str] = None,
@@ -1362,7 +1370,9 @@ class Client:
         Omitted policy retains the server's deny default. Sources and review
         artifacts are immutable IDs; candidate is an exact workspace commit.
         Provisioning names operator-known secrets and connector grants.
-        Provider choices retain the server operator's backend policy.
+        Provider choices retain the server operator's backend policy. A
+        preset from execution_presets() supplies the provider and secrets
+        instead; it is refused beside provider or provision.
         Unapproved tools require explicit acknowledgment and operator permission;
         reviewers always require enforced tool approvals."""
         return self._operation(
@@ -1371,6 +1381,7 @@ class Client:
                 "name": name,
                 "prompt": prompt,
                 "harness": harness,
+                "preset": preset,
                 "provider": provider,
                 "unapproved_tools": unapproved_tools,
                 "model": model,

@@ -786,6 +786,8 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config
         .secrets
         .extend(flags.secrets.into_iter().map(|s| (s.name.clone(), s)));
+    config.execution_presets = partial.execution_presets;
+    config.require_workspace_execution_presets = partial.require_workspace_execution_presets;
     config.database = flags.database.or(partial.database);
     if let Some(aging) = partial.aging {
         config.aging = aging;

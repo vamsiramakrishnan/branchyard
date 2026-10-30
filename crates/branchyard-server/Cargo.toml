@@ -20,8 +20,9 @@ path = "src/main.rs"
 postgres = ["dep:postgres", "branchyard/postgres"]
 # Derive schemars::JsonSchema on the configuration file's types, and build
 # schema/server.config.json from them; see tools/schema-gen and
-# docs/server.md.
-schema = ["dep:schemars"]
+# docs/server.md. An execution preset's `provider` is the engine's
+# `Provider`, so its schema comes from the engine's.
+schema = ["dep:schemars", "branchyard/schema"]
 
 [dependencies]
 branchyard-support = { path = "../branchyard-support" }
@@ -29,6 +30,10 @@ google-cloud-auth = { workspace = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
 branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
+# Execution presets read a harness profile's protocol and ask its
+# provisioner whether it takes an effort, as branchyard-setup does.
+branchyard-harness = { version = "0.3.0", path = "../branchyard-harness" }
+branchyard-provision = { version = "0.3.0", path = "../branchyard-provision" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = { workspace = true }
 hmac = "0.13"

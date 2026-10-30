@@ -284,12 +284,42 @@ pub(super) fn session_views(
                 view["turns"] = json!(attempt.turns);
                 view["candidate"] = json!(attempt.candidate);
             }
+            if let Some(preset) = super::presets::stored(r)? {
+                for field in ["status_detail", "error", "result_error"] {
+                    if let Some(value) = view.get_mut(field) {
+                        super::presets::project_value(value, &preset.hidden);
+                    }
+                }
+            }
             Ok(view)
         })
         .collect()
 }
 /// Serialize the existing operation envelope with durable console ownership.
+/// An operation of a session started with an execution preset shows its
+/// error and result through the preset's projection.
 pub(crate) fn operation_value(app: &App, operation: &Operation) -> Result<Value, ApiError> {
+    let mut value = owned_operation_value(app, operation)?;
+    let session = match value.get("session_id").and_then(Value::as_str) {
+        Some(id) => app.registry.console_get(Collection::Sessions, id)?,
+        None => None,
+    };
+    if let Some(preset) = session
+        .as_ref()
+        .map(super::presets::stored)
+        .transpose()?
+        .flatten()
+    {
+        for field in ["error", "result"] {
+            if let Some(value) = value.get_mut(field) {
+                super::presets::project_value(value, &preset.hidden);
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn owned_operation_value(app: &App, operation: &Operation) -> Result<Value, ApiError> {
     let operation = auth::public_operation(operation.clone());
     let mut value =
         serde_json::to_value(&operation).map_err(|error| ApiError::internal(error.to_string()))?;
@@ -481,6 +511,7 @@ fn start_once(
     if let Some(old) = replayed(app, caller, idem.as_ref())? {
         return Ok(old);
     }
+    let preset = super::presets::resolve(app, caller, &body)?;
     if !matches!(access, "writer" | "reviewer") {
         return Err(ApiError::bad_request("access must be writer or reviewer"));
     }
@@ -498,7 +529,21 @@ fn start_once(
                 .map_err(|error| ApiError::bad_request(error.to_string()))?,
             None => branchyard::Provisioning::default(),
         };
-    if let Some(value) = body.get("model").filter(|value| !value.is_null()) {
+    if let Some(preset) = &preset {
+        provision.secrets = preset
+            .secrets
+            .iter()
+            .map(|name| branchyard::SecretSource {
+                name: name.clone(),
+                from: None,
+            })
+            .collect();
+    }
+    let model = match &preset {
+        Some(preset) => preset.model.clone().map(Value::String),
+        None => body.get("model").filter(|value| !value.is_null()).cloned(),
+    };
+    if let Some(value) = &model {
         let model = value
             .as_str()
             .filter(|value| !value.trim().is_empty())
@@ -546,13 +591,20 @@ fn start_once(
             .get("unapproved_tools")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        provider: body
-            .get("provider")
-            .filter(|value| !value.is_null())
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| ApiError::bad_request(format!("invalid provider: {error}")))?,
+        provider: match &preset {
+            Some(preset) => Some(preset.provider.clone()),
+            None => body
+                .get("provider")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| ApiError::bad_request(format!("invalid provider: {error}")))?,
+        },
+        require_labels: preset
+            .as_ref()
+            .map(|preset| preset.require_labels.clone())
+            .unwrap_or_default(),
         base: candidate.as_ref().map(|(commit, _)| commit.clone()),
         prompt: prompt.into(),
         harness: Some(harness.into()),
@@ -581,7 +633,7 @@ fn start_once(
         Collection::Sessions,
         &sid,
         caller,
-        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":body.get("model").filter(|value| !value.is_null()),"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"_policy":request.policy,"unapproved_tools":access != "reviewer" && request.unapproved_tools,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
+        json!({"id":sid,"workspace_id":wid,"name":name,"branch":sid,"harness":harness,"model":model,"preset":preset.as_ref().map(|preset|&preset.id),"_preset":preset,"effort":body.get("effort").filter(|value| !value.is_null()),"access":access,"_policy":request.policy,"unapproved_tools":access != "reviewer" && request.unapproved_tools,"review_candidate":candidate.as_ref().map(|(commit,_)|commit),"review_candidate_branch":candidate.as_ref().map(|(_,branch)|branch),"subject":caller.0.connector_subject(),"credential":caller.name(),"status":"queued","sources":selected,"artifacts":artifact_inputs,"result_contract":body.get("result_contract"),"created_at_ms":branchyard_support::time::now_ms()}),
     );
     let mutations = vec![
         insert(row),
@@ -686,6 +738,9 @@ pub(super) fn continue_session(
         policy,
         unapproved_tools: row.body["access"] != "reviewer"
             && row.body["unapproved_tools"].as_bool().unwrap_or(false),
+        require_labels: super::presets::stored(&row)?
+            .map(|preset| preset.require_labels)
+            .unwrap_or_default(),
         ..Default::default()
     };
     crate::work::send_options(app, &repo, &request)?;

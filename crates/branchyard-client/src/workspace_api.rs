@@ -196,6 +196,9 @@ pub struct Session {
     /// Stable verified subject that admitted the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Execution preset the session started with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// Admit an isolated native session through the durable queue.
@@ -208,8 +211,14 @@ pub struct StartSessionRequest {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unapproved_tools: bool,
     /// Existing typed execution backend; still subject to operator provider policy.
+    /// Refused beside `preset`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<branchyard::Provider>,
+    /// Operator execution preset ID from `GET /v1/execution-presets`. The
+    /// server supplies its provider, secrets and worker labels; the request
+    /// may then not carry `provider` or `provision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// Human title.
     pub name: String,
     /// Initial instruction.
@@ -386,6 +395,136 @@ pub struct WorkspaceOperation {
     pub session_id: Option<String>,
 }
 
+/// Where an execution preset came from.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetOrigin {
+    /// Written by the operator in `execution_presets`.
+    Operator,
+    /// The implicit `local` preset of a server that configures none.
+    Default,
+}
+
+/// What a readiness value found.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadyState {
+    /// Checked and usable.
+    Ready,
+    /// Checked and not usable from where it was measured.
+    NotReady,
+    /// Not checked before a session starts.
+    Unknown,
+}
+
+/// Where a readiness value was measured.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessScope {
+    /// The server answering the request, which may not be the worker that
+    /// runs the session.
+    ApiHost,
+    /// The preset's execution environment.
+    Environment,
+}
+
+/// Whether a preset supplies a harness's key.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetCredentials {
+    /// The preset supplies a secret the harness accepts as its key.
+    Configured,
+    /// The preset supplies no key for the harness.
+    None,
+}
+
+/// One readiness observation. It informs a person and never refuses a start.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Readiness {
+    /// What was found.
+    pub state: ReadyState,
+    /// Where it was measured.
+    pub scope: ReadinessScope,
+    /// Fixed text chosen by the server; never an error message, path,
+    /// endpoint or secret name.
+    pub reason: String,
+    /// Fixed text saying what an operator can do, when anything.
+    pub action: Option<String>,
+    /// Age of a cached check, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_ms_ago: Option<u64>,
+}
+
+/// A harness an execution preset offers.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresetHarnessView {
+    /// Harness or profile ID a session start names.
+    pub harness: String,
+    /// Models a session may choose; absent means it may not choose one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    /// Model a session that names none runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The harness routes tool permission requests to the session's policy.
+    pub tool_approvals: bool,
+    /// A writer session can start on it.
+    pub writer: bool,
+    /// A reviewer session can start on it.
+    pub reviewer: bool,
+    /// A session may choose an effort.
+    pub effort: bool,
+    /// Whether the preset supplies the harness's key.
+    pub credentials: PresetCredentials,
+    /// Whether the harness's executable is where the session runs.
+    pub executable: Readiness,
+    /// Whether the harness can sign in; verified when a session starts.
+    pub auth: Readiness,
+}
+
+/// An execution preset as the console offers it.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPresetView {
+    /// ID a session start names.
+    pub id: String,
+    /// Plain-language name.
+    pub label: String,
+    /// Plain-language description.
+    pub description: String,
+    /// Provider kind: `local`, `substrate` or `microsandbox`.
+    pub provider: String,
+    /// Operator-written or the implicit default.
+    pub origin: PresetOrigin,
+    /// Whether the caller's workspace role can start a session on it; only
+    /// when the request named a workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_start: Option<bool>,
+    /// Harnesses it offers.
+    pub harnesses: Vec<PresetHarnessView>,
+    /// Whether the environment's settings are usable.
+    pub environment: Readiness,
+    /// Whether the environment can be reached; only for remote ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<Readiness>,
+}
+
+/// `GET /v1/execution-presets` response.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPresetList {
+    /// Workspace session starts must name a preset.
+    pub required: bool,
+    /// Presets offered to the caller's tenant.
+    pub presets: Vec<ExecutionPresetView>,
+}
+
 /// Project listing response.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -461,6 +600,25 @@ impl crate::Client {
                 crate::http::encode(workspace)
             ))?
             .sessions)
+    }
+
+    /// Execution presets offered to the caller's tenant. With a workspace,
+    /// the caller must be a member and each preset says whether its role
+    /// can start a session there.
+    pub fn execution_presets(
+        &self,
+        workspace: Option<&str>,
+    ) -> Result<ExecutionPresetList, crate::Error> {
+        let path = workspace.map_or_else(
+            || "/v1/execution-presets".to_owned(),
+            |id| {
+                format!(
+                    "/v1/execution-presets?workspace={}",
+                    crate::http::encode(id)
+                )
+            },
+        );
+        self.get(&path)
     }
 
     /// Start a named attempt through the existing operation queue.
@@ -585,6 +743,45 @@ mod tests {
         assert_eq!(request.access, SessionAccess::Reviewer);
         assert_eq!(request.candidate.as_deref(), Some(candidate));
         assert_eq!(serde_json::to_value(request).unwrap(), value);
+    }
+
+    #[test]
+    fn execution_presets_round_trip_as_the_contract_writes_them() {
+        let value = serde_json::json!({"required":true,"presets":[{
+            "id":"substrate-gke","label":"Substrate on GKE","description":"Runs each session in its own Substrate actor.",
+            "provider":"substrate","origin":"operator","can_start":true,
+            "harnesses":[{"harness":"antigravity","models":["gemini-3.8-flash-low"],"default_model":"gemini-3.8-flash-low",
+                "tool_approvals":false,"writer":true,"reviewer":false,"effort":false,"credentials":"configured",
+                "executable":{"state":"unknown","scope":"environment","reason":"The Substrate template provides the harness; discovery does not contact the cluster.","action":null},
+                "auth":{"state":"unknown","scope":"environment","reason":"Credentials are configured on the server; they are verified when a session starts.","action":null}}],
+            "environment":{"state":"ready","scope":"api_host","checked_ms_ago":12000,"reason":"This server can read the Substrate settings and credential files.","action":null},
+            "reachability":{"state":"unknown","scope":"environment","reason":"The cluster is contacted when a session starts, not before.","action":null}}]});
+        let list: ExecutionPresetList = serde_json::from_value(value.clone()).unwrap();
+        let preset = &list.presets[0];
+        assert_eq!(preset.origin, PresetOrigin::Operator);
+        assert_eq!(preset.environment.state, ReadyState::Ready);
+        assert_eq!(preset.environment.scope, ReadinessScope::ApiHost);
+        assert_eq!(preset.environment.checked_ms_ago, Some(12000));
+        assert_eq!(
+            preset.harnesses[0].credentials,
+            PresetCredentials::Configured
+        );
+        assert_eq!(serde_json::to_value(&list).unwrap(), value);
+        let local: ExecutionPresetView = serde_json::from_value(serde_json::json!({
+            "id":"local","label":"This server","description":"","provider":"local","origin":"default","harnesses":[],
+            "environment":{"state":"ready","scope":"api_host","reason":"Sessions run here.","action":null}})).unwrap();
+        assert!(local.can_start.is_none() && local.reachability.is_none());
+        let start: StartSessionRequest = serde_json::from_value(serde_json::json!({
+            "name":"Analyst","prompt":"Summarise","preset":"substrate-gke","harness":"antigravity","access":"writer"})).unwrap();
+        assert_eq!(start.preset.as_deref(), Some("substrate-gke"));
+        assert_eq!(
+            serde_json::to_value(&start).unwrap()["preset"],
+            "substrate-gke"
+        );
+        let session: Session = serde_json::from_value(serde_json::json!({
+            "id":"s","workspace_id":"w","name":"Analyst","branch":"s","harness":"antigravity","status":"queued",
+            "access":"writer","preset":"substrate-gke"})).unwrap();
+        assert_eq!(session.preset.as_deref(), Some("substrate-gke"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub(crate) fn router() -> Router<Shared> {
             post(cancel),
         )
         .route("/v1/workspaces/{workspace}/actions/{action}", post(action))
+        .route("/v1/execution-presets", get(execution_presets))
         .route(
             "/v1/workspaces/{workspace}/finalize",
             post(super::sources::finalize),
@@ -370,6 +371,16 @@ async fn start_session(
         serde_json::to_value(request).map_err(|error| ApiError::internal(error.to_string()))?;
     super::runtime::start(&app, &caller, &wid, &headers, body).map(Json)
 }
+async fn execution_presets(
+    State(app): State<Shared>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<super::presets::PresetList>, ApiError> {
+    let workspace = query(raw_query).remove("workspace");
+    crate::api::blocking(move || super::presets::discover(&app, &caller, workspace.as_deref()))
+        .await?
+        .map(Json)
+}
 async fn messages(
     State(app): State<Shared>,
     Path((wid, sid)): Path<(String, String)>,
@@ -413,6 +424,9 @@ async fn messages(
         messages.push(json!({"id":format!("{sid}:{index}"),"role":role,"text":text,"time":event.at_ms,"at_ms":event.at_ms}));
     }
     let mut response = json!({"messages":messages,"next_cursor":next.to_string()});
+    if let Some(preset) = super::presets::stored(&session)? {
+        super::presets::project_value(&mut response["messages"], &preset.hidden);
+    }
     if workspace.body["repo"] == MANAGED_REPO {
         auth::redact_paths(
             &mut response,

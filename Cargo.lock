@@ -906,6 +906,8 @@ dependencies = [
  "branchyard",
  "branchyard-bridge",
  "branchyard-client",
+ "branchyard-harness",
+ "branchyard-provision",
  "branchyard-runtime",
  "branchyard-sandbox",
  "branchyard-setup",

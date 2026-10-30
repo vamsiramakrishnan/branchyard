@@ -116,6 +116,16 @@ Session requests accept the existing typed `provider` object. It passes through
 the same operator allowlist and provider validation as ordinary task requests.
 Python clients use `start_workspace_session(..., provider={...})`. A denied or
 failed remote backend stays denied or failed; it never becomes a local turn.
+An operator can instead name the environments sessions run in.
+`GET /v1/execution-presets?workspace=ID` lists the presets offered to the
+caller's tenant, with each harness's models, readiness and whether the caller's
+role can start a session. A start names one with `preset` and may then not carry
+`provider` or `provision` ([execution presets](server.md#execution-presets)).
+Python clients use `execution_presets(workspace)` and
+`start_workspace_session(..., preset="substrate-gke")`; typed Rust clients use
+`Client::execution_presets` and `StartSessionRequest::preset`. The manager's
+`start_session` tool takes no `preset` yet, so a server with
+`require_workspace_execution_presets` refuses its starts with `preset_required`.
 Remote terminal access requires an allocation retained by the provider.
 For AGY and other profiles that cannot route individual tool approvals, pass
 `unapproved_tools: true` explicitly. The operator must enable
