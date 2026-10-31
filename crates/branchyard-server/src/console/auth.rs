@@ -8,6 +8,7 @@ use axum::response::Response;
 use futures_util::StreamExt as _;
 use serde_json::Value;
 
+use super::Projection;
 use crate::api::{App, Caller, Shared};
 use crate::console_store::{Collection, Record};
 use crate::error::ApiError;
@@ -351,59 +352,190 @@ pub(crate) fn authorize_legacy(
     Ok(())
 }
 
-/// Redact operator-owned storage roots from bounded workspace JSON errors.
-/// Success bodies and other routes retain their existing representation.
-pub(crate) async fn redact_workspace_error(app: &App, path: &str, response: Response) -> Response {
+/// The largest error body read for redaction.
+const ERROR_BOUND: usize = 1024 * 1024;
+
+/// The largest gateway read projected for a preset session: the PR
+/// snapshot's own 2 MiB bound and a terminal page (1 MiB of output, as
+/// base64) both fit.
+const GATEWAY_READ_BOUND: usize = 4 * 1024 * 1024;
+
+const FALLBACK: &[u8] = br#"{"error":{"code":"workspace_error","message":"workspace request failed; inspect the server diagnostics"}}"#;
+
+/// Whose preset projection a response passes through.
+enum Owner {
+    Session { workspace: String, session: String },
+    Branch { repo: String, branch: String },
+}
+
+/// What a preset session's projection rewrites in a JSON body.
+enum Part {
+    Whole,
+    /// Only `error`: a terminal page's `data` is the terminal's own bytes.
+    ErrorField,
+}
+
+/// The projection a JSON response with `status` to `method` on `path`
+/// passes through, what it rewrites and how much of the body is read.
+/// Errors on a session's console routes and on a legacy branch route do,
+/// and so do the runtime and PR gateways' reads, which know nothing of
+/// presets. Other success bodies are projected by their handlers.
+fn preset_target(method: &Method, path: &str, status: StatusCode) -> Option<(Owner, Part, usize)> {
+    let decoded: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(branchyard_client::http::decode)
+        .collect();
+    let parts: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    let error = status.is_client_error() || status.is_server_error();
+    match parts.as_slice() {
+        ["v1", "workspaces", workspace, "sessions", session, rest @ ..] => {
+            let owner = Owner::Session {
+                workspace: (*workspace).to_owned(),
+                session: (*session).to_owned(),
+            };
+            match rest {
+                _ if error => Some((owner, Part::Whole, ERROR_BOUND)),
+                ["runtime"] | ["pr"] if *method == Method::GET => {
+                    Some((owner, Part::Whole, GATEWAY_READ_BOUND))
+                }
+                ["terminals", _, "output"] if *method == Method::GET => {
+                    Some((owner, Part::ErrorField, GATEWAY_READ_BOUND))
+                }
+                _ => None,
+            }
+        }
+        ["v1", "repos", repo, "branches", branch, ..] if error => Some((
+            Owner::Branch {
+                repo: (*repo).to_owned(),
+                branch: (*branch).to_owned(),
+            },
+            Part::Whole,
+            ERROR_BOUND,
+        )),
+        _ => None,
+    }
+}
+
+/// What a response shows of the operator's configuration: no managed
+/// storage root in a workspace route's JSON error, and no configured value
+/// of a preset session in what [`preset_target`] names. Status, headers
+/// and `error.code` are kept. A projection that cannot be looked up
+/// withholds the body.
+pub(crate) async fn redact_response(
+    app: &Shared,
+    method: &Method,
+    path: &str,
+    response: Response,
+) -> Response {
     let root = app
         .config
         .managed_knowledge
         .root
         .clone()
         .unwrap_or_else(|| app.config.data_dir.join("knowledge"));
-    redact_error(path, &root.to_string_lossy(), response).await
+    let target = match is_json(&response) {
+        true => preset_target(method, path, response.status()),
+        false => None,
+    };
+    let preset = match target {
+        Some((owner, part, bound)) => {
+            let app = app.clone();
+            let found = crate::api::blocking(move || match owner {
+                Owner::Session { workspace, session } => {
+                    Projection::of_session(&app, &workspace, &session)
+                }
+                Owner::Branch { repo, branch } => Projection::of_branch(&app, &repo, &branch),
+            })
+            .await
+            .and_then(|found| found);
+            match found {
+                Ok(projection) => Some((projection, part, bound)),
+                Err(error) => {
+                    tracing::warn!(error = %error.body.message, "could not look up a preset projection");
+                    return withheld(response.into_parts().0);
+                }
+            }
+        }
+        None => None,
+    };
+    redact(path, &root.to_string_lossy(), preset, response).await
 }
 
-async fn redact_error(path: &str, root: &str, response: Response) -> Response {
-    let is_json = response
+fn is_json(response: &Response) -> bool {
+    response
         .headers()
         .get("content-type")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json"));
-    if !(path == "/v1/workspaces" || path.starts_with("/v1/workspaces/"))
-        || !response.status().is_client_error() && !response.status().is_server_error()
-        || !is_json
-        || root.is_empty()
-    {
+        .is_some_and(|value| value.starts_with("application/json"))
+}
+
+async fn redact(
+    path: &str,
+    root: &str,
+    preset: Option<(Projection, Part, usize)>,
+    response: Response,
+) -> Response {
+    let managed = (path == "/v1/workspaces" || path.starts_with("/v1/workspaces/"))
+        && (response.status().is_client_error() || response.status().is_server_error())
+        && is_json(&response)
+        && !root.is_empty();
+    let preset = preset.filter(|(projection, ..)| !projection.is_empty());
+    if !managed && preset.is_none() {
         return response;
     }
-    const FALLBACK:&[u8]=br#"{"error":{"code":"workspace_error","message":"workspace request failed; inspect the server diagnostics"}}"#;
-    let (mut parts, body) = response.into_parts();
-    let encoded = match axum::body::to_bytes(body, 1024 * 1024).await {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-            Ok(mut value) => {
-                let code = value.pointer("/error/code").cloned();
-                redact_paths(&mut value, root);
-                if let Some(code) = code {
-                    value["error"]["code"] = code;
-                }
-                match serde_json::to_vec(&value) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(%error,"could not encode a redacted workspace error");
-                        FALLBACK.to_vec()
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error,"could not parse a workspace error for redaction");
-                FALLBACK.to_vec()
-            }
-        },
+    let bound = preset.as_ref().map_or(ERROR_BOUND, |(.., bound)| *bound);
+    let (parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, bound).await {
+        Ok(bytes) => bytes,
         Err(error) => {
-            tracing::warn!(%error,"could not read a bounded workspace error for redaction");
-            FALLBACK.to_vec()
+            tracing::warn!(%error, "could not read a bounded response for redaction");
+            return withheld(parts);
         }
     };
+    let mut value = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "could not parse a response for redaction");
+            return withheld(parts);
+        }
+    };
+    let code = value.pointer("/error/code").cloned();
+    if managed {
+        redact_paths(&mut value, root);
+    }
+    if let Some((projection, part, _)) = &preset {
+        match part {
+            Part::Whole => projection.apply(&mut value),
+            Part::ErrorField => {
+                if let Some(error) = value.get_mut("error") {
+                    projection.apply(error);
+                }
+            }
+        }
+    }
+    if let (Some(code), Some(slot)) = (code, value.pointer_mut("/error/code")) {
+        *slot = code;
+    }
+    match serde_json::to_vec(&value) {
+        Ok(encoded) => with_body(parts, encoded),
+        Err(error) => {
+            tracing::warn!(%error, "could not encode a redacted response");
+            withheld(parts)
+        }
+    }
+}
+
+/// The fixed error in place of a body that could not be redacted; a
+/// success becomes a server error, since its body is gone.
+fn withheld(mut parts: axum::http::response::Parts) -> Response {
+    if !parts.status.is_client_error() && !parts.status.is_server_error() {
+        parts.status = StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    with_body(parts, FALLBACK.to_vec())
+}
+
+fn with_body(mut parts: axum::http::response::Parts, encoded: Vec<u8>) -> Response {
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     if let Ok(length) = axum::http::HeaderValue::from_str(&encoded.len().to_string()) {
         parts
@@ -486,7 +618,7 @@ mod tests {
         response
             .headers_mut()
             .insert("x-request-id", axum::http::HeaderValue::from_static("kept"));
-        let response = redact_error("/v1/workspaces/workspace", root, response).await;
+        let response = redact("/v1/workspaces/workspace", root, None, response).await;
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers()["x-request-id"], "kept");
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -503,7 +635,7 @@ mod tests {
         );
         let success =
             (StatusCode::OK, axum::Json(serde_json::json!({"text":root}))).into_response();
-        let success = redact_error("/v1/workspaces/workspace", root, success).await;
+        let success = redact("/v1/workspaces/workspace", root, None, success).await;
         let bytes = axum::body::to_bytes(success.into_body(), 1024 * 1024)
             .await
             .unwrap();

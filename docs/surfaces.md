@@ -24,6 +24,11 @@ alongside the workspace, action and idempotency key. A `revision_conflict` is
 returned without an automatic retry. Inspect again before explicitly proposing
 a new action with a new key.
 
+The manager's `start_session` takes an optional `preset`, the execution preset
+ID that `StartSessionRequest::preset` carries over HTTP, and has no `provider`
+or `provision` argument. A server with `require_workspace_execution_presets`
+answers a start that omits `preset` with `preset_required`.
+
 The PR gateway exposes `GET /v1/workspaces/{workspace}/sessions/{session}/pr`
 for cached PR/check observations. `POST /v1/workspaces/{workspace}/sessions/{session}/pr`
 accepts optional `title`, `base` and `draft`; `POST /v1/workspaces/{workspace}/sessions/{session}/pr/refresh`

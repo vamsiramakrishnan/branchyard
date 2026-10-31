@@ -135,8 +135,12 @@ role can start a session. A start names one with `preset` and may then not carry
 Python clients use `execution_presets(workspace)` and
 `start_workspace_session(..., preset="substrate-gke")`; typed Rust clients use
 `Client::execution_presets` and `StartSessionRequest::preset`. The manager's
-`start_session` tool takes no `preset` yet, so a server with
-`require_workspace_execution_presets` refuses its starts with `preset_required`.
+`start_session` tool takes `preset` and sends it with `harness` and `model`
+unchanged; the tool has no `provider` or `provision` argument. Omit `model` to
+run the preset's default model. On a server with
+`require_workspace_execution_presets`, a start without `preset` returns a tool
+error whose code is `preset_required`. The manager has no tool that lists
+presets, so its operator gives the agent the preset ID.
 Remote terminal access requires an allocation retained by the provider.
 For AGY and other profiles that cannot route individual tool approvals, pass
 `unapproved_tools: true` explicitly. The operator must enable

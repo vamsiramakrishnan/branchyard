@@ -296,24 +296,14 @@ pub(super) fn session_views(
         .collect()
 }
 /// Serialize the existing operation envelope with durable console ownership.
-/// An operation of a session started with an execution preset shows its
-/// error and result through the preset's projection.
+/// An operation on a preset session's branch, or on a branch under one,
+/// shows its error and result through the preset's projection.
 pub(crate) fn operation_value(app: &App, operation: &Operation) -> Result<Value, ApiError> {
     let mut value = owned_operation_value(app, operation)?;
-    let session = match value.get("session_id").and_then(Value::as_str) {
-        Some(id) => app.registry.console_get(Collection::Sessions, id)?,
-        None => None,
-    };
-    if let Some(preset) = session
-        .as_ref()
-        .map(super::presets::stored)
-        .transpose()?
-        .flatten()
-    {
-        for field in ["error", "result"] {
-            if let Some(value) = value.get_mut(field) {
-                super::presets::project_value(value, &preset.hidden);
-            }
+    let projection = super::Projection::of_operation(app, operation)?;
+    for field in ["error", "result"] {
+        if let Some(value) = value.get_mut(field) {
+            projection.apply(value);
         }
     }
     Ok(value)

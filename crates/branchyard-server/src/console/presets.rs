@@ -2,17 +2,20 @@
 //! (docs/server.md#execution-presets): what discovery offers a caller, how
 //! ready each environment looks from this server, what a session start's
 //! `preset` resolves to, and the projection that keeps a preset's configured
-//! values out of the errors its sessions show.
+//! values out of what its sessions and their branches show.
 //!
 //! A preset grants nothing. It resolves to the request fields a session
 //! start already has (`provider`, provisioned secrets, `require_labels`),
 //! which then pass the same checks as any request. Readiness informs a
 //! person and never refuses a start.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{LazyLock, Mutex};
 
 use axum::http::StatusCode;
+use axum::response::{IntoResponse as _, Response};
+use axum::Json;
+use branchyard_client::api::Operation;
 use branchyard_client::workspace_api::{
     PresetCredentials, PresetOrigin, ReadinessScope, ReadyState, StartSessionRequest,
 };
@@ -23,7 +26,7 @@ use serde_json::{json, Value};
 use super::auth;
 use crate::api::{App, Caller};
 use crate::config::{substrate_options, ExecutionPreset};
-use crate::console_store::Record;
+use crate::console_store::{Collection, Record};
 use crate::error::ApiError;
 
 /// How long an API-host check is reused before it runs again, so a viewer
@@ -704,10 +707,22 @@ impl Configured {
     }
 }
 
+/// `hidden` longest value first, so a path is replaced before a shorter
+/// value inside it, each value once and none empty.
+fn longest_first(hidden: &mut Vec<Hidden>) {
+    hidden.retain(|h| !h.value.is_empty());
+    hidden.sort_by(|a, b| {
+        b.value
+            .len()
+            .cmp(&a.value.len())
+            .then_with(|| a.value.cmp(&b.value))
+    });
+    hidden.dedup_by(|a, b| a.value == b.value);
+}
+
 /// Every configured value of `preset` an error could name: its provider's
 /// paths (as written and as resolved), endpoints and variable names, and
-/// its secrets' names and sources. Longest first, so a path is replaced
-/// before a shorter value inside it.
+/// its secrets' names and sources, in [`longest_first`] order.
 fn hidden(
     preset: &ExecutionPreset,
     secrets: &BTreeMap<String, branchyard::SecretSource>,
@@ -759,16 +774,15 @@ fn hidden(
             None => {}
         }
     }
-    found.retain(|(value, _)| !value.is_empty());
-    found.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-    found.dedup_by(|a, b| a.0 == b.0);
-    found
+    let mut hidden = found
         .into_iter()
         .map(|(value, what)| Hidden {
             value,
             placeholder: format!("[preset {}: {}]", preset.id, what.text()),
         })
-        .collect()
+        .collect();
+    longest_first(&mut hidden);
+    hidden
 }
 
 /// The forms an endpoint takes in error text: the URL as configured, its
@@ -853,6 +867,125 @@ pub(super) fn stored(session: &Record) -> Result<Option<ResolvedPreset>, ApiErro
         .map(serde_json::from_value)
         .transpose()
         .map_err(|error| ApiError::internal(format!("stored session preset: {error}")))
+}
+
+/// The configured values a resource's text must not show: those of the
+/// preset session it belongs to; empty for anything else.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Projection(Vec<Hidden>);
+
+impl Projection {
+    fn of_row(session: &Record) -> Result<Projection, ApiError> {
+        Ok(Projection(
+            stored(session)?
+                .map(|preset| preset.hidden)
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// The projection of session `session_id`, when its row belongs to
+    /// workspace `workspace_id`.
+    pub(crate) fn of_session(
+        app: &App,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<Projection, ApiError> {
+        match app.registry.console_get(Collection::Sessions, session_id)? {
+            Some(session)
+                if session.body.get("workspace_id").and_then(Value::as_str)
+                    == Some(workspace_id) =>
+            {
+                Projection::of_row(&session)
+            }
+            _ => Ok(Projection::default()),
+        }
+    }
+
+    /// The projection of the session `branch` of `repo` belongs to: the
+    /// nearest of the branch and its ancestors that is a session's own
+    /// branch in a workspace on `repo`. A session's preset and a branch's
+    /// parent never change, so neither does the answer.
+    pub(crate) fn of_branch(app: &App, repo: &str, branch: &str) -> Result<Projection, ApiError> {
+        let mut seen = BTreeSet::new();
+        let mut current = Some(branch.to_owned());
+        while let Some(name) = current {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            if let Some(session) = session_on(app, repo, &name)? {
+                return Projection::of_row(&session);
+            }
+            current = app
+                .repos
+                .get(repo)
+                .and_then(|state| state.yard.branch(&name).ok())
+                .and_then(|branch| branch.info().parent.clone());
+        }
+        Ok(Projection::default())
+    }
+
+    /// The projections of every branch `operation` names, merged.
+    pub(crate) fn of_operation(app: &App, operation: &Operation) -> Result<Projection, ApiError> {
+        let mut hidden = Vec::new();
+        for branch in &operation.branches {
+            hidden.extend(Projection::of_branch(app, &operation.repo, branch)?.0);
+        }
+        longest_first(&mut hidden);
+        Ok(Projection(hidden))
+    }
+
+    /// Whether this projection hides nothing.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Every string in `value`, object keys included, through this
+    /// projection.
+    pub(crate) fn apply(&self, value: &mut Value) {
+        if !self.is_empty() {
+            project_value(value, &self.0);
+        }
+    }
+
+    /// `body` as the response a caller reads, with the value at each JSON
+    /// pointer through the projection beside it. When every projection is
+    /// empty the body is serialized as it always was, so what a resource
+    /// outside any preset session shows does not change.
+    pub(crate) fn respond_at(
+        body: impl Serialize,
+        at: &[(String, Projection)],
+    ) -> Result<Response, ApiError> {
+        if at.iter().all(|(_, projection)| projection.is_empty()) {
+            return Ok(Json(body).into_response());
+        }
+        let mut value =
+            serde_json::to_value(body).map_err(|error| ApiError::internal(error.to_string()))?;
+        for (pointer, projection) in at {
+            if let Some(found) = value.pointer_mut(pointer) {
+                projection.apply(found);
+            }
+        }
+        Ok(Json(value).into_response())
+    }
+}
+
+/// The session whose own branch is `name`, in a workspace on `repo`.
+fn session_on(app: &App, repo: &str, name: &str) -> Result<Option<Record>, ApiError> {
+    let Some(session) = app.registry.console_get(Collection::Sessions, name)? else {
+        return Ok(None);
+    };
+    let field = |key: &str| session.body.get(key).and_then(Value::as_str);
+    if field("branch") != Some(name) {
+        return Ok(None);
+    }
+    let Some(workspace_id) = field("workspace_id") else {
+        return Ok(None);
+    };
+    let on_repo = app
+        .registry
+        .console_get(Collection::Workspaces, workspace_id)?
+        .is_some_and(|workspace| workspace.body.get("repo").and_then(Value::as_str) == Some(repo));
+    Ok(on_repo.then_some(session))
 }
 
 #[cfg(test)]

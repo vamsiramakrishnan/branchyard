@@ -57,8 +57,10 @@ fn definition(name: &str) -> (&'static str, Value, Vec<&'static str>, bool) {
             json!({"project_id":id(),"title":text(500),"idempotency_key":id()}),vec!["project_id","title","idempotency_key"],false),
         "inspect_workspace" => ("Read workspace state, conversations, source references and accepted deliverables.",json!({"workspace_id":id()}),vec!["workspace_id"],true),
         "list_sessions" => ("List native conversations attached to the workspace.",json!({"workspace_id":id()}),vec!["workspace_id"],true),
-        "start_session" => ("Start an isolated writer or constrained reviewer through the ordinary durable queue. Native plans and subagents remain native.",
-            json!({"workspace_id":id(),"name":text(500),"prompt":text(131072),"harness":id(),"model":text(500),"effort":choices(&["low","medium","high","xhigh","max","ultra"]),
+        "start_session" => ("Start an isolated writer or constrained reviewer through the ordinary durable queue. Native plans and subagents remain native. \
+Pass preset, an operator execution preset ID, when the server answers preset_required or the operator names one. The preset supplies the provider, secrets and worker labels; \
+harness and model must be ones it offers (preset_choice_unavailable lists them in detail.allowed), and an omitted model runs the preset's default.",
+            json!({"workspace_id":id(),"name":text(500),"prompt":text(131072),"harness":id(),"preset":{"type":"string","pattern":"^[a-z0-9-]{1,64}$"},"model":text(500),"effort":choices(&["low","medium","high","xhigh","max","ultra"]),
                 "access":choices(&["writer","reviewer"]),"unapproved_tools":{"type":"boolean"},"result_contract":{"type":"object"},"sources":strings(),"artifacts":strings(),"idempotency_key":id()}),
             vec!["workspace_id","name","prompt","harness","access","idempotency_key"],false),
         "session_messages" => ("Read a native conversation without copying or replacing its session state. Pass next_cursor as after.",
@@ -166,5 +168,30 @@ mod tests {
         )
         .is_err());
         assert!(validate("unknown", &json!({})).is_err());
+    }
+
+    #[test]
+    fn start_session_takes_an_optional_preset_shaped_like_a_preset_id() {
+        let start = |preset: Option<Value>| {
+            let mut args = json!({"workspace_id":"w","name":"Analyst","prompt":"Summarise","harness":"gemini-cli","access":"writer","idempotency_key":"k"});
+            if let Some(preset) = preset {
+                args["preset"] = preset;
+            }
+            validate("start_session", &args)
+        };
+        assert!(start(None).is_ok());
+        for accepted in [json!("substrate-gke"), json!("a".repeat(64))] {
+            assert!(start(Some(accepted.clone())).is_ok(), "{accepted}");
+        }
+        for refused in [
+            json!(""),
+            json!("a".repeat(65)),
+            json!("Substrate-GKE"),
+            json!("local_pool"),
+            json!("local\n"),
+            json!(7),
+        ] {
+            assert!(start(Some(refused.clone())).is_err(), "{refused}");
+        }
     }
 }

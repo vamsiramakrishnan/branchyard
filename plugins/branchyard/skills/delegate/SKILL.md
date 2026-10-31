@@ -46,6 +46,8 @@ a new key; never refresh and resubmit automatically.
 The operator manager's `start_session` accepts explicit `unapproved_tools: true`
 for a profile such as AGY that cannot route tool approvals. The server operator
 must also permit it. Omission means false; do not infer this acknowledgment.
+When the server answers `preset_required`, pass the operator's execution preset
+ID as `preset`; harness and model must then be ones that preset offers.
 
 Continue while your own native tasks or tools are active. A managed lead may
 end its turn to await Branchyard children after its native work finishes.

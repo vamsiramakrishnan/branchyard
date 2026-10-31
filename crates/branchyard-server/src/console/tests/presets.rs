@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::config::ExecutionPreset;
-use branchyard_client::api::OperationState;
+use crate::console::Projection;
+use axum::response::IntoResponse as _;
+use branchyard_client::api::{BranchEvents, Operation, OperationList, OperationState};
 use branchyard_client::workspace_api::ExecutionPresetList;
 
 /// A server whose configuration and worker labels the test chose before it
@@ -126,6 +128,57 @@ impl Case {
         repo.yard.branch(session).ok()
     }
 
+    async fn read(&self, token: &str, path: &str) -> (StatusCode, String) {
+        let (status, body) = self
+            .fixture
+            .bytes(Method::GET, path, token, None, &[], Vec::new())
+            .await;
+        (status, String::from_utf8(body).unwrap())
+    }
+
+    /// Repository `code`'s feed from its start to the head it had when the
+    /// stream opened, as `token` reads it.
+    async fn feed(&self, token: &str) -> String {
+        use axum::body::HttpBody as _;
+        let request = Request::builder()
+            .uri("/v1/repos/code/events/stream?cursor=0")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::api::router(self.fixture.app.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let mut text = String::new();
+        loop {
+            let head = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .find_map(|data| serde_json::from_str::<Value>(data.trim()).ok()?["head"].as_u64());
+            let last = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("id:"))
+                .filter_map(|id| id.trim().parse::<u64>().ok())
+                .max();
+            if head.is_some() && last >= head {
+                return text;
+            }
+            let frame = tokio::time::timeout(
+                Duration::from_secs(30),
+                std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)),
+            )
+            .await
+            .expect("the feed stalled before its head")
+            .expect("the feed ended before its head")
+            .unwrap();
+            if let Ok(data) = frame.into_data() {
+                text.push_str(std::str::from_utf8(&data).unwrap());
+            }
+        }
+    }
+
     async fn grant(&self, wid: &str, subject: &str, role: &str) {
         let revision = self.fixture.detail(wid).await["revision"].clone();
         let (status, member) = self
@@ -140,6 +193,42 @@ impl Case {
             .await;
         assert_eq!(status, StatusCode::OK, "{member}");
     }
+}
+
+fn put(app: &App, collection: Collection, id: &str, body: Value) {
+    let owner = Caller::new(Principal::default_for("owner"));
+    app.registry
+        .console_mutate(&[super::super::insert(super::super::new(
+            collection, id, &owner, body,
+        ))])
+        .unwrap();
+}
+
+/// A session row whose own branch is `id`, with `preset` stored as a
+/// session start stores the preset it resolved.
+fn session_row(app: &App, id: &str, workspace: &str, preset: Value) {
+    put(
+        app,
+        Collection::Sessions,
+        id,
+        json!({"id":id,"workspace_id":workspace,"branch":id,"_preset":preset}),
+    );
+}
+
+fn operation(repo: &str, branches: &[&str], message: &str) -> Operation {
+    serde_json::from_value(
+        json!({"id":format!("op-{}", branches.join("-")),"repo":repo,
+        "kind":"send","state":"running","branches":branches,"cursor":0,"created_at_ms":0,
+        "error":{"code":"unavailable","message":message}}),
+    )
+    .unwrap()
+}
+
+async fn body_of(response: axum::response::Response) -> Vec<u8> {
+    to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec()
 }
 
 fn presets(value: Value) -> Vec<ExecutionPreset> {
@@ -551,29 +640,42 @@ fn unreachable_substrate(config: &mut Config) -> std::path::PathBuf {
     conf
 }
 
-/// Start a session on each unreachable preset; neither runs locally, and
-/// what members read of its failure names no configured value, showing the
-/// expected placeholder where the failure's text reaches them.
-async fn remote_failures_never_run_locally_and_are_projected(
-    case: &Case,
-    wid: &str,
-    conf: &std::path::Path,
-    expected: [(&str, Option<&str>); 2],
-) {
-    let (_, list) = case.presets(OWNER, Some(wid)).await;
-    assert_eq!(
-        preset(&list, "substrate-gke")["environment"]["state"],
-        "not_ready",
-        "the missing key shows, and does not refuse the start below"
-    );
-    let configured = [
+/// What [`unreachable_substrate`] configured that no member may read of a
+/// preset session.
+fn configured(conf: &std::path::Path) -> [String; 6] {
+    [
         conf.display().to_string(),
         "substrate/missing.key".into(),
         "substrate/live.key".into(),
         "127.0.0.1:1".into(),
         "GEMINI_API_KEY".into(),
         "gemini.key".into(),
-    ];
+    ]
+}
+
+fn assert_hidden(conf: &std::path::Path, what: &str, shown: &str) {
+    for value in configured(conf) {
+        assert!(!shown.contains(&value), "{what}: {value} shown in {shown}");
+    }
+}
+
+/// Start a session on each unreachable preset; neither runs locally, and
+/// what members read of its failure names no configured value, showing the
+/// expected placeholder where the failure's text reaches them. Returns the
+/// sessions' IDs.
+async fn remote_failures_never_run_locally_and_are_projected(
+    case: &Case,
+    wid: &str,
+    conf: &std::path::Path,
+    expected: [(&str, Option<&str>); 2],
+) -> Vec<String> {
+    let (_, list) = case.presets(OWNER, Some(wid)).await;
+    assert_eq!(
+        preset(&list, "substrate-gke")["environment"]["state"],
+        "not_ready",
+        "the missing key shows, and does not refuse the start below"
+    );
+    let mut sessions = Vec::new();
     for (id, placeholder) in expected {
         let (status, started) = case
             .start(
@@ -619,13 +721,21 @@ async fn remote_failures_never_run_locally_and_are_projected(
             .into_iter()
             .flatten()
             .any(|message| message["role"] == "assistant");
-        let shown = format!("{operation}\n{session}\n{messages}");
-        for value in &configured {
-            assert!(
-                !shown.contains(value.as_str()),
-                "{id}: {value} shown in {shown}"
-            );
+        let mut shown = format!("{operation}\n{session}\n{messages}");
+        for gateway in ["runtime", "pr"] {
+            let (_, read) = case
+                .fixture
+                .json(
+                    Method::GET,
+                    &format!("/v1/workspaces/{wid}/sessions/{sid}/{gateway}"),
+                    OWNER,
+                    None,
+                    Value::Null,
+                )
+                .await;
+            shown.push_str(&format!("\n{read}"));
         }
+        assert_hidden(conf, id, &shown);
         if let Some(placeholder) = placeholder {
             assert!(
                 shown.contains(placeholder),
@@ -646,7 +756,9 @@ async fn remote_failures_never_run_locally_and_are_projected(
             assert_eq!(done.state, OperationState::Failed, "{done:?}");
         }
         assert!(!answered, "{id}: a harness answered");
+        sessions.push(sid.to_owned());
     }
+    sessions
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -675,7 +787,7 @@ async fn remote_presets_never_fall_back_and_repository_errors_are_projected() {
     let mut conf = std::path::PathBuf::new();
     let case = Case::build(|config| conf = unreachable_substrate(config), true, &[]);
     let wid = case.repository_workspace().await;
-    remote_failures_never_run_locally_and_are_projected(
+    let sessions = remote_failures_never_run_locally_and_are_projected(
         &case,
         &wid,
         &conf,
@@ -688,4 +800,449 @@ async fn remote_presets_never_fall_back_and_repository_errors_are_projected() {
         ],
     )
     .await;
+    legacy_reads_are_projected(&case, &wid, &conf, &sessions).await;
+    sessions_without_a_preset_read_as_the_engine_serializes_them(&case, &wid, &conf).await;
+}
+
+/// What a repository workspace's viewer reads of its preset sessions on
+/// the legacy routes names no configured value, and the closed cluster's
+/// failure shows with its placeholder wherever its text reaches.
+async fn legacy_reads_are_projected(
+    case: &Case,
+    wid: &str,
+    conf: &std::path::Path,
+    sessions: &[String],
+) {
+    case.grant(wid, "editor", "viewer").await;
+    let failure = "[preset substrate-closed: control endpoint]";
+    for sid in sessions {
+        let exists = case.branch(wid, sid).is_some();
+        for route in [
+            "",
+            "/events",
+            "/event-page",
+            "/inspection",
+            "/children",
+            "/graph",
+        ] {
+            let path = format!("/v1/repos/code/branches/{sid}{route}");
+            let (status, body) = case.read(EDITOR, &path).await;
+            assert_eq!(status.is_success(), exists, "{path}: {body}");
+            assert_hidden(conf, &path, &body);
+            if exists && !matches!(route, "/children" | "/graph") {
+                assert!(body.contains(failure), "{path}: {failure} not in {body}");
+            }
+        }
+    }
+    let closed = sessions
+        .iter()
+        .find(|sid| case.branch(wid, sid).is_some())
+        .expect("the closed cluster's session has a branch");
+    let (status, waited) = case
+        .fixture
+        .json(
+            Method::POST,
+            "/v1/repos/code/wait",
+            OWNER,
+            None,
+            json!({"branches":[closed],"timeout_seconds":0}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{waited}");
+    let mut reads = vec![("wait".to_owned(), waited.to_string())];
+    for path in [
+        "/v1/repos/code/branches".to_owned(),
+        "/v1/repos/code/task-records".to_owned(),
+        format!("/v1/repos/code/task-records/{closed}"),
+        "/v1/repos/code/operations".to_owned(),
+    ] {
+        let (status, body) = case.read(EDITOR, &path).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        reads.push((path, body));
+    }
+    reads.push(("feed".to_owned(), case.feed(EDITOR).await));
+    for (what, body) in &reads {
+        assert_hidden(conf, what, body);
+        if what != "/v1/repos/code/operations" {
+            assert!(body.contains(failure), "{what}: {failure} not in {body}");
+        }
+    }
+
+    let message = format!(
+        "could not reach 127.0.0.1:1 with {}",
+        conf.join("substrate/live.key").display()
+    );
+    let app = &case.fixture.app;
+    let listed = crate::api::operation_list(
+        app,
+        vec![
+            operation("code", &[closed.as_str()], &message),
+            operation("code", &["unrelated"], &message),
+        ],
+    )
+    .unwrap();
+    let listed: Value = serde_json::from_slice(&body_of(listed).await).unwrap();
+    let shown = listed["operations"][0]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert_hidden(conf, "an unfinished operation", shown);
+    assert!(shown.contains(failure), "{shown}");
+    assert_eq!(
+        listed["operations"][1]["error"]["message"], message,
+        "an operation outside every preset session keeps its text"
+    );
+    let unrelated = vec![operation("code", &["unrelated"], &message)];
+    assert_eq!(
+        body_of(crate::api::operation_list(app, unrelated.clone()).unwrap()).await,
+        serde_json::to_vec(&OperationList {
+            operations: unrelated
+        })
+        .unwrap()
+    );
+}
+
+/// In the same workspace, a session started on a raw Substrate provider
+/// and a local one read exactly as the engine serializes them, raw
+/// endpoint included.
+async fn sessions_without_a_preset_read_as_the_engine_serializes_them(
+    case: &Case,
+    wid: &str,
+    conf: &std::path::Path,
+) {
+    let raw = json!({"kind":"substrate","endpoint":"http://127.0.0.1:1","router":"http://127.0.0.1:1",
+        "template":"harnesses","key":conf.join("substrate/live.key")});
+    for (key, fields) in [
+        ("raw-substrate", json!({"provider":raw})),
+        ("local", json!({})),
+    ] {
+        let (status, started) = case.start(wid, key, fields).await;
+        assert_eq!(status, StatusCode::OK, "{key}: {started}");
+        let sid = started["session_id"].as_str().unwrap();
+        case.fixture.finished(started["id"].as_str().unwrap());
+        let native = case.branch(wid, sid).unwrap();
+        let (status, info) = case
+            .fixture
+            .bytes(
+                Method::GET,
+                &format!("/v1/repos/code/branches/{sid}"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{key}");
+        assert_eq!(
+            info,
+            serde_json::to_vec(native.info()).unwrap(),
+            "{key}: the branch as the engine serializes it"
+        );
+        let mut events = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = native.events_since(cursor, 500).unwrap();
+            if page.events.is_empty() {
+                break;
+            }
+            cursor = page.next_cursor;
+            events.extend(page.events);
+        }
+        let (status, page) = case
+            .fixture
+            .bytes(
+                Method::GET,
+                &format!("/v1/repos/code/branches/{sid}/events"),
+                OWNER,
+                None,
+                &[],
+                Vec::new(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{key}");
+        assert_eq!(
+            page,
+            serde_json::to_vec(&BranchEvents { events, cursor }).unwrap(),
+            "{key}: the events as the engine serializes them"
+        );
+        if key == "raw-substrate" {
+            let info = String::from_utf8(info).unwrap();
+            assert!(info.contains("127.0.0.1:1"), "{info}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_takes_the_projection_of_its_nearest_session_on_the_same_repository() {
+    let case = Case::build(|config| config.allow_delegation = true, true, &[]);
+    let f = &case.fixture;
+    for (name, parent) in [
+        ("root", None),
+        ("middle", Some("root")),
+        ("leaf", Some("middle")),
+        ("other", None),
+    ] {
+        let mut body = json!({"prompt":"Summarise the backlog","harness":"gemini-cli","name":name});
+        let path = match parent {
+            None => {
+                body["delegation"] = json!({"max_depth":3,"max_children":3,"harnesses":[]});
+                "/v1/repos/code/tasks".to_owned()
+            }
+            Some(parent) => format!("/v1/repos/code/branches/{parent}/spawn"),
+        };
+        let (status, started) = f.json(Method::POST, &path, OWNER, Some(name), body).await;
+        assert!(status.is_success(), "{name}: {started}");
+        let done = f.finished(started["id"].as_str().unwrap());
+        assert_eq!(done.state, OperationState::Succeeded, "{name}: {done:?}");
+    }
+    let preset = |id: &str, hidden: &[(&str, &str)]| {
+        let hidden: Vec<Value> = hidden
+            .iter()
+            .map(|(value, placeholder)| json!({"value":value,"placeholder":placeholder}))
+            .collect();
+        json!({"id":id,"provider":{"kind":"local"},"secrets":[],"require_labels":[],
+            "model":null,"hidden":hidden})
+    };
+    let text = "at /srv/conf/key.pem and /srv/conf";
+    let near = "at [near]/key.pem and [near]";
+    let shown = |branch: &str| {
+        let mut value = json!(text);
+        Projection::of_branch(&f.app, "code", branch)
+            .unwrap()
+            .apply(&mut value);
+        value
+    };
+    let merged = |branches: &[&str]| {
+        let mut value = json!(text);
+        Projection::of_operation(&f.app, &operation("code", branches, ""))
+            .unwrap()
+            .apply(&mut value);
+        value
+    };
+    put(
+        &f.app,
+        Collection::Workspaces,
+        "on-code",
+        json!({"repo":"code"}),
+    );
+    put(
+        &f.app,
+        Collection::Workspaces,
+        "on-other",
+        json!({"repo":"other"}),
+    );
+    session_row(
+        &f.app,
+        "root",
+        "on-code",
+        preset("near", &[("/srv/conf", "[near]")]),
+    );
+    for branch in ["root", "middle", "leaf"] {
+        assert_eq!(shown(branch), near, "{branch} is under the root session");
+    }
+    assert_eq!(shown("other"), text);
+    session_row(
+        &f.app,
+        "leaf",
+        "on-other",
+        preset("foreign", &[("/srv/conf", "[foreign]")]),
+    );
+    assert_eq!(
+        shown("leaf"),
+        near,
+        "a session of the same name on another repository owns nothing here"
+    );
+    session_row(
+        &f.app,
+        "other",
+        "on-code",
+        preset(
+            "far",
+            &[
+                ("/srv/conf", "[far conf]"),
+                ("/srv/conf/key.pem", "[far key]"),
+            ],
+        ),
+    );
+    assert_eq!(
+        merged(&["leaf", "other"]),
+        "at [far key] and [near]",
+        "longest first; a value both hide takes the first branch's placeholder"
+    );
+    assert_eq!(merged(&["other", "leaf"]), "at [far key] and [far conf]");
+    assert_eq!(merged(&["unrelated"]), text);
+    session_row(&f.app, "middle", "on-code", Value::Null);
+    assert_eq!(shown("leaf"), text, "the nearest session has no preset");
+    assert_eq!(shown("middle"), text);
+    assert_eq!(shown("root"), near);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_middleware_projects_a_preset_sessions_errors_and_gateway_reads() {
+    let mut conf = std::path::PathBuf::new();
+    let case = Case::new(|config| conf = unreachable_substrate(config));
+    let app = &case.fixture.app;
+    let owner = Caller::new(Principal::default_for("owner"));
+    let resolved = super::super::presets::resolve(
+        app,
+        &owner,
+        &json!({"name":"Analyst","prompt":"Summarise","harness":"gemini-cli","access":"writer",
+            "preset":"substrate-closed"}),
+    )
+    .unwrap()
+    .unwrap();
+    put(
+        app,
+        Collection::Workspaces,
+        "on-code",
+        json!({"repo":"code"}),
+    );
+    session_row(app, "s-preset", "on-code", json!(resolved));
+    session_row(app, "s-raw", "on-code", Value::Null);
+    session_row(app, "s-damaged", "on-code", json!("not a stored preset"));
+    let key = conf.join("substrate/live.key").display().to_string();
+    let message = format!("cannot reach http://127.0.0.1:1 with {key}");
+    let error =
+        json!({"error":{"code":"provider_unavailable","message":message,"detail":{"key":key}}});
+    let respond = |status: StatusCode, body: &Value| {
+        let mut response = (status, axum::Json(body.clone())).into_response();
+        response
+            .headers_mut()
+            .insert("x-request-id", axum::http::HeaderValue::from_static("kept"));
+        response
+    };
+    let redacted = |method: Method, path: String, response: axum::response::Response| async move {
+        let response = super::super::auth::redact_response(app, &method, &path, response).await;
+        let status = response.status();
+        let length = response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .cloned();
+        assert_eq!(response.headers()["x-request-id"], "kept", "{path}");
+        let body = body_of(response).await;
+        if let Some(length) = length {
+            assert_eq!(length, body.len().to_string(), "{path}");
+        }
+        (status, body)
+    };
+    let session = "/v1/workspaces/on-code/sessions";
+    for (method, path, status) in [
+        (
+            Method::POST,
+            format!("{session}/s-preset/messages"),
+            StatusCode::CONFLICT,
+        ),
+        (
+            Method::GET,
+            format!("{session}/s-preset/runtime"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::POST,
+            "/v1/repos/code/branches/s%2Dpreset/send".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let (got, body) = redacted(method, path.clone(), respond(status, &error)).await;
+        assert_eq!(got, status, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "provider_unavailable", "{path}");
+        assert_hidden(&conf, &path, &body.to_string());
+        assert_eq!(
+            body["error"]["message"],
+            "cannot reach [preset substrate-closed: control endpoint] with [preset \
+             substrate-closed: bridge key]",
+            "{path}"
+        );
+    }
+    let read = json!({"state":"unavailable","reason":message});
+    for gateway in ["runtime", "pr"] {
+        let path = format!("{session}/s-preset/{gateway}");
+        let (status, body) =
+            redacted(Method::GET, path.clone(), respond(StatusCode::OK, &read)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_hidden(&conf, &path, &String::from_utf8(body).unwrap());
+    }
+    let page = json!({"cursor":1,"data":message,"encoding":"base64","error":message});
+    let (status, body) = redacted(
+        Method::GET,
+        format!("{session}/s-preset/terminals/t1/output"),
+        respond(StatusCode::OK, &page),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["data"], message, "terminal bytes are never rewritten");
+    assert_hidden(&conf, "terminal error", body["error"].as_str().unwrap());
+
+    for (method, path, status, body) in [
+        (
+            Method::GET,
+            format!("{session}/s-preset/messages"),
+            StatusCode::OK,
+            &read,
+        ),
+        (
+            Method::GET,
+            format!("{session}/s-raw/runtime"),
+            StatusCode::OK,
+            &read,
+        ),
+        (
+            Method::POST,
+            format!("{session}/s-raw/messages"),
+            StatusCode::CONFLICT,
+            &error,
+        ),
+        (
+            Method::POST,
+            "/v1/repos/code/branches/s-raw/send".to_owned(),
+            StatusCode::CONFLICT,
+            &error,
+        ),
+    ] {
+        let (got, shown) = redacted(method, path.clone(), respond(status, body)).await;
+        assert_eq!(got, status, "{path}");
+        assert_eq!(
+            shown,
+            serde_json::to_vec(body).unwrap(),
+            "{path} is unchanged"
+        );
+    }
+    let mut plain = (StatusCode::CONFLICT, message.clone()).into_response();
+    plain
+        .headers_mut()
+        .insert("x-request-id", axum::http::HeaderValue::from_static("kept"));
+    let plain = super::super::auth::redact_response(
+        app,
+        &Method::POST,
+        &format!("{session}/s-preset/messages"),
+        plain,
+    )
+    .await;
+    assert_eq!(
+        body_of(plain).await,
+        message.as_bytes(),
+        "only JSON is rewritten"
+    );
+
+    for (method, path, status, withheld) in [
+        (
+            Method::POST,
+            format!("{session}/s-damaged/messages"),
+            StatusCode::CONFLICT,
+            StatusCode::CONFLICT,
+        ),
+        (
+            Method::GET,
+            format!("{session}/s-damaged/runtime"),
+            StatusCode::OK,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    ] {
+        let (got, body) = redacted(method, path.clone(), respond(status, &error)).await;
+        assert_eq!(got, withheld, "{path}");
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "workspace_error", "{path}: {body}");
+        assert_hidden(&conf, &path, &body.to_string());
+    }
 }

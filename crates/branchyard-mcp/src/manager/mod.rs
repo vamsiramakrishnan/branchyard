@@ -32,7 +32,9 @@ This external manager uses its own HTTP credential and is distinct from the rest
 Tool responses have a bounded context budget; oversized responses return a structured error with small identifiers and cursors. \
 Preview defaults to 25 rows. Use narrower previews, authorized original downloads or focused compute for large tables. \
 A mutation can succeed before its response is found too large; inspect its operation and reuse the original idempotency_key. \
-For a harness that cannot route tool approvals, start_session requires explicit unapproved_tools:true and the operator's permission. It defaults to false; never infer consent.";
+For a harness that cannot route tool approvals, start_session requires explicit unapproved_tools:true and the operator's permission. It defaults to false; never infer consent. \
+A server can require start_session to name an operator execution preset and refuses a start without one with preset_required. With preset the server supplies the provider, \
+secrets and worker labels; harness and model must be ones the preset offers, and an omitted model runs its default.";
 
 /// Tool definitions for the external manager only.
 pub fn tools() -> Vec<Tool> {
@@ -344,6 +346,38 @@ mod tests {
         assert_eq!(requests[2].json()["action"], "steer");
         assert_eq!(requests[2].header("idempotency-key"), Some("steer-key"));
         assert!(!format!("{server:?}").contains("fixture-secret"));
+    }
+
+    #[test]
+    fn start_session_forwards_a_preset_and_its_choices_unchanged() {
+        let http = MockHttp::start(|_| Response::json(202, &json!({"id":"op","session_id":"s"})));
+        let server = Server::new(Client::new(&http.url(), "fixture").unwrap());
+        let start = |extra: Value| {
+            let mut args = json!({"workspace_id":"w","name":"Analyst","prompt":"Summarise the backlog","harness":"gemini-cli","access":"writer","idempotency_key":"preset-key"});
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            server.call("start_session", args)
+        };
+        start(json!({"preset":"local-gemini","model":"deep"})).unwrap();
+        for refused in [
+            json!({"preset":"Local Gemini"}),
+            json!({"preset":"local-gemini","provider":{"kind":"local"}}),
+            json!({"preset":"local-gemini","provision":{"model":"deep"}}),
+        ] {
+            assert!(
+                matches!(start(refused.clone()), Err(CallError::Arguments(_))),
+                "{refused}"
+            );
+        }
+        let requests = http.requests();
+        assert_eq!(requests.len(), 1, "a refused call sends nothing");
+        assert_eq!(requests[0].path, "/v1/workspaces/w/sessions");
+        assert_eq!(
+            requests[0].json(),
+            json!({"name":"Analyst","prompt":"Summarise the backlog","harness":"gemini-cli","preset":"local-gemini","model":"deep","access":"writer"})
+        );
+        assert_eq!(requests[0].header("idempotency-key"), Some("preset-key"));
     }
 
     #[test]
