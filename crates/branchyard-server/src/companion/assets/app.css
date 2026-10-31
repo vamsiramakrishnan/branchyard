@@ -472,6 +472,89 @@ button.file-name[aria-pressed="true"] { color: var(--ink); }
 .menu-item:has(.menu-why) { flex-direction: column; align-items: flex-start; gap: 0; white-space: normal; text-align: left; }
 .menu-why { font-size: 11px; font-weight: 400; color: var(--ink-3); overflow-wrap: anywhere; }
 
+/* The guided start: the next step over the session tabs, the selected
+   session's facts under them, and the form's steps, with each environment
+   a card that carries its readiness. A state's dot repeats its words. */
+.guide {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-height: 41px;
+  padding: 6px 20px; border-bottom: 1px solid var(--line); color: var(--ink-2);
+}
+.guide:empty { display: none; }
+.guide-text { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.guide button { min-height: 28px; padding: 3px 10px; }
+.session-facts {
+  list-style: none; margin: 0; padding: 6px 20px; display: flex; flex-wrap: wrap; align-items: center; row-gap: 2px;
+  border-bottom: 1px solid var(--line-2); color: var(--ink-3); font-size: 12px;
+}
+.session-facts li { display: inline-flex; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.session-facts li:not(:last-child)::after { content: ""; flex: none; width: 3px; height: 3px; margin: 0 8px; border-radius: 50%; background: var(--grey-dot); }
+.session-facts .fact-phase { color: var(--ink-2); font-weight: 600; }
+.session-facts .fact-phase .dot { margin-right: 6px; }
+.session-form .step { border: 0; border-top: 1px solid var(--line-2); margin: 16px 0 0; padding: 12px 0 0; min-width: 0; }
+.session-form .step > legend { float: left; width: 100%; padding: 0; margin: 0 0 8px; font-size: 13px; font-weight: 650; }
+.session-form .step > legend + * { clear: left; }
+.session-form .step > legend + label.block { margin-top: 0; }
+.slot { min-width: 0; }
+.step .choices { margin: 0; }
+.step-tools { margin-top: 10px; }
+.env-list { display: grid; gap: 8px; }
+.env-card {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 10px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--paper); cursor: pointer;
+}
+.env-card:hover { border-color: var(--field); }
+.env-card:has(input:checked) { border-color: var(--ink-3); background: var(--wash); }
+.env-card:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.env-card:has(input:disabled) { cursor: not-allowed; color: var(--ink-3); }
+.env-card input[type="radio"] { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--green); }
+.env-body { min-width: 0; }
+.env-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+.env-name { font-weight: 650; cursor: inherit; overflow-wrap: anywhere; }
+.env-about { margin-top: 2px; color: var(--ink-2); overflow-wrap: anywhere; }
+.env-why { color: var(--amber-text); font-weight: 600; }
+.readiness { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-2); }
+.readiness-row { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 8px; align-items: start; overflow-wrap: anywhere; }
+.readiness-row > .dot, .readiness-mark { margin-top: 5px; }
+.readiness-mark { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--grey-dot); }
+.readiness b { color: var(--ink); font-weight: 600; }
+.readiness-action { color: var(--ink-3); }
+.agent-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 16px; }
+.agent-grid select, .agent-grid input[type="text"] { width: 100%; }
+.agent-grid label.block { margin-top: 0; }
+.field-title { display: block; margin: 0 0 4px; font-weight: 600; }
+.reasons span { display: block; overflow-wrap: anywhere; }
+#sf-agent > .readiness { margin-top: 12px; }
+.ack { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--amber); border-radius: 8px; }
+.ack .toggle { border-color: var(--amber); }
+.session-form .toggle { max-width: 100%; }
+#sf-collect-slot:not(:empty) { margin-top: 12px; }
+details.advanced { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-2); }
+details.advanced > summary {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 28px; padding-right: 6px;
+  border-radius: 6px; cursor: pointer; list-style: none; font-weight: 650;
+}
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary::before {
+  content: ""; width: 6px; height: 6px; margin: 0 2px; border-right: 1.5px solid var(--ink-3); border-bottom: 1.5px solid var(--ink-3);
+  transform: rotate(-45deg);
+}
+details.advanced[open] > summary::before { transform: rotate(45deg); }
+details.advanced > .slot { padding-top: 4px; }
+details.advanced select { width: 100%; max-width: 360px; }
+.form-status { margin-top: 10px; color: var(--ink-2); overflow-wrap: anywhere; }
+.form-error:not(:empty) { margin-top: 6px; overflow-wrap: anywhere; }
+.recovery {
+  width: 100%; max-width: 760px; margin: 0 auto; padding: 12px 16px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 12px;
+}
+.recovery-head { display: flex; align-items: center; gap: 8px; font-weight: 600; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+.recovery-head span { min-width: 0; }
+.recovery-next { color: var(--ink-2); }
+.recovery button { margin-top: 4px; }
+@media (prefers-reduced-motion: no-preference) {
+  details.advanced > summary::before { transition: transform .12s ease-out; }
+}
+
 /* Wide: three panes, each scrolling on its own */
 @media (min-width: 760px) {
   .app { height: 100vh; height: 100dvh; overflow: hidden; }
@@ -513,6 +596,11 @@ button.file-name[aria-pressed="true"] { color: var(--ink); }
   .strip .state { margin-right: auto; }
   .convo { padding: 16px; }
   .sessions { padding: 6px 12px; }
+  .guide, .session-facts { padding-left: 16px; padding-right: 16px; }
+  .agent-grid { grid-template-columns: 1fr; }
+  .agent-grid > div + div { margin-top: 12px; }
+  .card.form.session-form { padding: 4px 14px 16px; }
+  .env-card { padding: 10px 12px; }
   .session-tab, button.new-session { min-height: 40px; }
   .panel-tools { flex-wrap: wrap; }
   .drop { flex-basis: 100%; }

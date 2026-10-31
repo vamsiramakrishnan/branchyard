@@ -38,6 +38,10 @@ Hard rules (no counts; a violation fails):
   * no wait::settle of 500 ms or more unless tools/test_hygiene_allow.json
     names it (file and the settle's `why` text) with the reason time must pass.
     A listed settle that is gone or shorter fails too: remove the entry
+  * no `waitForFunction(async ...)` in a browser script (crates/*/tests/**/*.js):
+    Playwright takes the async predicate's promise as a truthy result and
+    returns at once, so the wait waits for nothing. Poll the condition from the
+    script, for example `GET /v1/operations/{id}?wait=` in a loop
 
 Ratchets (tools/test_hygiene_ratchet.json, a counted allowlist that can only
 fall: a count above it fails, and so does a count below it until the file is
@@ -90,6 +94,7 @@ TMP_BARE_RE = re.compile(
     r"(?:Path::new|PathBuf::from|create_dir_all|create_dir|fs::write|File::create|current_dir|\.join)\s*\(\s*\"/tmp\""
 )
 TMP_ALLOW_RE = re.compile(r"hygiene-allow:\s*tmp\b")
+ASYNC_WAIT_RE = re.compile(r"\bwaitForFunction\(\s*async\b")
 ONCE_OPENERS = ("call_once(", "get_or_init(", "get_or_try_init(", "LazyLock::new(", "Lazy::new(")
 FN_DECL_RE = re.compile(r"^\s*(?:pub(?:\([a-z]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)")
 TEST_ATTR_RE = re.compile(r"#\[(?:[\w:]+::)?test(?:\(|\])")
@@ -434,12 +439,26 @@ def load_allow(root):
     return {(entry["file"], entry["why"]): entry["reason"] for entry in data.get("long_settle", [])}
 
 
+def async_waits(root):
+    """Browser scripts whose page.waitForFunction gets an async predicate."""
+    found = []
+    for path in sorted(root.glob("crates/*/tests/**/*.js")):
+        rel = path.relative_to(root).as_posix()
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if ASYNC_WAIT_RE.search(line):
+                found.append(
+                    f"{rel}:{number}: waitForFunction takes an async predicate's promise as truthy and returns at "
+                    "once; poll the condition from the script instead"
+                )
+    return found
+
+
 def check(root, lower=False):
     """The problems found under `root`; with `lower`, also rewrite the ratchet
     file with every count that fell (it never raises one)."""
     violations, counts, longs = scan(root)
     allowed = load_ratchet(root)
-    problems = list(violations)
+    problems = list(violations) + async_waits(root)
     allow = load_allow(root)
     used = set()
     for rel, settles in sorted(longs.items()):

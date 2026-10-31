@@ -122,6 +122,15 @@ let browser = null;
     const response = await fetch(pathname, { method, headers, body: body ? JSON.stringify(body) : undefined });
     return { status: response.status, body: await response.json().catch(() => null) };
   }, [method, pathname, body]);
+  // page.waitForFunction would take an async predicate's promise as truthy
+  // and return at once, so an operation is awaited here.
+  const awaitOperation = async (id) => {
+    for (const deadline = Date.now() + TURN.timeout; ;) {
+      const op = (await callApi('GET', `/v1/operations/${id}?wait=5`)).body;
+      if (!['queued', 'running'].includes(op.state)) return op;
+      if (Date.now() > deadline) throw new Error(`operation ${id} is still ${op.state}`);
+    }
+  };
   const previewed = async (click, pathname) => {
     const [response] = await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === pathname, TURN), click()]);
     if (!/^Bearer .+/.test(response.request().headers().authorization || '')) throw new Error(`the preview at ${pathname} omitted its bearer token`);
@@ -136,6 +145,8 @@ let browser = null;
       if (name === XLSX) {
         const sheets = await preview.getByRole('combobox', { name: 'Select sheet' }).locator('option').allInnerTexts();
         if (JSON.stringify(sheets) !== JSON.stringify(['Backlog', 'Summary'])) throw new Error(`the XLSX preview offers sheets ${JSON.stringify(sheets)}`);
+        const warned = (await preview.locator('.by-preview-warning-banner').textContent()) || '';
+        if (/Truncated columns/.test(warned)) throw new Error(`the XLSX preview of a narrow workbook warns ${JSON.stringify(warned)}`);
       }
       await said(/^Preview ready: \d+ rows?\.$/);
     },
@@ -263,7 +274,9 @@ let browser = null;
   say('WORKSPACE');
 
   await page.locator('#tab-sources').click();
-  await page.getByRole('button', { name: 'Upload sources', exact: true }).waitFor();
+  const uploadSources = page.locator('#inspector').getByRole('button', { name: 'Upload sources', exact: true });
+  await uploadSources.waitFor();
+  await page.locator('#guide').getByRole('button', { name: 'Upload sources', exact: true }).waitFor();
   await page.setInputFiles('#source-file', [CSV, DOCX].map((name) => path.join(fixtures, name)));
   await toast('Uploaded 2 sources.');
   const sources = page.locator('ul#sources > li[data-source]');
@@ -285,7 +298,7 @@ let browser = null;
   if (!notesMeta.startsWith('RTF · ')) throw new Error(`the RTF source shows ${JSON.stringify(notesMeta)}, not its format`);
   const sourcePath = (name) => `/v1/workspaces/${ws}/sources/${sourceId[name]}/preview`;
   const sourceName = (name) => sources.filter({ hasText: name }).locator('button.file-name');
-  await page.getByRole('button', { name: 'Upload sources', exact: true }).focus();
+  await uploadSources.focus();
   await page.keyboard.press('Tab');
   if (await focusedPreview() !== `source:${sourceId[CSV]}`) throw new Error(`Tab from Upload sources reached ${await focusedPreview()}, not the first source`);
   const csvSource = await previewed(() => page.keyboard.press('Enter'), sourcePath(CSV));
@@ -336,11 +349,15 @@ let browser = null;
   const startSession = async (name, prompt, collect) => {
     await page.locator('nav#sessions').getByRole('button', { name: '+ Session', exact: true }).click();
     const session = page.locator('#session-form');
+    const environment = session.getByRole('radio', { name: 'This server', exact: true });
+    if (!(await environment.isChecked())) throw new Error('the only environment, this server, is not chosen');
     await session.getByLabel('Session name', { exact: true }).fill(name);
     const harness = session.getByLabel('Harness', { exact: true });
     if (await harness.evaluate((control) => control.tagName === 'SELECT')) await harness.selectOption('gemini-cli');
     else await harness.fill('gemini-cli');
+    await session.locator('#sf-advanced > summary').click();
     await session.getByLabel('Access', { exact: true }).selectOption('writer');
+    await session.locator('#sf-advanced > summary').click();
     await session.getByLabel('First prompt', { exact: true }).fill(prompt);
     for (const upload of [CSV, DOCX]) {
       if (!(await session.getByRole('checkbox', { name: upload, exact: true }).isChecked())) throw new Error(`source ${upload} is not attached by default`);
@@ -349,23 +366,23 @@ let browser = null;
     if (!(await capture.isChecked())) throw new Error('an outputs project does not collect outputs by default');
     await capture.setChecked(collect);
     if (collect) {
-      await session.getByText('Tool approval compatibility', { exact: true }).click();
-      const acknowledgement = session.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true });
-      if (await acknowledgement.isChecked()) throw new Error('tool acknowledgement starts enabled');
+      if (await session.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true }).count()) throw new Error('a harness with tool approvals asks for the acknowledgement');
       const model = session.getByLabel('Model (optional)', { exact: true });
       await model.fill('knowledge-model');
-      await acknowledgement.check();
       const sessionRoute = `**/v1/workspaces/${ws}/sessions`;
+      let refusedBody = null;
       await page.route(sessionRoute, async (route) => {
-        const body = route.request().postDataJSON();
-        if (body.model !== 'knowledge-model' || body.unapproved_tools !== true) throw new Error('model or explicit tool acknowledgement was lost');
+        refusedBody = route.request().postDataJSON();
         await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'provider_not_allowed', message: 'Fixture operator refused this request.' } }) });
       });
       await session.getByRole('button', { name: 'Start session', exact: true }).click();
-      await session.getByRole('alert').filter({ hasText: 'Fixture operator refused this request.' }).waitFor();
+      await session.getByRole('alert').filter({ hasText: 'Fixture operator refused this request. Choose another environment or harness, or ask the operator.' }).waitFor();
       await page.unroute(sessionRoute);
+      if (refusedBody.model !== 'knowledge-model') throw new Error(`the free-text model was lost: ${JSON.stringify(refusedBody)}`);
+      if ('preset' in refusedBody || 'unapproved_tools' in refusedBody) throw new Error(`the default environment sent ${JSON.stringify(refusedBody)}`);
+      const kept = [await session.getByLabel('Session name', { exact: true }).inputValue(), await session.getByLabel('First prompt', { exact: true }).inputValue()];
+      if (JSON.stringify(kept) !== JSON.stringify([name, prompt])) throw new Error(`a refused start changed the draft: ${JSON.stringify(kept)}`);
       await model.fill('');
-      await acknowledgement.uncheck();
     }
     if (shots && collect) await page.screenshot({ path: `${shots}/session-form.png` });
     const before = hash();
@@ -509,14 +526,19 @@ let browser = null;
 
   const workspaceRoute = `**/v1/workspaces/${ws}`;
   let presentedRole = 'viewer';
-  await page.route(workspaceRoute, async (route) => {
+  const presentRole = async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.current_role = presentedRole;
     body.capabilities.can_run = false;
     body.capabilities.can_comment = presentedRole === 'reviewer';
     await route.fulfill({ response, json: body });
-  });
+  };
+  // A reload abandons a poll this handler still holds, and that request
+  // needs no answer.
+  await page.route(workspaceRoute, (route) => presentRole(route).catch((e) => {
+    if (!/Route is already handled/.test(e.message)) throw e;
+  }));
   await page.reload();
   await titled('Backlog review').waitFor();
   if (!(await page.getByRole('button', { name: 'Upload sources', exact: true }).isDisabled())) throw new Error('a viewer can upload sources');
@@ -528,13 +550,14 @@ let browser = null;
   presentedRole = 'reviewer';
   await page.reload();
   await titled('Backlog review').waitFor();
-  await page.getByRole('button', { name: '+ Session', exact: true }).click();
+  await page.locator('nav#sessions').getByRole('button', { name: '+ Session', exact: true }).click();
   const reviewForm = page.locator('#session-form');
+  await reviewForm.locator('#sf-advanced[open]').waitFor();
   const reviewAccess = reviewForm.getByLabel('Access', { exact: true });
   if (await reviewAccess.inputValue() !== 'reviewer' || !(await reviewAccess.isDisabled())) throw new Error('a reviewer can select writer access');
-  await reviewForm.getByText('Tool approval compatibility', { exact: true }).click();
-  const reviewAck = reviewForm.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true });
-  if (!(await reviewAck.isDisabled()) || await reviewAck.isChecked()) throw new Error('reviewer tool acknowledgment can bypass read-only access');
+  for (const consent of ['I accept tools without per-tool approval', 'Allow every tool']) {
+    if (await reviewForm.getByRole('checkbox', { name: consent, exact: true }).count()) throw new Error(`a reviewer is offered ${consent}`);
+  }
   await reviewForm.getByLabel('Session name', { exact: true }).fill('Read-only review');
   await reviewForm.getByLabel('Harness', { exact: true }).selectOption('gemini-cli');
   await reviewForm.getByLabel('First prompt', { exact: true }).fill('Review the frozen CSV without modifying files.');
@@ -601,13 +624,10 @@ let browser = null;
   await outputs.nth(3).waitFor();
   const continued = await callApi('POST', `/v1/workspaces/${ws}/sessions/${analystSid}/messages`, { prompt: capturePrompt, action: 'send' });
   if (continued.status >= 300) throw new Error(`continuing the analyst answered ${continued.status}: ${JSON.stringify(continued.body)}`);
-  await page.waitForFunction(async ([id, workspace]) => {
-    const headers = { Authorization: `Bearer ${sessionStorage.getItem('branchyard.token')}` };
-    const op = await (await fetch(`/v1/operations/${id}`, { headers })).json();
-    if (['failed', 'interrupted'].includes(op.state)) throw new Error(`the analyst's second turn ${op.state}`);
-    if (op.state !== 'succeeded') return false;
-    return (await (await fetch(`/v1/workspaces/${workspace}/artifacts`, { headers })).json()).artifacts.length === 8;
-  }, [continued.body.id, ws], { polling: 250, ...TURN });
+  const second = await awaitOperation(continued.body.id);
+  if (second.state !== 'succeeded') throw new Error(`the analyst's second turn ${second.state}`);
+  const listed = (await callApi('GET', `/v1/workspaces/${ws}/artifacts`)).body.artifacts.length;
+  if (listed !== 8) throw new Error(`the workspace lists ${listed} outputs after the second turn, not 8`);
   if (await byId(artifact[DOCX]).getAttribute('data-standing') !== 'current') throw new Error('the page saw the second turn by itself, so it is not a stale page');
   await choose(DOCX).check();
   const { revision } = (await callApi('GET', `/v1/workspaces/${ws}`)).body;
