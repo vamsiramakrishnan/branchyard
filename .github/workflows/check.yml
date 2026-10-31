@@ -232,9 +232,17 @@ jobs:
   postgres:
     # The PostgreSQL store: the shared backend conformance suite, the engine
     # and the server against a real database. The test jobs above stay
-    # offline and without the feature.
+    # offline and without the feature. One build per partition; nextest
+    # deals the tests out round-robin (`slice`), so the partitions take about
+    # as long as each other, and each has a database of its own. The
+    # doctests run once, in the first.
+    name: postgres ${{ matrix.partition }}/3
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2, 3]
     services:
       postgres:
         image: postgres:16
@@ -254,11 +262,34 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # The partitions build the same thing, so they share a key.
           shared-key: postgres
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: python3 tools/install_ci_tool.py cargo-nextest
+      - run: cargo fetch --locked
+      - run: cargo nextest run -p branchyard -p branchyard-server -p branchyard-cli --locked --offline --features "$FEATURES" --profile ci --partition "slice:${{ matrix.partition }}/3"
+      - if: matrix.partition == 1
+        run: cargo test --doc -p branchyard -p branchyard-server -p branchyard-cli --locked --offline --features "$FEATURES"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-postgres-${{ matrix.partition }}
+          path: target/nextest/ci/junit.xml
+  postgres-lint:
+    # Clippy with the PostgreSQL features, every warning an error: the step
+    # the postgres job ran before its tests, now beside them.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FEATURES: branchyard/postgres,branchyard-server/postgres,branchyard-cli/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: postgres-lint
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fetch --locked
       - run: cargo clippy --workspace --all-targets --locked --offline --features "$FEATURES" -- -D warnings
-      - run: cargo test -p branchyard -p branchyard-server -p branchyard-cli --locked --offline --features "$FEATURES"
   microsandbox:
     # The Microsandbox provider with its SDK compiled in: built, linted and
     # unit-tested on every change. Its KVM tests stay ignored (no /dev/kvm on
@@ -331,13 +362,18 @@ jobs:
       - run: python tools/install_ci_tool.py cargo-deny
       - run: cargo fetch --locked
       - run: cargo deny --locked check
-  coverage:
-    # Line coverage per crate and per watched file may not fall below
-    # tools/coverage_floor.json (docs/coverage.md). Two reports: the whole
-    # workspace's tests, and the unit tests alone for the files whose floor
-    # must not be carried by integration tests.
+  coverage-shard:
+    # A third of the workspace's tests each (nextest's `slice`, dealt
+    # round-robin), each shard with its own instrumented build; the first
+    # also writes the unit-test report. `coverage` joins their reports and
+    # holds the floors.
+    name: coverage ${{ matrix.shard }}/3
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -345,13 +381,53 @@ jobs:
           python-version: '3.12'
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # The shards build the same thing, so they share a key.
           shared-key: coverage
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: rustup component add llvm-tools
       - run: python tools/install_ci_tool.py cargo-llvm-cov
+      - run: python tools/install_ci_tool.py cargo-nextest
       - run: cargo fetch --locked
-      - run: cargo llvm-cov --workspace --locked --offline --lcov --output-path lcov.info
-      - run: cargo llvm-cov -p branchyard -p branchyard-provision -p branchyard-substrate --lib --locked --offline --lcov --output-path unit.lcov
+      - run: cargo llvm-cov nextest --workspace --locked --offline --profile ci --partition "slice:${{ matrix.shard }}/3" --lcov --output-path "lcov-${{ matrix.shard }}.info"
+      - if: matrix.shard == 1
+        run: cargo llvm-cov nextest -p branchyard -p branchyard-provision -p branchyard-substrate --lib --locked --offline --profile ci --lcov --output-path unit.lcov
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lcov-${{ matrix.shard }}
+          path: |
+            lcov-${{ matrix.shard }}.info
+            unit.lcov
+  coverage:
+    # Line coverage per crate and per watched file may not fall below
+    # tools/coverage_floor.json (docs/coverage.md). Two reports: the whole
+    # workspace's tests, joined from the shards above, and the unit tests
+    # alone for the files whose floor must not be carried by integration
+    # tests. Doctests count toward neither, as before (llvm-cov runs them
+    # only with `--doctests`). Runs after a shard failed (`!cancelled()`), so
+    # that it fails too; skipped, it would count as passed.
+    if: ${{ !cancelled() }}
+    needs: [coverage-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Every shard ran its tests
+        env:
+          RESULT: ${{ needs.coverage-shard.result }}
+        run: test "$RESULT" = success
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: lcov-*
+          merge-multiple: true
+      - name: Join the shards' reports
+        # check_coverage.py counts a line hit when any record of its file
+        # hits it, so the reports join one after another. cargo llvm-cov ends
+        # a report without a newline; each gets one, or its last
+        # end_of_record would run into the next report's first SF: line.
+        run: for report in lcov-1.info lcov-2.info lcov-3.info; do cat "$report"; echo; done > lcov.info
       - run: python tools/check_coverage.py lcov.info --unit unit.lcov
       # Even when the floor check fails: the floors are written from this artifact.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

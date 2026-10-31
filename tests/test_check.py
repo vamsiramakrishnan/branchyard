@@ -268,11 +268,13 @@ class Workflow(unittest.TestCase):
             "fast",
             "controls",
             "postgres",
+            "postgres-lint",
             "microsandbox",
             "docs",
             "all-features",
             "unused-deps",
             "deny",
+            "coverage-shard",
             "coverage",
         }
         needs = re.search(r"(?m)^    needs: \[([^\]]*)\]$", text)
@@ -341,6 +343,43 @@ class Workflow(unittest.TestCase):
                 if not any((ROOT / "crates" / package / "src/lib.rs").is_file() for package in packages):
                     continue
                 self.assertIn(f"cargo test --doc {selection}", text, name)
+
+    def test_the_postgres_partitions_cover_every_test(self):
+        text = job_text("postgres")
+        partitions = re.search(r"partition: \[([\d, ]+)\]", text)
+        assert partitions is not None, text
+        numbers = [int(n) for n in partitions.group(1).split(",")]
+        count = len(numbers)
+        self.assertEqual(numbers, list(range(1, count + 1)))
+        self.assertIn(f'--partition "slice:${{{{ matrix.partition }}}}/{count}"', text)
+        self.assertIn(f"name: postgres ${{{{ matrix.partition }}}}/{count}", text)
+        self.assertIn("if: matrix.partition == 1", text)
+        # The Clippy pass the single postgres job ran before its tests.
+        self.assertIn(
+            'cargo clippy --workspace --all-targets --locked --offline --features "$FEATURES" -- -D warnings',
+            job_text("postgres-lint"),
+        )
+
+    def test_the_coverage_shards_cover_every_test_and_are_joined_whole(self):
+        # Each shard runs a slice of the workspace's tests; `coverage` holds the floors on their
+        # reports joined end to end, and fails when any shard did not succeed.
+        shard = job_text("coverage-shard")
+        shards = re.search(r"shard: \[([\d, ]+)\]", shard)
+        assert shards is not None, shard
+        numbers = [int(n) for n in shards.group(1).split(",")]
+        count = len(numbers)
+        self.assertEqual(numbers, list(range(1, count + 1)))
+        self.assertIn(f'--partition "slice:${{{{ matrix.shard }}}}/{count}"', shard)
+        self.assertIn("cargo llvm-cov nextest --workspace", shard)
+        self.assertIn("if: matrix.shard == 1", shard)
+        self.assertIn("--lib --locked --offline --profile ci --lcov --output-path unit.lcov", shard)
+        join = job_text("coverage")
+        self.assertIn("needs: [coverage-shard]", join)
+        self.assertIn("if: ${{ !cancelled() }}", join)
+        self.assertIn('test "$RESULT" = success', join)
+        reports = " ".join(f"lcov-{n}.info" for n in numbers)
+        self.assertIn(f'for report in {reports}; do cat "$report"; echo; done > lcov.info', join)
+        self.assertIn("python tools/check_coverage.py lcov.info --unit unit.lcov", join)
 
     def test_the_nightly_workflow_runs_on_a_schedule_and_on_request(self):
         header = NIGHTLY.split("\njobs:", 1)[0]
