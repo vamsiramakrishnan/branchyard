@@ -5,32 +5,10 @@
 
 pub use branchyard_provision::skills::{skill, Skill, SKILLS};
 
-/// A `SKILL.md` needs frontmatter with a `name` and a `description`; other
-/// files need nothing.
-pub fn check_skill_file(path: &str, text: &str) -> Result<(), String> {
-    if !path.ends_with("SKILL.md") {
-        return Ok(());
-    }
-    let front = text
-        .strip_prefix("---\n")
-        .and_then(|rest| rest.split_once("\n---"))
-        .map(|(front, _)| front)
-        .ok_or("SKILL.md needs YAML frontmatter between --- lines")?;
-    for key in ["name", "description"] {
-        let found = front.lines().any(|line| {
-            line.strip_prefix(key)
-                .is_some_and(|rest| rest.starts_with(':') && rest.len() > 2)
-        });
-        if !found {
-            return Err(format!("SKILL.md frontmatter needs a {key}"));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use branchyard_provision::skillset::check_skill_file;
     use std::path::Path;
 
     #[test]
@@ -71,7 +49,7 @@ mod tests {
             );
             for (path, text) in skill.files {
                 assert_eq!(std::fs::read_to_string(dir.join(path)).unwrap(), *text);
-                check_skill_file(path, text).unwrap();
+                check_skill_file(&format!("{}/{path}", skill.name), text).unwrap();
             }
         }
     }

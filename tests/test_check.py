@@ -2,9 +2,10 @@
 """tools/check.py: step selection, --fast and --fix, the verdict and exit code, and the
 step table against .github/workflows/check.yml (and what that workflow promises: one run per
 change, no job that repeats another, a cache on every job that compiles, actions pinned to a
-commit, and the cargo gates in parallel jobs that test every crate once, still run every step
-the single `controls` job ran, and leave `controls` green only when all of them pass). A fake
-step table runs the runner; no cargo."""
+commit, the cargo gates in parallel jobs that test every crate once, still run every step
+the single `controls` job ran, and leave `controls` green only when all of them pass, and the
+tests run by nextest's `ci` profile with their doctests beside them). A fake step table runs
+the runner; no cargo."""
 
 import ast
 import contextlib
@@ -26,6 +27,7 @@ spec.loader.exec_module(check)
 
 WORKFLOW = (ROOT / ".github/workflows/check.yml").read_text()
 NIGHTLY = (ROOT / ".github/workflows/nightly.yml").read_text()
+NEXTEST = (ROOT / ".config/nextest.toml").read_text()
 
 
 def fake(name, code=0, *, job="controls", cargo=False, fix=False, lines=("ok",)):
@@ -201,13 +203,14 @@ class RealTable(unittest.TestCase):
     def test_every_python_script_check_yml_runs_is_a_step(self):
         scripts = set()
         # The jobs whose gates tools/check.py also runs; coverage, deny and unused-deps run
-        # tools only CI uses (check_coverage.py, install_ci_tool.py).
+        # tools only CI uses (check_coverage.py, install_ci_tool.py), and the test jobs install
+        # cargo-nextest with install_ci_tool.py.
         for job in controls_jobs():
             if job in ("coverage", "deny", "unused-deps"):
                 continue
             scripts |= set(re.findall(r"\bpython3?\s+((?:tools|tests)/[\w./-]+\.py)", job_text(job)))
         steps = {arg for step in check.STEPS for arg in step.argv if isinstance(arg, str)}
-        self.assertEqual(sorted(scripts - steps - {"tools/check.py"}), [])
+        self.assertEqual(sorted(scripts - steps - {"tools/check.py", "tools/install_ci_tool.py"}), [])
 
 
 class Workflow(unittest.TestCase):
@@ -224,8 +227,10 @@ class Workflow(unittest.TestCase):
         self.assertEqual(jobs[0], "fast")
 
     def test_no_job_reruns_a_filtered_part_of_the_workspace_tests(self):
-        self.assertEqual(len(re.findall(r"- run: cargo test --workspace", WORKFLOW)), 1)
-        self.assertIn("- run: cargo test --workspace", job_text("test-engine"))
+        self.assertEqual(len(re.findall(r"- run: cargo nextest run --workspace", WORKFLOW)), 1)
+        self.assertIn("- run: cargo nextest run --workspace", job_text("test-engine"))
+        self.assertEqual(len(re.findall(r"- run: cargo test --doc --workspace", WORKFLOW)), 1)
+        self.assertNotIn("- run: cargo test --workspace", WORKFLOW)
         self.assertNotIn("branchyard-controls --locked --offline catalog", WORKFLOW)
         self.assertNotIn("--test compatibility", WORKFLOW)
 
@@ -263,11 +268,13 @@ class Workflow(unittest.TestCase):
             "fast",
             "controls",
             "postgres",
+            "postgres-lint",
             "microsandbox",
             "docs",
             "all-features",
             "unused-deps",
             "deny",
+            "coverage-shard",
             "coverage",
         }
         needs = re.search(r"(?m)^    needs: \[([^\]]*)\]$", text)
@@ -283,10 +290,11 @@ class Workflow(unittest.TestCase):
             self.assertIn("timeout-minutes:", job_text(name), name)
 
     def test_every_job_that_compiles_restores_a_cache(self):
-        compiling = re.compile(r"cargo (?:test|clippy|doc|check|build|llvm-cov)\b")
+        compiling = re.compile(r"cargo (?:test|nextest|clippy|doc|check|build|llvm-cov)\b")
         for name in controls_jobs():
             text = job_text(name)
-            if compiling.search(text):
+            commands = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+            if compiling.search(commands):
                 self.assertIn("Swatinem/rust-cache@", text, f"the {name} job compiles without a cache")
 
     def test_the_cache_is_written_only_on_main(self):
@@ -301,6 +309,77 @@ class Workflow(unittest.TestCase):
             self.assertTrue(uses)
             for use in uses:
                 self.assertRegex(use, r"^[\w./-]+@[0-9a-f]{40}$", use)
+
+    def test_the_tests_run_under_the_ci_profile_without_retries(self):
+        # Every nextest run uses the `ci` profile; it reports every failure, kills and names a hung
+        # test, writes a JUnit report, and never retries: a test that passes on a second try is a
+        # flake to fix (AGENTS.md).
+        runs = [line for line in WORKFLOW.splitlines() if re.search(r"cargo (?:llvm-cov )?nextest\b", line)]
+        self.assertTrue(runs)
+        for line in runs:
+            self.assertIn("--profile ci", line)
+        for text in (WORKFLOW, NEXTEST):
+            self.assertNotRegex(text, r"--retries|retries = [1-9]|--no-fail-fast")
+        profile = NEXTEST.split("[profile.ci]\n", 1)[1].split("\n[", 1)[0]
+        self.assertIn("retries = 0", profile)
+        self.assertIn("fail-fast = false", profile)
+        self.assertRegex(profile, r"slow-timeout = \{ period = \"\d+s\", terminate-after = \d+ \}")
+        self.assertRegex(NEXTEST, r'\[profile\.ci\.junit\]\n(?:#.*\n)*path = "junit.xml"')
+
+    def test_every_job_that_runs_nextest_installs_the_pinned_binary(self):
+        for name in controls_jobs():
+            text = job_text(name)
+            if re.search(r"cargo (?:llvm-cov )?nextest\b", text):
+                self.assertRegex(text, r"python3? tools/install_ci_tool.py cargo-nextest", name)
+
+    def test_the_doctests_still_run_beside_nextest(self):
+        # nextest runs no doctest; each job that tests a crate with a library runs its doctests with
+        # the same packages and features, so nothing `cargo test` ran drops out.
+        for name in controls_jobs():
+            text = job_text(name)
+            runs = re.findall(r"- run: cargo nextest run (.*?) --profile ci", text)
+            for selection in runs:
+                packages = set(re.findall(r"-p ([\w-]+)", selection)) or workspace_members()
+                if not any((ROOT / "crates" / package / "src/lib.rs").is_file() for package in packages):
+                    continue
+                self.assertIn(f"cargo test --doc {selection}", text, name)
+
+    def test_the_postgres_partitions_cover_every_test(self):
+        text = job_text("postgres")
+        partitions = re.search(r"partition: \[([\d, ]+)\]", text)
+        assert partitions is not None, text
+        numbers = [int(n) for n in partitions.group(1).split(",")]
+        count = len(numbers)
+        self.assertEqual(numbers, list(range(1, count + 1)))
+        self.assertIn(f'--partition "slice:${{{{ matrix.partition }}}}/{count}"', text)
+        self.assertIn(f"name: postgres ${{{{ matrix.partition }}}}/{count}", text)
+        self.assertIn("if: matrix.partition == 1", text)
+        # The Clippy pass the single postgres job ran before its tests.
+        self.assertIn(
+            'cargo clippy --workspace --all-targets --locked --offline --features "$FEATURES" -- -D warnings',
+            job_text("postgres-lint"),
+        )
+
+    def test_the_coverage_shards_cover_every_test_and_are_joined_whole(self):
+        # Each shard runs a slice of the workspace's tests; `coverage` holds the floors on their
+        # reports joined end to end, and fails when any shard did not succeed.
+        shard = job_text("coverage-shard")
+        shards = re.search(r"shard: \[([\d, ]+)\]", shard)
+        assert shards is not None, shard
+        numbers = [int(n) for n in shards.group(1).split(",")]
+        count = len(numbers)
+        self.assertEqual(numbers, list(range(1, count + 1)))
+        self.assertIn(f'--partition "slice:${{{{ matrix.shard }}}}/{count}"', shard)
+        self.assertIn("cargo llvm-cov nextest --workspace", shard)
+        self.assertIn("if: matrix.shard == 1", shard)
+        self.assertIn("--lib --locked --offline --profile ci --lcov --output-path unit.lcov", shard)
+        join = job_text("coverage")
+        self.assertIn("needs: [coverage-shard]", join)
+        self.assertIn("if: ${{ !cancelled() }}", join)
+        self.assertIn('test "$RESULT" = success', join)
+        reports = " ".join(f"lcov-{n}.info" for n in numbers)
+        self.assertIn(f'for report in {reports}; do cat "$report"; echo; done > lcov.info', join)
+        self.assertIn("python tools/check_coverage.py lcov.info --unit unit.lcov", join)
 
     def test_the_nightly_workflow_runs_on_a_schedule_and_on_request(self):
         header = NIGHTLY.split("\njobs:", 1)[0]
@@ -325,8 +404,8 @@ def job_text(name):
 
 
 def test_command(job):
-    """The one `cargo test` line of a job in check.yml."""
-    found = [line for line in controls_jobs()[job] if line.lstrip().startswith("- run: cargo test")]
+    """The one `cargo nextest run` line of a job in check.yml."""
+    found = [line for line in controls_jobs()[job] if line.lstrip().startswith("- run: cargo nextest run")]
     assert len(found) == 1, (job, found)
     return found[0]
 

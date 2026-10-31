@@ -41,6 +41,10 @@
 //! exec's standard input and output (an environment recipe's machine,
 //! reached over ssh). The second needs `sh`, `cat`, `tar` and `mkdir`
 //! there too, and `tar` on this host.
+//!
+//! For the turn's record, [`push_staged`] returns the size of the bundle it
+//! sent, and [`push_tree`] and [`pull_tree`] the size of the regular files
+//! in the tree they copied.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -584,17 +588,18 @@ fn path_str(path: &Path) -> Result<&str, Error> {
 /// hold a repository yet. The staging repository is a new directory under
 /// the system's temporary directory; see [`push_staged`] to choose it.
 pub fn push(endpoint: &dyn Guest, worktree: &Path, guest_dir: &Path) -> Result<Pushed, Error> {
-    push_staged(endpoint, worktree, guest_dir, None)
+    push_staged(endpoint, worktree, guest_dir, None).map(|(pushed, _)| pushed)
 }
 
 /// [`push`], staging in `stage` (replaced if it exists), so that whoever
-/// recovers from a crash knows what to delete.
+/// recovers from a crash knows what to delete. Returns the push and the
+/// size in bytes of the bundle that carried it.
 pub fn push_staged(
     endpoint: &dyn Guest,
     worktree: &Path,
     guest_dir: &Path,
     stage: Option<&Path>,
-) -> Result<Pushed, Error> {
+) -> Result<(Pushed, u64), Error> {
     if !guest_dir.is_absolute() {
         return Err(Error::Guest(format!(
             "{} is not an absolute path",
@@ -642,7 +647,9 @@ pub fn push_staged(
         )));
     }
     let incoming = guest_dir.join(".git/branchyard/in.bundle");
-    endpoint.put_file(&incoming, 0o600, &mut fs::File::open(&bundle)?)?;
+    let mut sent = fs::File::open(&bundle)?;
+    let bytes = sent.metadata()?.len();
+    endpoint.put_file(&incoming, 0o600, &mut sent)?;
     let incoming = path_str(&incoming)?;
     for args in [
         &["config", "user.name", "Branchyard sandbox"][..],
@@ -669,12 +676,13 @@ pub fn push_staged(
     ] {
         guest(endpoint, guest_dir, args, &[])?;
     }
-    Ok(Pushed {
+    let pushed = Pushed {
         base,
         snapshot,
         guest: guest_dir.to_path_buf(),
         stage,
-    })
+    };
+    Ok((pushed, bytes))
 }
 
 /// The [`Pushed`] a stopped process's [`push_staged`] of `worktree` to
@@ -1034,17 +1042,23 @@ fn clear(endpoint: &dyn Guest, script: &str, workdir: &Path, home: &str) -> Resu
 }
 
 /// Copy the host directory `from` to `to` in the actor, if it exists.
-pub fn push_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Error> {
+/// Returns the size in bytes of the regular files in `from`, not following
+/// symbolic links; 0 when there is no `from` or it cannot be walked.
+pub fn push_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<u64, Error> {
     if !from.is_dir() {
-        return Ok(());
+        return Ok(0);
     }
-    Ok(endpoint.put_tree(from, to)?)
+    let bytes = tree_bytes(from);
+    endpoint.put_tree(from, to)?;
+    Ok(bytes)
 }
 
 /// Replace the host directory `to` with the actor's `from`, if the actor
 /// has it. The new tree is received beside `to` and swapped in, so a failed
-/// transfer leaves `to` as it was.
-pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Error> {
+/// transfer leaves `to` as it was. Returns the size in bytes of the regular
+/// files received, not following symbolic links; 0 when the actor has no
+/// `from` or the received tree cannot be walked.
+pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<u64, Error> {
     let name = to
         .file_name()
         .and_then(|n| n.to_str())
@@ -1054,13 +1068,14 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             branchyard_support::cleanup_dir(&incoming);
-            return Ok(());
+            return Ok(0);
         }
         Err(error) => {
             branchyard_support::cleanup_dir(&incoming);
             return Err(error.into());
         }
     }
+    let bytes = tree_bytes(&incoming);
     let old = to.with_file_name(unique(&format!(".{name}.old")));
     if to.symlink_metadata().is_ok() {
         fs::rename(to, &old)?;
@@ -1070,7 +1085,31 @@ pub fn pull_tree(endpoint: &dyn Guest, from: &Path, to: &Path) -> Result<(), Err
         return Err(error.into());
     }
     branchyard_support::cleanup_dir(&old);
-    Ok(())
+    Ok(bytes)
+}
+
+/// The total size in bytes of the regular files under `dir`, not following
+/// symbolic links. A tree that cannot be walked (a directory the harness
+/// made unreadable) reads as 0, with a warning logged: the figure is for
+/// the record and never fails the copy it describes.
+fn tree_bytes(dir: &Path) -> u64 {
+    let walk = || -> io::Result<u64> {
+        let mut total = 0;
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    total += entry.metadata()?.len();
+                }
+            }
+        }
+        Ok(total)
+    };
+    branchyard_support::best_effort("measure a copied tree", walk()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1429,7 +1468,7 @@ mod tests {
         let s = setup();
         let exec = Exec::new(&PROVIDER, "box");
         let stage = s.root.parent().unwrap().join("stage");
-        let pushed = push_staged(&exec, &s.root, &s.guest, Some(&stage)).unwrap();
+        let (pushed, _) = push_staged(&exec, &s.root, &s.guest, Some(&stage)).unwrap();
         let (base, snapshot) = (pushed.base.clone(), pushed.snapshot.clone());
         // The first process dies without dropping its stage.
         std::mem::forget(pushed);
@@ -1551,6 +1590,55 @@ mod tests {
             .filter(|n| n.contains(".incoming") || n.contains(".old"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn copies_count_the_bytes_they_send_and_receive() {
+        let s = setup();
+        let exec = Exec::new(&PROVIDER, "box");
+        let dir = s.root.parent().unwrap();
+        let (_pushed, bundle) = push_staged(&exec, &s.root, &s.guest, None).unwrap();
+        let received = fs::metadata(s.guest.join(".git/branchyard/in.bundle")).unwrap();
+        assert_eq!(bundle, received.len(), "the bundle as the sandbox got it");
+
+        let home = dir.join("home");
+        fs::create_dir_all(home.join("sub")).unwrap();
+        fs::write(home.join("a"), "12345").unwrap();
+        fs::write(home.join("sub/b"), "678").unwrap();
+        symlink("a", home.join("link")).unwrap();
+        let theirs = dir.join("sandbox/home");
+        assert_eq!(
+            push_tree(&exec, &home, &theirs).unwrap(),
+            8,
+            "links do not count"
+        );
+        fs::write(theirs.join("sub/c"), "9012").unwrap();
+        assert_eq!(pull_tree(&exec, &theirs, &home).unwrap(), 12);
+        assert_eq!(fs::read_to_string(home.join("sub/c")).unwrap(), "9012");
+
+        let absent = dir.join("absent");
+        assert_eq!(
+            push_tree(&exec, &absent, &dir.join("sandbox/x")).unwrap(),
+            0
+        );
+        assert_eq!(pull_tree(&exec, &absent, &home).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_tree_that_cannot_be_walked_measures_as_nothing() {
+        let s = setup();
+        let tree = s.root.parent().unwrap().join("tree");
+        fs::create_dir_all(tree.join("locked")).unwrap();
+        fs::write(tree.join("locked/x"), "x").unwrap();
+        fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(tree.join("locked")).is_ok();
+        let bytes = tree_bytes(&tree);
+        fs::set_permissions(tree.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        let expected = if readable { 1 } else { 0 };
+        assert_eq!(
+            bytes, expected,
+            "0 unless the directory reads anyway, as for root"
+        );
     }
 
     #[test]

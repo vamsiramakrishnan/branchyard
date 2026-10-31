@@ -96,6 +96,11 @@ fn build(package: &str, bin: &str, artifact: &Path, plain: bool) -> &'static Pat
         .args(["build", "--quiet", "--offline", "--manifest-path"])
         .arg(workspace_manifest())
         .args(["-p", package, "--bin", bin]);
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(is_package_variable) {
+            command.env_remove(name);
+        }
+    }
     // A plain build under `cargo llvm-cov` goes to a target directory of its
     // own: cargo's fingerprint does not see the RUSTC_WRAPPER that
     // instruments, so it would reuse the instrumented binary in the shared one.
@@ -124,18 +129,73 @@ fn build(package: &str, bin: &str, artifact: &Path, plain: bool) -> &'static Pat
         }
         None => panic!("unexpected build location {}", artifact.display()),
     }
-    let status = command
-        .status()
-        .unwrap_or_else(|e| panic!("run cargo to build {bin}: {e}"));
-    assert!(
-        status.success(),
-        "building {bin} of {package} failed: {status}"
-    );
     let path = built_dir.join(bin);
+    // Under nextest each test is a process of its own, so the map above only
+    // spares a test its second build. A cargo invocation holds the target
+    // directory's lock even when it builds nothing, and the processes of one
+    // run would queue on it, so the first to build records the run, and the
+    // others of that run take the binary as built.
+    let run = std::env::var("NEXTEST_RUN_ID").ok();
+    if !run.as_deref().is_some_and(|run| built_in_run(&path, run)) {
+        let status = command
+            .status()
+            .unwrap_or_else(|e| panic!("run cargo to build {bin}: {e}"));
+        assert!(
+            status.success(),
+            "building {bin} of {package} failed: {status}"
+        );
+        if let Some(run) = &run {
+            record_run(&path, run);
+        }
+    }
     assert!(path.is_file(), "{} was not built", path.display());
     let path: &'static Path = Box::leak(path.into_boxed_path());
     built.insert(key, path);
     path
+}
+
+/// Whether `name` is one of the variables cargo sets for the package under
+/// test (`CARGO_MANIFEST_DIR`, `CARGO_PKG_NAME`, `OUT_DIR` and the like). A
+/// build script that tracks one, as ring's tracks `CARGO_MANIFEST_DIR`,
+/// reruns when cargo is started with a different value, so a build started
+/// from a test with them set, and the next one started from a shell, rebuild
+/// that crate and every crate above it, each time.
+fn is_package_variable(name: &str) -> bool {
+    [
+        "CARGO_PKG_",
+        "CARGO_MANIFEST_",
+        "CARGO_CRATE_",
+        "CARGO_BIN_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix))
+        || matches!(
+            name,
+            "OUT_DIR" | "CARGO_PRIMARY_PACKAGE" | "CARGO_TARGET_TMPDIR" | "CARGO_RUSTC_CURRENT_DIR"
+        )
+}
+
+/// The file beside `binary` that names the nextest run which last built it.
+fn run_marker(binary: &Path) -> PathBuf {
+    let name = binary.file_name().unwrap_or_default().to_string_lossy();
+    binary.with_file_name(format!(".{name}.nextest-run"))
+}
+
+/// Whether a process of nextest run `run` has built `binary`.
+fn built_in_run(binary: &Path, run: &str) -> bool {
+    binary.is_file() && std::fs::read_to_string(run_marker(binary)).is_ok_and(|text| text == run)
+}
+
+/// Record that nextest run `run` built `binary`. Written whole and renamed
+/// into place, so a reader sees this run or the one before. Without the
+/// record a later test builds again, which is slower, not wrong.
+fn record_run(binary: &Path, run: &str) {
+    let marker = run_marker(binary);
+    let staged = marker.with_extension(std::process::id().to_string());
+    branchyard_support::best_effort(
+        "record the nextest run that built a test binary",
+        std::fs::write(&staged, run).and_then(|()| std::fs::rename(&staged, &marker)),
+    );
 }
 
 /// `target/<profile>` for a path inside it (directly, or in `deps/`).
@@ -161,6 +221,58 @@ mod tests {
             profile_dir(Path::new("/t/debug/deps/cli-1a2b")),
             Path::new("/t/debug")
         );
+    }
+
+    /// One process of a nextest run records the build; the others of that
+    /// run skip cargo, and a process of another run builds again.
+    #[test]
+    fn a_binary_counts_as_built_only_for_the_run_that_recorded_it() {
+        let scratch = crate::Scratch::new("testkit-run-marker");
+        let binary = scratch.path().join("fake-acp-agent");
+        assert!(!built_in_run(&binary, "run-a"), "no binary yet");
+        std::fs::write(&binary, "#!/bin/sh\n").unwrap();
+        assert!(!built_in_run(&binary, "run-a"), "built, but by no run");
+        record_run(&binary, "run-a");
+        assert!(built_in_run(&binary, "run-a"));
+        assert!(!built_in_run(&binary, "run-b"));
+        record_run(&binary, "run-b");
+        assert!(built_in_run(&binary, "run-b"));
+        assert!(!built_in_run(&binary, "run-a"));
+        assert_eq!(
+            std::fs::read_dir(scratch.path()).unwrap().count(),
+            2,
+            "the binary and its one marker, no staged file left"
+        );
+    }
+
+    /// What cargo sets for the package under test is left out of a nested
+    /// build; what configures the build itself is kept.
+    #[test]
+    fn a_nested_build_drops_the_package_variables_of_the_test() {
+        for name in [
+            "CARGO_MANIFEST_DIR",
+            "CARGO_MANIFEST_PATH",
+            "CARGO_PKG_NAME",
+            "CARGO_PKG_VERSION_MAJOR",
+            "CARGO_CRATE_NAME",
+            "CARGO_BIN_EXE_by",
+            "OUT_DIR",
+            "CARGO_TARGET_TMPDIR",
+        ] {
+            assert!(is_package_variable(name), "{name}");
+        }
+        for name in [
+            "CARGO",
+            "CARGO_HOME",
+            "CARGO_TARGET_DIR",
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_TEST_DEBUG",
+            "CARGO_LLVM_COV",
+            "RUSTFLAGS",
+            "PATH",
+        ] {
+            assert!(!is_package_variable(name), "{name}");
+        }
     }
 
     /// The workspace is found from where cargo runs the test, not from where

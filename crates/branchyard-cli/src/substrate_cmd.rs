@@ -193,13 +193,71 @@ pub fn main(env: &Env, globals: &Globals, action: &Action) -> Outcome {
             } else {
                 format!("Control authenticated; template {}/{} has a valid bridge port, identity and matching signing key.\nNext: by substrate check --smoke --harness agy. Model authentication not checked.", inspection.atespace, inspection.name)
             };
+            let checks = check_readiness(
+                config,
+                &inspection,
+                *smoke,
+                harness.as_deref(),
+                version.as_deref(),
+            )?;
             report(
-                &serde_json::json!({"control": "authenticated", "template": "validated", "template_details": {"atespace": inspection.atespace, "name": inspection.name, "image": inspection.image, "bridge_port": inspection.bridge_port, "signer": "matches"}, "smoke": *smoke, "harness_version": version, "model": "not_checked"}),
+                &serde_json::json!({"control": "authenticated", "template": "validated", "template_details": {"atespace": inspection.atespace, "name": inspection.name, "image": inspection.image, "bridge_port": inspection.bridge_port, "signer": "matches"}, "smoke": *smoke, "harness_version": version, "model": "not_checked", "checks": checks}),
                 *json,
                 &text,
             )
         }
     }
+}
+
+/// The seven readiness checks after `by substrate check` passed: Control
+/// authenticated and the template inspected; with `--smoke`, a disposable
+/// actor was scheduled, bridged and deleted, and `harness` (when named) ran
+/// its version command inside it.
+fn check_readiness(
+    config: &branchyard::config::ProjectConfig,
+    inspection: &branchyard_substrate::TemplateInspection,
+    smoke: bool,
+    harness: Option<&str>,
+    version: Option<&str>,
+) -> Result<Vec<branchyard::up::ReadinessCheck>, Failure> {
+    use branchyard::up::{ReadinessCheck, ReadinessCheckId, SubstrateProbe};
+    let probe = SubstrateProbe::Inspected {
+        template: inspection.name.clone(),
+        image: inspection.image.clone(),
+        workers: None,
+    };
+    let mut checks = branchyard::up::substrate_checks(
+        &std::env::current_dir()?,
+        config,
+        &branchyard::up::LocalMachine::new(),
+        probe,
+    );
+    if smoke {
+        for check in &mut checks {
+            match (check.id, harness) {
+                (ReadinessCheckId::WorkerCapacityAvailable, _) => {
+                    *check = ReadinessCheck::verified(
+                        check.id,
+                        "a disposable actor was scheduled, bridged and deleted",
+                    );
+                }
+                (ReadinessCheckId::CliAndHarnessInstalled, Some(program)) => {
+                    let answered = version
+                        .and_then(|v| v.lines().next())
+                        .filter(|line| !line.is_empty())
+                        .unwrap_or("no output");
+                    *check = ReadinessCheck::verified(
+                        check.id,
+                        format!(
+                            "{program} --version ran in the disposable actor and answered {answered}; no model was called"
+                        ),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(checks)
 }
 
 fn setup(env: &Env, options: &branchyard::SubstrateOptions, args: &Setup) -> Outcome {

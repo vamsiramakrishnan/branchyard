@@ -761,6 +761,25 @@ pub enum ConnectorsAction {
     Catalog,
 }
 
+/// `by skills ...`; see docs/knowledge-skills.md.
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+pub enum SkillsAction {
+    /// The skills a new branch here runs with, or the set fixed for a branch
+    ///
+    /// The built-in skills, and the repository's from .agents/skills at HEAD with whether
+    /// you trusted them; with a branch, the set fixed when it was created, staged or
+    /// withheld and why.
+    Ls {
+        /// The branch whose set to show; inside a harness, your own. Without one, what a new
+        /// branch here runs with
+        branch: Option<String>,
+    },
+    /// Trust the repository's skills at HEAD, so new branches here stage them
+    Trust,
+    /// Forget the trust decision for this repository's skills
+    Untrust,
+}
+
 /// `by workspace ...`; see docs/workspace.md.
 #[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceAction {

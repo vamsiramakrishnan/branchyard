@@ -358,6 +358,15 @@ class Hygiene(unittest.TestCase):
         for entry in data["long_settle"]:
             self.assertGreater(len(entry["reason"].strip()), 40, entry)
 
+    def test_an_async_wait_for_function_in_a_browser_script_fails(self):
+        self.write("crates/a/tests/page.js", "await page.waitForFunction(() => done, null, TURN);\n")
+        self.assertEqual(self.problems(), [])
+        self.write("crates/a/tests/page.js", "await page.waitForFunction( async (id) => {\n  return false;\n}, id);\n")
+        found = self.problems()
+        self.assertEqual(len(found), 1, found)
+        self.assertIn("crates/a/tests/page.js:1", found[0])
+        self.assertIn("async predicate", found[0])
+
     def test_this_repository_passes(self):
         self.assertEqual(hygiene.check(hygiene.ROOT), [])
 

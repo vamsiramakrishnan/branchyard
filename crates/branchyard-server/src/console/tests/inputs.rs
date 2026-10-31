@@ -3,7 +3,13 @@
 use super::*;
 use sha2::{Digest as _, Sha256};
 
-async fn upload(fixture: &Fixture, wid: &str, key: &str, title: &str, data: &[u8]) -> Value {
+pub(super) async fn upload(
+    fixture: &Fixture,
+    wid: &str,
+    key: &str,
+    title: &str,
+    data: &[u8],
+) -> Value {
     let revision = fixture.detail(wid).await["revision"].to_string();
     let (status, bytes) = fixture
         .bytes(

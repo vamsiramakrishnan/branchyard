@@ -8,6 +8,9 @@ use tonic::{Code, Status};
 use crate::capabilities::{capabilities, state, TemplateError};
 use crate::pb;
 
+/// How long a read-only Control inspection may take, connecting included.
+pub(crate) const INSPECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// An actor bound to the identity Substrate assigned when it was created.
 ///
 /// Names can be reused after deletion; the UID cannot. Delete is fenced by
@@ -163,15 +166,13 @@ impl Actors {
         let mut request = tonic::Request::new(pb::GetActorTemplateRequest {
             actor_template: Some(template_reference(&self.atespace, template)?),
         });
-        request.set_timeout(std::time::Duration::from_secs(30));
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            self.client.get_actor_template(request),
-        )
-        .await
-        .map_err(|_| {
-            Status::deadline_exceeded("Substrate template inspection exceeded 30 seconds")
-        })??;
+        request.set_timeout(INSPECTION_TIMEOUT);
+        let response =
+            tokio::time::timeout(INSPECTION_TIMEOUT, self.client.get_actor_template(request))
+                .await
+                .map_err(|_| {
+                    Status::deadline_exceeded("Substrate template inspection exceeded 30 seconds")
+                })??;
         Ok(response.into_inner())
     }
 

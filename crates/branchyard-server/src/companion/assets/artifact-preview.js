@@ -17,13 +17,37 @@
     return /^[a-zA-Z0-9_\-\.]+$/.test(filename);
   }
 
-  function formatBytes(bytes) {
-    if (typeof bytes !== 'number' || isNaN(bytes)) return '';
-    if (bytes < 1024) return bytes + ' B';
-    var kb = bytes / 1024;
-    if (kb < 1024) return kb.toFixed(1) + ' KB';
-    var mb = kb / 1024;
-    return mb.toFixed(1) + ' MB';
+  var MAX_RETRIES = 5;
+
+  // What a refused or failed preview means to the person reading it, by the
+  // server's error code. `server` shows the server's own message and next
+  // step; `operator` keeps them under a disclosure, since they are setup
+  // instructions for whoever runs the server; `retry` offers Try again.
+  var FAILURES = {
+    preview_unsupported: { title: 'No preview for this format', hint: 'Download the original to open it on this device.' },
+    preview_unavailable: { title: 'This server cannot make previews right now', hint: 'Download the original to open it on this device.', operator: true },
+    conversion_failed: { title: 'This file could not be converted for preview', server: true },
+    preview_timeout: { title: 'The preview took too long to make', hint: 'Try again, or download the original.', retry: true },
+    preview_too_large: { title: 'This file is too large to preview', server: true },
+    preview_output_limit: { title: 'This preview is too large to show', hint: 'Download the original to open it on this device.' },
+    preview_busy: { title: 'The server is busy making other previews', hint: 'Try again in a moment.', retry: true },
+    not_found: { title: 'This file is no longer available', server: true },
+    unknown_preview_asset: { title: 'This page of the preview is no longer available', retry: true },
+    unreachable: { title: 'The server cannot be reached', hint: 'Check the connection, then try again.', retry: true },
+    error: { title: 'The preview could not be shown', server: true, retry: true }
+  };
+
+  // The server's answer as preview data, or as a failure with the server's
+  // words. A refusal is a JSON error envelope; a conversion that failed, or
+  // whose renderer lacks a component, is a 200 whose status says so.
+  function outcome(status, body) {
+    var error = (body && body.error) || {};
+    if (status === 200 && body && body.status === 'passed') return { data: body };
+    if (status === 200 && body && (body.status === 'failed' || body.status === 'unavailable')) {
+      return { code: body.status === 'failed' ? 'conversion_failed' : 'preview_unavailable', message: error.message, next: error.next };
+    }
+    var detail = error.detail || {};
+    return { code: error.code || 'error', message: error.message || 'HTTP ' + status, next: detail.next || error.next, retryAfter: detail.retry_after };
   }
 
   function mount(container, options) {
@@ -45,7 +69,6 @@
     var activeAbortControllers = new Set();
     var retryTimerId = null;
     var activeBlobUrls = [];
-    var pendingRevokeTimerIds = new Set();
     var generation = 0;
 
     // View state
@@ -100,12 +123,6 @@
     }
 
     function revokeAllBlobs() {
-      // Clear pending delayed revocation timers
-      pendingRevokeTimerIds.forEach(function (tid) {
-        clearTimeout(tid);
-      });
-      pendingRevokeTimerIds.clear();
-
       for (var i = 0; i < activeBlobUrls.length; i++) {
         try {
           URL.revokeObjectURL(activeBlobUrls[i]);
@@ -264,17 +281,6 @@
         rightGroup.appendChild(nextBtn);
       }
 
-      // Download Original Button (always available)
-      var downloadBtn = document.createElement('button');
-      downloadBtn.type = 'button';
-      downloadBtn.className = 'by-preview-btn by-preview-btn-primary';
-      downloadBtn.textContent = 'Download Original';
-      downloadBtn.setAttribute('aria-label', 'Download original file');
-      downloadBtn.addEventListener('click', function () {
-        handleDownloadOriginal();
-      });
-      rightGroup.appendChild(downloadBtn);
-
       toolbarEl.appendChild(leftGroup);
       toolbarEl.appendChild(rightGroup);
     }
@@ -313,70 +319,55 @@
 
       var text = document.createElement('div');
       text.className = 'by-preview-state-message';
-      text.textContent = msg || 'Preparing preview...';
+      text.textContent = msg || 'Making a preview…';
       container.appendChild(text);
 
       contentEl.appendChild(container);
       announce(text.textContent);
     }
 
-    function renderUnavailableOrError(titleMsg, detailNext, showSetup, showRetry) {
+    function textBlock(tag, className, text) {
+      var el = document.createElement(tag);
+      el.className = className;
+      el.textContent = text;
+      return el;
+    }
+
+    // One failure as `outcome` reads it: a plain title, then the server's
+    // words where they help the reader, or under a disclosure for the
+    // server's operator.
+    function renderFailure(failure) {
+      var meaning = FAILURES[failure.code] || FAILURES.error;
       contentEl.textContent = '';
       toolbarEl.textContent = '';
       renderWarnings([]);
 
       var container = document.createElement('div');
-      container.className = 'by-preview-state-container';
-
-      var titleEl = document.createElement('div');
-      titleEl.className = 'by-preview-state-message';
-      titleEl.textContent = titleMsg || 'Preview unavailable';
-      container.appendChild(titleEl);
-
-      if (detailNext) {
-        var subtext = document.createElement('div');
-        subtext.className = 'by-preview-state-subtext';
-        subtext.textContent = detailNext;
-        container.appendChild(subtext);
+      container.className = 'by-preview-state-container by-preview-failure';
+      container.appendChild(textBlock('p', 'by-preview-state-message', meaning.title));
+      if (meaning.server && failure.message) container.appendChild(textBlock('p', 'by-preview-state-subtext', failure.message));
+      if (meaning.server && failure.next) container.appendChild(textBlock('p', 'by-preview-state-subtext', 'Next: ' + failure.next));
+      if (meaning.hint) container.appendChild(textBlock('p', 'by-preview-state-subtext', meaning.hint));
+      if (meaning.operator && (failure.message || failure.next)) {
+        var details = document.createElement('details');
+        details.className = 'by-preview-operator';
+        details.appendChild(textBlock('summary', '', 'Details for the server\'s operator'));
+        if (failure.message) details.appendChild(textBlock('p', '', failure.message));
+        if (failure.next) details.appendChild(textBlock('p', '', failure.next));
+        container.appendChild(details);
       }
-
-      var actions = document.createElement('div');
-      actions.className = 'by-preview-state-actions';
-
-      if (showRetry) {
+      if (meaning.retry) {
         var retryBtn = document.createElement('button');
         retryBtn.type = 'button';
         retryBtn.className = 'by-preview-btn';
-        retryBtn.textContent = 'Retry Preview';
+        retryBtn.textContent = 'Try again';
         retryBtn.addEventListener('click', function () {
           loadPreview();
         });
-        actions.appendChild(retryBtn);
+        container.appendChild(retryBtn);
       }
-
-      if (showSetup) {
-        var setupBtn = document.createElement('button');
-        setupBtn.type = 'button';
-        setupBtn.className = 'by-preview-btn';
-        setupBtn.textContent = 'Setup Instructions';
-        setupBtn.addEventListener('click', function () {
-          alert('Setup action: ' + (detailNext || 'Please configure the required preview service.'));
-        });
-        actions.appendChild(setupBtn);
-      }
-
-      var dlBtn = document.createElement('button');
-      dlBtn.type = 'button';
-      dlBtn.className = 'by-preview-btn by-preview-btn-primary';
-      dlBtn.textContent = 'Download Original';
-      dlBtn.addEventListener('click', function () {
-        handleDownloadOriginal();
-      });
-      actions.appendChild(dlBtn);
-
-      container.appendChild(actions);
       contentEl.appendChild(container);
-      announce(titleEl.textContent);
+      announce(meaning.title);
     }
 
     function renderTable(data) {
@@ -467,7 +458,7 @@
         contentEl.appendChild(footer);
       }
 
-      announce('Loaded table preview, ' + rows.length + ' rows displayed.');
+      announce('Preview ready: ' + rows.length + (rows.length === 1 ? ' row.' : ' rows.'));
     }
 
     function renderPages(data, currentGen, previewQuery) {
@@ -477,7 +468,7 @@
 
       var imageFilename = data.image;
       if (!imageFilename || !isSafeBasename(imageFilename)) {
-        renderUnavailableOrError('Security Error: Invalid or unsafe page asset reference.', null, false, false);
+        renderFailure({ code: 'error', message: 'The page image has an unexpected name.' });
         return;
       }
 
@@ -501,11 +492,11 @@
         activeAbortControllers.delete(assetAbort);
         if (currentGen !== generation || isDisposed) return;
         if (!res.ok) {
-          throw new Error('Failed to load page image: ' + res.status);
+          throw new Error('the server answered ' + res.status + '.');
         }
         var ctype = res.headers && res.headers.get ? (res.headers.get('content-type') || '') : '';
         if (ctype.toLowerCase().indexOf('image/png') === -1) {
-          throw new Error('Unsafe content type for page preview: ' + ctype);
+          throw new Error('it is not a PNG image.');
         }
         return res.blob();
       }).then(function (blob) {
@@ -522,7 +513,7 @@
           img.style.maxWidth = data.width + 'px';
         }
         pagesContainer.appendChild(img);
-        announce('Loaded page ' + (data.page || currentPage) + ' of ' + (data.pages || 1));
+        announce('Preview ready: page ' + (data.page || currentPage) + ' of ' + (data.pages || 1) + '.');
       }).catch(function (err) {
         activeAbortControllers.delete(assetAbort);
         if (currentGen !== generation || isDisposed) return;
@@ -530,8 +521,9 @@
         pagesContainer.textContent = '';
         var errBox = document.createElement('div');
         errBox.className = 'by-preview-state-message';
-        errBox.textContent = 'Error loading page visual: ' + err.message;
+        errBox.textContent = 'The page image did not load: ' + err.message;
         pagesContainer.appendChild(errBox);
+        announce(errBox.textContent);
       });
     }
 
@@ -549,56 +541,7 @@
       textContainer.appendChild(pre);
 
       contentEl.appendChild(textContainer);
-      announce('Loaded text preview.');
-    }
-
-    function handleDownloadOriginal() {
-      if (isDisposed) return;
-      var contentPath = baseUrl + '/content';
-      var dlAbort = new AbortController();
-      activeAbortControllers.add(dlAbort);
-
-      fetchAuthenticated(contentPath, {
-        method: 'GET',
-        signal: dlAbort.signal
-      }).then(function (res) {
-        activeAbortControllers.delete(dlAbort);
-        if (isDisposed) return;
-        if (!res.ok) {
-          throw new Error('Download failed: ' + res.status);
-        }
-        return res.blob();
-      }).then(function (blob) {
-        if (isDisposed || !blob) return;
-        var blobUrl = URL.createObjectURL(blob);
-        activeBlobUrls.push(blobUrl);
-
-        var a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = blobUrl;
-        a.download = displayName || 'download';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-
-        var timerId = setTimeout(function () {
-          pendingRevokeTimerIds.delete(timerId);
-          try {
-            URL.revokeObjectURL(blobUrl);
-            var idx = activeBlobUrls.indexOf(blobUrl);
-            if (idx !== -1) {
-              activeBlobUrls.splice(idx, 1);
-            }
-          } catch (e) {
-            // ignore
-          }
-        }, 1000);
-        pendingRevokeTimerIds.add(timerId);
-      }).catch(function (err) {
-        activeAbortControllers.delete(dlAbort);
-        if (isDisposed || err.name === 'AbortError') return;
-        alert('Could not download original document: ' + err.message);
-      });
+      announce('Preview ready.');
     }
 
     function loadPreview() {
@@ -608,10 +551,7 @@
       revokeAllBlobs();
 
       var thisGen = ++generation;
-      var fetchAbort = new AbortController();
-      activeAbortControllers.add(fetchAbort);
-
-      renderLoading('Loading document preview...');
+      renderLoading();
 
       var queryParts = ['view=' + encodeURIComponent(currentView)];
       if (currentPage > 1) {
@@ -628,9 +568,7 @@
       }
       var previewQuery = '?' + queryParts.join('&');
       var previewUrl = baseUrl + '/preview' + previewQuery;
-
-      var retryCount = 0;
-      var MAX_RETRIES = 5;
+      var retries = 0;
 
       function executeFetch() {
         if (thisGen !== generation || isDisposed) return;
@@ -642,124 +580,49 @@
           method: 'GET',
           signal: reqAbort.signal
         }).then(function (res) {
+          return res.json().catch(function () { return null; }).then(function (body) {
+            return outcome(res.status, body);
+          });
+        }, function (err) {
+          if (err.name === 'AbortError') throw err;
+          return { code: 'unreachable' };
+        }).then(function (result) {
           activeAbortControllers.delete(reqAbort);
           if (thisGen !== generation || isDisposed) return;
 
-          // 202 Accepted: Still preparing preview with Retry-After
-          if (res.status === 202) {
-            retryCount++;
-            if (retryCount > MAX_RETRIES) {
-              renderUnavailableOrError('Preview generation timed out.', 'The preview took too long to prepare.', false, true);
-              return;
-            }
-            var retrySec = 1;
-            var headerVal = res.headers && res.headers.get ? res.headers.get('Retry-After') : null;
-            if (headerVal) {
-              var parsed = parseInt(headerVal, 10);
-              if (!isNaN(parsed) && parsed > 0 && parsed <= 10) {
-                retrySec = parsed;
-              }
-            }
-            renderLoading('Preparing preview (attempt ' + retryCount + ')...');
+          // Both of the server's conversion slots are taken; it says when to ask again.
+          var wait = result.retryAfter;
+          if (result.code === 'preview_busy' && typeof wait === 'number' && wait > 0 && wait <= 10 && retries < MAX_RETRIES) {
+            retries++;
+            renderLoading('The server is busy making other previews. Trying again in ' + wait + (wait === 1 ? ' second…' : ' seconds…'));
             retryTimerId = setTimeout(function () {
               retryTimerId = null;
-              if (thisGen === generation && !isDisposed) {
-                executeFetch();
-              }
-            }, retrySec * 1000);
+              executeFetch();
+            }, wait * 1000);
+            return;
+          }
+          if (!result.data) {
+            renderFailure(result);
             return;
           }
 
-          return res.json().then(function (body) {
-            return { ok: res.ok, status: res.status, headers: res.headers, body: body };
-          }).catch(function (parseErr) {
-            return { ok: res.ok, status: res.status, headers: res.headers, body: null };
-          });
-        }).then(function (result) {
-          if (!result || thisGen !== generation || isDisposed) return;
-
-          // Handle 429 Too Many Requests (e.g. preview_busy)
-          if (result.status === 429) {
-            var body = result.body || {};
-            var errObj = body.error || body;
-            var isBusy = errObj.code === 'preview_busy' || (errObj.detail && errObj.detail.retry_after != null);
-            var retryAfterSec = null;
-
-            if (errObj.detail && typeof errObj.detail.retry_after === 'number') {
-              retryAfterSec = errObj.detail.retry_after;
-            } else if (result.headers && result.headers.get && result.headers.get('Retry-After')) {
-              var hSec = parseInt(result.headers.get('Retry-After'), 10);
-              if (!isNaN(hSec) && hSec > 0) {
-                retryAfterSec = hSec;
-              }
+          var payload = result.data;
+          if (payload.kind === 'table') {
+            if (payload.sheet) {
+              currentSheet = payload.sheet;
             }
-
-            if (isBusy && retryAfterSec !== null && retryAfterSec > 0 && retryAfterSec <= 10 && retryCount < MAX_RETRIES) {
-              retryCount++;
-              renderLoading('Preview service busy; retrying in ' + retryAfterSec + 's (attempt ' + retryCount + ')...');
-              retryTimerId = setTimeout(function () {
-                retryTimerId = null;
-                if (thisGen === generation && !isDisposed) {
-                  executeFetch();
-                }
-              }, retryAfterSec * 1000);
-              return;
-            }
-
-            var busyMsg = errObj.message || 'Preview service is busy.';
-            var busyNext = (errObj.detail && errObj.detail.next) || 'Please retry in a moment.';
-            renderUnavailableOrError(busyMsg, busyNext, false, true);
-            return;
-          }
-
-          if (!result.ok) {
-            var errMsg = 'Preview request failed (' + result.status + ')';
-            var nextAction = null;
-            if (result.body && result.body.error) {
-              errMsg = result.body.error.message || errMsg;
-              if (result.body.error.detail && result.body.error.detail.next) {
-                nextAction = result.body.error.detail.next;
-              }
-            }
-            renderUnavailableOrError(errMsg, nextAction, Boolean(nextAction), result.status >= 500);
-            return;
-          }
-
-          var payload = result.body;
-          if (!payload) {
-            renderUnavailableOrError('Empty preview response received.', null, false, false);
-            return;
-          }
-
-          if (payload.status === 'failed' || payload.status === 'unavailable') {
-            var msg = payload.message || 'Preview unavailable for this artifact.';
-            var detailNext = (payload.detail && payload.detail.next) || (payload.error && payload.error.detail && payload.error.detail.next) || null;
-            var showSetup = Boolean(payload.setup || detailNext);
-            renderUnavailableOrError(msg, detailNext, showSetup, false);
-            return;
-          }
-
-          if (payload.status === 'passed') {
-            if (payload.kind === 'table') {
-              if (payload.sheet) {
-                currentSheet = payload.sheet;
-              }
-              renderTable(payload);
-            } else if (payload.kind === 'pages') {
-              renderPages(payload, thisGen, previewQuery);
-            } else if (payload.kind === 'text') {
-              renderText(payload);
-            } else {
-              renderUnavailableOrError('Unsupported preview kind: ' + payload.kind, null, false, false);
-            }
+            renderTable(payload);
+          } else if (payload.kind === 'pages') {
+            renderPages(payload, thisGen, previewQuery);
+          } else if (payload.kind === 'text') {
+            renderText(payload);
           } else {
-            renderUnavailableOrError('Unexpected preview status: ' + payload.status, null, false, false);
+            renderFailure({ code: 'error', message: 'The server sent a kind of preview this page does not show: ' + payload.kind + '.' });
           }
         }).catch(function (err) {
           activeAbortControllers.delete(reqAbort);
-          if (thisGen !== generation || isDisposed) return;
-          if (err.name === 'AbortError') return;
-          renderUnavailableOrError('Preview error: ' + err.message, null, false, true);
+          if (thisGen !== generation || isDisposed || err.name === 'AbortError') return;
+          renderFailure({ code: 'error', message: err.message });
         });
       }
 

@@ -5,7 +5,10 @@ bucket and an Artifact Registry repository, then runs the pinned upstream
 Substrate installer and starts a dedicated worker pool. Its default is an offline JSON plan. Add `--apply` to create
 or adopt resources and install Substrate. Cluster provisioning is separate from
 `by up`; finish the connection, bridge image and template using
-[Substrate setup](substrate-setup.md).
+[Substrate setup](substrate-setup.md). Once saved, `by up --plan` reports the
+seven [readiness checks](up.md#readiness-checks) without creating anything,
+`by up --plan --smoke` adds the worker listing, and `by substrate check --smoke
+--harness agy` runs the harness in one disposable actor.
 
 The supported source revision is
 `1d7ca8ced056192a1801d6565251adcaab3eb0c9` from

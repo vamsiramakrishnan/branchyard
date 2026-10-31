@@ -12,18 +12,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One entry per packaged target, on a runner that executes it: dist
+        # builds x86_64-apple-darwin on Apple silicon, and only an Intel Mac
+        # runs that binary natively. release_smoke.py refuses a runner that
+        # would install another target's archive.
         include:
           - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
             runtime: false
           - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
             runtime: false
           - runner: macos-15
+            target: aarch64-apple-darwin
             runtime: false
           - runner: macos-15-intel
+            target: x86_64-apple-darwin
             runtime: false
           - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
             runtime: true
           - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             runtime: true
     runs-on: ${{ matrix.runner }}
     steps:
@@ -39,4 +49,5 @@ jobs:
       - name: Install and exercise the packaged CLI
         env:
           RUNTIME: ${{ matrix.runtime }}
-        run: python3 tools/release_smoke.py --artifacts artifacts --runtime "$RUNTIME"
+          TARGET: ${{ matrix.target }}
+        run: python3 tools/release_smoke.py --artifacts artifacts --runtime "$RUNTIME" --target "$TARGET"

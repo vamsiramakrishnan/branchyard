@@ -26,10 +26,13 @@
 //! - A test can have an actor replaced under its name, with a new UID, just
 //!   before the next call of a given RPC acts on it
 //!   ([`FakeCluster::replace_before`]), to exercise UID fencing.
+//! - `ListWorkers` answers with the workers a test supplies
+//!   ([`FakeCluster::set_workers`]), all in one page.
 //!
 //! Header routing and optional API bearer authentication follow the pinned
-//! upstream contract. Worker scheduling, ingress activation, egress enforcement
-//! and process snapshots are not modelled. This is not cluster evidence.
+//! upstream contract. Scheduling actors onto workers, ingress activation,
+//! egress enforcement and process snapshots are not modelled. This is not
+//! cluster evidence.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)] // ratchet: branchyard-substrate
 use branchyard_support::LockExt as _;
@@ -90,6 +93,9 @@ struct State {
     actors: HashMap<String, Actor>,
     tags: HashMap<String, (pb::Tag, PathBuf)>,
     next_uid: u32,
+    workers: Vec<pb::Worker>,
+    /// `CreateActor` calls received, including refused ones.
+    create_actor_calls: usize,
 }
 
 /// Certificates for a fake cluster that serves TLS.
@@ -401,6 +407,16 @@ impl Control for Service {
         Ok(Response::new(template))
     }
 
+    async fn list_workers(
+        &self,
+        _request: Request<pb::ListWorkersRequest>,
+    ) -> Result<Response<pb::ListWorkersResponse>, Status> {
+        Ok(Response::new(pb::ListWorkersResponse {
+            workers: self.0.lock().workers.clone(),
+            next_page_token: String::new(),
+        }))
+    }
+
     async fn get_actor_template(
         &self,
         request: Request<pb::GetActorTemplateRequest>,
@@ -423,11 +439,12 @@ impl Control for Service {
         &self,
         request: Request<pb::CreateActorRequest>,
     ) -> Result<Response<pb::Actor>, Status> {
+        let mut state = self.0.lock();
+        state.create_actor_calls += 1;
         let mut actor = request
             .into_inner()
             .actor
             .ok_or_else(|| Status::invalid_argument("actor"))?;
-        let mut state = self.0.lock();
         let metadata = actor
             .metadata
             .as_mut()
@@ -976,6 +993,17 @@ impl FakeCluster {
     /// Require this bearer token on every Control RPC; replacing it models rotation.
     pub fn require_api_token(&self, token: impl Into<String>) {
         *self.inner.token.lock_recovering("fake API token") = Some(token.into());
+    }
+
+    /// Answer `ListWorkers` with `workers`, in one page, from now on.
+    pub fn set_workers(&self, workers: Vec<pb::Worker>) {
+        self.inner.lock().workers = workers;
+    }
+
+    /// How many `CreateActor` calls the fake has received since it started,
+    /// counting refused ones.
+    pub fn created_actors(&self) -> usize {
+        self.inner.lock().create_actor_calls
     }
 
     /// The explicit egress policy of an actor, if one was created.

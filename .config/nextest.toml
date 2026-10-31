@@ -1,0 +1,18 @@
+# cargo-nextest, run with `--profile ci` by the jobs of check.yml that run
+# tests (docs/ci-gates.md): a process per test, and every binary's tests in
+# one pool of threads, where `cargo test` runs the binaries one after another.
+
+[profile.ci]
+fail-fast = false
+# A test that passes on a second try is a flake to fix; a retry would turn
+# it green (AGENTS.md).
+retries = 0
+# Reported as slow after 60 seconds, killed and failed as a hang after five
+# periods, so a hung test is named instead of holding the job to its timeout.
+slow-timeout = { period = "60s", terminate-after = 5 }
+failure-output = "immediate-final"
+final-status-level = "slow"
+
+[profile.ci.junit]
+# target/nextest/ci/junit.xml under the workspace, which each test job uploads.
+path = "junit.xml"

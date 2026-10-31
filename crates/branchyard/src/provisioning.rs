@@ -62,8 +62,9 @@ pub(crate) struct Provisioned {
     /// otherwise inherit from this process: taken out of its environment
     /// before `env` is set.
     pub scrub: Vec<String>,
-    /// What to record, if anything was provisioned.
-    pub activity: Option<Activity>,
+    /// What to record: [`Activity::Provisioned`], on every turn, since it
+    /// names the turn's skills whether or not anything else was provisioned.
+    pub activity: Activity,
 }
 
 /// Where per-turn files go, under the state directory.
@@ -321,10 +322,13 @@ pub(crate) struct Access<'a> {
 
 /// What a turn is told beyond its prompt, for its instructions: the
 /// repository knowledge given it, and what its parent assigned it (the
-/// paths it owns, the shared brief; [`crate::assignment`]).
+/// paths it owns, the shared brief; [`crate::assignment`]); and the
+/// repository skills it stages beside the built-in ones
+/// ([`crate::skills::for_turn`]).
 pub(crate) struct Standing<'a> {
     pub knowledge: Option<&'a crate::knowledge::Briefing>,
     pub assignment: Option<&'a str>,
+    pub skills: &'a crate::skills::ForTurn,
 }
 
 /// Plan and apply the turn's provisioning. A failure is the turn's failure
@@ -345,6 +349,7 @@ pub(crate) fn prepare(
     let Standing {
         knowledge,
         assignment,
+        skills,
     } = standing;
     let spec = record.provision.clone().unwrap_or_default();
     let (workspace, home) = placement::guest_paths(record);
@@ -358,7 +363,12 @@ pub(crate) fn prepare(
     } else {
         &capability_home
     };
-    let capabilities = crate::capabilities::stage(&capability_home, capability_guest)?;
+    let repository = match skills {
+        crate::skills::ForTurn::Staged(set) => Some(set),
+        crate::skills::ForTurn::Nothing | crate::skills::ForTurn::Withheld(_) => None,
+    };
+    let capabilities = crate::capabilities::stage(&capability_home, capability_guest, repository)?;
+    let skill_set = crate::skills::skill_set(capabilities.built_in, skills);
     // Branchyard's own server first, then the task's, with the variables
     // they take from secrets. A sandboxed harness gets Branchyard's over
     // HTTP, from the turn's endpoint on this host.
@@ -455,13 +465,7 @@ pub(crate) fn prepare(
     let granted = connectors.map(|c| c.connectors.clone()).unwrap_or_default();
     let knowledge_ids = knowledge.map(|k| k.ids.clone()).unwrap_or_default();
     let permissions = plan.permissions.clone().filter(|p| !p.is_empty());
-    let activity = (plan.auth.is_some()
-        || !files.is_empty()
-        || !env.is_empty()
-        || !plan.unused_secrets.is_empty()
-        || !knowledge_ids.is_empty()
-        || permissions.is_some())
-    .then(|| Activity::Provisioned {
+    let activity = Activity::Provisioned {
         auth: plan.auth.clone(),
         files,
         env,
@@ -469,10 +473,11 @@ pub(crate) fn prepare(
         unused_secrets: plan.unused_secrets.clone(),
         connectors: granted,
         knowledge: knowledge_ids,
+        skills: skill_set,
         // Set once the sandbox has taken the managed settings; see `with_managed`.
         managed: None,
         permissions,
-    });
+    };
     let scrub = spec
         .secrets
         .iter()
@@ -579,29 +584,11 @@ pub(crate) fn write_managed(
 
 /// The turn's `Provisioned` activity with the managed settings the sandbox
 /// took added to it, so one activity records everything provisioning did.
-/// A turn that provisioned nothing else gets one for them alone.
-pub(crate) fn with_managed(
-    activity: Option<Activity>,
-    managed: Option<ManagedWritten>,
-) -> Option<Activity> {
-    let Some(managed) = managed else {
-        return activity;
-    };
-    let mut activity = activity.unwrap_or_else(|| Activity::Provisioned {
-        auth: None,
-        files: Vec::new(),
-        env: Vec::new(),
-        secrets: Vec::new(),
-        unused_secrets: Vec::new(),
-        connectors: Vec::new(),
-        knowledge: Vec::new(),
-        managed: None,
-        permissions: None,
-    });
-    if let Activity::Provisioned { managed: slot, .. } = &mut activity {
+pub(crate) fn with_managed(mut activity: Activity, managed: Option<ManagedWritten>) -> Activity {
+    if let (Activity::Provisioned { managed: slot, .. }, Some(managed)) = (&mut activity, managed) {
         *slot = Some(managed);
     }
-    Some(activity)
+    activity
 }
 
 #[cfg(test)]
@@ -635,8 +622,8 @@ mod tests {
         );
     }
 
-    /// The turn's `Provisioned` activity takes the managed settings, keeps
-    /// what it had, and a turn with nothing else gets one for them alone.
+    /// The turn's `Provisioned` activity takes the managed settings and
+    /// keeps what it had.
     #[test]
     fn managed_settings_join_the_provisioned_activity() {
         let managed = ManagedWritten {
@@ -645,13 +632,6 @@ mod tests {
             bypass_disabled: true,
             telemetry_off: false,
         };
-        assert_eq!(with_managed(None, None), None);
-        let alone = with_managed(None, Some(managed.clone()));
-        assert!(matches!(
-            alone,
-            Some(Activity::Provisioned { ref files, managed: Some(ref m), .. })
-                if files.is_empty() && *m == managed
-        ));
         let before = Activity::Provisioned {
             auth: Some("api-key".into()),
             files: vec![".claude/settings.json".into()],
@@ -660,17 +640,18 @@ mod tests {
             unused_secrets: Vec::new(),
             connectors: Vec::new(),
             knowledge: Vec::new(),
+            skills: crate::skills::SkillSet::default(),
             managed: None,
             permissions: None,
         };
-        match with_managed(Some(before.clone()), Some(managed.clone())) {
-            Some(Activity::Provisioned {
+        match with_managed(before.clone(), Some(managed.clone())) {
+            Activity::Provisioned {
                 auth,
                 files,
                 env,
                 managed: Some(m),
                 ..
-            }) => {
+            } => {
                 assert_eq!(auth.as_deref(), Some("api-key"));
                 assert_eq!(files, [".claude/settings.json"]);
                 assert_eq!(env, ["ANTHROPIC_MODEL"]);
@@ -678,10 +659,7 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        assert!(matches!(
-            with_managed(Some(before.clone()), None),
-            Some(Activity::Provisioned { managed: None, .. })
-        ));
+        assert_eq!(with_managed(before.clone(), None), before);
     }
 
     #[test]

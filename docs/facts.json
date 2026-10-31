@@ -65,11 +65,11 @@
     }
   },
   "tests": {
-    "total": 3074,
+    "total": 3186,
     "ignored": 34,
     "by_crate": {
       "branchyard": {
-        "tests": 953,
+        "tests": 986,
         "ignored": 17
       },
       "branchyard-bridge": {
@@ -77,11 +77,11 @@
         "ignored": 0
       },
       "branchyard-cli": {
-        "tests": 735,
+        "tests": 755,
         "ignored": 3
       },
       "branchyard-client": {
-        "tests": 30,
+        "tests": 31,
         "ignored": 0
       },
       "branchyard-config": {
@@ -101,7 +101,7 @@
         "ignored": 0
       },
       "branchyard-mcp": {
-        "tests": 39,
+        "tests": 41,
         "ignored": 0
       },
       "branchyard-microsandbox": {
@@ -109,7 +109,7 @@
         "ignored": 8
       },
       "branchyard-provision": {
-        "tests": 181,
+        "tests": 190,
         "ignored": 0
       },
       "branchyard-qualify": {
@@ -129,15 +129,15 @@
         "ignored": 0
       },
       "branchyard-server": {
-        "tests": 430,
+        "tests": 461,
         "ignored": 1
       },
       "branchyard-setup": {
-        "tests": 89,
+        "tests": 90,
         "ignored": 0
       },
       "branchyard-substrate": {
-        "tests": 64,
+        "tests": 77,
         "ignored": 5
       },
       "branchyard-support": {
@@ -149,7 +149,7 @@
         "ignored": 0
       },
       "branchyard-testkit": {
-        "tests": 21,
+        "tests": 23,
         "ignored": 0
       },
       "branchyard-wire": {
@@ -163,7 +163,7 @@
     }
   },
   "http": {
-    "route_count": 123,
+    "route_count": 124,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
@@ -177,6 +177,7 @@
       "/v1/app/push",
       "/v1/app/push/subscriptions",
       "/v1/app/push/test",
+      "/v1/execution-presets",
       "/v1/harnesses",
       "/v1/inventory",
       "/v1/operations",

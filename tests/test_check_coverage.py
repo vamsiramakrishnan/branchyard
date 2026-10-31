@@ -63,6 +63,16 @@ class Parse(unittest.TestCase):
         text = f"SF:{ROOT}/{A}\nDA:1,0\nDA:1,3\nDA:2,0\nend_of_record\n"
         self.assertEqual(check_coverage.parse_lcov(text, ROOT), {A: [2, 1]})
 
+    def test_shard_reports_joined_as_ci_joins_them_count_a_line_hit_by_any(self):
+        # CI's coverage shards each report every file, and cargo llvm-cov ends a report without a
+        # newline; `coverage` ends each report's last line before joining them.
+        first = lcov(**{A: [1, 0, 0], B: [0]}).rstrip("\n")
+        second = lcov(**{A: [0, 2, 0], B: [0]}).rstrip("\n")
+        joined = "".join(report + "\n" for report in (first, second))
+        self.assertEqual(check_coverage.parse_lcov(joined, ROOT), {A: [3, 2], B: [1, 0]})
+        # Joined bare, the first report's last end_of_record swallows the second's first SF: line.
+        self.assertNotEqual(check_coverage.parse_lcov(first + second, ROOT), {A: [3, 2], B: [1, 0]})
+
     def test_crate_percentages_sum_a_crates_files(self):
         files = {A: [2, 1], B: [2, 2], C: [4, 0]}
         pct = check_coverage.crate_percentages(files)

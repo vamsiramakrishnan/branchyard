@@ -5,6 +5,7 @@ use serde::Serialize;
 use tonic::{Code, Status};
 
 use crate::actors::{resource_name, template_reference, Actors, Error};
+use crate::provider::runtime;
 use crate::template::{
     bridge_template_with, BridgeOptions, BridgeTemplate, BRIDGE_PORT, IDENTITY_DIR,
 };
@@ -84,22 +85,43 @@ pub struct TemplateInspection {
     pub public_key: String,
 }
 
+pub(crate) const SIGNER_MISMATCH: &str =
+    "the template's bridge verifying key does not match the configured signing key";
+
+/// Why reading the configured template failed, before a caller picks its error type.
+pub(crate) enum TemplateFailure {
+    /// The `GetActorTemplate` call failed.
+    Control(Error),
+    /// Control returned a template this client cannot use.
+    Unusable(ProviderError),
+    /// The template's bridge verifying key is not the configured signer's.
+    SignerMismatch,
+}
+
 impl SubstrateProvider {
     /// Read and validate the configured template through authenticated Control.
     pub fn inspect_template(&self) -> Result<TemplateInspection, ProviderError> {
+        self.read_template().map_err(|failure| match failure {
+            TemplateFailure::Control(error) => runtime(error),
+            TemplateFailure::Unusable(error) => error,
+            TemplateFailure::SignerMismatch => ProviderError::Invalid(SIGNER_MISMATCH.into()),
+        })
+    }
+
+    /// One `GetActorTemplate` call, then the checks every inspection makes.
+    pub(crate) fn read_template(&self) -> Result<TemplateInspection, TemplateFailure> {
         let template = self.config().template.clone();
-        let found = self.block(async move |actors| actors.template(&template).await)?;
-        let inspection = inspect(&found)?;
+        let found = self
+            .run(async move |actors| actors.template(&template).await)
+            .map_err(TemplateFailure::Control)?;
+        let inspection = inspect(&found).map_err(TemplateFailure::Unusable)?;
         if self
             .config()
             .signer
             .as_ref()
             .is_some_and(|signer| signer.public_key() != inspection.public_key)
         {
-            return Err(ProviderError::Invalid(
-                "the template's bridge verifying key does not match the configured signing key"
-                    .into(),
-            ));
+            return Err(TemplateFailure::SignerMismatch);
         }
         Ok(inspection)
     }

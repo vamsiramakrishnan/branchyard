@@ -229,6 +229,15 @@ pub enum Command {
         #[command(subcommand)]
         action: crate::recipe_cmd::RecipeAction,
     },
+    /// The skills new branches run with: list them, trust the repository's
+    #[command(display_order = 117, subcommand_required = true, after_help = SKILLS_EXAMPLES)]
+    Skills {
+        /// Print JSON
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        action: SkillsAction,
+    },
     /// Remove a branch and free its name
     ///
     /// Removes the branch's worktree and record. A removed child leaves its parent's
@@ -1009,6 +1018,9 @@ pub enum Command {
         /// Inspect readiness without installing harnesses or starting services
         #[arg(long)]
         plan: bool,
+        /// Also list the Substrate workers to check capacity (read-only; no actor, no model)
+        #[arg(long)]
+        smoke: bool,
         /// Make the installs the [harnesses] policy would ask about, without asking
         #[arg(long)]
         yes: bool,

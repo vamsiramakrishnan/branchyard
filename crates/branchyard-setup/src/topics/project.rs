@@ -2048,9 +2048,9 @@ mod tests {
         );
         assert_eq!(crate::probe::label_in(r#"{"k": {"nested": 1}}"#, "k"), None);
 
-        // Logged out Claude Code is not suggested; logged in Codex is.
+        // Logged out Claude Code is not suggested; installed Antigravity leads.
         let state = resolve(&|a| questions(&facts, a), &BTreeMap::new(), true);
-        assert_eq!(state.answers["harness"], json!("codex"));
+        assert_eq!(state.answers["harness"], json!("antigravity"));
         // Not isolated: offered, not chosen, and nothing recorded.
         assert_eq!(state.answers["logins"], json!([]));
         let config = config_of(&facts, &state.answers, &probe);
@@ -2093,6 +2093,57 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_leads_the_suggestion_and_gemini_cli_is_never_suggested() {
+        let login = |state: &str| crate::probe::HarnessLogin {
+            state: state.into(),
+            evidence: "verified".into(),
+            detail: String::new(),
+            label: String::new(),
+        };
+        let mut facts = Facts::gather(&FakeProbe::typical());
+        for fact in &mut facts.harnesses {
+            fact.installed = fact.harness == "gemini-cli";
+            fact.login = Some(login("logged_in"));
+        }
+        assert_eq!(
+            facts.preferred_harness(),
+            "claude-code",
+            "gemini-cli alone is not suggested"
+        );
+        for fact in &mut facts.harnesses {
+            fact.installed = true;
+        }
+        assert_eq!(facts.preferred_harness(), "antigravity");
+        let question = &questions(&facts, &BTreeMap::new())
+            .into_iter()
+            .find(|q| q.id == "harness")
+            .unwrap();
+        let order: Vec<&str> = question
+            .choices
+            .iter()
+            .chain(&question.more_choices)
+            .filter_map(|c| c.value.as_str())
+            .collect();
+        assert_eq!(order.first(), Some(&"antigravity"));
+        let at = |h: &str| order.iter().position(|o| *o == h);
+        assert!(
+            at("gemini-cli") > at("codex"),
+            "selectable, after the others: {order:?}"
+        );
+        assert!(at("gemini-cli") > at("claude-code"), "{order:?}");
+        for fact in &mut facts.harnesses {
+            if fact.harness == "antigravity" {
+                fact.login = Some(login("logged_out"));
+            }
+        }
+        assert_eq!(
+            facts.preferred_harness(),
+            "claude-code",
+            "a logged-out agy is not suggested"
+        );
+    }
+
+    #[test]
     fn the_inventory_default_can_be_written_as_the_fleet_default() {
         let probe = machine();
         let facts = Facts::gather(&probe);
@@ -2103,7 +2154,7 @@ mod tests {
         assert!(
             plan.notes
                 .iter()
-                .any(|n| n.contains("route among the harnesses logged in when they run (now codex, antigravity, gemini-cli)")),
+                .any(|n| n.contains("route among the harnesses logged in when they run (now antigravity, codex, gemini-cli)")),
             "{:?}",
             plan.notes
         );

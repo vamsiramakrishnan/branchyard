@@ -373,7 +373,7 @@ impl std::fmt::Debug for SubstrateProvider {
     }
 }
 
-fn runtime(error: Error) -> ProviderError {
+pub(crate) fn runtime(error: Error) -> ProviderError {
     ProviderError::Runtime(error.to_string())
 }
 
@@ -414,8 +414,16 @@ impl SubstrateProvider {
         &self,
         call: impl AsyncFnOnce(&mut Actors) -> Result<T, Error>,
     ) -> Result<T, ProviderError> {
+        self.run(call).map_err(runtime)
+    }
+
+    /// [`SubstrateProvider::block`], keeping the call's own error.
+    pub(crate) fn run<T>(
+        &self,
+        call: impl AsyncFnOnce(&mut Actors) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let mut actors = self.actors.clone();
-        self.runtime.block_on(call(&mut actors)).map_err(runtime)
+        self.runtime.block_on(call(&mut actors))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Live>> {

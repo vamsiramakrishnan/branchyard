@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use branchyard_harness::{Driver, Open};
 use branchyard_recipe::RecipeProvider;
@@ -56,7 +57,7 @@ use crate::providers::microsandbox;
 use crate::providers::recipe::recipe_provider;
 use crate::providers::substrate::substrate_signed;
 use crate::providers::{self, ProviderKind};
-use crate::snapshots::{self, SandboxEvent, SandboxOrigin};
+use crate::snapshots::{self, Placed, SandboxEvent, SandboxOrigin, Transfer};
 use crate::state::{Begun, Fence, Record, SandboxKind};
 use crate::{
     harness, Activity, Error, Provider, RecipeOptions, SandboxOptions, SubstrateOptions, Yard,
@@ -226,6 +227,14 @@ impl Remote {
         }
     }
 
+    /// The provider's name in events: `substrate` or `recipe`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Remote::Substrate(_) => "substrate",
+            Remote::Recipe(_) => "recipe",
+        }
+    }
+
     /// How the transfer reaches sandbox `name`.
     fn guest<'a>(&'a self, name: &'a str) -> Result<Box<dyn Guest + 'a>, String> {
         match self {
@@ -241,8 +250,6 @@ impl Remote {
 /// How [`Placement::copied`] makes and reaches its sandbox.
 struct Copied<'a> {
     remote: Remote,
-    /// The provider's name in events: `substrate` or `recipe`.
-    kind: &'static str,
     /// A fresh sandbox's spec.
     spec: SandboxSpec,
     /// The `sandbox` step's intent for a sandbox's name.
@@ -269,9 +276,10 @@ struct Actor {
 
 impl Actor {
     /// Bring the worktree and home back. Returns what went wrong, if
-    /// anything.
-    fn bring_back(&mut self) -> Vec<String> {
+    /// anything, and the home's copy when it came back.
+    fn bring_back(&mut self) -> (Vec<String>, Option<Transfer>) {
         let mut warnings = Vec::new();
+        let mut home_pull = None;
         let noun = self.provider.noun();
         match self.provider.guest(&self.name) {
             Ok(endpoint) => {
@@ -291,11 +299,18 @@ impl Actor {
                     }
                 }
                 if let Some((host, guest)) = &self.home {
-                    if let Err(error) = transfer::pull_tree(endpoint.as_ref(), guest, host) {
-                        warnings.push(format!(
+                    let pulling = Instant::now();
+                    match transfer::pull_tree(endpoint.as_ref(), guest, host) {
+                        Ok(bytes) => {
+                            home_pull = Some(Transfer {
+                                bytes,
+                                ms: ms_since(pulling),
+                            });
+                        }
+                        Err(error) => warnings.push(format!(
                             "could not bring the home directory back from {noun} {}: {error}",
                             self.name
-                        ));
+                        )),
                     }
                 }
             }
@@ -309,7 +324,7 @@ impl Actor {
             Err(_) => {}
         }
         self.pushed = None;
-        warnings
+        (warnings, home_pull)
     }
 
     /// Bring the worktree and home back, then delete the actor. Returns
@@ -318,7 +333,7 @@ impl Actor {
         if std::mem::replace(&mut self.released, true) {
             return Vec::new();
         }
-        let mut warnings = self.bring_back();
+        let (mut warnings, _) = self.bring_back();
         if let Err(error) = self.provider.provider().destroy(&self.name) {
             warnings.push(match &self.provider {
                 Remote::Substrate(_) => format!("could not delete actor {}: {error}", self.name),
@@ -495,6 +510,7 @@ impl Placement {
                 provider: "microsandbox".into(),
                 sandbox: acquired.name.clone(),
                 origin: acquired.origin,
+                placed: None,
             }),
             egress: None,
             writable: None,
@@ -524,7 +540,6 @@ impl Placement {
             plan,
             Copied {
                 remote: Remote::Substrate(Box::new(provider)),
-                kind: "substrate",
                 spec: SandboxSpec::new(actor_name(&record.info.name)?),
                 // Journaled before the actor exists, so recovery can delete it.
                 intent: Box::new(
@@ -553,7 +568,6 @@ impl Placement {
             plan,
             Copied {
                 remote: Remote::Recipe(recipe_provider(yard, options)),
-                kind: "recipe",
                 spec: SandboxSpec::new(sandbox_name(&record.info.name)?),
                 // Journaled before `create` runs, so recovery can destroy it.
                 intent: Box::new(
@@ -567,7 +581,8 @@ impl Placement {
     }
 
     /// A sandbox the worktree and home are copied into, and back from when
-    /// the turn ends.
+    /// the turn ends. Its `started` event records how long it took to be
+    /// ready and what the copies in sent ([`Placed`]).
     fn copied(
         yard: &Yard,
         record: &Record,
@@ -588,6 +603,8 @@ impl Placement {
                 return Err(copied.failure());
             }
         }
+        // The sandbox's readiness, not this host's copying of inputs.
+        let began = Instant::now();
         let home = record
             .home
             .clone()
@@ -643,6 +660,7 @@ impl Placement {
                 )
             }
         };
+        let ready_ms = ms_since(began);
         let name = acquired
             .as_ref()
             .map_or_else(|_| spec.name.clone(), |a| a.name.clone());
@@ -688,7 +706,7 @@ impl Placement {
         let service = register_sandbox(yard, record, &name);
         let workdir = PathBuf::from(&how.workdir);
         let guest_home = PathBuf::from(&how.home);
-        let pushed = (|| -> Result<Pushed, String> {
+        let pushed = (|| -> Result<(Pushed, Transfer), String> {
             let endpoint = actor.provider.guest(&name)?;
             if let Some(capture) = &actor.capture {
                 capture
@@ -710,37 +728,56 @@ impl Placement {
             };
             cleared.map_err(|e| format!("could not clear {noun} {name} for this turn: {e}"))?;
             let stage = staging(yard, &name);
-            let pushed = transfer::push_staged(
+            let pushing = Instant::now();
+            let (pushed, bytes) = transfer::push_staged(
                 endpoint.as_ref(),
                 &record.info.worktree,
                 &workdir,
                 Some(&stage),
             )
             .map_err(|e| format!("could not copy the worktree into {noun} {name}: {e}"))?;
-            Ok(pushed)
+            let sent = Transfer {
+                bytes,
+                ms: ms_since(pushing),
+            };
+            Ok((pushed, sent))
         })();
-        match pushed {
-            Ok(pushed) => actor.pushed = Some(pushed),
+        let worktree_push = match pushed {
+            Ok((pushed, sent)) => {
+                actor.pushed = Some(pushed);
+                sent
+            }
             Err(error) => return fail(&mut actor, error),
-        }
+        };
         let home_sent = actor
             .provider
             .guest(&name)
             .and_then(|endpoint| {
-                transfer::push_tree(endpoint.as_ref(), &home, &guest_home)
-                    .map_err(|e| e.to_string())
+                let pushing = Instant::now();
+                let bytes = transfer::push_tree(endpoint.as_ref(), &home, &guest_home)
+                    .map_err(|e| e.to_string())?;
+                Ok(Transfer {
+                    bytes,
+                    ms: ms_since(pushing),
+                })
             })
             .map_err(|e| format!("could not copy the home directory into {noun} {name}: {e}"));
-        if let Err(error) = home_sent {
-            return fail(&mut actor, error);
-        }
+        let home_push = match home_sent {
+            Ok(sent) => sent,
+            Err(error) => return fail(&mut actor, error),
+        };
         actor.home = Some((home, guest_home));
         Ok(Placement {
             cwd: how.workdir,
             started: Some(SandboxEvent::Started {
-                provider: how.kind.into(),
+                provider: actor.provider.kind().into(),
                 sandbox: name,
                 origin: acquired.origin,
+                placed: Some(Placed {
+                    ready_ms,
+                    worktree_push,
+                    home_push,
+                }),
             }),
             egress: None,
             writable: None,
@@ -928,8 +965,15 @@ impl Placement {
                 if std::mem::replace(&mut actor.released, true) {
                     return Vec::new();
                 }
-                let warnings = actor.bring_back();
+                let (warnings, home_pull) = actor.bring_back();
                 let mut said: Vec<Activity> = warnings.into_iter().map(Activity::Warning).collect();
+                if let Some(home_pull) = home_pull {
+                    said.push(snapshots::event(SandboxEvent::Returned {
+                        provider: actor.provider.kind().into(),
+                        sandbox: actor.name.clone(),
+                        home_pull,
+                    }));
+                }
                 said.extend(snapshots::park(
                     yard,
                     record,
@@ -973,6 +1017,11 @@ impl Drop for Placement {
     fn drop(&mut self) {
         self.discard();
     }
+}
+
+/// Milliseconds since `began`, on the monotonic clock.
+fn ms_since(began: Instant) -> u64 {
+    u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// `HOME` and the passed variables, each of which must be set here.

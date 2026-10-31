@@ -24,6 +24,15 @@ the image identity, observed resource limits, versions and source digests.
 Not done: browser acceptance, GKE renderer qualification, model turns or
 production load testing.
 
+Status, 30 October 2026: hermetic. A table preview warned "Truncated columns to
+100" for every XLSX sheet, however narrow, because read-only rows were padded to
+101 cells before the check. `tests/test_artifact_previews.py` now covers a
+three-column workbook, a styled empty cell and a value in column 150, a value in
+column 101, a stored dimension that understates the data, and CSV rows padded
+with empty fields. With Python 3.12.3 and openpyxl 3.1.5 it failed 5 tests on
+the module before the change and passed 19, with 1 skipped, after it. Not done:
+other spreadsheet writers, and a live renderer on GCE or GKE.
+
 ## Open a preview
 
 An authorized client requests:
@@ -64,6 +73,11 @@ Query options apply to both requests:
 The table response includes columns, rows, selected sheet, next offset and
 warnings. The page response includes a PNG basename, dimensions, selected page,
 total page count and warnings. Use the same options when requesting its image.
+A table shows at most 100 columns. The warning "Truncated columns to 100"
+means a cell beyond column 100 holds a value. Empty cells there do not count:
+trailing empty CSV fields, or workbook cells that carry only a style. An XLSX
+sheet is read row by row at each row's own width, so a stored dimension that
+understates the used range hides nothing.
 CSV and XLSX values are shown without executing formulas. XLSX print preview,
 DOCX pages and PPTX slides use the native rendering helper; PDF and raster
 images use the same bounded page response.

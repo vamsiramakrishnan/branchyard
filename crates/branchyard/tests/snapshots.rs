@@ -133,10 +133,11 @@ fn a_kept_sandbox_is_resumed_across_turns_with_a_snapshot_per_checkpoint() {
             &events[0],
             SandboxEvent::Started {
                 origin: SandboxOrigin::Fresh { reason: None },
+                placed: None,
                 ..
             }
         ),
-        "{events:?}"
+        "a mounted sandbox copies nothing in: {events:?}"
     );
     assert!(
         matches!(&events[1], SandboxEvent::Kept { .. }),
@@ -279,6 +280,7 @@ fn fork_at_a_checkpoint_branches_from_its_snapshot_with_its_own_worktree() {
         provider: "microsandbox".into(),
         sandbox: child,
         origin: origins(&fork)[0].clone(),
+        placed: None,
     }
     .describe();
     assert_eq!(

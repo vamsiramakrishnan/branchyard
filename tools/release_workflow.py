@@ -27,43 +27,59 @@ def require_smoke(text: str) -> str:
     return text[:start] + host + text[end:]
 
 
+# What a release build reads beyond the crates: a pull request that changes one runs `dist plan`,
+# and a push of one to main runs every build, the image and the smoke tests as a rehearsal.
+RELEASE_INPUTS = (
+    ".github/workflows/release*.yml",
+    ".github/workflows/agy-image.yml",
+    ".github/dist-build-setup.yml",
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+    "deploy/Dockerfile.agy",
+    "deploy/agy-release.json",
+    "dist-workspace.toml",
+    "install.sh",
+    "packaging/**",
+    "sdk/python/pyproject.toml",
+    "tools/fetch_agy.py",
+    "tools/package.py",
+    "tools/release*.py",
+    "tools/homebrew_formula.py",
+)
+# dist builds on every event but a pull request (and on one only in its "upload" mode); `publishing`
+# no longer means "not a pull request" here, so the build jobs say so themselves.
+UPLOAD_MODE = "fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload'"
+DIST_BUILDS = f"needs.plan.outputs.publishing == 'true' || {UPLOAD_MODE}"
+BUILDS = f"github.event_name != 'pull_request' || {UPLOAD_MODE}"
+
+
+def triggers(text: str) -> str:
+    """Run on a version tag, on a pull request or a push to main that changes a release input,
+    and on request; path filters do not apply to a pushed tag."""
+    paths = "".join(f"      - {path}\n" for path in RELEASE_INPUTS)
+    block = (
+        "on:\n"
+        f"  pull_request:\n    paths:\n{paths}"
+        "  push:\n    branches: [main]\n    tags:\n      - 'v[0-9]+.[0-9]+.[0-9]+*'\n"
+        f"    paths:\n{paths}"
+        "\n"
+        "  workflow_dispatch:\n"
+        "    inputs:\n"
+        "      draft:\n"
+        "        description: Draft a release only when running on a version tag\n"
+        "        type: boolean\n"
+        "        default: false\n"
+    )
+    start = text.index("\non:\n") + 1
+    end = text.index("\njobs:\n", start)
+    return text[:start] + block + text[end:]
+
+
 def rehearsals(text: str) -> str:
     """Preserve tag drafts and complete branch/PR rehearsals without external writes."""
     text = text.replace('  "contents": "write"', '  "contents": "read"', 1)
-    text = text.replace("      - '**[0-9]+.[0-9]+.[0-9]+*'", "      - 'v[0-9]+.[0-9]+.[0-9]+*'")
-    trigger = "\n  workflow_dispatch:\n"
-    if trigger not in text:
-        where = text.index("\njobs:\n")
-        text = (
-            text[:where]
-            + """
-  workflow_dispatch:
-    inputs:
-      draft:
-        description: Draft a release only when running on a version tag
-        type: boolean
-        default: false
-"""
-            + text[where:]
-        )
-    if "  pull_request:\n    paths:" not in text:
-        text = text.replace(
-            "  pull_request:\n",
-            """  pull_request:
-    paths:
-      - .github/workflows/release*.yml
-      - .github/workflows/agy-image.yml
-      - .github/dist-build-setup.yml
-      - dist-workspace.toml
-      - install.sh
-      - packaging/**
-      - sdk/python/pyproject.toml
-      - tools/package.py
-      - tools/release*.py
-      - tools/homebrew_formula.py
-""",
-            1,
-        )
+    text = triggers(text)
     text = text.replace(
         "${{ !github.event.pull_request && github.ref_name || '' }}",
         "${{ github.ref_type == 'tag' && github.ref_name || '' }}",
@@ -76,6 +92,7 @@ def rehearsals(text: str) -> str:
         "publishing: ${{ !github.event.pull_request }}",
         "publishing: ${{ github.ref_type == 'tag' && (github.event_name == 'push' || inputs.draft == true) }}",
     )
+    text = text.replace(DIST_BUILDS, BUILDS)
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
         if line.startswith("          dist ${{") and "> plan-dist-manifest.json" in line:

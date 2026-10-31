@@ -119,7 +119,7 @@ retrying its request. `workspace_messages(workspace_id, session_id, after=cursor
 next cursor. Sending, steering and explicitly resuming use `send_workspace_message`; the server retains control
 of harness installation, provider placement, native authentication and permissions.
 
-Source uploads send original bytes with `X-Source-Title`, `X-Workspace-Revision` and the declared media type.
+Source uploads send original bytes with the title in `X-Source-Title-Encoded` (RFC 8187, any Unicode title) and an ASCII copy in `X-Source-Title`, `X-Workspace-Revision` and the declared media type.
 `read_workspace_source` and `read_workspace_artifact` return authenticated bytes. Source and artifact preview
 methods use the same bounded options as repository previews:
 

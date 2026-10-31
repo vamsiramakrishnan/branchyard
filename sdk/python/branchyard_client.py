@@ -437,6 +437,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "unsupported_media_type": InvalidRequestError,
     "body_too_large": InvalidRequestError,
     "invalid_pairing_code": InvalidRequestError,
+    "invalid_source_title": InvalidRequestError,
     "branch_busy": BranchBusyError,
     "running": RunningError,
     "not_running": NotRunningError,
@@ -1334,6 +1335,13 @@ class Client:
         wait for initialization before starting sessions or uploading sources."""
         return self._operation("/v1/workspaces", {"project_id": project, "title": title}, key)
 
+    def execution_presets(self, workspace: Optional[str] = None) -> Record:
+        """Operator execution presets offered to this tenant: `required` and
+        `presets`, each with its harnesses and readiness. With `workspace`,
+        the caller must be a member and each preset says in `can_start`
+        whether its role can start a session there."""
+        return Record(self.get("/v1/execution-presets", workspace=workspace))
+
     def workspace_sessions(self, workspace: str) -> list[Record]:
         """Named native attempts with their current result and provenance."""
         return [Record(value) for value in self.get(self._workspace(workspace, "/sessions")).get("sessions", [])]
@@ -1345,6 +1353,7 @@ class Client:
         prompt: str,
         *,
         harness: str,
+        preset: Optional[str] = None,
         provider: Optional[JSON] = None,
         unapproved_tools: Optional[bool] = None,
         model: Optional[str] = None,
@@ -1362,7 +1371,9 @@ class Client:
         Omitted policy retains the server's deny default. Sources and review
         artifacts are immutable IDs; candidate is an exact workspace commit.
         Provisioning names operator-known secrets and connector grants.
-        Provider choices retain the server operator's backend policy.
+        Provider choices retain the server operator's backend policy. A
+        preset from execution_presets() supplies the provider and secrets
+        instead; it is refused beside provider or provision.
         Unapproved tools require explicit acknowledgment and operator permission;
         reviewers always require enforced tool approvals."""
         return self._operation(
@@ -1371,6 +1382,7 @@ class Client:
                 "name": name,
                 "prompt": prompt,
                 "harness": harness,
+                "preset": preset,
                 "provider": provider,
                 "unapproved_tools": unapproved_tools,
                 "model": model,
@@ -1491,8 +1503,11 @@ class Client:
         media_type: str = "application/octet-stream",
         key: Optional[str] = None,
     ) -> Record:
-        """Upload original bytes at revision, retaining the server's media type
-        and title header contract. This does not read any client filesystem path."""
+        """Upload original bytes at revision under title, which may be any
+        Unicode text: it travels in X-Source-Title-Encoded as an RFC 8187
+        value, beside an ASCII copy in X-Source-Title (each other character
+        `_`) that a server without the encoded header reads instead. This does
+        not read any client filesystem path."""
         return Record(
             self.request(
                 "POST",
@@ -1500,7 +1515,8 @@ class Client:
                 data,
                 key=key or new_key(),
                 headers={
-                    "X-Source-Title": title,
+                    "X-Source-Title-Encoded": "UTF-8''" + urllib.parse.quote(title, safe="!#$&+^`|"),
+                    "X-Source-Title": re.sub(r"[^\x20-\x7e]", "_", title),
                     "X-Workspace-Revision": str(revision),
                     "Content-Type": media_type,
                 },

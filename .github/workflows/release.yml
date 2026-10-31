@@ -44,16 +44,40 @@ on:
       - .github/workflows/release*.yml
       - .github/workflows/agy-image.yml
       - .github/dist-build-setup.yml
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - deploy/Dockerfile.agy
+      - deploy/agy-release.json
       - dist-workspace.toml
       - install.sh
       - packaging/**
       - sdk/python/pyproject.toml
+      - tools/fetch_agy.py
       - tools/package.py
       - tools/release*.py
       - tools/homebrew_formula.py
   push:
+    branches: [main]
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
+    paths:
+      - .github/workflows/release*.yml
+      - .github/workflows/agy-image.yml
+      - .github/dist-build-setup.yml
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - deploy/Dockerfile.agy
+      - deploy/agy-release.json
+      - dist-workspace.toml
+      - install.sh
+      - packaging/**
+      - sdk/python/pyproject.toml
+      - tools/fetch_agy.py
+      - tools/package.py
+      - tools/release*.py
+      - tools/homebrew_formula.py
 
   workflow_dispatch:
     inputs:
@@ -121,7 +145,7 @@ jobs:
     # Let the initial task tell us to not run (currently very blunt)
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (github.event_name != 'pull_request' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -163,6 +187,7 @@ jobs:
         uses: "Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a"
         with:
           "cache-on-failure": true
+          "save-if": "${{ github.ref == 'refs/heads/main' }}"
           "shared-key": "dist-${{ join(matrix.targets, '-') }}"
       - name: "Install Linux build dependencies"
         if: "runner.os == 'Linux'"
@@ -231,7 +256,7 @@ jobs:
   custom-agy-image:
     needs:
       - plan
-    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
+    if: ${{ github.event_name != 'pull_request' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' }}
     uses: ./.github/workflows/agy-image.yml
     with:
       publish: ${{ needs.plan.outputs.publishing == 'true' }}

@@ -791,6 +791,9 @@ fn run(
     }
     // What its parent assigned it: the paths it owns, the shared brief.
     let assignment = crate::assignment::for_turn(turn.yard, record);
+    // The repository skills fixed for the branch, read again from their
+    // commit: never from the worktree its turns change.
+    let skills = crate::skills::for_turn(turn.yard.root(), record.skills.as_ref());
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
@@ -799,6 +802,7 @@ fn run(
         crate::provisioning::Standing {
             knowledge: Some(&briefing),
             assignment: assignment.as_deref(),
+            skills: &skills,
         },
         crate::provisioning::Access {
             policy: &bounds.policy,
@@ -818,9 +822,7 @@ fn run(
     let mut placement = match Placement::prepare(turn.yard, record, fence, &turn.sandbox) {
         Ok(placement) => placement,
         Err(reason) => {
-            if let Some(activity) = provisioned.activity {
-                recorder.record(activity)?;
-            }
+            recorder.record(provisioned.activity)?;
             driven.end = End::failed(reason);
             return Ok(driven);
         }
@@ -843,9 +845,10 @@ fn run(
         Ok(managed) => (managed, None),
         Err(why) => (None, Some(why)),
     };
-    if let Some(activity) = crate::provisioning::with_managed(provisioned.activity, managed) {
-        recorder.record(activity)?;
-    }
+    recorder.record(crate::provisioning::with_managed(
+        provisioned.activity,
+        managed,
+    ))?;
     if let Some(why) = managed_failure {
         recorder.record(Activity::Warning(why))?;
     }

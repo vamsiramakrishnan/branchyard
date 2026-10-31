@@ -2,6 +2,8 @@
 pub(crate) mod auth;
 mod collaboration;
 mod execution;
+mod harness_input;
+mod presets;
 mod previews;
 mod quotas;
 mod routes;
@@ -11,6 +13,7 @@ pub(crate) mod services;
 pub(crate) mod sources;
 #[cfg(test)]
 mod tests;
+mod titles;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
@@ -21,6 +24,7 @@ use crate::console_store::{Collection, Mutation, Record};
 use crate::error::ApiError;
 
 pub(crate) use execution::execute;
+pub(crate) use presets::Projection;
 pub(crate) use routes::{knowledge_allowed, router};
 pub(crate) use runtime::operation_value;
 pub use runtime::ConsoleWork;

@@ -104,11 +104,7 @@ async fn upload(
             "source must be nonempty and within the configured upload limit",
         ));
     }
-    let title = headers
-        .get("x-source-title")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty() && v.len() <= 512)
-        .ok_or_else(|| ApiError::bad_request("X-Source-Title is required, at most 512 bytes"))?;
+    let title = super::titles::upload_title(&headers)?;
     let media = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -167,7 +163,7 @@ async fn upload(
         },
     }
 }
-fn content(data: Vec<u8>, media: &str) -> Result<Response, ApiError> {
+fn content(data: Vec<u8>, media: &str, name: &str) -> Result<Response, ApiError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -177,7 +173,7 @@ fn content(data: Vec<u8>, media: &str) -> Result<Response, ApiError> {
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_static("attachment"),
+        super::titles::attachment(name)?,
     );
     headers.insert(
         "x-content-type-options",
@@ -205,7 +201,7 @@ async fn download(
     Extension(caller): Extension<Caller>,
 ) -> Result<Response, ApiError> {
     let (metadata, original) = source_original(&app, &caller, &wid, &sid)?;
-    content(original, &metadata.media_type)
+    content(original, &metadata.media_type, &metadata.title)
 }
 
 pub(super) fn selection(
@@ -324,6 +320,9 @@ pub(super) fn prepare(
     repo: &RepoState,
     options: &mut branchyard::TaskOptions,
 ) -> Result<Option<String>, ApiError> {
+    let Some(index) = index(&workspace.id, session) else {
+        return Ok(None);
+    };
     let mut paths = Vec::new();
     let mut inputs = Vec::new();
     if let Some(sources) = session.body["sources"].as_array() {
@@ -365,10 +364,6 @@ pub(super) fn prepare(
                 "digest":{"algorithm":"blake3","value":verified.digest}}));
         }
     }
-    if paths.is_empty() {
-        return Ok(None);
-    }
-    let index = format!(".console-inputs/{}/{}/INDEX.md", workspace.id, session.id);
     write_input(repo.yard.root(), &index, &input_index(inputs)?)?;
     paths.push(index.clone());
     let spec = options.workspace.get_or_insert_with(Default::default);
@@ -377,6 +372,17 @@ pub(super) fn prepare(
     let instructions = provision.instructions.get_or_insert_with(String::new);
     instructions.push_str(&input_hint(&index));
     Ok(Some(index))
+}
+/// Where the input index of `session` in `workspace_id` is staged, when the
+/// session selected sources or frozen artifacts.
+pub(super) fn index(workspace_id: &str, session: &Record) -> Option<String> {
+    let selected = |key: &str| {
+        session.body[key]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    };
+    (selected("sources") || selected("artifacts"))
+        .then(|| format!(".console-inputs/{workspace_id}/{}/INDEX.md", session.id))
 }
 /// Direct native and standing instructions to the same metadata index.
 pub(super) fn input_hint(index: &str) -> String {
@@ -519,7 +525,7 @@ async fn artifact_content(
         .map_err(sdk)?;
     let data = std::fs::read(temp.path()).map_err(io)?;
 
-    content(data, &artifact.media_type)
+    content(data, &artifact.media_type, &artifact.name)
 }
 pub(super) async fn finalize(
     State(app): State<Shared>,

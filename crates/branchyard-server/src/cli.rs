@@ -782,10 +782,13 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     config.by_path = flags.by_path.or(partial.by_path);
     config.allow_unapproved_tools = partial.allow_unapproved_tools || flags.allow_unapproved_tools;
     config.allow_workspace_scripts = partial.allow_workspace_scripts;
+    config.allow_repository_skills = partial.allow_repository_skills;
     config.secrets = partial.secrets;
     config
         .secrets
         .extend(flags.secrets.into_iter().map(|s| (s.name.clone(), s)));
+    config.execution_presets = partial.execution_presets;
+    config.require_workspace_execution_presets = partial.require_workspace_execution_presets;
     config.database = flags.database.or(partial.database);
     if let Some(aging) = partial.aging {
         config.aging = aging;

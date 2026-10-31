@@ -1614,6 +1614,44 @@ by undo [OPTIONS] <BRANCH>
 | `-y, --yes` | Undo every reversible effect without a confirmation prompt |
 | `--json` | Print JSON |
 
+## `by skills`
+
+The skills new branches run with: list them, trust the repository's
+
+```text
+by skills [OPTIONS] <COMMAND>
+```
+
+### `by skills ls`
+
+The skills a new branch here runs with, or the set fixed for a branch
+
+The built-in skills, and the repository's from .agents/skills at HEAD with whether you trusted them; with a branch, the set fixed when it was created, staged or withheld and why.
+
+```text
+by skills ls [OPTIONS] [BRANCH]
+```
+
+| Option | What it does |
+|---|---|
+| `<BRANCH>` | The branch whose set to show; inside a harness, your own. Without one, what a new branch here runs with |
+
+### `by skills trust`
+
+Trust the repository's skills at HEAD, so new branches here stage them
+
+```text
+by skills trust [OPTIONS]
+```
+
+### `by skills untrust`
+
+Forget the trust decision for this repository's skills
+
+```text
+by skills untrust [OPTIONS]
+```
+
 ## `by ls`
 
 List branches
@@ -2771,6 +2809,7 @@ by up [OPTIONS]
 |---|---|
 | `--json` | Print JSON |
 | `--plan` | Inspect readiness without installing harnesses or starting services |
+| `--smoke` | Also list the Substrate workers to check capacity (read-only; no actor, no model) |
 | `--yes` | Make the installs the [harnesses] policy would ask about, without asking |
 
 ## Exit status

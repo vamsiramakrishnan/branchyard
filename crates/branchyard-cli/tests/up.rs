@@ -249,6 +249,65 @@ fn a_configured_harness_that_is_installed_and_logged_in_is_ready() {
     assert!(shown.contains("ready: every step is in place"), "{shown}");
     assert!(shown.contains("harness.codex"), "{shown}");
     assert!(!shown.contains("To do"), "{shown}");
+    // The seven checks: the remote ones do not apply to this machine.
+    assert_eq!(
+        statuses(&plan),
+        [
+            "verified",
+            "verified",
+            "not_applicable",
+            "not_applicable",
+            "not_applicable",
+            "verified",
+            "verified"
+        ]
+    );
+    assert!(shown.contains("Readiness checks:"), "{shown}");
+    assert!(
+        shown.contains("checks: 4 verified, 3 not applicable"),
+        "{shown}"
+    );
+}
+
+fn statuses(plan: &Value) -> Vec<&str> {
+    plan["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["status"].as_str())
+        .collect()
+}
+
+/// Found on PATH and answering its version command is not authenticated:
+/// the installed check passes, the login check fails with its command.
+#[test]
+fn a_harness_found_but_logged_out_is_installed_and_not_authenticated() {
+    let w = World::new();
+    w.fake_codex("0.150.0");
+    w.project_file("[defaults]\nharness = \"codex\"\n");
+    let (plan, code) = w.up(&["--plan"], &[]);
+    assert_eq!(code, Some(1), "{plan}");
+    let checks = plan["checks"].as_array().unwrap();
+    assert_eq!(checks[0]["id"], "cli_and_harness_installed");
+    assert_eq!(checks[0]["status"], "verified", "{plan}");
+    assert_eq!(checks[6]["id"], "harness_auth_verified");
+    assert_eq!(checks[6]["status"], "failed", "{plan}");
+    assert!(
+        checks[6]["next"].as_str().unwrap().contains("codex"),
+        "{plan}"
+    );
+    // --smoke adds nothing to run on this machine: no install, no model.
+    let (smoked, _) = w.up(&["--plan", "--smoke"], &[]);
+    assert_eq!(smoked["checks"], plan["checks"]);
+    assert_eq!(names(&smoked), names(&plan));
+    let calls = w.calls("codex");
+    assert!(!calls.is_empty());
+    for call in calls {
+        assert!(
+            call.starts_with("codex --version") || call == "codex login status",
+            "only the version and login status commands ran: {call}"
+        );
+    }
 }
 
 #[test]

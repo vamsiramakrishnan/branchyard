@@ -1,7 +1,10 @@
 // Drives the console's knowledge workspaces in headless Chromium for
 // tests/console_workspace_browser.rs, which runs the server and reads this
 // script's stdout a line at a time: LOADED, PROJECT, WORKSPACE, SOURCES,
-// SESSIONS, OUTPUTS, ACCEPTED and DONE, each once the page has shown it.
+// SESSIONS, OUTPUTS, ACCEPTED, STALE and DONE, each once the page has shown
+// it. Previews come from the server's own renderer: the script observes the
+// page's preview requests and checks the page shows what each answer means,
+// and writes which formats rendered to stderr.
 //
 // PLAYWRIGHT names the playwright module; BY_URL the server; BY_CODE a
 // pairing code; BY_KNOWLEDGE_TOKEN a token that reaches knowledge projects
@@ -20,10 +23,34 @@ const fixtures = process.env.BY_FIXTURES;
 const scale = Number(process.env.BY_TEST_TIMEOUT_SCALE) || 1;
 const TURN = { timeout: 60000 * scale };
 const PREVIEW = '**/artifacts/*/preview*';
+const SOURCE_PREVIEW = '**/sources/*/preview*';
 const CSV = 'ticket_backlog.csv';
 const XLSX = 'backlog_metrics.xlsx';
 const DOCX = 'backlog_report.docx';
 const PPTX = 'backlog_briefing.pptx';
+const NOTES = 'meeting-notes.rtf';
+// CSV's bytes under a name with accents, an apostrophe and parentheses
+// (which encodeURIComponent leaves bare), CJK and an emoji.
+const UNICODE = 'Étude d\'été (T3) — 季度报告 📊.csv';
+const UNICODE_ENCODED = 'UTF-8\'\'%C3%89tude%20d%27%C3%A9t%C3%A9%20%28T3%29%20%E2%80%94%20%E5%AD%A3%E5%BA%A6%E6%8A%A5%E5%91%8A%20%F0%9F%93%8A.csv';
+// The answers a working server may give for each format, whether or not this
+// machine has the document renderer; anything else is a failure of the page.
+const ALLOWED = {
+  [CSV]: ['table', 'renderer unavailable'],
+  [UNICODE]: ['table', 'renderer unavailable'],
+  [XLSX]: ['table', 'renderer unavailable'],
+  [DOCX]: ['pages', 'conversion failed', 'renderer unavailable'],
+  [PPTX]: ['pages', 'conversion failed', 'renderer unavailable'],
+  [NOTES]: ['unsupported'],
+};
+const answerOf = (status, body) => {
+  const error = (body && body.error) || {};
+  if (status === 200 && body.status === 'passed') return body.kind;
+  if (status === 200 && body.status === 'failed') return 'conversion failed';
+  if ((status === 200 && body.status === 'unavailable') || (status === 503 && error.code === 'preview_unavailable')) return 'renderer unavailable';
+  if (status === 422 && error.code === 'preview_unsupported') return 'unsupported';
+  return `HTTP ${status} ${error.code || ''}`.trim();
+};
 const files = JSON.parse(fs.readFileSync(path.join(fixtures, 'manifest.json'), 'utf8')).files;
 const mediaType = (name) => files.find((f) => f.filename === name).media_type;
 const format = (name) => path.extname(name).slice(1).toUpperCase();
@@ -78,14 +105,87 @@ let browser = null;
   const menu = strip.locator('summary[aria-label="More actions"]');
   const tabs = page.locator('nav#sessions a.session-tab');
   const selectedTab = (sid) => page.locator(`nav#sessions a.session-tab[data-session="${sid}"][aria-current="page"]`);
-  const outputs = page.locator('ul#outputs > li[data-artifact]');
-  const outputRow = (name) => outputs.filter({ has: page.locator('button.output-name', { hasText: name }) });
-  const outputName = (name) => outputRow(name).locator('button.output-name');
+  const outputs = page.locator('#outputs-list li[data-artifact]');
+  const outputRow = (name) => outputs.filter({ has: page.locator('button.file-name', { hasText: name }) });
+  const outputName = (name) => outputRow(name).locator('button.file-name');
   const choose = (name) => page.getByRole('checkbox', { name: `Select ${name}`, exact: true });
+  const byId = (id) => page.locator(`#outputs-list li[data-artifact="${id}"]`);
   const preview = page.locator('#preview-host .by-artifact-preview');
-  const notice = page.locator('#preview-host .preview-missing')
-    .filter({ hasText: 'This server cannot preview workspace outputs yet.' })
-    .filter({ hasText: 'no such route' });
+  const settled = preview.locator('.by-preview-table, .by-preview-page-img, .by-preview-failure').first();
+  const failure = preview.locator('.by-preview-failure');
+  const focusedPreview = () => page.evaluate(() => document.activeElement.dataset.preview || null);
+  const said = (pattern) => page.waitForFunction((source) => new RegExp(source)
+    .test((document.querySelector('#preview-host .by-preview-sr-only[aria-live="polite"]') || {}).textContent || ''), pattern.source);
+  const callApi = (method, pathname, body) => page.evaluate(async ([method, pathname, body]) => {
+    const headers = { Authorization: `Bearer ${sessionStorage.getItem('branchyard.token')}` };
+    if (body) Object.assign(headers, { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() });
+    const response = await fetch(pathname, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    return { status: response.status, body: await response.json().catch(() => null) };
+  }, [method, pathname, body]);
+  // page.waitForFunction would take an async predicate's promise as truthy
+  // and return at once, so an operation is awaited here.
+  const awaitOperation = async (id) => {
+    for (const deadline = Date.now() + TURN.timeout; ;) {
+      const op = (await callApi('GET', `/v1/operations/${id}?wait=5`)).body;
+      if (!['queued', 'running'].includes(op.state)) return op;
+      if (Date.now() > deadline) throw new Error(`operation ${id} is still ${op.state}`);
+    }
+  };
+  const previewed = async (click, pathname) => {
+    const [response] = await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === pathname, TURN), click()]);
+    if (!/^Bearer .+/.test(response.request().headers().authorization || '')) throw new Error(`the preview at ${pathname} omitted its bearer token`);
+    const body = await response.json().catch(() => null);
+    return { status: response.status(), body, answer: answerOf(response.status(), body) };
+  };
+  const SHOWN = {
+    table: async (name) => {
+      await preview.getByRole('columnheader', { name: 'ticket_id', exact: true }).waitFor();
+      await preview.getByRole('cell', { name: '00451', exact: true }).waitFor();
+      if (name === CSV) await preview.getByRole('cell', { name: "<script>alert('reported')</script> seen in the log copy", exact: true }).waitFor();
+      if (name === XLSX) {
+        const sheets = await preview.getByRole('combobox', { name: 'Select sheet' }).locator('option').allInnerTexts();
+        if (JSON.stringify(sheets) !== JSON.stringify(['Backlog', 'Summary'])) throw new Error(`the XLSX preview offers sheets ${JSON.stringify(sheets)}`);
+        const warned = (await preview.locator('.by-preview-warning-banner').textContent()) || '';
+        if (/Truncated columns/.test(warned)) throw new Error(`the XLSX preview of a narrow workbook warns ${JSON.stringify(warned)}`);
+      }
+      await said(/^Preview ready: \d+ rows?\.$/);
+    },
+    pages: async () => {
+      const image = preview.locator('img.by-preview-page-img');
+      await image.waitFor();
+      await image.evaluate((img) => (img.complete && img.naturalWidth > 0 ? Promise.resolve() : new Promise((resolve, reject) => {
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', () => reject(new Error('the rendered page did not load')), { once: true });
+      })));
+      await said(/^Preview ready: page 1 of \d+\.$/);
+    },
+    'conversion failed': async (name, got) => {
+      await failure.locator('.by-preview-state-message', { hasText: 'This file could not be converted for preview' }).waitFor();
+      await failure.getByText(got.body.error.message, { exact: true }).waitFor();
+      await said(/^This file could not be converted for preview$/);
+    },
+    'renderer unavailable': async (name, got) => {
+      await failure.locator('.by-preview-state-message', { hasText: 'This server cannot make previews right now' }).waitFor();
+      await failure.getByText('Download the original to open it on this device.', { exact: true }).waitFor();
+      const operator = failure.locator('details.by-preview-operator');
+      await operator.locator('summary', { hasText: 'Details for the server\'s operator' }).click();
+      await operator.getByText(got.body.error.message, { exact: true }).waitFor();
+      await said(/^This server cannot make previews right now$/);
+    },
+    unsupported: async () => {
+      await failure.locator('.by-preview-state-message', { hasText: 'No preview for this format' }).waitFor();
+      await failure.getByText('Download the original to open it on this device.', { exact: true }).waitFor();
+      await said(/^No preview for this format$/);
+    },
+  };
+  const expectShown = async (name, got) => {
+    if (!ALLOWED[name].includes(got.answer)) throw new Error(`the preview of ${name} answered ${got.answer}`);
+    await page.locator('#preview-title', { hasText: name }).waitFor();
+    await page.locator('#preview .preview-head').getByRole('button', { name: 'Download original', exact: true }).waitFor();
+    await SHOWN[got.answer](name, got);
+  };
+  const rendered = [];
+  const told = (what, got) => rendered.push(`${what}: ${got.answer}${got.body && got.body.error ? ` (${got.body.error.message})` : ''}`);
 
   await page.goto(`${base}/app/`);
   await page.getByRole('heading', { name: 'Connect to Branchyard' }).waitFor();
@@ -174,7 +274,9 @@ let browser = null;
   say('WORKSPACE');
 
   await page.locator('#tab-sources').click();
-  await page.getByRole('button', { name: 'Upload sources', exact: true }).waitFor();
+  const uploadSources = page.locator('#inspector').getByRole('button', { name: 'Upload sources', exact: true });
+  await uploadSources.waitFor();
+  await page.locator('#guide').getByRole('button', { name: 'Upload sources', exact: true }).waitFor();
   await page.setInputFiles('#source-file', [CSV, DOCX].map((name) => path.join(fixtures, name)));
   await toast('Uploaded 2 sources.');
   const sources = page.locator('ul#sources > li[data-source]');
@@ -186,16 +288,76 @@ let browser = null;
     if (await listed.locator('.item-meta').getAttribute('title') !== mediaType(name)) throw new Error(`source ${name} does not name ${mediaType(name)}`);
   }
   sameBytes(await downloaded(() => page.getByRole('button', { name: `Download ${CSV}`, exact: true }).click()), CSV, 'the downloaded source');
+  fs.writeFileSync(path.join(fixtures, NOTES), '{\\rtf1\\ansi Minutes of the backlog review.}');
+  await page.setInputFiles('#source-file', path.join(fixtures, NOTES));
+  await toast('Uploaded 1 source.');
+  await sources.nth(2).waitFor();
+  const sourceId = {};
+  for (const name of [CSV, DOCX, NOTES]) sourceId[name] = await sources.filter({ hasText: name }).getAttribute('data-source');
+  const notesMeta = await sources.filter({ hasText: NOTES }).locator('.item-meta').innerText();
+  if (!notesMeta.startsWith('RTF · ')) throw new Error(`the RTF source shows ${JSON.stringify(notesMeta)}, not its format`);
+  const sourcePath = (name) => `/v1/workspaces/${ws}/sources/${sourceId[name]}/preview`;
+  const sourceName = (name) => sources.filter({ hasText: name }).locator('button.file-name');
+  await uploadSources.focus();
+  await page.keyboard.press('Tab');
+  if (await focusedPreview() !== `source:${sourceId[CSV]}`) throw new Error(`Tab from Upload sources reached ${await focusedPreview()}, not the first source`);
+  const csvSource = await previewed(() => page.keyboard.press('Enter'), sourcePath(CSV));
+  await expectShown(CSV, csvSource);
+  if (await sourceName(CSV).getAttribute('aria-pressed') !== 'true') throw new Error('the previewed source is not marked');
+  if (!(await page.locator('#panel-sources #preview-host').count())) throw new Error('the source preview is not in the Sources panel');
+  told('CSV source', csvSource);
+  const notes = await previewed(() => sourceName(NOTES).click(), sourcePath(NOTES));
+  await expectShown(NOTES, notes);
+  if (await sourceName(CSV).getAttribute('aria-pressed') !== 'false') throw new Error('the previous source is still marked previewed');
+  sameBytes(await downloaded(() => page.getByRole('button', { name: 'Download original', exact: true }).click()), NOTES, 'the unsupported source\'s original');
+  const [unicodeUpload] = await Promise.all([
+    page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === `/v1/workspaces/${ws}/sources`, TURN),
+    page.setInputFiles('#source-file', { name: UNICODE, mimeType: 'text/csv', buffer: fixture(CSV) }),
+  ]);
+  const titleHeaders = unicodeUpload.headers();
+  if (titleHeaders['x-source-title-encoded'] !== UNICODE_ENCODED) throw new Error(`the upload sent X-Source-Title-Encoded ${titleHeaders['x-source-title-encoded']}`);
+  if (titleHeaders['x-source-title'] !== '_tude d\'_t_ (T3) _ ____ _.csv') throw new Error(`the upload sent X-Source-Title ${titleHeaders['x-source-title']}`);
+  await sources.nth(3).waitFor();
+  const unicodeName = sourceName(UNICODE);
+  if (await unicodeName.textContent() !== UNICODE) throw new Error(`the source is listed as ${JSON.stringify(await unicodeName.textContent())}`);
+  sourceId[UNICODE] = await sources.filter({ hasText: UNICODE }).getAttribute('data-source');
+  const unicodeSource = await previewed(() => unicodeName.click(), sourcePath(UNICODE));
+  await expectShown(UNICODE, unicodeSource);
+  const previewTitle = await page.locator('#preview-title').textContent();
+  if (previewTitle !== UNICODE) throw new Error(`the preview is titled ${JSON.stringify(previewTitle)}`);
+  told('Unicode-titled CSV source', unicodeSource);
+  if (shots) await page.screenshot({ path: `${shots}/unicode-source.png` });
+  sameBytes(await downloaded(() => page.getByRole('button', { name: `Download ${UNICODE}`, exact: true }).click()), CSV, 'the Unicode-titled source');
+  // Held, never answered, so each preview is still loading when the page moves on.
+  await page.route(SOURCE_PREVIEW, () => {});
+  const dropped = (name) => page.waitForEvent('requestfailed', { predicate: (r) => new URL(r.url()).pathname === sourcePath(name), ...TURN });
+  const docxDropped = dropped(DOCX);
+  await sourceName(DOCX).click();
+  await preview.waitFor();
+  await sourceName(CSV).click();
+  await docxDropped;
+  if (await preview.count() !== 1) throw new Error(`${await preview.count()} previews after choosing another source`);
+  await page.locator('#preview-title', { hasText: CSV }).waitFor();
+  const csvDropped = dropped(CSV);
+  await page.locator('#tab-outputs').click();
+  await csvDropped;
+  if (await preview.count()) throw new Error('the source preview outlived switching to Outputs');
+  await page.unroute(SOURCE_PREVIEW);
+  await page.locator('#tab-sources').click();
   say('SOURCES');
 
   const startSession = async (name, prompt, collect) => {
     await page.locator('nav#sessions').getByRole('button', { name: '+ Session', exact: true }).click();
     const session = page.locator('#session-form');
+    const environment = session.getByRole('radio', { name: 'This server', exact: true });
+    if (!(await environment.isChecked())) throw new Error('the only environment, this server, is not chosen');
     await session.getByLabel('Session name', { exact: true }).fill(name);
     const harness = session.getByLabel('Harness', { exact: true });
     if (await harness.evaluate((control) => control.tagName === 'SELECT')) await harness.selectOption('gemini-cli');
     else await harness.fill('gemini-cli');
+    await session.locator('#sf-advanced > summary').click();
     await session.getByLabel('Access', { exact: true }).selectOption('writer');
+    await session.locator('#sf-advanced > summary').click();
     await session.getByLabel('First prompt', { exact: true }).fill(prompt);
     for (const upload of [CSV, DOCX]) {
       if (!(await session.getByRole('checkbox', { name: upload, exact: true }).isChecked())) throw new Error(`source ${upload} is not attached by default`);
@@ -204,23 +366,23 @@ let browser = null;
     if (!(await capture.isChecked())) throw new Error('an outputs project does not collect outputs by default');
     await capture.setChecked(collect);
     if (collect) {
-      await session.getByText('Tool approval compatibility', { exact: true }).click();
-      const acknowledgement = session.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true });
-      if (await acknowledgement.isChecked()) throw new Error('tool acknowledgement starts enabled');
+      if (await session.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true }).count()) throw new Error('a harness with tool approvals asks for the acknowledgement');
       const model = session.getByLabel('Model (optional)', { exact: true });
       await model.fill('knowledge-model');
-      await acknowledgement.check();
       const sessionRoute = `**/v1/workspaces/${ws}/sessions`;
+      let refusedBody = null;
       await page.route(sessionRoute, async (route) => {
-        const body = route.request().postDataJSON();
-        if (body.model !== 'knowledge-model' || body.unapproved_tools !== true) throw new Error('model or explicit tool acknowledgement was lost');
+        refusedBody = route.request().postDataJSON();
         await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'provider_not_allowed', message: 'Fixture operator refused this request.' } }) });
       });
       await session.getByRole('button', { name: 'Start session', exact: true }).click();
-      await session.getByRole('alert').filter({ hasText: 'Fixture operator refused this request.' }).waitFor();
+      await session.getByRole('alert').filter({ hasText: 'Fixture operator refused this request. Choose another environment or harness, or ask the operator.' }).waitFor();
       await page.unroute(sessionRoute);
+      if (refusedBody.model !== 'knowledge-model') throw new Error(`the free-text model was lost: ${JSON.stringify(refusedBody)}`);
+      if ('preset' in refusedBody || 'unapproved_tools' in refusedBody) throw new Error(`the default environment sent ${JSON.stringify(refusedBody)}`);
+      const kept = [await session.getByLabel('Session name', { exact: true }).inputValue(), await session.getByLabel('First prompt', { exact: true }).inputValue()];
+      if (JSON.stringify(kept) !== JSON.stringify([name, prompt])) throw new Error(`a refused start changed the draft: ${JSON.stringify(kept)}`);
       await model.fill('');
-      await acknowledgement.uncheck();
     }
     if (shots && collect) await page.screenshot({ path: `${shots}/session-form.png` });
     const before = hash();
@@ -287,6 +449,9 @@ let browser = null;
   await page.locator('#tab-outputs').click();
   await outputs.nth(3).waitFor(TURN);
   if (await outputs.count() !== 4) throw new Error(`${await outputs.count()} outputs, not 4`);
+  const groups = page.locator('#outputs-list section.output-group');
+  if (await groups.count() !== 1) throw new Error(`the outputs of one session show in ${await groups.count()} groups`);
+  await groups.getByRole('heading', { level: 3, name: /^Backlog analyst/ }).waitFor();
   const artifact = {};
   for (const name of [CSV, XLSX, DOCX, PPTX]) {
     artifact[name] = await outputRow(name).getAttribute('data-artifact');
@@ -294,66 +459,25 @@ let browser = null;
     if (label !== name) throw new Error(`output ${name} is labelled ${JSON.stringify(label)}`);
     if (!(await outputRow(name).innerText()).includes(format(name))) throw new Error(`output ${name} does not show ${format(name)}`);
     if (await outputRow(name).locator('.item-meta').getAttribute('title') !== mediaType(name)) throw new Error(`output ${name} does not name ${mediaType(name)}`);
+    if (await outputRow(name).getAttribute('data-standing') !== 'current') throw new Error(`output ${name} of the finished turn is not current`);
+    await outputRow(name).locator('.tag', { hasText: 'Current' }).waitFor();
+    if (!(await outputRow(name).locator('.item-meta').innerText()).endsWith('turn 1')) throw new Error(`output ${name} does not name its turn`);
   }
-  const previewPath = (name) => `/v1/workspaces/${ws}/artifacts/${artifact[name]}/preview`;
-  const previewMissing = async (name) => {
-    const [response] = await Promise.all([
-      page.waitForResponse((r) => new URL(r.url()).pathname === previewPath(name), TURN),
-      outputName(name).click(),
-    ]);
-    if (response.status() !== 404) throw new Error(`the preview of ${name} answered ${response.status()}`);
-    await page.locator('#preview-title', { hasText: name }).waitFor();
-    if (await outputName(name).getAttribute('aria-pressed') !== 'true') throw new Error(`${name} is not marked as previewed`);
-    await notice.waitFor();
-    await preview.waitFor({ state: 'detached' });
-    await page.getByRole('button', { name: 'Download original', exact: true }).waitFor();
-  };
-  // Conversion stays hermetic: intercept only preview metadata and PNGs.
-  // Server-side preview authorization and isolation have separate HTTP tests.
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-  const authenticate = (route) => {
-    if (!/^Bearer .+/.test(route.request().headers().authorization || '')) throw new Error('preview fetch omitted its bearer token');
-  };
-  await page.route(PREVIEW, (route) => {
-    authenticate(route);
-    const pathname = new URL(route.request().url()).pathname;
-    const name = [CSV, XLSX, DOCX, PPTX].find((n) => previewPath(n) === pathname);
-    if (!name) throw new Error(`unexpected preview route ${pathname}`);
-    const data = [CSV, XLSX].includes(name)
-      ? { status: 'passed', kind: 'table', format: format(name).toLowerCase(), columns: ['Evidence'], rows: [['=1+1']], offset: 0, next_offset: null }
-      : { status: 'passed', kind: 'pages', format: format(name).toLowerCase(), image: 'page-1.png', page: 1, pages: 1, width: 1, height: 1 };
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
-  });
-  const assets = '**/artifacts/*/preview/assets/*';
-  await page.route(assets, (route) => {
-    authenticate(route);
-    return route.fulfill({ status: 200, contentType: 'image/png', body: png });
-  });
+  const previewPath = (id) => `/v1/workspaces/${ws}/artifacts/${id}/preview`;
   for (const name of [CSV, XLSX, DOCX, PPTX]) {
-    await outputName(name).click();
-    if ([CSV, XLSX].includes(name)) await preview.getByRole('cell', { name: '=1+1', exact: true }).waitFor();
-    else {
-      const image = preview.getByRole('img', { name: 'Page 1 of 1', exact: true });
-      await image.waitFor();
-      await image.evaluate((img) => img.complete && img.naturalWidth > 0 ? Promise.resolve() : new Promise((resolve, reject) => {
-        img.addEventListener('load', resolve, { once: true });
-        img.addEventListener('error', () => reject(new Error('fake preview PNG did not load')), { once: true });
-      }));
-    }
+    const got = await previewed(() => outputName(name).click(), previewPath(artifact[name]));
+    if (await outputName(name).getAttribute('aria-pressed') !== 'true') throw new Error(`${name} is not marked as previewed`);
+    if (!(await page.locator('#panel-outputs #preview-host').count())) throw new Error('the output preview is not in the Outputs panel');
+    await expectShown(name, got);
+    told(`${format(name)} output`, got);
   }
-  await page.unroute(PREVIEW);
-  await page.unroute(assets);
-  // Preserve the older-server fallback as an explicit compatibility case.
-  const missingPreview = (route) => route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: { code: 'not_found', message: 'no such route' } }) });
-  await page.route(PREVIEW, missingPreview);
-  for (const name of [CSV, XLSX, DOCX, PPTX]) await previewMissing(name);
-  await page.unroute(PREVIEW, missingPreview);
+  process.stderr.write(`previews from this server: ${rendered.join('; ')}\n`);
 
-  // Never answered, so each preview stays in flight until the page abandons it.
+  // Held, never answered, so each preview stays in flight until the page abandons it.
   await page.route(PREVIEW, () => {});
   const abandon = async (name, leave, what) => {
     await page.locator('#tab-outputs').click();
-    const failed = page.waitForEvent('requestfailed', { predicate: (r) => new URL(r.url()).pathname === previewPath(name), ...TURN });
+    const failed = page.waitForEvent('requestfailed', { predicate: (r) => new URL(r.url()).pathname === previewPath(artifact[name]), ...TURN });
     await outputName(name).click();
     await preview.waitFor();
     await leave();
@@ -365,11 +489,18 @@ let browser = null;
   await titled('Backlog review').waitFor();
   await abandon(XLSX, () => page.locator('#tab-sources').click(), 'switching to Sources');
   await page.unroute(PREVIEW);
-  await page.route(PREVIEW, missingPreview);
-  say('OUTPUTS');
 
   await page.locator('#tab-outputs').click();
-  await previewMissing(CSV);
+  await choose(CSV).focus();
+  await page.keyboard.press('Space');
+  await strip.getByRole('button', { name: 'Accept 1 selected', exact: true }).waitFor();
+  await page.keyboard.press('Space');
+  await strip.locator('#accept').waitFor({ state: 'detached' });
+  await page.keyboard.press('Tab');
+  if (await focusedPreview() !== `output:${artifact[CSV]}`) throw new Error(`Tab from an output's checkbox reached ${await focusedPreview()}, not its name`);
+  await expectShown(CSV, await previewed(() => page.keyboard.press('Enter'), previewPath(artifact[CSV])));
+  say('OUTPUTS');
+
   sameBytes(await downloaded(() => page.getByRole('button', { name: 'Download original', exact: true }).click()), CSV, 'the downloaded original');
   await choose(CSV).check();
   await strip.getByRole('button', { name: 'Accept 1 selected', exact: true }).waitFor();
@@ -395,14 +526,19 @@ let browser = null;
 
   const workspaceRoute = `**/v1/workspaces/${ws}`;
   let presentedRole = 'viewer';
-  await page.route(workspaceRoute, async (route) => {
+  const presentRole = async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.current_role = presentedRole;
     body.capabilities.can_run = false;
     body.capabilities.can_comment = presentedRole === 'reviewer';
     await route.fulfill({ response, json: body });
-  });
+  };
+  // A reload abandons a poll this handler still holds, and that request
+  // needs no answer.
+  await page.route(workspaceRoute, (route) => presentRole(route).catch((e) => {
+    if (!/Route is already handled/.test(e.message)) throw e;
+  }));
   await page.reload();
   await titled('Backlog review').waitFor();
   if (!(await page.getByRole('button', { name: 'Upload sources', exact: true }).isDisabled())) throw new Error('a viewer can upload sources');
@@ -414,13 +550,14 @@ let browser = null;
   presentedRole = 'reviewer';
   await page.reload();
   await titled('Backlog review').waitFor();
-  await page.getByRole('button', { name: '+ Session', exact: true }).click();
+  await page.locator('nav#sessions').getByRole('button', { name: '+ Session', exact: true }).click();
   const reviewForm = page.locator('#session-form');
+  await reviewForm.locator('#sf-advanced[open]').waitFor();
   const reviewAccess = reviewForm.getByLabel('Access', { exact: true });
   if (await reviewAccess.inputValue() !== 'reviewer' || !(await reviewAccess.isDisabled())) throw new Error('a reviewer can select writer access');
-  await reviewForm.getByText('Tool approval compatibility', { exact: true }).click();
-  const reviewAck = reviewForm.getByRole('checkbox', { name: 'I accept tools without per-tool approval', exact: true });
-  if (!(await reviewAck.isDisabled()) || await reviewAck.isChecked()) throw new Error('reviewer tool acknowledgment can bypass read-only access');
+  for (const consent of ['I accept tools without per-tool approval', 'Allow every tool']) {
+    if (await reviewForm.getByRole('checkbox', { name: consent, exact: true }).count()) throw new Error(`a reviewer is offered ${consent}`);
+  }
   await reviewForm.getByLabel('Session name', { exact: true }).fill('Read-only review');
   await reviewForm.getByLabel('Harness', { exact: true }).selectOption('gemini-cli');
   await reviewForm.getByLabel('First prompt', { exact: true }).fill('Review the frozen CSV without modifying files.');
@@ -483,12 +620,80 @@ let browser = null;
   await page.getByRole('searchbox', { name: 'Filter branches', exact: true }).waitFor();
   await go(`#/w/${ws}`);
   await titled('Backlog review').waitFor();
+  await page.locator('#tab-outputs').click();
+  await outputs.nth(3).waitFor();
+  const continued = await callApi('POST', `/v1/workspaces/${ws}/sessions/${analystSid}/messages`, { prompt: capturePrompt, action: 'send' });
+  if (continued.status >= 300) throw new Error(`continuing the analyst answered ${continued.status}: ${JSON.stringify(continued.body)}`);
+  const second = await awaitOperation(continued.body.id);
+  if (second.state !== 'succeeded') throw new Error(`the analyst's second turn ${second.state}`);
+  const listed = (await callApi('GET', `/v1/workspaces/${ws}/artifacts`)).body.artifacts.length;
+  if (listed !== 8) throw new Error(`the workspace lists ${listed} outputs after the second turn, not 8`);
+  if (await byId(artifact[DOCX]).getAttribute('data-standing') !== 'current') throw new Error('the page saw the second turn by itself, so it is not a stale page');
+  await choose(DOCX).check();
+  const { revision } = (await callApi('GET', `/v1/workspaces/${ws}`)).body;
+  // A page's reads see a newer turn together with the revision it moved, so
+  // a stale page meets revision_conflict first. A current revision stands in
+  // for a page that read the workspace after the turn was admitted and
+  // before it ran; the refusal is the server's own.
+  const finalize = `/v1/workspaces/${ws}/finalize`;
+  await page.route(`**${finalize}`, (route) => route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), revision }) }));
+  await strip.getByRole('button', { name: 'Accept 1 selected', exact: true }).click();
+  const [refusal] = await Promise.all([
+    page.waitForResponse((r) => new URL(r.url()).pathname === finalize, TURN),
+    page.locator('#confirm-ok').click(),
+  ]);
+  await page.unroute(`**${finalize}`);
+  const refused = await refusal.json();
+  if (refusal.status() !== 409 || refused.error.code !== 'deliverable_not_current') throw new Error(`accepting a stale output answered ${refusal.status()} ${JSON.stringify(refused)}`);
+  await toast('Not accepted: an output you chose is no longer its session\'s current result. The outputs are reloaded; accept the ones marked Current.');
+  await outputs.nth(7).waitFor(TURN);
+  const earlier = byId(artifact[DOCX]);
+  await page.waitForFunction((id) => document.querySelector(`#outputs-list li[data-artifact="${id}"]`).dataset.standing === 'earlier', artifact[DOCX]);
+  if (!(await earlier.locator('.item-meta').innerText()).endsWith('Earlier turn 1 — not the current result')) throw new Error(`the earlier DOCX says ${await earlier.locator('.item-meta').innerText()}`);
+  const earlierBox = earlier.getByRole('checkbox');
+  if (!(await earlierBox.isDisabled()) || await earlierBox.isChecked()) throw new Error('an earlier turn\'s output can still be selected');
+  if (await strip.locator('#accept').count()) throw new Error('Accept is still offered for an earlier turn\'s output');
+  const standingOf = (id) => byId(id).getAttribute('data-standing');
+  if (await standingOf(artifact[PPTX]) !== 'earlier') throw new Error('the first turn\'s PPTX is not marked earlier');
+  for (const name of [CSV, XLSX]) if (await standingOf(artifact[name]) !== 'accepted') throw new Error(`accepted ${name} lost its mark`);
+  const latest = {};
+  for (const name of [CSV, XLSX, DOCX, PPTX]) {
+    const fresh = outputRow(name).and(page.locator('[data-standing="current"]'));
+    latest[name] = await fresh.getAttribute('data-artifact');
+    if (!(await fresh.locator('.item-meta').innerText()).endsWith('turn 2')) throw new Error(`the second turn's ${name} does not say turn 2`);
+  }
+  await expectShown(DOCX, await previewed(() => earlier.locator('button.file-name').click(), previewPath(artifact[DOCX])));
+  const direct = await callApi('POST', finalize, { revision, artifacts: [artifact[DOCX]] });
+  if (direct.status !== 409 || direct.body.error.code !== 'deliverable_not_current') throw new Error(`the API accepted an earlier turn's output: ${direct.status} ${JSON.stringify(direct.body)}`);
+  await byId(latest[DOCX]).getByRole('checkbox').focus();
+  await page.keyboard.press('Space');
+  await strip.getByRole('button', { name: 'Accept 1 selected', exact: true }).waitFor();
+  await page.keyboard.press('Space');
+  await strip.locator('#accept').waitFor({ state: 'detached' });
+  const stillAccepted = (await callApi('GET', `/v1/workspaces/${ws}`)).body.accepted_deliverables.map((d) => d.artifact_id).sort();
+  if (JSON.stringify(stillAccepted) !== JSON.stringify(want)) throw new Error(`the server holds ${JSON.stringify(stillAccepted)} as accepted, not ${JSON.stringify(want)}`);
+  say('STALE');
 
-  const showNotice = async (name) => {
+  const openOutput = async (which = CSV) => {
     await page.locator('#tab-outputs').click();
-    if (await outputName(name).getAttribute('aria-pressed') !== 'true') await outputName(name).click();
-    await notice.waitFor();
-    await notice.scrollIntoViewIfNeeded();
+    const name = byId(latest[which]).locator('button.file-name');
+    if (await name.getAttribute('aria-pressed') !== 'true') await name.click();
+    await settled.waitFor(TURN);
+    await page.locator('#preview').scrollIntoViewIfNeeded();
+  };
+  const openSource = async () => {
+    await page.locator('#tab-sources').click();
+    if (await sourceName(CSV).getAttribute('aria-pressed') !== 'true') await sourceName(CSV).click();
+    await settled.waitFor(TURN);
+    await page.locator('#preview').scrollIntoViewIfNeeded();
+  };
+  const fits = async (what) => {
+    await noOverflow(what);
+    const width = page.viewportSize().width;
+    for (const part of ['#preview', '#preview .preview-head button']) {
+      const box = await page.locator(part).boundingBox();
+      if (!box || box.x < 0 || box.x + box.width > width) throw new Error(`${part} of ${what} does not fit in ${width}px`);
+    }
   };
   const reopen = async () => {
     await go('#/inbox');
@@ -501,10 +706,13 @@ let browser = null;
   if (await page.locator('#sidebar').isVisible()) throw new Error('the sidebar shows beside a workspace at 390px');
   await strip.locator('a.back', { hasText: '‹ Workspaces' }).waitFor();
   await noOverflow('a workspace');
-  await showNotice(CSV);
-  await noOverflow('workspace outputs');
+  await openOutput();
+  await fits('an output preview');
+  await openSource();
+  await fits('a source preview');
 
   if (shots) {
+    await page.waitForFunction(() => !document.querySelector('#toasts .toast'), null, TURN);
     const desktop = [
       ['project-glance', async () => {
         await go(`#/p/${pid}`);
@@ -514,15 +722,14 @@ let browser = null;
         await reopen();
         await tabs.nth(1).waitFor();
       }],
-      ['workspace-sources', async () => {
-        await page.locator('#tab-sources').click();
-        await page.locator('ul#sources > li[data-source]').nth(1).waitFor();
-      }],
-      ['workspace-outputs', () => showNotice(CSV)],
+      ['workspace-sources', openSource],
+      ['workspace-outputs', () => openOutput(CSV)],
+      ['workspace-document', () => openOutput(DOCX)],
     ];
     const phone = [
       ['phone-workspace', reopen],
-      ['phone-outputs', () => showNotice(CSV)],
+      ['phone-sources', openSource],
+      ['phone-outputs', () => openOutput(CSV)],
     ];
     for (const [width, height, views] of [[1440, 900, desktop], [390, 844, phone]]) {
       await page.setViewportSize({ width, height });

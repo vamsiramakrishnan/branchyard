@@ -3512,6 +3512,9 @@ impl Local {
                 depth: caller.info.depth + 1,
                 // Its denials are in its grant.
                 deny: Vec::new(),
+                // Its parent's, fixed when the parent was created: never
+                // read from a base its parent's turns may have changed.
+                skills: caller.skills.clone(),
                 provision,
                 workspace: caller.workspace.as_ref().map(|w| w.spec.clone()),
                 // Resolved when it starts, from its parent as it is then
@@ -5712,6 +5715,7 @@ Checks on the merged result: \
             deny: Vec::new(),
             removed: Vec::new(),
             metered_from: None,
+            skills: None,
 
             result_contract: None,
         }

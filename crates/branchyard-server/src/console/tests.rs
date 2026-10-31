@@ -1,8 +1,11 @@
 //! HTTP and durable worker regressions, using only fake agents and providers.
 
 mod discovery;
+mod harness_input;
 mod inputs;
+mod presets;
 mod services;
+mod titles;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -112,10 +115,12 @@ impl Fixture {
         let scratch = branchyard_testkit::Scratch::new("console-inprocess");
         let mut config = Config::new(scratch.path().join("data"));
         config.managed_knowledge.enabled = true;
-        config.harness_commands.insert(
-            "gemini-cli".into(),
-            vec![branchyard_testkit::fake_agent_here().display().to_string()],
-        );
+        for harness in ["gemini-cli", "claude-code-acp"] {
+            config.harness_commands.insert(
+                harness.into(),
+                vec![branchyard_testkit::fake_agent_here().display().to_string()],
+            );
+        }
         for (name, secret) in [
             ("owner", OWNER),
             ("editor", EDITOR),

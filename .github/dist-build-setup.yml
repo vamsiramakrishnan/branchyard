@@ -3,6 +3,7 @@
   with:
     shared-key: dist-${{ join(matrix.targets, '-') }}
     cache-on-failure: true
+    save-if: ${{ github.ref == 'refs/heads/main' }}
 - name: Install Linux build dependencies
   if: runner.os == 'Linux'
   run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev pkg-config

@@ -15,7 +15,7 @@ local-artifacts-jobs = ["./agy-image"]
 global-artifacts-jobs = ["./release-extras"]
 host-jobs = ["./release-smoke"]
 github-attestations = true
-pr-run-mode = "upload"
+pr-run-mode = "plan"
 cache-builds = false
 allow-dirty = ["ci"]
 
@@ -25,7 +25,7 @@ x86_64-unknown-linux-gnu = "ubuntu-24.04"
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 aarch64-apple-darwin = "macos-15"
-x86_64-apple-darwin = "macos-15-intel"
+x86_64-apple-darwin = "macos-15"
 
 [dist.github-action-commits]
 "swatinem/rust-cache" = "e9d7b9f1e587218970671bac74e5511ed9506e6a"

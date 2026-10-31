@@ -20,6 +20,7 @@ mod control;
 mod egress;
 #[cfg(feature = "fake")]
 pub mod fake;
+mod probe;
 mod provider;
 mod setup;
 pub mod template;
@@ -28,6 +29,7 @@ pub mod transfer;
 pub use actors::{ActorHandle, Actors, CheckpointRef, Error};
 pub use capabilities::{capabilities, runs_bridge, state, TemplateError};
 pub use egress::EgressPolicy;
+pub use probe::{ControlError, WorkerCapacity};
 pub use provider::{Config, Quiesce, SubstrateProvider};
 pub use setup::{SetupAction, SetupEvent, SetupPlan, SetupResult, TemplateInspection};
 

@@ -155,6 +155,10 @@ class CloudSetupTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--version") + 1], "0.0.1")
         self.assertEqual(argv[argv.index("--forward-secret") + 1], "GEMINI_API_KEY")
         self.assertNotIn("--service-account", argv)
+        saved = self.root / ".local/state/branchyard/cloud/gce/test-project/us-central1-a/test-worker"
+        answers = saved / "project-answers.json"
+        self.assertEqual(answers.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(answers.read_text()), json.loads(out))
 
     def test_gce_iap_transport_is_explicit_in_the_plan_and_helper_arguments(self):
         with patch.object(cloud, "command", side_effect=AssertionError("offline subprocess")):

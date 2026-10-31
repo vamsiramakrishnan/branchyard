@@ -160,6 +160,7 @@ mod schema_parity;
 pub mod scope;
 mod seats;
 pub mod services;
+pub mod skills;
 mod snapshots;
 mod spotlight;
 mod sqlite;
@@ -299,9 +300,10 @@ pub use reported::{Reported, ReportedState, StatusReport};
 pub use review::ReviewSpec;
 pub use seats::{Seat, Seats};
 use serde::{Deserialize, Serialize};
+pub use skills::{BranchSkills, SkillGate, SkillSet, WithheldSkills};
 pub use snapshots::{
-    SandboxConsistency, SandboxEvent, SandboxKeep, SandboxOrigin, SandboxScope, SandboxSnapshot,
-    SnapshotMethod,
+    Placed, SandboxConsistency, SandboxEvent, SandboxKeep, SandboxOrigin, SandboxScope,
+    SandboxSnapshot, SnapshotMethod, Transfer,
 };
 pub use spotlight::{TryEntry, TryFile, TryState};
 use std::collections::BTreeMap;
@@ -831,6 +833,15 @@ impl Yard {
         on_fill: impl Fn(&PoolFill) + Send + 'static,
     ) -> PoolKeeper {
         PoolKeeper::start(self.clone(), Box::new(spec), every, Box::new(on_fill))
+    }
+
+    /// The repository skills `branch` runs with, fixed when it (or the
+    /// branch it was forked or delegated from) was created: the commit they
+    /// are read from, their entries and digest, and whether they are staged
+    /// or withheld and why. `None` when its base commit had none. See
+    /// [`skills`].
+    pub fn branch_skills(&self, branch: &str) -> Result<Option<BranchSkills>, Error> {
+        Ok(self.store().read(branch)?.skills)
     }
 
     /// The variables `branch`'s scripts and harness get:
@@ -1498,6 +1509,16 @@ pub struct TaskOptions {
     /// parent's denials bound a spawned child (`by spawn --deny`). Read
     /// only when a branch is created.
     pub deny: Vec<String>,
+    /// Whether a new branch stages the repository's own skills
+    /// (`.agents/skills/` at its base commit), and why not when it does
+    /// not. Read only when a branch is created by `run`, a fan or
+    /// `run_attempts`; a fork, reincarnation or delegated child inherits
+    /// its parent's. Withheld by default. Whether a repository's skills
+    /// may be staged is the caller's decision: `by` stages a set you
+    /// trusted by its digest (`by skills trust`), a server one its
+    /// operator allows (`allow_repository_skills`). See
+    /// `docs/knowledge-skills.md`.
+    pub repository_skills: SkillGate,
 }
 
 /// The variable a turn's harness gets [`TaskOptions::trace_parent`] in.
@@ -2637,6 +2658,14 @@ pub enum Activity {
         /// `docs/knowledge.md`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         knowledge: Vec<u64>,
+        /// The skills staged for the turn, built-in and the repository's,
+        /// each by layer, name and digest, with the set's digest; and the
+        /// repository's skills that were found and withheld, and why.
+        /// Recorded on every turn that reaches provisioning, whether or not
+        /// a file changed; an event from before it was kept reads empty.
+        /// See `docs/knowledge-skills.md`.
+        #[serde(default)]
+        skills: skills::SkillSet,
         /// The managed settings written into a sandbox for a Claude Code
         /// turn, before the harness started, when the turn's sandbox took
         /// them; see `docs/provisioning.md#managed-settings`. Names and

@@ -46,6 +46,7 @@ use crate::args::SetupFlags;
 use crate::commands::{print, Env, Failure, Outcome};
 use crate::errors;
 use crate::hook_cmd::heard::{self, dialect_of, Hearing};
+use crate::readiness::Answer;
 use crate::render::{table, Cell, Column, Tone};
 use crate::setup_io::{self, which, CachedProbe, HostProbe, HostValidator, RandomEntropy};
 
@@ -333,31 +334,53 @@ fn readiness(env: &Env, args: &SetupFlags, root: &Path) -> Result<branchyard::up
     let config = branchyard::configure::configuration(root)?
         .map(|located| located.config)
         .unwrap_or_default();
-    if config.remote.url.is_none() {
-        return crate::up_cmd::run(env, false, args.yes, args.json);
-    }
+    let Some(url) = config.remote.url.as_deref() else {
+        return crate::up_cmd::run(env, false, false, args.yes, args.json);
+    };
+    let shown = crate::doctor_cmd::without_userinfo(url);
     let mut globals = crate::args::Globals::default();
     crate::defaults::apply_globals(&config, &mut globals);
-    let remote = crate::remote::Remote::connect(&globals)?;
-    let inventory = remote.client.inventory()?;
     let harness = config.defaults.harness.as_deref().unwrap_or("claude-code");
-    Ok(remote_plan(&inventory, remote.repo.name(), harness))
+    let answer = match crate::remote::Remote::connect(&globals) {
+        Err(failure) => Answer::of_failure(&failure),
+        Ok(remote) => match remote.client.inventory() {
+            Ok(report) => Answer::Workers {
+                report,
+                repository: remote.repo.name().to_owned(),
+            },
+            Err(error) => Answer::of_client(&error),
+        },
+    };
+    Ok(remote_plan(&shown, &answer, harness))
 }
 
-/// Convert advertised worker evidence into setup's shared readiness shape.
-fn remote_plan(
-    inventory: &branchyard_client::api::InventoryReport,
-    repository: &str,
-    harness: &str,
-) -> branchyard::up::Plan {
+/// The server's readiness: its steps (`remote.connection`, then the
+/// serving workers' harness and login) and the seven checks.
+fn remote_plan(shown: &str, answer: &Answer, harness: &str) -> branchyard::up::Plan {
     use branchyard::inventory::LoginState;
     use branchyard::up::{Plan, Step};
 
+    let checks = crate::readiness::server_checks(shown, answer, harness);
+    let Answer::Workers { report, repository } = answer else {
+        let why = checks
+            .iter()
+            .find(|check| check.status == branchyard::up::CheckStatus::Failed)
+            .map_or_else(
+                || "the server was not asked".to_owned(),
+                |check| check.detail.clone(),
+            );
+        let step = Step::blocked(
+            "remote.connection",
+            why,
+            "verify [remote] url and token_file, then rerun by setup --up",
+        );
+        return Plan::new(vec![step], checks);
+    };
     let mut steps = vec![Step::ready(
         "remote.connection",
         "server authenticated and inventory received",
     )];
-    let installed = inventory
+    let installed = report
         .workers
         .iter()
         .filter(|worker| worker.repos.iter().any(|name| name == repository))
@@ -385,7 +408,7 @@ fn remote_plan(
             format!("install {harness} on the worker, then rerun by setup --up"),
         )),
     }
-    Plan { steps }
+    Plan::new(steps, checks)
 }
 
 // ----------------------------------------------------------------- detecting
@@ -1283,7 +1306,7 @@ fn tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-fn plural(n: usize, word: &str) -> String {
+pub(crate) fn plural(n: usize, word: &str) -> String {
     match n {
         1 => format!("1 {word}"),
         n => format!("{n} {word}s"),
@@ -2202,8 +2225,14 @@ mod tests {
     #[test]
     fn remote_readiness_requires_the_serving_workers_harness_and_credentials() {
         use branchyard::inventory::{HarnessState, Inventory, Login, LoginState};
+        use branchyard::up::CheckStatus;
         use branchyard_client::api::{InventoryReport, WorkerInventory};
 
+        let workers = |report: &InventoryReport, repository: &str| Answer::Workers {
+            report: report.clone(),
+            repository: repository.into(),
+        };
+        let plan = |answer: &Answer| remote_plan("https://server.example", answer, "antigravity");
         let mut report = InventoryReport {
             workers: vec![WorkerInventory {
                 id: "worker".into(),
@@ -2227,29 +2256,37 @@ mod tests {
                 }),
             }],
         };
-        let plan = remote_plan(&report, "project", "antigravity");
-        assert!(plan.ready());
-        assert!(plan
+        let ready = plan(&workers(&report, "project"));
+        assert!(ready.ready());
+        assert!(ready
             .steps
             .iter()
             .any(|step| step.detail.contains("model authentication unverified")));
-        assert!(!remote_plan(&report, "another-project", "antigravity").ready());
+        assert_eq!(ready.checks.len(), 7);
+        assert_eq!(ready.checks[4].status, CheckStatus::Verified);
+        assert_eq!(ready.checks[6].status, CheckStatus::Unverified);
+        assert!(!plan(&workers(&report, "another-project")).ready());
         report.workers[0].inventory.as_mut().unwrap().harnesses[0]
             .login
             .state = LoginState::Unknown;
-        let plan = remote_plan(&report, "project", "antigravity");
-        assert!(!plan.ready());
+        let unknown = plan(&workers(&report, "project"));
+        assert!(!unknown.ready());
         assert_eq!(
-            plan.steps.last().unwrap().state,
+            unknown.steps.last().unwrap().state,
             branchyard::up::State::NeedsPerson
         );
-        assert!(!remote_plan(
+        assert_eq!(unknown.checks[6].status, CheckStatus::Unknown);
+        assert!(!plan(&workers(
             &InventoryReport {
                 workers: Vec::new()
             },
-            "project",
-            "antigravity"
-        )
+            "project"
+        ))
         .ready());
+        let unreachable = plan(&Answer::Unreachable("connection refused".into()));
+        assert!(!unreachable.ready());
+        assert_eq!(unreachable.steps[0].name, "remote.connection");
+        assert!(unreachable.steps[0].detail.contains("did not answer"));
+        assert_eq!(unreachable.checks[3].status, CheckStatus::Failed);
     }
 }

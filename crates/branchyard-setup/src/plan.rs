@@ -364,10 +364,12 @@ impl Validator for BuiltinValidator {
                 Ok(_) => Validation::ok("branchyard.toml parser"),
                 Err(e) => Validation::failed("branchyard.toml parser", e.to_string()),
             },
-            ArtifactKind::Skill => match crate::skills::check_skill_file(&file.path, file.body()) {
-                Ok(()) => Validation::ok("skill frontmatter"),
-                Err(e) => Validation::failed("skill frontmatter", e),
-            },
+            ArtifactKind::Skill => {
+                match branchyard_provision::skillset::check_skill_file(&file.path, file.body()) {
+                    Ok(()) => Validation::ok("skill frontmatter"),
+                    Err(e) => Validation::failed("skill frontmatter", e),
+                }
+            }
             ArtifactKind::Text => Validation::ok("text"),
             ArtifactKind::HarnessConfig => {
                 let name = file.path.rsplit('/').next().unwrap_or(&file.path);

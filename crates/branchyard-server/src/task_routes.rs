@@ -5,13 +5,14 @@
 //! merge (`POST .../branches/{branch}/merge`).
 
 use axum::extract::{Path, State};
+use axum::response::Response;
 use axum::routing::get;
-use axum::{Extension, Json, Router};
+use axum::{Extension, Router};
 
-use branchyard::tasks::{self, TaskView};
+use branchyard::tasks;
 use branchyard_client::api::TaskList;
 
-use crate::api::{blocking, Caller, Shared};
+use crate::api::{blocking, branch_response, items, Caller, Shared};
 use crate::error::{self, ApiError};
 
 pub(crate) fn router() -> Router<Shared> {
@@ -24,26 +25,43 @@ fn sdk<T>(result: Result<T, branchyard::Error>) -> Result<T, ApiError> {
     result.map_err(|e| error::sdk(&e))
 }
 
-/// `GET /v1/repos/{repo}/task-records`.
+/// `GET /v1/repos/{repo}/task-records`. Each attempt shows through the
+/// projection of the preset session its branch belongs to.
 async fn list_tasks(
     State(app): State<Shared>,
     Path(repo): Path<String>,
     Extension(caller): Extension<Caller>,
-) -> Result<Json<TaskList>, ApiError> {
-    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
-    let tasks = sdk(blocking(move || tasks::list(&yard)).await?)?;
-    Ok(Json(TaskList { tasks }))
+) -> Result<Response, ApiError> {
+    let state = app.authorized_repo(&caller, &repo, "read")?;
+    let (yard, repo) = (state.yard.clone(), state.name.clone());
+    blocking(move || {
+        let tasks = sdk(tasks::list(&yard))?;
+        let owners = tasks
+            .iter()
+            .enumerate()
+            .flat_map(|(i, task)| {
+                let names = task.attempts.iter().map(|attempt| attempt.name.as_str());
+                items(&format!("/tasks/{i}/attempts"), names)
+            })
+            .collect();
+        branch_response(&app, &repo, TaskList { tasks }, owners)
+    })
+    .await?
 }
 
 /// `GET /v1/repos/{repo}/task-records/{task}`: by ID, a prefix of one, or
-/// an attempt's name.
+/// an attempt's name, with each attempt as [`list_tasks`] shows it.
 async fn task(
     State(app): State<Shared>,
     Path((repo, key)): Path<(String, String)>,
     Extension(caller): Extension<Caller>,
-) -> Result<Json<TaskView>, ApiError> {
-    let yard = app.authorized_repo(&caller, &repo, "read")?.yard.clone();
-    Ok(Json(
-        sdk(blocking(move || tasks::view(&yard, &key)).await?)?,
-    ))
+) -> Result<Response, ApiError> {
+    let state = app.authorized_repo(&caller, &repo, "read")?;
+    let (yard, repo) = (state.yard.clone(), state.name.clone());
+    blocking(move || {
+        let task = sdk(tasks::view(&yard, &key))?;
+        let owners = items("/attempts", task.attempts.iter().map(|a| a.name.as_str()));
+        branch_response(&app, &repo, task, owners)
+    })
+    .await?
 }

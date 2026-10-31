@@ -352,6 +352,19 @@ fn typed_client_reads_durable_console_metadata_and_native_conversations() {
     }
     let workspace = client.workspace(&operation.workspace_id).unwrap();
     assert_eq!(workspace.title, "Typed workspace");
+    let offered = client.execution_presets(Some(&workspace.id)).unwrap();
+    assert!(!offered.required);
+    assert_eq!(offered.presets.len(), 1, "{offered:?}");
+    assert_eq!(offered.presets[0].id, "local");
+    assert_eq!(
+        offered.presets[0].origin,
+        branchyard_client::workspace_api::PresetOrigin::Default
+    );
+    assert_eq!(offered.presets[0].can_start, Some(true));
+    assert_eq!(
+        client.execution_presets(None).unwrap().presets[0].can_start,
+        None
+    );
     assert_eq!(client.workspaces(Some(&project.id)).unwrap().len(), 1);
     let started = client
         .start_workspace_session(
@@ -359,6 +372,7 @@ fn typed_client_reads_durable_console_metadata_and_native_conversations() {
             &StartSessionRequest {
                 unapproved_tools: false,
                 provider: None,
+                preset: None,
                 name: "Writer".into(),
                 prompt: "Hello".into(),
                 harness: "gemini-cli".into(),

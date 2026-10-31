@@ -49,11 +49,14 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
         unapproved_tools: args.unapproved_tools,
         ..TaskArgs::default()
     };
-    let workspace = workspace(env, &open()?)?;
+    let yard = open()?;
+    let workspace = workspace(env, &yard)?;
+    let repository_skills = crate::skills_cmd::gate(yard.root());
     let live = Live::start_to(env, &task, true, args.json, None);
     let result = (|| {
         let options = TaskOptions {
             workspace,
+            repository_skills,
             ..live.options(&task)?
         };
         let mut policy = match root.policy.default {
@@ -92,7 +95,7 @@ pub fn rig(env: &Env, target: &Target, args: &args::RigArgs) -> Outcome {
             seats: plan.seats.clone(),
             ..options
         };
-        Ok::<_, Failure>(open()?.task(prompt.as_str()).options(options).run())
+        Ok::<_, Failure>(yard.task(prompt.as_str()).options(options).run())
     })();
     let result = match result {
         Ok(result) => result,

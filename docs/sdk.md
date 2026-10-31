@@ -24,7 +24,7 @@ cargo install --locked --path crates/branchyard-cli     # `by`, onto PATH
 pip install ./sdk/python                                # branchyard and branchyard_client
 ```
 
-`pip install ./branchyard-sdk` does the same from the extracted release archive (`unzip branchyard-sdk-0.3.0.zip` first), and `pip install branchyard-0.3.0-py3-none-any.whl` installs the downloaded release wheel ([distribution](distribution.md#prebuilt-binaries)). `by` is found from `BRANCHYARD_BY`, else `PATH`; a missing one is a `LocalError` that gives the published single-command installer. [`sdk/python/README.md`](../sdk/python/README.md) is this install and the first run in one page.
+`pip install ./branchyard-sdk` does the same from the extracted release archive (`unzip branchyard-sdk-0.3.1.zip` first), and `pip install branchyard-0.3.1-py3-none-any.whl` installs the downloaded release wheel ([distribution](distribution.md#prebuilt-binaries)). `by` is found from `BRANCHYARD_BY`, else `PATH`; a missing one is a `LocalError` that gives the published single-command installer. [`sdk/python/README.md`](../sdk/python/README.md) is this install and the first run in one page.
 
 `sdk/python/pyproject.toml` builds with setuptools 77 or later, which reads its SPDX `license` (pip fetches one, or `--no-build-isolation` uses the one installed), and installs the two top-level modules, `branchyard` and `branchyard_client`, with no dependencies. Its version is the workspace's in PEP 440's spelling (`0.1.0rc1` for `0.1.0-rc.1`): `tools/release_version.py` checks it with every other version field and `tools/package.py` refuses to build the archives when the two differ ([the version](distribution.md#the-version)), and `tests/test_distribution.py` checks it, builds the project from the extracted archive and imports both modules from what was built. Nothing needs installing inside a harness: a delegated turn gets both modules written to `.branchyard/sdk/python/`, first on its `PYTHONPATH` ([delegation](delegation.md#python)), so `import branchyard` works there as it did, and `import branchyard_client` too.
 
@@ -90,6 +90,12 @@ allowlist. Runtime resource operations expose their saved state in
 `operation.result.pull_request`. An interrupted PR publication requires forge
 inspection before a new request. Reuse the original key to recover its operation.
 
+`Client.upload_workspace_source(workspace, data, title, revision=...)` accepts any
+Unicode title within the server's title rules. It sends the title in `X-Source-Title-Encoded` as an RFC 8187
+value, so the server stores it as written, and an ASCII copy in `X-Source-Title`
+with `_` for each other character, which a server without the encoded header
+reads instead ([source titles](server.md#durable-workspace-console)).
+
 For a service that is not on the machine that does the work, or that outlives a run: serve the repository, then connect.
 
 ```sh
@@ -125,7 +131,7 @@ Every refusal is a `BranchyardError` subclass carrying the server's stable `code
 | `NotFoundError` | `unknown_repo`, `unknown_branch`, `unknown_operation`, `unknown_trigger`, `unknown_checkpoint`, `unknown_knowledge`, `unknown_message`, `not_found` |
 | `DeniedError` | `denied` (the envelope or a branch's authority refused), `scope_required`, `repo_not_allowed` |
 | `NotAllowedError` | what the server's operator did not allow: `connectors_not_configured`, `delegation_not_allowed`, `command_not_allowed`, `provider_not_allowed`, `secret_not_allowed`, `unapproved_tools_not_allowed`, ... |
-| `InvalidRequestError` | `invalid_request`, `invalid_name`, `unknown_harness`, `cursor_out_of_range`, `body_too_large`, ... |
+| `InvalidRequestError` | `invalid_request`, `invalid_name`, `unknown_harness`, `cursor_out_of_range`, `body_too_large`, `invalid_source_title`, ... |
 | `BranchBusyError` | `branch_busy`; `.holder` is the operation that holds the branch |
 | `RunningError` | `running` (a turn runs in another engine; a wait that timed out) |
 | `NotRunningError`, `SteerRefusedError` | `not_running`, `steer_refused`: a steer with no turn to join, or one the turn did not take |

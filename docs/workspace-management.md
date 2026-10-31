@@ -71,6 +71,17 @@ and names are untrusted metadata encoded as JSON strings. The index contains no
 source contents and has a 64 KiB limit. It travels through the same workspace
 copy step as the immutable input bytes, including to copied remote worktrees.
 
+A session started with a result contract gets the contract's requested-result
+instructions on every turn. The engine appends them to the first prompt, and
+the console repeats them on each follow-up and resume, because every finished
+turn of a capture contract must rewrite its manifest.
+
+A user message in a session message response is the text the person sent.
+The server removes what it added to the harness input: a reviewer's preface,
+the input-index sentence and the requested-result instructions. It removes each
+only where it stands exactly as the server put it, so text a person wrote never
+changes. Native events keep the full harness input.
+
 Session message responses for managed knowledge workspaces replace the operator's
 configured storage root with `<managed-storage>` in user and assistant text,
 including paths inside nested JSON text. This also applies to the default root
@@ -116,6 +127,20 @@ Session requests accept the existing typed `provider` object. It passes through
 the same operator allowlist and provider validation as ordinary task requests.
 Python clients use `start_workspace_session(..., provider={...})`. A denied or
 failed remote backend stays denied or failed; it never becomes a local turn.
+An operator can instead name the environments sessions run in.
+`GET /v1/execution-presets?workspace=ID` lists the presets offered to the
+caller's tenant, with each harness's models, readiness and whether the caller's
+role can start a session. A start names one with `preset` and may then not carry
+`provider` or `provision` ([execution presets](server.md#execution-presets)).
+Python clients use `execution_presets(workspace)` and
+`start_workspace_session(..., preset="substrate-gke")`; typed Rust clients use
+`Client::execution_presets` and `StartSessionRequest::preset`. The manager's
+`start_session` tool takes `preset` and sends it with `harness` and `model`
+unchanged; the tool has no `provider` or `provision` argument. Omit `model` to
+run the preset's default model. On a server with
+`require_workspace_execution_presets`, a start without `preset` returns a tool
+error whose code is `preset_required`. The manager has no tool that lists
+presets, so its operator gives the agent the preset ID.
 Remote terminal access requires an allocation retained by the provider.
 For AGY and other profiles that cannot route individual tool approvals, pass
 `unapproved_tools: true` explicitly. The operator must enable

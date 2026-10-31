@@ -27,6 +27,7 @@ use branchyard_workspace::Repository;
 
 use super::context::{Context, Layer, Merged, Store};
 use super::{Check, Status, NOT_CHECKED};
+use crate::readiness::Answer;
 use crate::render::age_text;
 use crate::workspace_cmd::{self, TrustState};
 
@@ -102,7 +103,7 @@ fn serve_uses_postgres(ctx: &Context, config: &ProjectConfig) -> bool {
 }
 
 /// `url` without the `user:password@` of its authority.
-fn without_userinfo(url: &str) -> String {
+pub(crate) fn without_userinfo(url: &str) -> String {
     match url.split_once("://") {
         Some((scheme, rest)) => {
             let (authority, path) = rest
@@ -427,10 +428,13 @@ fn trust_row(resolved: &workspace_cmd::Resolved) -> Check {
             "review it with `by workspace show`, then run `by workspace trust`",
         ),
         TrustState::Changed => {
-            let before = workspace_cmd::trusted_digest(&resolved.root.display().to_string())
-                .ok()
-                .flatten()
-                .map_or_else(String::new, |d| format!("trusted digest {}, ", short(&d)));
+            let before = workspace_cmd::trusted_digest(
+                workspace_cmd::TrustSection::Repositories,
+                &resolved.root.display().to_string(),
+            )
+            .ok()
+            .flatten()
+            .map_or_else(String::new, |d| format!("trusted digest {}, ", short(&d)));
             Check::warn(
                 NAME,
                 format!(
@@ -789,9 +793,7 @@ pub(super) fn provider_default(ctx: &Context) -> Vec<Check> {
             "local (the default): harnesses run as your user in a worktree, with no isolation",
         ),
         ConfiguredProvider::Microsandbox => microsandbox_row(ctx, config),
-        ConfiguredProvider::Substrate => {
-            provider_check(branchyard::up::substrate_readiness(config))
-        }
+        ConfiguredProvider::Substrate => provider_check(ctx.substrate().step()),
         ConfiguredProvider::Recipe => recipe_row(ctx, config),
     }]
 }
@@ -1069,28 +1071,48 @@ pub(super) fn host_kvm(ctx: &Context) -> Vec<Check> {
 
 /// A configured `[remote]` answers `GET /v1/repos` with its token.
 pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
+    vec![ctx.server().0.clone()]
+}
+
+/// Ask the configured server once: the `server.reachable` row, and what it
+/// answered for the readiness checks (`None` when none is configured).
+pub(super) fn ask_server(ctx: &Context) -> (Check, Option<Answer>) {
     const NAME: &str = "server.reachable";
     let globals = &ctx.globals;
     let Some(url) = globals.remote.as_deref() else {
-        return vec![Check::ok(
-            NAME,
-            "not configured: no --remote, BRANCHYARD_REMOTE or [remote] url; commands run here",
-        )];
+        return (
+            Check::ok(
+                NAME,
+                "not configured: no --remote, BRANCHYARD_REMOTE or [remote] url; commands run here",
+            ),
+            None,
+        );
     };
     // A URL may carry `user:password@`: shown without it.
     let shown = without_userinfo(url);
     if crate::ssh_remote::is_ssh(url) {
-        return vec![Check::ok(
-            NAME,
-            format!("{shown} is an ssh remote: not checked here; `by remote ssh status` shows it"),
-        )];
+        return (
+            Check::ok(
+                NAME,
+                format!(
+                    "{shown} is an ssh remote: not checked here; `by remote ssh status` shows it"
+                ),
+            ),
+            Some(Answer::NotAsked(
+                "doctor does not contact an ssh remote".into(),
+            )),
+        );
     }
     let Some(token_file) = globals.token_file.as_deref() else {
-        return vec![Check::fail(
-            NAME,
-            format!("{shown} is configured but no token file is"),
-            "set token_file under [remote], or pass --token-file / BRANCHYARD_TOKEN_FILE",
-        )];
+        let detail = format!("{shown} is configured but no token file is");
+        return (
+            Check::fail(
+                NAME,
+                &detail,
+                "set token_file under [remote], or pass --token-file / BRANCHYARD_TOKEN_FILE",
+            ),
+            Some(Answer::Unusable(detail)),
+        );
     };
     let client = Client::from_token_file(url, token_file)
         .and_then(|client| match globals.ca_file.as_deref() {
@@ -1101,34 +1123,60 @@ pub(super) fn server_reachable(ctx: &Context) -> Vec<Check> {
     let client = match client {
         Ok(client) => client,
         Err(error) => {
-            return vec![Check::fail(
-                NAME,
-                error.to_string().replace(url, &shown),
-                "check the token file and CA file the remote names",
-            )]
+            return (
+                Check::fail(
+                    NAME,
+                    error.to_string().replace(url, &shown),
+                    "check the token file and CA file the remote names",
+                ),
+                Some(Answer::of_client(&error)),
+            )
         }
     };
-    vec![match served_repositories(client, SERVER_DEADLINE) {
-        Err(why) => Check::fail(
-            NAME,
-            format!(
-                "{shown} did not answer GET /v1/repos: {}",
-                why.replace(url, &shown)
-            ),
-            crate::remote::UNREACHABLE_FIX,
-        ),
-        Ok(names) => match globals.repo.as_deref() {
-            Some(wanted) if !names.iter().any(|n| n == wanted) => Check::fail(
-                NAME,
-                format!(
-                    "{shown} answers, but serves {}, not {wanted:?}",
-                    list(&names)
+    match served_repositories(client, SERVER_DEADLINE) {
+        Err(error) => {
+            let why = error.as_ref().map_or_else(
+                || format!("no answer within {SERVER_DEADLINE:?}"),
+                ToString::to_string,
+            );
+            let answer = match &error {
+                Some(error) => Answer::of_client(error),
+                None => Answer::Unreachable(why.clone()),
+            };
+            (
+                Check::fail(
+                    NAME,
+                    format!(
+                        "{shown} did not answer GET /v1/repos: {}",
+                        why.replace(url, &shown)
+                    ),
+                    crate::remote::UNREACHABLE_FIX,
                 ),
-                "fix repo under [remote] (or --repo / BRANCHYARD_REPO), or serve it",
-            ),
-            _ => Check::ok(NAME, format!("{shown} answers; it serves {}", list(&names))),
-        },
-    }]
+                Some(answer),
+            )
+        }
+        Ok(names) => {
+            let wanted = globals.repo.clone();
+            let row = match wanted.as_deref() {
+                Some(wanted) if !names.iter().any(|n| n == wanted) => Check::fail(
+                    NAME,
+                    format!(
+                        "{shown} answers, but serves {}, not {wanted:?}",
+                        list(&names)
+                    ),
+                    "fix repo under [remote] (or --repo / BRANCHYARD_REPO), or serve it",
+                ),
+                _ => Check::ok(NAME, format!("{shown} answers; it serves {}", list(&names))),
+            };
+            (
+                row,
+                Some(Answer::Repositories {
+                    served: names,
+                    wanted,
+                }),
+            )
+        }
+    }
 }
 
 fn list(names: &[String]) -> String {
@@ -1139,17 +1187,19 @@ fn list(names: &[String]) -> String {
     }
 }
 
-/// The names of the repositories the server serves, or why it did not say,
-/// within `deadline` whatever the network does: the request runs on a
-/// thread of its own, and one that outlives the deadline is left to end
-/// with the process.
-fn served_repositories(client: Client, deadline: Duration) -> Result<Vec<String>, String> {
+/// The names of the repositories the server serves, or its error (`None`:
+/// no answer within `deadline`), whatever the network does: the request
+/// runs on a thread of its own, and one that outlives the deadline is left
+/// to end with the process.
+fn served_repositories(
+    client: Client,
+    deadline: Duration,
+) -> Result<Vec<String>, Option<branchyard_client::Error>> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let answer = client
             .repos()
-            .map(|repos| repos.into_iter().map(|r| r.name).collect::<Vec<_>>())
-            .map_err(|error| error.to_string());
+            .map(|repos| repos.into_iter().map(|r| r.name).collect::<Vec<_>>());
         branchyard_support::best_effort(
             "tell doctor what the server answered",
             sender.send(answer),
@@ -1157,7 +1207,8 @@ fn served_repositories(client: Client, deadline: Duration) -> Result<Vec<String>
     });
     receiver
         .recv_timeout(deadline)
-        .map_err(|_| format!("no answer within {deadline:?}"))?
+        .map_err(|_| None)?
+        .map_err(Some)
 }
 
 // Model gateway.
@@ -1733,8 +1784,8 @@ mod tests {
         });
         let client = Client::new(&served.url(), "tok").unwrap();
         assert_eq!(
-            served_repositories(client, Duration::from_secs(10)),
-            Ok(vec!["app".to_owned()])
+            served_repositories(client, Duration::from_secs(10)).ok(),
+            Some(vec!["app".to_owned()])
         );
         served.finish();
 
@@ -1742,7 +1793,7 @@ mod tests {
         let client = Client::new(&silent.url(), "tok").unwrap();
         let began = std::time::Instant::now();
         let answer = served_repositories(client, Duration::from_millis(300));
-        assert_eq!(answer, Err("no answer within 300ms".to_owned()));
+        assert!(matches!(answer, Err(None)), "{answer:?}");
         assert!(
             began.elapsed() < Duration::from_secs(5),
             "{:?}",

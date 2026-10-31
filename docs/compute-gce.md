@@ -54,8 +54,8 @@ by compute gce \
   --name=branchyard-worker \
   --directory="$PWD" \
   --tunnel-through-iap \
-  --version=0.3.0 \
-  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.3.0
+  --version=0.3.1 \
+  --image=ghcr.io/vamsiramakrishnan/branchyard-agy:0.3.1
 ```
 
 The planner contacts no cloud service, runs no provider commands and creates no
@@ -113,7 +113,11 @@ A matching existing VM is reused and completed steps can run again.
 
 Use the recorded URL with `by --remote URL`, or save it as `[remote] url` in the
 local project configuration. The native remote starts and authenticates its own
-Unix-socket server. It introduces no public Branchyard HTTP port.
+Unix-socket server. It introduces no public Branchyard HTTP port. `by setup --up`
+then reports the seven [readiness checks](up.md#readiness-checks) from the worker's
+own inventory. A worker made by guided setup is also offered to new projects
+under *Existing remote environment*; one made by `by compute gce` keeps its record
+under `compute-gce/` and is not.
 
 Operations act on the remote copy. After reviewing and merging a candidate
 there, fetch its parent branch through the recorded SSH alias if the local

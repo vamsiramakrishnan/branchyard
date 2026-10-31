@@ -1432,6 +1432,31 @@ fn workspace_actions_parse_with_json_anywhere() {
 }
 
 #[test]
+fn skills_actions_parse_with_json_anywhere() {
+    let skills = |line: &str| match parse_str(line).unwrap() {
+        Command::Skills { json, action } => (json, action),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        skills("skills ls"),
+        (false, SkillsAction::Ls { branch: None })
+    );
+    assert_eq!(
+        skills("skills --json ls b"),
+        (
+            true,
+            SkillsAction::Ls {
+                branch: Some("b".into())
+            }
+        )
+    );
+    assert_eq!(skills("skills trust --json"), (true, SkillsAction::Trust));
+    assert_eq!(skills("skills untrust"), (false, SkillsAction::Untrust));
+    assert!(err("skills").contains("Usage"));
+    assert!(err("skills trust b").contains("unexpected argument"));
+}
+
+#[test]
 fn env_actions_parse() {
     let env = |line: &str| match parse_str(line).unwrap() {
         Command::Env { json, action } => (json, action),
@@ -2485,14 +2510,20 @@ fn config_has_four_actions() {
 }
 
 #[test]
-fn up_takes_plan_yes_and_json() {
+fn up_takes_plan_smoke_yes_and_json() {
     let up = |line: &str| match parse_str(line).unwrap() {
-        Command::Up { json, plan, yes } => (json, plan, yes),
+        Command::Up {
+            json,
+            plan,
+            smoke,
+            yes,
+        } => (json, plan, smoke, yes),
         other => panic!("{line}: parsed as {other:?}"),
     };
-    assert_eq!(up("up"), (false, false, false));
-    assert_eq!(up("up --plan --json"), (true, true, false));
-    assert_eq!(up("up --yes"), (false, false, true));
+    assert_eq!(up("up"), (false, false, false, false));
+    assert_eq!(up("up --plan --json"), (true, true, false, false));
+    assert_eq!(up("up --plan --smoke"), (false, true, true, false));
+    assert_eq!(up("up --yes"), (false, false, false, true));
     assert!(parse_str("up extra").is_err());
 }
 

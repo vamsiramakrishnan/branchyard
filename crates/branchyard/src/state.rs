@@ -211,6 +211,11 @@ pub(crate) struct Record {
     /// counted twice. Cleared when the turn ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metered_from: Option<f64>,
+    /// The repository skills it runs with, fixed when it was created and
+    /// inherited by its forks, reincarnations and children; `None` when
+    /// its base commit had none. See `crate::skills`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<crate::skills::BranchSkills>,
 }
 
 /// A delegated child that was removed, as its parent's record remembers it.

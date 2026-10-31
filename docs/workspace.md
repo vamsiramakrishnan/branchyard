@@ -77,6 +77,7 @@ A cloned repository's scripts are code you have not read. Superset's advisory ab
 - A section with no commands (only `copy`) needs no trust, and neither does your own user file's entry.
 - `by run`, `fan`, `fork`, `reincarnate` and `rig run`, which create branches, check it before creating anything. On a terminal they show the scripts and ask once (`trust these scripts for …? [y/N]`); a yes is recorded, a no creates nothing. Without a terminal they refuse, exit 1, and point to `by workspace trust`. `by send` creates no worktree and asks nothing.
 - `by workspace trust` trusts the section as it is now; `by workspace untrust` forgets the decision; `by workspace show` shows the section, where it came from, its digest and whether it is trusted.
+- The same file keeps, in its `skills` map, the digest of each repository's skill set you trusted with `by skills trust` ([your repository's skills](knowledge-skills.md#your-repositorys-skills)).
 - A harness on a branch (`BRANCHYARD_BRANCH` set) can never trust anything, and its `by` reads no configuration: a delegated child gets its parent's workspace, as decided when the parent was created.
 - The SDK takes no decision: `TaskOptions::workspace` runs what its caller passes.
 - A server runs a repository's scripts only when its operator allows them in the server's configuration, never because a request asks (a request with a `workspace` field is refused as an unknown field):

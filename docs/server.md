@@ -100,6 +100,7 @@ Configuration file (relative paths resolve against the file's directory; unknown
   "by_path": "/usr/local/bin/by",
   "allow_unapproved_tools": false,
   "allow_workspace_scripts": ["app"],
+  "allow_repository_skills": ["app"],
   "secrets": { "ANTHROPIC_API_KEY": "ANTHROPIC_API_KEY", "CODEX_AUTH": "@/etc/branchyard/codex-auth.json" },
   "database": "postgres://branchyard@db.internal/branchyard",
   "labels": ["linux", "gpu"],
@@ -118,11 +119,15 @@ Configuration file (relative paths resolve against the file's directory; unknown
 
 `allow_workspace_scripts` (`true`, or a list of served repositories) lets a repository's own `[workspace]` scripts in its `branchyard.toml` run for the branches this server creates: copy, setup before the first turn, teardown on removal, with `BRANCHYARD_PORT` reserved per branch. Off by default, and no request can ask for it: every other repository's yard refuses workspace scripts outright. See [workspace](workspace.md#trust).
 
+`allow_repository_skills` (`true`, or a list of served repositories) stages a repository's own skills, `.agents/skills/` read from each new branch's base commit, beside the built-in skills of the branches this server creates. Off by default: every other repository's branches withhold them, and each turn's `provisioned` event says why. Neither a request nor the repository's `branchyard.toml` can turn it on. See [your repository's skills](knowledge-skills.md#your-repositorys-skills).
+
 `app` (`true`, or its settings) turns on the [web companion](companion.md#setting-it-up): the page at `/app/`, pairing links and Web Push.
 
 `allow_trigger_prechecks` (`true`, or a list of served repositories) is the same decision for [triggers](triggers.md): a trigger's precheck command runs, as the server's user, only for those repositories, and a trigger with one is refused (`403 precheck_not_allowed`) elsewhere. `public_url` is the base of every event trigger's webhook URL, for a server behind a proxy.
 
-The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts` or `allow_trigger_prechecks` entry naming a repository it does not serve, a `public_url` that is not `http://` or `https://`, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
+`execution_presets` names the environments a workspace session may run in, and `require_workspace_execution_presets` makes workspace sessions name one; see [execution presets](#execution-presets).
+
+The server refuses to start with no repository, no token or credential, an `allow_workspace_scripts`, `allow_repository_skills` or `allow_trigger_prechecks` entry naming a repository it does not serve, a `public_url` that is not `http://` or `https://`, a token shorter than 16 characters, an unknown provider or scope name, a malformed or duplicated `credentials` hash, a `by_path` that is not a file, a `database` that is not a `postgres://` URL, an [execution preset](#execution-presets) that cannot run as written or `require_workspace_execution_presets` without one, or a plain-HTTP bind to anything but loopback without `--insecure-bind`. It warns when a token file, or a configuration holding inline tokens or a database password, is readable by other users. A password in `--database` is visible to other users of the host in its process list; prefer the configuration file, mode 600.
 
 SIGINT or SIGTERM starts a graceful shutdown, the same for both: no new connections or operations (`503 shutting_down`), no more operations claimed from the queue, event streams end, requests in flight finish, and running operations get the grace period. Operations still running after it are recorded as `interrupted`; queued ones stay queued, and run after the restart or on another server sharing the database. A second signal stops waiting at once. The log says each step: at the signal `shutting down: 8 running operations may finish within 60s (signal again to stop waiting); 2 queued stay queued for the next start`, and as the process ends `stopped: 7 finished within the grace period; 1 recorded interrupted; 2 left in the queue for the next start, or another server on the database` (a `WARN` line when something was interrupted; `nothing is running` and `nothing was running` for an idle server). A `by --remote` command following one of those operations waits through the restart ([remote mode](#remote-mode-in-by)).
 
@@ -498,6 +503,10 @@ Every error is `{"error": {"code", "message", "detail"?}}`. Codes are stable; me
 | `connectors_not_configured` | 403 | `provision.connectors` on a server without `connectors` |
 | `secret_not_allowed` | 403 | A `provision.secrets` name the server's operator did not define; `detail.secret` |
 | `provider_not_allowed` | 403 | A provider the server's operator did not allow; `detail.provider` |
+| `preset_required` | 400 | A workspace session start without `preset` on a server with `require_workspace_execution_presets` |
+| `unknown_preset` | 404 | No [execution preset](#execution-presets) of that ID lists the caller's tenant; `detail.preset` |
+| `preset_conflict` | 400 | A workspace session start with `preset` and `provider` or `provision` |
+| `preset_choice_unavailable` | 422 | A harness, model or effort the selected preset does not offer; `detail.field` and `detail.allowed` |
 | `delegation_not_allowed` | 403 | A delegation envelope, `allow_delegation`, a spawn, or a send to a branch with an envelope, on a server that does not allow delegation |
 | `unapproved_tools_not_allowed` | 403 | `unapproved_tools` on a server that does not allow them |
 | `idempotency_key_reused` | 422 | Same key, different request; `detail.operation` |
@@ -668,7 +677,7 @@ The keys are `[sync]`'s ([sync](sync.md#quick-start)) and `lease_seconds` (defau
 ## Security
 
 - **No isolation by default, even remotely.** Unless a request names an allowed sandbox provider, the server runs harnesses with the local process provider: as the server's operating-system user, with its environment, home and credentials. A remote caller with a token and `--yes` (policy `allow`) can make a harness do anything that user can. Serving a repository is granting its token holders that user's authority. Run the server as a dedicated, unprivileged user on a machine you are willing to hand over. `--allow-provider` does not restrict callers to that provider; they may still ask for `local`. Neither sandbox provider is qualified yet (design §4, M2).
-- **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses.
+- **Allowed providers use the server's credentials.** A token holder chooses which of the server's variables a sandboxed turn gets through `pass_env`, and which Substrate endpoint, router and key path it uses. For workspace sessions, `require_workspace_execution_presets` takes that choice away: a session names an [execution preset](#execution-presets), whose provider, paths and secrets the operator chose. Direct tasks still accept `provider`.
 - **Delegation** gives the server's harnesses the delegation tools, bounded by the envelope. As in local mode, a harness running as the server's user can read other branches' tokens in `.branchyard/`; the envelope stops honest mistakes, not a hostile harness, until harnesses run in sandboxes. `--allow-unapproved-tools` lets token holders run profiles whose tools the request's policy never sees.
 - **`allow_client_commands`** additionally lets any token holder choose the executable the server launches. Leave it off outside tests; configure `harness_commands` instead.
 - **The web companion** ([its security model](companion.md#security-model)) is off unless `--app`; its page is static, adds no authority beyond the caller's token, and is served with a strict Content Security Policy.
@@ -822,7 +831,8 @@ fields. Poll the existing operation route to determine its outcome.
 | `POST /v1/workspaces` | Reserve `{project_id,title}` and enqueue native task initialization |
 | `GET /v1/workspaces/{workspace}` | Read revision, task binding, sessions, source provenance, members, accepted outputs, and capabilities |
 | `GET /v1/workspaces/{workspace}/sessions` | Derive named session views from native attempts and operations |
-| `POST /v1/workspaces/{workspace}/sessions` | Start `{name,prompt,harness,model?,effort?,result_contract?,access,sources?,artifacts?}` |
+| `GET /v1/execution-presets?workspace=ID` | List the [execution presets](#execution-presets) offered to the caller's tenant, with readiness and, with a workspace, `can_start` |
+| `POST /v1/workspaces/{workspace}/sessions` | Start `{name,prompt,harness,preset?,model?,effort?,result_contract?,access,sources?,artifacts?}` |
 | `GET /v1/workspaces/{workspace}/sessions/{session}/messages?after=CURSOR` | Read native prompt, output, and steering text with a cursor |
 | `POST /v1/workspaces/{workspace}/sessions/{session}/messages` | Continue `{prompt,action:"send"|"resume"|"steer"}` in the same native attempt |
 | `POST /v1/workspaces/{workspace}/sessions/{session}/cancel` | Admit attributed native cancellation |
@@ -835,8 +845,8 @@ fields. Poll the existing operation route to determine its outcome.
 | `POST /v1/workspaces/{workspace}/sessions/{session}/terminals/{terminal}/close` | Close the handle and terminate its shell process group |
 | `POST /v1/workspaces/{workspace}/actions/{action}` | Archive or restore at `{revision}`; unsupported provider actions return structured capability reasons |
 | `GET /v1/workspaces/{workspace}/sources` | List immutable original source metadata |
-| `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
-| `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment |
+| `POST /v1/workspaces/{workspace}/sources` | Upload original bytes with `X-Source-Title-Encoded` or `X-Source-Title`, `Content-Type`, and `X-Workspace-Revision` |
+| `GET /v1/workspaces/{workspace}/sources/{source}/content` | Download digest-verified original bytes as an attachment named by the title |
 | `GET /v1/workspaces/{workspace}/sources/{source}/preview` | Render a bounded original source after checking current membership |
 | `GET /v1/workspaces/{workspace}/sources/{source}/preview/assets/{asset}` | Read a derived page image under the same source grant |
 | `GET /v1/workspaces/{workspace}/artifacts` | List native immutable artifacts owned by this workspace |
@@ -862,6 +872,28 @@ A reviewer additionally selects frozen artifact IDs and runs under the
 intersection of the original policy and the engine's read-only policy. Separate
 sessions retain separate native conversations; continuation never substitutes a
 fresh native session.
+
+A source's title travels in one of two headers. `X-Source-Title` holds visible
+ASCII, 1 to 512 bytes. `X-Source-Title-Encoded` holds any title as an
+[RFC 8187](https://www.rfc-editor.org/rfc/rfc8187) extended value: `UTF-8`, an
+optional language tag of letters, digits and `-` that is ignored, and the
+percent-encoded UTF-8 title, as in
+`UTF-8''%C3%89tude%20de%20march%C3%A9.xlsx`. When the encoded header is present,
+the server reads only it and ignores `X-Source-Title`. An invalid encoded title is
+refused and never replaced by the ASCII one, so a client sends an ASCII copy in
+`X-Source-Title` for older servers. The encoded value is at most 4 KiB, and after
+the charset and language it holds only `attr-char` and `%` followed by two hex
+digits. It must decode to valid UTF-8 of 1 to 512 bytes, with no control
+character (Unicode category Cc, C1 included) and no bidirectional override or
+isolate (U+202A to U+202E, U+2066 to U+2069). Any other value is
+`400 invalid_source_title`, and the message names the rule it broke. The title is
+stored as decoded, without normalisation, and the upload's idempotency
+fingerprint covers the decoded title. A source or artifact download sends
+`Content-Disposition: attachment; filename="<fallback>"; filename*=UTF-8''<encoded>`
+([RFC 6266](https://www.rfc-editor.org/rfc/rfc6266)). Both parameters name the
+title's or artifact name's last segment after any `/` or `\`; a name that ends
+in one of them is sent as a bare `attachment`. The quoted fallback has `_` in
+place of each non-ASCII character, control, `"` and `\`.
 
 Finalization requires immutable artifacts from completed workspace producers with
 a valid deliverable contract and valid current-turn output. An earlier turn's
@@ -972,3 +1004,75 @@ that commit. A later writer turn cannot change the review input. Mutable branch
 names, arbitrary Git references and candidates from another task are rejected.
 The reviewer still runs with the intersection of its requested policy and
 read-only constraints; selecting a candidate grants no integration permission.
+
+### Execution presets
+
+An execution preset is a named environment the operator writes into the configuration. A workspace session start names its ID; the server supplies the provider, its paths and secrets, and the worker labels. A preset grants nothing. It resolves to the start's existing `provider`, provisioned secrets and `require_labels`, which then pass the same checks as any start: `allow_providers`, `allow_unapproved_tools`, provisioning, membership and roles, quotas and scheduling. Direct tasks (`POST /v1/repos/{repo}/tasks`) and native delegation are unchanged.
+
+```json
+"require_workspace_execution_presets": true,
+"execution_presets": [
+  { "id": "local", "label": "This server",
+    "description": "Runs on the Branchyard server with the harnesses installed here.",
+    "provider": { "kind": "local" },
+    "harnesses": [
+      { "harness": "antigravity", "models": ["gemini-3.8-flash-low"] },
+      { "harness": "claude-code" }
+    ],
+    "secrets": ["GEMINI_API_KEY"] },
+  { "id": "substrate-gke", "label": "Substrate on GKE",
+    "description": "Runs each session in its own Substrate actor on the team's GKE cluster.",
+    "provider": { "kind": "substrate", "endpoint": "https://substrate-control.internal.example",
+      "router": "https://substrate-router.internal.example", "template": "branchyard-harnesses",
+      "key": "substrate/bridge.key", "api_token_file": "substrate/api.token", "ca": "substrate/ca.pem" },
+    "harnesses": [ { "harness": "antigravity", "models": ["gemini-3.8-flash-low"] } ],
+    "secrets": ["GEMINI_API_KEY"],
+    "tenants": ["research"],
+    "require_labels": ["substrate-gke"] }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable and unique: 1 to 64 of `a-z`, `0-9` and `-` |
+| `label`, `description` | Plain language for the console |
+| `provider` | A request's `provider`: `local`, `substrate` or `microsandbox`. Its kind must be in `allow_providers` (`local` always is); `recipe` is refused. Relative paths resolve against the configuration file's directory. A `microsandbox` preset on a build without Microsandbox gets the `--check` warning that `allow_providers` gets |
+| `harnesses` | Harness or profile IDs a session may choose, matched exactly: `claude-code` does not admit `claude-code-acp`. Each has an optional `models` allowlist and `default_model`, by default the first of `models`. Without `models`, a session may not choose a model |
+| `secrets` | Names in `secrets`, added to the session's provisioning. A worker resolves them from its own table, so workers need the same names |
+| `tenants` | Tenants that may use the preset. Absent: every tenant |
+| `require_labels` | Worker labels every turn of the session requires, so a Substrate session runs only on workers that hold its files |
+
+`by serve --check` validates presets after the flags merge `allow_providers` and `secrets`. With no `execution_presets` at all, the server offers one implicit `local` preset (`"origin": "default"`) whose harnesses are the ones it finds, with no secrets. When presets are configured and none lists the caller's tenant, the list is empty.
+
+`GET /v1/execution-presets?workspace=ID` needs `read`. With `workspace`, the caller must be a member, and each preset's `can_start` says whether the caller's role there can start a writer or reviewer session on one of its harnesses. Without `workspace`, presets are filtered by tenant and `can_start` is absent. A preset for another tenant is absent, not refused. Each harness lists `models`, `default_model`, `tool_approvals`, `writer` (false without tool approvals unless the operator allows unapproved tools), `reviewer` (false without tool approvals), `effort` (whether its provisioner takes one), `credentials` (`configured` when the preset supplies a secret the harness reads as its key, else `none`) and readiness:
+
+- `environment`: `ready` for local. For Substrate, this server loads the bridge key and PEM files and opens no socket; the result is cached for at most 60 seconds and `checked_ms_ago` gives its age. For Microsandbox, `ready` when this build runs it.
+- `reachability`: Substrate only, always `unknown`. The cluster is contacted when a session starts.
+- `executable`, per harness: for local, the PATH check of `GET /v1/harnesses`, cached like `environment`. For a remote environment, `unknown`.
+- `auth`, per harness: always `unknown` until a session verifies it. Console sessions do not use the server's own login.
+
+Each readiness value is `{state, scope, reason, action, checked_ms_ago?}`. `state` is `ready`, `not_ready` or `unknown`. `scope` is `api_host`, the server answering, which may not be the worker that runs the session, or `environment`. `reason` and `action` are fixed text, never an error message, path, endpoint or secret name. Readiness never refuses a start. Discovery opens no provider, contacts no environment, runs no harness and calls no model.
+
+A session start runs these steps after workspace authorization, the state check and the idempotent replay. The replay's fingerprint is the request body, so it covers the preset ID, not what the preset resolved to.
+
+1. With `require_workspace_execution_presets`, a start without `preset` is `400 preset_required`.
+2. The preset must exist and list the caller's tenant; otherwise `404 unknown_preset`.
+3. A start with `preset` may not carry `provider` or `provision`: `400 preset_conflict`. Model and effort go in the top-level fields.
+4. `harness` must be listed, `model` among its `models` (or absent when none are listed), and `effort` only for a harness that takes one; otherwise `422 preset_choice_unavailable` with `detail.field` and `detail.allowed`. A start that names no model runs the harness's `default_model`.
+5. The server sets the start's provider from the preset, adds its secrets and labels, and checks the result as any start.
+
+The session record keeps the resolved provider, labels and model, and the configured values its errors must not show. Its JSON gains `preset`. Every send and resume requires the same labels and runs on the provider the native branch recorded. A steer only delivers input to the running turn, so it keeps the label-free claim of control operations. A session on a remote preset never runs locally: a failed environment fails the run. Removing a preset, or a tenant from one, stops new sessions, not existing ones.
+
+For a session started with a preset, the server projects the text callers read of it, whoever they are. The projection replaces the preset's configured paths, as written and as resolved, its endpoints (as a URL, an origin, `host:port` and a host), passed variable names, and secret names and sources with fixed placeholders such as `[preset substrate-gke: bridge key]`, where each stands as a whole word. It applies to:
+
+- session JSON (`status_detail`, `error`, `result_error`) and the session's messages;
+- the `error` and `result` of its operations: `GET /v1/operations/{id}`, idempotency-key recovery, admission responses and their replays, and the unfinished operations `GET /v1/repos/{repo}/operations` lists;
+- a repository workspace's legacy answers about its branches: the branch, its inspection, events, event page, children and graph, the branch list, the wait and discard answers, task records with their attempts, and each entry of the repository feed (`GET /v1/repos/{repo}/events/stream`);
+- every JSON error on its console routes (`/v1/workspaces/{workspace}/sessions/{session}/...`) and on its legacy branch routes (`/v1/repos/{repo}/branches/{branch}/...`);
+- runtime inspection (`GET .../runtime`), the PR read (`GET .../pr`) and a terminal page's `error`. A terminal page's `data` is the terminal's own output and is never rewritten.
+
+A branch takes the projection of the nearest session among itself and its ancestors. A child or fork of a session's branch shows through that session's preset, and a session without a preset between them ends the walk. An operation merges the projections of every branch it names. Anything outside a preset session reads exactly as before.
+
+Not projected: the answers of a legacy branch's write routes that return no operation (cancel, steer, graph proposals, rewind and undo), the repository's effects, approvals and map records, content routes (diff, artifacts, scratch areas, inbox and plan), push notifications, trigger run details, operator-configured webhooks and OTLP export.
+
+**Status, 31 October 2026.** Hermetic only: in-process HTTP routes, in-memory queues, the native engine with the fake ACP agent, and Substrate environments that are never reached (a missing bridge key, and a cluster at the always-refused `127.0.0.1:1`), in `cargo test -p branchyard-server --lib presets` (12 tests, passed). They cover configuration validation, discovery and readiness, tenant and role filtering, each refusal, continuation labels, no local fallback, and the projection in a knowledge and a repository workspace: session, operation and message views, the runtime and PR reads, a viewer's legacy branch, event, list, wait, task-record and feed answers, and sessions without a preset, which read byte for byte as the engine serializes them. The nearest-session walk runs over real spawned branches with crafted session rows. The middleware and the operation list are tested with crafted responses and operations, since no hermetic failure produces a synchronous error that names a configured value, or an unfinished operation with an error. The manager MCP's `start_session` passes `preset`: `cargo test -p branchyard-cli --test workspace_manager` (1 test, passed) drives `by mcp manager` over stdio against `by serve` with a required local preset and the fake ACP agent, and `cargo test -p branchyard-mcp` (41 tests, passed) covers its schema and forwarding. Not done: a run against a real Substrate cluster or GKE, a Microsandbox preset, workers holding preset labels on other hosts, a real failure on a child of a preset session's branch, and the console UI.

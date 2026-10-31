@@ -46,6 +46,8 @@ a new key; never refresh and resubmit automatically.
 The operator manager's `start_session` accepts explicit `unapproved_tools: true`
 for a profile such as AGY that cannot route tool approvals. The server operator
 must also permit it. Omission means false; do not infer this acknowledgment.
+When the server answers `preset_required`, pass the operator's execution preset
+ID as `preset`; harness and model must then be ones that preset offers.
 
 Continue while your own native tasks or tools are active. A managed lead may
 end its turn to await Branchyard children after its native work finishes.
@@ -365,6 +367,12 @@ your children commits your work the same way. Write scratch files under
 `$TMPDIR`, a directory private to your branch, not in `/tmp`, which other
 branches share.
 
+`by skills ls` shows the skills your branch runs with: the built-in ones and,
+when a person trusted them or a server's operator allows them, the
+repository's `.agents/skills/` from the commit your branch started at. They are fixed when the branch is created and your
+children inherit them, so a skill you edit or commit is not one until a person
+merges it and trusts the new set with `by skills trust`, outside any branch.
+
 ## Before you finish
 
 Finish your native work before returning a final answer. For a structured
@@ -634,6 +642,8 @@ Substrate template setup; `--yes` applies it. `by substrate check --smoke
 --harness agy` verifies bridge execution, file transfer and cleanup without a
 model call. These are operator commands, run outside a harness session.
 `by up` and `by doctor` check the saved connection and remote credential sources.
+They report seven readiness checks; only a verified one was established by that run.
+`by up --plan --smoke` also lists Substrate workers, creating no actor and calling no model.
 An operator runs `by setup --guided` to choose a repository and compute backend.
 `by setup --up --json` includes readiness; `--directory PATH` selects a repository.
 An operator can plan a dedicated worker with `by compute gce --project PROJECT

@@ -1,7 +1,7 @@
 {
   "name": "branchyard",
   "displayName": "Branchyard",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI.",
   "author": {
     "name": "Branchyard contributors"

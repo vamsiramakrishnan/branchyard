@@ -69,6 +69,20 @@ def _minimal_office_zip(fmt: str, extra_entries: dict[str, bytes] | None = None,
     return buffer.getvalue()
 
 
+def _set_first_sheet_dimension(path: Path, ref: str) -> None:
+    """Rewrite the first worksheet's `<dimension>` the way a careless writer leaves it."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                start = data.index(b"<dimension ")
+                end = data.index(b"/>", start) + 2
+                data = data[:start] + b'<dimension ref="' + ref.encode() + b'"/>' + data[end:]
+            target.writestr(info, data)
+    path.write_bytes(buffer.getvalue())
+
+
 class PreviewTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -221,6 +235,21 @@ class CsvPreviewTests(PreviewTestCase):
         self.assertTrue(any("characters" in w for w in bounded["warnings"]))
         self.assertTrue(any("rows" in w for w in bounded["warnings"]))
 
+    def test_csv_column_warning_requires_a_value_beyond_the_column_limit(self) -> None:
+        padded = self.root / "padded.csv"
+        padded.write_text("a,b,c" + "," * 150 + "\n1,2,3" + "," * 150 + "\n", encoding="utf-8")
+        result = preview.preview(padded, self.root / "out")
+        self.assertEqual(result["columns"][:4], ["a", "b", "c", "column_4"])
+        self.assertEqual(len(result["columns"]), 100)
+        self.assertEqual(result["rows"], [["1", "2", "3", *([""] * 97)]])
+        self.assertEqual(result["warnings"], [])
+
+        wide = self.root / "wide.csv"
+        wide.write_text("a,b,c" + "," * 150 + "\n1,2,3" + "," * 97 + ",far\n", encoding="utf-8")
+        result = preview.preview(wide, self.root / "out")
+        self.assertEqual(len(result["columns"]), 100)
+        self.assertEqual(result["warnings"], ["Truncated columns to 100"])
+
     def test_csv_ragged_rows_and_invalid_arguments_are_handled(self) -> None:
         source = self.root / "ragged.csv"
         source.write_text(",b\n1\n1,2,3\n", encoding="utf-8")
@@ -353,12 +382,77 @@ class XlsxPreviewTests(PreviewTestCase):
         self.assertTrue(any("characters" in w for w in res["warnings"]))
         self.assertTrue(any("rows" in w for w in res["warnings"]))
 
+        with mock.patch.object(preview, "MAX_COLUMNS", 3):
+            exact = preview.preview(source, out_dir, sheet="Summary")
+        self.assertEqual(exact["columns"], ["Metric", "Value", "Notes"])
+        self.assertFalse(any("columns" in w for w in exact["warnings"]), exact["warnings"])
+
         class FakeArrayFormula:
             text = "=SUM(A1:A10)"
 
         warnings: list[str] = []
         self.assertEqual(preview._xlsx_cell(FakeArrayFormula(), warnings), "=SUM(A1:A10)")
         self.assertTrue(any("formula" in w.lower() for w in warnings))
+
+    def test_xlsx_column_warning_requires_a_value_beyond_the_column_limit(self) -> None:
+        import openpyxl
+        from openpyxl.styles import Font
+
+        def styled_empty_cell(sheet: Any) -> None:
+            sheet.cell(row=1, column=150).font = Font(bold=True)
+
+        def value_past_empty_column_101(sheet: Any) -> None:
+            sheet.cell(row=2, column=150, value="note")
+
+        cases: list[tuple[str, Any, list[str]]] = [
+            ("narrow", lambda sheet: None, []),
+            ("styled empty cell in column 150", styled_empty_cell, []),
+            ("value in column 150 only", value_past_empty_column_101, ["Truncated columns to 100"]),
+        ]
+        for label, extend, expected in cases:
+            with self.subTest(label):
+                path = self.root / "narrow.xlsx"
+                workbook = openpyxl.Workbook()
+                sheet = workbook.active
+                sheet.append(["Region", "Q1", "Q2"])
+                sheet.append(["North", 1, 2])
+                extend(sheet)
+                workbook.save(path)
+                result = preview.preview(path, self.root / "out")
+                self.assertEqual(result["columns"], ["Region", "Q1", "Q2"])
+                self.assertEqual(result["rows"], [["North", 1, 2]])
+                self.assertEqual(result["warnings"], expected)
+
+    def test_xlsx_value_in_column_101_warns_once_and_shows_100_columns(self) -> None:
+        import openpyxl
+
+        path = self.root / "wide.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append([f"c{index}" for index in range(1, 102)])
+        sheet.append(list(range(1, 102)))
+        sheet.append(list(range(1, 102)))
+        workbook.save(path)
+        result = preview.preview(path, self.root / "out")
+        self.assertEqual(result["columns"], [f"c{index}" for index in range(1, 101)])
+        self.assertEqual(result["rows"], [list(range(1, 101))] * 2)
+        self.assertEqual(result["warnings"], ["Truncated columns to 100"])
+
+    def test_xlsx_preview_reads_past_an_understated_dimension(self) -> None:
+        import openpyxl
+
+        path = self.root / "understated.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        for row in (["Region", "Q1", "Q2"], ["North", 1, 2], ["South", 3, 4], ["East", 5, 6]):
+            sheet.append(row)
+        sheet.cell(row=4, column=150, value="note")
+        workbook.save(path)
+        _set_first_sheet_dimension(path, "A1:C2")
+        result = preview.preview(path, self.root / "out")
+        self.assertEqual(result["columns"], ["Region", "Q1", "Q2"])
+        self.assertEqual(result["rows"], [["North", 1, 2], ["South", 3, 4], ["East", 5, 6]])
+        self.assertEqual(result["warnings"], ["Truncated columns to 100"])
 
 
 @unittest.skipUnless(HAS_PDF and HAS_PIL, "pypdf, reportlab and Pillow are required for page preview tests")

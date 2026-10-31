@@ -1895,8 +1895,8 @@
     return `${(n / 1024 / 1024).toFixed(1)} MB`;
   }
 
-  // Short names for formats people know; any other shows its media type,
-  // which a row's tooltip always gives in full.
+  // Short names for formats people know; any other shows its file name's
+  // extension, and a row's tooltip always gives the media type in full.
   const FORMATS = {
     'text/csv': 'CSV',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
@@ -1909,29 +1909,81 @@
     'image/png': 'PNG',
     'image/jpeg': 'JPEG',
   };
-  const formatOf = (type) => FORMATS[(type || '').split(';')[0].trim().toLowerCase()] || type || 'File';
+  function formatOf(type, name) {
+    const known = FORMATS[(type || '').split(';')[0].trim().toLowerCase()];
+    if (known) return known;
+    const extension = /\.([a-z0-9]{1,8})$/i.exec(name || '');
+    return extension ? extension[1].toUpperCase() : 'File';
+  }
 
-  // The server reads a source's title from a header, which carries printable
-  // ASCII only: accents are dropped and any other character becomes `_`.
-  const asciiTitle = (name) => name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\x20-\x7e]/g, '_').slice(0, 512);
+  // A source's title travels as an RFC 8187 extended value, so any name
+  // arrives as written. encodeURIComponent would leave ' ( ) * bare, which
+  // attr-char excludes, so each UTF-8 byte outside attr-char is escaped
+  // here. X-Source-Title keeps an ASCII copy for a server that reads only it.
+  const ATTR_CHAR = /^[A-Za-z0-9!#$&+\-.^_`|~]$/;
+  const encodedTitle = (name) => `UTF-8''${Array.from(new TextEncoder().encode(name), (byte) => {
+    const c = String.fromCharCode(byte);
+    return ATTR_CHAR.test(c) ? c : `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+  }).join('')}`;
+  const asciiTitle = (name) => name.replace(/[^\x20-\x7e]/gu, '_');
+  // The server keeps a title to 512 UTF-8 bytes, so a longer name keeps its
+  // extension and loses whole characters from the end of the rest.
+  const utf8Length = (text) => new TextEncoder().encode(text).length;
+  function sourceTitle(name) {
+    if (utf8Length(name) <= 512) return name;
+    const extension = (/\.[a-z0-9]{1,8}$/i.exec(name) || [''])[0];
+    const stem = Array.from(name.slice(0, name.length - extension.length));
+    while (stem.length && utf8Length(stem.join('') + extension) > 512) stem.pop();
+    return stem.join('') + extension;
+  }
 
   // A session's native status once its turn exists. Before that it has no
   // `status_detail`, and `status` is its admission operation's state.
   const sessionStatus = (s) => (s.status_detail ? { name: s.name, status: s.status_detail } : null);
-  const unstarted = (s) => !s.status_detail && ['failed', 'interrupted'].includes(s.status);
-  function sessionActive(s) {
-    const info = sessionStatus(s);
-    return info ? ['running', 'waiting', 'waiting_on_children'].includes(info.status.state) : !unstarted(s);
+
+  // Where a session stands, in the words every part of the page uses: its
+  // tab, its outputs' heading, Details, the facts line, the conversation
+  // and the next-step line. `next` is what to do about it.
+  const RECOVER = 'Try again, choosing another environment or harness if this one cannot run it.';
+  const PHASES = {
+    queued: { label: 'Waiting to start', lane: 'running', next: 'It starts as soon as the server admits it.' },
+    starting: { label: 'Starting', lane: 'running', next: 'Its first turn begins in a moment.' },
+    running: { label: 'Running', lane: 'running', next: 'Steer it from the message box, or wait for the turn to end.' },
+    waiting: { label: 'Waiting', lane: 'running', next: 'It continues when what it waits for finishes.' },
+    interrupted: { label: 'Interrupted', lane: 'needs', next: 'Resume it from the message box.' },
+    completed: { label: 'Completed', lane: 'done', next: 'Review its outputs, or continue it from the message box.' },
+    failed: { label: 'Failed', lane: 'needs', next: RECOVER },
+    not_started: { label: 'Did not start', lane: 'needs', next: RECOVER },
+  };
+  // A native state's phase, and an admission operation's before the
+  // session's branch exists.
+  const NATIVE_PHASE = {
+    running: 'running', waiting: 'waiting', waiting_on_children: 'waiting', interrupted: 'interrupted',
+    ready: 'completed', no_changes: 'completed', merged: 'completed',
+    failed: 'failed', blocked: 'failed', budget_exceeded: 'failed', awaiting_plan_approval: 'failed',
+  };
+  const ADMISSION_PHASE = { queued: 'queued', running: 'starting', succeeded: 'starting', failed: 'not_started', interrupted: 'not_started' };
+  const ACTIVE_PHASES = ['queued', 'starting', 'running', 'waiting'];
+  const RECOVERABLE_PHASES = ['not_started', 'failed'];
+
+  function sessionPhase(s) {
+    const native = s.status_detail;
+    const key = native ? NATIVE_PHASE[native.state] || 'running' : ADMISSION_PHASE[s.status] || 'starting';
+    const phase = PHASES[key];
+    let lane = phase.lane;
+    let detail = null;
+    if (key === 'not_started') detail = s.error ? s.error.message : null;
+    else if (key === 'completed' && native.state === 'ready') lane = 'ready';
+    else if (key === 'completed' || (key === 'failed' && native.state !== 'failed')) detail = statusOf({ status: native }).text;
+    else if (key === 'failed') detail = native.reason || null;
+    return { key, label: phase.label, lane, next: phase.next, detail };
   }
-  function sessionLane(s) {
-    const info = sessionStatus(s);
-    if (!info) return unstarted(s) ? 'needs' : 'running';
-    return info.status.state === 'waiting_on_children' ? 'running' : laneOf(info, new Map()).key;
-  }
+  const unstarted = (s) => sessionPhase(s).key === 'not_started';
+  const sessionActive = (s) => ACTIVE_PHASES.includes(sessionPhase(s).key);
+  const sessionLane = (s) => sessionPhase(s).lane;
   function sessionText(s) {
-    if (unstarted(s)) return `did not start${s.error ? `: ${s.error.message}` : ''}`;
-    const info = sessionStatus(s);
-    return info ? statusOf(info).text : 'starting';
+    const { label, detail } = sessionPhase(s);
+    return detail ? `${label}: ${detail}` : label;
   }
   const sessionsOf = (v) => (v.workspace.sessions || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
   const selectedSession = (v) => sessionsOf(v).find((s) => s.id === v.session) || null;
@@ -2012,6 +2064,242 @@
     return c.available ? null : c.reason || 'not available';
   }
 
+  // Why a workspace takes no new session, by its state (or, for a view
+  // state such as `running`, the lifecycle state behind it); null when it
+  // takes one.
+  const NOT_READY = {
+    pending: 'The workspace is starting; sessions can start once it is ready.',
+    restoring: 'The workspace is being restored; sessions can start once it is ready.',
+    archiving: 'The workspace is being archived.',
+    archived: 'The workspace is archived: restore it from ⋯, then start.',
+    failed: 'The workspace\'s setup failed: restore it from ⋯, then start.',
+    interrupted: 'The workspace\'s setup was interrupted: restore it from ⋯, then start.',
+  };
+  const notReady = (ws) => NOT_READY[ws.state] || NOT_READY[ws.lifecycle_intent] || null;
+  const said = (text) => (/[.!?]$/.test(text) ? cap(text) : `${cap(text)}.`);
+
+  // Readiness in fixed words: a state's word and the dot that repeats it,
+  // and where it was measured. Text is always shown, and readiness never
+  // disables anything.
+  const READY = { ready: ['Ready', 'ready'], not_ready: ['Not ready', 'needs'], unknown: ['Unknown', 'done'] };
+  const SCOPE = { api_host: 'checked on this server', environment: 'in the environment itself' };
+  // Whether an environment supplies a harness's key is configuration, not a
+  // measurement: its row has a fact and no state.
+  const KEY = { configured: 'This environment supplies its key', none: 'This environment supplies no key' };
+  const PROVIDERS = { local: 'Local', substrate: 'Substrate', microsandbox: 'Microsandbox' };
+  const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+  const readinessRow = (name, r) => ({
+    name, state: r.state, scope: r.scope, reason: r.reason, action: r.action, checkedMsAgo: r.checked_ms_ago == null ? null : r.checked_ms_ago,
+  });
+
+  // Discovery's presets as the environments a session can start in. Which
+  // `preset` a start sends is decided here and nowhere else: the server's
+  // implicit default environment sends none (today's start, so coding
+  // projects are unchanged) unless the server requires one.
+  function environmentsOf(list) {
+    return list.presets.map((p) => {
+      const preset = p.origin === 'default' && !list.required ? null : p.id;
+      return {
+        key: p.id, label: p.label, description: p.description || '', provider: p.provider, origin: p.origin, preset,
+        canStart: p.can_start !== false,
+        readiness: [readinessRow('Environment', p.environment), p.reachability ? readinessRow('Reachability', p.reachability) : null].filter(Boolean),
+        harnesses: p.harnesses.map((x) => ({
+          id: x.harness, models: x.models || null, defaultModel: x.default_model || null, freeModel: preset === null,
+          toolApprovals: x.tool_approvals, writer: x.writer, reviewer: x.reviewer, effort: x.effort === true, credentials: x.credentials,
+          readiness: [readinessRow('Executable', x.executable), readinessRow('Sign-in', x.auth), { name: 'Key', fact: KEY[x.credentials] || x.credentials }],
+        })),
+      };
+    });
+  }
+
+  // The environment a session started in: its preset's, or the default
+  // environment's when it sent none.
+  const environmentOf = (v, s) => v.environments.list.find((env) => env.preset === (s.preset || null)) || null;
+
+  const WRITER_CANNOT = 'it cannot ask before each tool, and this server does not accept that for writers';
+  const REVIEWER_CANNOT = 'reviewers need a harness that routes each tool request for approval';
+  // Why each access is closed for a harness and the caller's role, or null.
+  const accessWhy = (x, roles) => ({
+    writer: !roles.run ? 'your role in this workspace cannot start writers' : x.writer === false ? WRITER_CANNOT : null,
+    reviewer: !roles.comment ? 'your role in this workspace cannot start reviewers' : x.reviewer === false ? REVIEWER_CANNOT : null,
+  });
+
+  // Everything the new-session form offers for a draft, what is closed and
+  // why, and the first thing still missing. Pure: the form draws it and
+  // Start checks it.
+  function startChoices(environments, roles, draft, outputs) {
+    const envs = environments.list.map((env) => ({ env, why: env.canStart ? null : 'Your role in this workspace cannot start sessions here.' }));
+    const open = envs.filter((e) => !e.why);
+    const picked = open.find((e) => e.env.key === draft.env) || (open.length === 1 ? open[0] : null);
+    const env = picked ? picked.env : null;
+    const harnesses = (env ? env.harnesses : []).map((x) => {
+      const w = accessWhy(x, roles);
+      const why = w.writer && w.reviewer ? [roles.run ? w.writer : null, roles.comment ? w.reviewer : null].filter(Boolean).join('; ') || w.writer : null;
+      return { harness: x, why };
+    });
+    const usable = harnesses.filter((x) => !x.why);
+    // The default environment of a server that lists no harness keeps
+    // today's typed harness.
+    const typed = !!env && env.preset === null && !env.harnesses.length;
+    const typedHarness = draft.harness && draft.harness.trim();
+    const chosen = usable.find((x) => x.harness.id === draft.harness) || usable[0];
+    const harness = typed
+      ? (typedHarness ? { id: typedHarness, models: null, freeModel: true, toolApprovals: null, writer: null, reviewer: null, effort: false, readiness: [] } : null)
+      : chosen ? chosen.harness : null;
+    const base = accessWhy(harness || {}, roles);
+    const other = draft.access === 'writer' ? 'reviewer' : 'writer';
+    const value = base[draft.access] && !base[other] ? other : draft.access;
+    // `fixed` when the role or the harness closes the other access, so the
+    // choice is not the person's; `forced` when that leaves reviewer.
+    const fixed = !!base[value === 'writer' ? 'reviewer' : 'writer'];
+    const access = {
+      value, writer: base.writer, reviewer: base.reviewer || (outputs.length ? null : 'no outputs to review yet'),
+      fixed, forced: value === 'reviewer' && fixed,
+    };
+    let model = { kind: 'none', options: [], value: '' };
+    if (harness && harness.freeModel) model = { kind: 'free', options: [], value: draft.model };
+    else if (harness && harness.models && harness.models.length) {
+      model = { kind: 'select', options: harness.models, value: harness.models.includes(draft.model) ? draft.model : harness.defaultModel || harness.models[0] };
+    }
+    const offered = !!harness && harness.effort;
+    const effort = { offered, value: offered && EFFORTS.includes(draft.effort) ? draft.effort : '' };
+    const acknowledgement = value === 'writer' && !!harness && harness.toolApprovals === false;
+    // The first thing the start still needs, in the form's order.
+    const firstMissing = () => {
+      if (environments.state !== 'ready') {
+        return { field: 'environments', text: environments.state === 'failed' ? `The environments did not load: ${said(environments.error)} Retry, then start.` : 'Loading the environments this server offers…' };
+      }
+      if (!env) return { field: 'environment', text: open.length ? 'Choose where it runs.' : 'No environment here can start a session for your role.' };
+      if (!harness) {
+        return { field: 'harness', text: typed ? 'Type a harness this server runs.' : usable.length ? 'Choose a harness.' : `No harness in ${env.label} can start a session for your role; choose another environment.` };
+      }
+      if (acknowledgement && !draft.ack) return { field: 'ack', text: `Tick “I accept tools without per-tool approval” to start ${harness.id} as a writer, or choose another harness.` };
+      if (!draft.name.trim()) return { field: 'name', text: 'Name the session.' };
+      if (!draft.prompt.trim()) return { field: 'prompt', text: 'Give it a first prompt.' };
+      if (value === 'reviewer' && !outputs.some((a) => draft.outputs.has(a.id))) {
+        return { field: 'outputs', text: outputs.length ? 'Choose at least one output to review (under Advanced).' : 'No outputs to review yet: a reviewer needs at least one.' };
+      }
+      return null;
+    };
+    return { envs, env, harnesses, harness, typed, access, model, effort, acknowledgement, missing: firstMissing() };
+  }
+
+  // The body of a start for a draft whose choices miss nothing.
+  function startRequest(c, draft, sources, outputs) {
+    const writer = c.access.value === 'writer';
+    const body = { name: draft.name.trim(), prompt: draft.prompt.trim(), harness: c.harness.id, access: c.access.value };
+    if (c.env.preset !== null) body.preset = c.env.preset;
+    const model = c.model.kind === 'none' ? '' : c.model.value.trim();
+    if (model) body.model = model;
+    if (c.effort.offered && c.effort.value) body.effort = c.effort.value;
+    const ticked = sources.filter((src) => draft.sources.get(src.id) !== false).map((src) => src.id);
+    if (ticked.length) body.sources = ticked;
+    if (!writer) body.artifacts = outputs.filter((a) => draft.outputs.has(a.id)).map((a) => a.id);
+    if (writer && draft.collect) body.result_contract = OUTPUT_CONTRACT;
+    if (writer && draft.allowAll) body.policy = { mode: 'allow' };
+    if (writer && c.acknowledgement && draft.ack) body.unapproved_tools = true;
+    return body;
+  }
+
+  // A new session's draft. A source missing from `sources` has not been
+  // seen by the draft, so it starts ticked.
+  function freshDraft(v, keep = {}) {
+    return {
+      name: '', prompt: '', env: keep.env || null, harness: keep.harness || null, model: keep.model || '', effort: '',
+      access: workspaceCanRun(v) ? 'writer' : 'reviewer', sources: new Map(), outputs: new Set(),
+      collect: v.workspace.result_mode !== 'code', allowAll: false, ack: false,
+    };
+  }
+
+  // A draft that starts `s` again: its first prompt from its messages, or
+  // from what this tab sent when it never ran. Consents (the tool
+  // acknowledgement, Allow every tool) are asked for again.
+  function draftFrom(v, s) {
+    const m = v.messages.get(s.id);
+    const first = m && m.list.find((x) => x.role === 'user');
+    const sent = v.sent.get(s.id);
+    const env = environmentOf(v, s);
+    return {
+      ...freshDraft(v),
+      name: `${s.name} (again)`, prompt: first ? first.text : sent ? sent.prompt : '',
+      env: env ? env.key : null, harness: s.harness, model: s.model || '', effort: s.effort || '', access: s.access || 'writer',
+      sources: new Map(sourcesOf(v).map((src) => [src.id, (s.sources || []).includes(src.id)])),
+      outputs: new Set((s.artifacts || []).map((a) => a.id)),
+      collect: s.result_contract != null,
+    };
+  }
+
+  const sourcesOf = (v) => (v.workspace.sources || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
+
+  // The one next useful step for this workspace and person, first match
+  // first, with at most one button.
+  const needsAttention = (v) => sessionsOf(v).find((s) => ['not_started', 'failed', 'interrupted'].includes(sessionPhase(s).key)) || null;
+  const awaitingReview = (v) => (v.artifacts ? outputGroups(v).flatMap((g) => g.rows).filter((r) => r.standing === 'current').length : 0);
+  const NEXT_STEPS = [
+    { when: (v) => !!notReady(v.workspace), text: (v) => notReady(v.workspace), action: () => null },
+    {
+      when: (v) => !workspaceCanRun(v) && !workspaceCanComment(v),
+      text: () => 'You can read and download here; an owner can make you an editor.', action: () => null,
+    },
+    {
+      when: (v) => v.workspace.result_mode !== 'code' && !sourcesOf(v).length && workspaceCanRun(v),
+      text: () => 'Upload the files its sessions should read, such as a spreadsheet, a document or a CSV.',
+      action: () => ({ label: 'Upload sources', run: () => $('source-file').click() }),
+    },
+    {
+      when: (v) => !sessionsOf(v).length, text: () => 'Start its first session.',
+      action: (v) => (v.composing ? null : { label: '+ Session', run: () => composeSession(v) }),
+    },
+    { when: (v) => v.selected.size > 0, text: (v) => `${plural(v.selected.size, 'output')} ticked: ready to accept.`, action: () => null },
+    {
+      when: (v) => !!needsAttention(v),
+      text: (v) => {
+        const s = needsAttention(v);
+        const phase = sessionPhase(s);
+        return `${s.name}: ${phase.label.toLowerCase()}. ${phase.next}`;
+      },
+      action: (v) => {
+        const s = needsAttention(v);
+        return s.id === v.session && !v.composing ? null : { label: `Open ${s.name}`, run: () => go(workspaceHref(v.id, s.id)) };
+      },
+    },
+    {
+      when: (v) => awaitingReview(v) > 0, text: (v) => `${plural(awaitingReview(v), 'output')} waiting for review.`,
+      action: (v) => (v.tab === 'outputs' ? null : { label: 'Review outputs', run: () => selectWorkspaceTab(v, 'outputs') }),
+    },
+    { when: (v) => sessionsOf(v).some(sessionActive), text: () => 'Sessions are running: outputs appear under each session when its turn ends.', action: () => null },
+    { when: () => true, text: () => 'Continue a session from the message box, or start another with + Session.', action: () => null },
+  ];
+  function nextStep(v) {
+    const step = NEXT_STEPS.find((s) => s.when(v));
+    return { text: step.text(v), action: step.action(v) };
+  }
+
+  // A refused start, by the server's code: what to say and what to read
+  // again first. The draft is never touched.
+  const OPERATOR_REFUSED = { text: (e) => `${said(e.message)} Choose another environment or harness, or ask the operator.` };
+  const RELOAD_PRESETS = { reload: 'environments', text: () => 'Start in one of the environments this server offers. They are reloaded; choose one.' };
+  const START_REFUSED = {
+    preset_choice_unavailable: {
+      reload: 'environments',
+      text: (e) => {
+        const d = e.detail || {};
+        const allowed = (d.allowed || []).length ? `It offers ${d.allowed.join(', ')}.` : 'It offers none.';
+        return `This environment does not offer that ${d.field || 'choice'}. ${allowed} The environments are reloaded; choose again.`;
+      },
+    },
+    unknown_preset: { reload: 'environments', text: () => 'That environment is no longer offered. The environments are reloaded; choose another.' },
+    preset_required: RELOAD_PRESETS,
+    preset_conflict: RELOAD_PRESETS,
+    workspace_not_ready: { reload: 'workspace', text: (e, v) => `${notReady(v.workspace) || said(e.message)} Your draft is kept.` },
+    quota_exceeded: { text: (e) => `${said(e.message)} Wait for a running session to finish, or ask the operator for more room. Your draft is kept.` },
+    provider_not_allowed: OPERATOR_REFUSED,
+    unapproved_tools_not_allowed: OPERATOR_REFUSED,
+    unsupported: OPERATOR_REFUSED,
+    forbidden: OPERATOR_REFUSED,
+  };
+
   // The open workspace, kept across polls and session switches.
   let wsView = null;
 
@@ -2020,20 +2308,18 @@
     wsView = null;
   }
 
-  // The one live preview, disposed on every route, tab, output and source
-  // change and on signing out, so no hidden preview keeps fetching.
+  // The one live preview, of a source or an output, disposed on every route,
+  // tab, item and source change and on signing out, so no hidden preview
+  // keeps fetching.
   let livePreview = null;
-  function disposePreview() {
-    if (livePreview && livePreview.handle) livePreview.handle.dispose();
-    livePreview = null;
-  }
   function closePreview() {
-    disposePreview();
+    if (livePreview) livePreview.dispose();
+    livePreview = null;
     if (!wsView) return;
     wsView.previewing = null;
     const slot = $('preview');
     if (slot) fill(slot);
-    for (const b of document.querySelectorAll('#outputs .output-name')) b.setAttribute('aria-pressed', 'false');
+    for (const b of document.querySelectorAll('#inspector button[data-preview]')) b.setAttribute('aria-pressed', 'false');
   }
 
   // Every write the server checks against the workspace's revision reads it
@@ -2068,6 +2354,10 @@
       composing: false, busy: null, sending: false, following: 0, drafts: new Map(),
       timer: null, refreshing: false, again: false, failures: 0, failure: null,
       asked: 0, applied: 0, drawn: {},
+      // The new session's draft, the body of every start this tab sent (so
+      // Try again has a prompt that never ran), and the environments.
+      draft: null, sent: new Map(), syncForm: null,
+      environments: { state: 'loading', list: [], error: null, at: 0 }, environmentsAsked: 0,
     };
     wsView = v;
     main(h('div', { class: 'page' }, h('p', { class: 'muted', role: 'status', text: 'Opening the workspace…' })));
@@ -2082,18 +2372,40 @@
     if (wsView !== v) return;
     workspaceLayout(v);
     selectSession(v, session);
-    loadArtifacts(v).then(() => { if (wsView === v) drawOutputs(v); });
+    loadArtifacts(v).then(() => { if (wsView === v) drawWorkspace(v); });
+    loadEnvironments(v);
     scheduleWorkspace(v);
   }
 
+  // The environments a session here can start in. A later read replaces
+  // an earlier one, never the reverse; a reload keeps the list shown until
+  // it answers.
+  async function loadEnvironments(v) {
+    const asked = (v.environmentsAsked += 1);
+    v.environments = { ...v.environments, state: 'loading', error: null };
+    if (v.composing && v.syncForm) v.syncForm();
+    let next;
+    try {
+      const list = await api('GET', `/v1/execution-presets?workspace=${enc(v.id)}`);
+      next = { state: 'ready', list: environmentsOf(list), error: null, at: Date.now() };
+    } catch (e) {
+      next = { state: 'failed', list: [], error: e.message, at: 0 };
+    }
+    if (wsView !== v || asked !== v.environmentsAsked) return;
+    v.environments = next;
+    drawWorkspace(v);
+  }
+
   // Reads overlap (a poll, an upload's reload): one asked earlier never
-  // replaces one asked later.
+  // replaces one asked later. Outputs are read again whenever a session's
+  // turn or status moved since they were last read.
   async function reloadDetail(v) {
     const asked = (v.asked += 1);
     const ws = await api('GET', workspacePath(v.id));
     if (wsView !== v || asked < v.applied) return;
     v.applied = asked;
     v.workspace = ws;
+    prune(v);
     if (!projectOf(ws.project_id)) {
       const project = await api('GET', `/v1/projects/${enc(ws.project_id)}`);
       state.projects = (state.projects || []).filter((p) => p.id !== project.id).concat(project);
@@ -2107,6 +2419,7 @@
     } else if (!row && state.workspaces.loaded && state.workspaces.project === ws.project_id) {
       loadWorkspaces(ws.project_id);
     }
+    if (v.artifacts !== null && turnsOf(v) !== v.artifactsFor) await loadArtifacts(v);
   }
 
   const INSPECTOR = [['sources', 'Sources', 'sources-count'], ['outputs', 'Outputs', 'outputs-count'], ['details', 'Details']];
@@ -2130,7 +2443,9 @@
     main(h('div', { class: 'branch workspace', id: 'workspace' },
       h('section', { class: 'focus', 'aria-label': 'Conversation' },
         h('header', { class: 'strip', id: 'strip' }),
+        h('div', { class: 'guide', id: 'guide', role: 'status' }),
         h('nav', { class: 'sessions', id: 'sessions', 'aria-label': 'Sessions' }),
+        h('ul', { class: 'session-facts', id: 'session-facts', 'aria-label': 'Selected session', hidden: true }),
         h('div', { class: 'convo', id: 'convo' }),
         composer(() => submitSession(v))),
       h('aside', { class: 'inspector', id: 'inspector', 'aria-label': 'Inspector' },
@@ -2139,10 +2454,10 @@
           h('div', { class: 'panel-tools' },
             h('button', { type: 'button', id: 'upload-sources', text: 'Upload sources', disabled: !workspaceCanRun(v), onclick: () => files.click() }),
             files, workspaceCanRun(v) ? drop : null),
-          h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' })),
-        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
-          h('div', { id: 'outputs-list' }),
+          h('ul', { class: 'files file-list', id: 'sources', 'aria-label': 'Sources' }),
           h('div', { class: 'preview', id: 'preview', 'aria-label': 'Preview' })),
+        h('div', { class: 'panel', role: 'tabpanel', id: 'panel-outputs', 'aria-labelledby': 'tab-outputs', hidden: true },
+          h('div', { id: 'outputs-list' })),
         h('div', { class: 'panel', role: 'tabpanel', id: 'panel-details', 'aria-labelledby': 'tab-details', hidden: true },
           h('dl', { class: 'facts', id: 'ws-facts' }),
           h('h2', { text: 'Sessions' }), h('ul', { class: 'events', id: 'ws-sessions' }),
@@ -2169,7 +2484,7 @@
     }
     v.session = chosen ? chosen.id : null;
     if (v.composing || !chosen) {
-      v.composing = !chosen && (workspaceCanRun(v) || workspaceCanComment(v)) && v.workspace.state === 'ready';
+      v.composing = !chosen && (workspaceCanRun(v) || workspaceCanComment(v)) && !notReady(v.workspace);
       v.drawn.convo = null;
     }
     drawWorkspace(v);
@@ -2207,9 +2522,10 @@
     return m.loading;
   }
 
+  const turnsOf = (v) => JSON.stringify((v.workspace.sessions || []).map((s) => [s.id, s.status, s.turns]));
   async function loadArtifacts(v) {
     const sessions = v.workspace.sessions || [];
-    v.artifactsFor = JSON.stringify(sessions.map((s) => [s.id, s.status, s.turns]));
+    v.artifactsFor = turnsOf(v);
     if (!sessions.length) { v.artifacts = []; return; }
     try {
       v.artifacts = (await api('GET', `${workspacePath(v.id)}/artifacts`)).artifacts;
@@ -2218,7 +2534,7 @@
       v.artifactsError = e.message;
       if (v.artifacts === null) v.artifacts = [];
     }
-    for (const id of v.selected) if (!v.artifacts.some((a) => a.id === id)) v.selected.delete(id);
+    prune(v);
   }
 
   // While anything here is starting, running or settling, the page reads
@@ -2239,8 +2555,6 @@
       await reloadDetail(v);
       const s = wsView === v ? selectedSession(v) : null;
       if (s && sessionStatus(s)) await loadMessages(v, s.id);
-      const settled = JSON.stringify((v.workspace.sessions || []).map((x) => [x.id, x.status, x.turns]));
-      if (wsView === v && settled !== v.artifactsFor) await loadArtifacts(v);
       v.failures = 0;
       v.failure = null;
     } catch (e) {
@@ -2271,7 +2585,9 @@
   function drawWorkspace(v) {
     if (wsView !== v || !$('strip')) return;
     drawStrip(v);
+    drawGuide(v);
     drawSessions(v);
+    drawSessionFacts(v);
     if (v.composing && v.syncForm) v.syncForm();
     $('upload-sources').disabled = !workspaceCanRun(v);
     const drop = $('source-drop');
@@ -2335,8 +2651,59 @@
     }, dot(sessionLane(s)), h('span', { class: 'session-name', text: s.name }))),
     workspaceCanRun(v) || workspaceCanComment(v) ? h('button', {
       type: 'button', class: 'ghost new-session', id: 'new-session', 'aria-pressed': String(v.composing), text: '+ Session',
-      onclick: () => { v.composing = true; v.drawn.convo = null; drawWorkspace(v); openSessionForm(v); },
+      onclick: () => composeSession(v),
     }) : null);
+  }
+
+  function composeSession(v) {
+    v.composing = true;
+    v.drawn.convo = null;
+    drawWorkspace(v);
+    openSessionForm(v);
+  }
+
+  // Try again: the form, with a draft taken from `s`.
+  function tryAgain(v, s) {
+    v.draft = draftFrom(v, s);
+    composeSession(v);
+  }
+
+  // The next useful step, redrawn only when what it says changes, so it is
+  // announced once.
+  function drawGuide(v) {
+    const { text, action } = nextStep(v);
+    const signature = JSON.stringify([text, action && action.label]);
+    if (signature === v.drawn.guide) return;
+    v.drawn.guide = signature;
+    const guide = $('guide');
+    const focused = guide.contains(document.activeElement);
+    fill(guide, h('span', { class: 'guide-text', text }),
+      action ? h('button', { type: 'button', id: 'guide-action', text: action.label, onclick: action.run }) : null);
+    if (focused) ($('guide-action') || $('workspace').querySelector('h1')).focus({ preventScroll: true });
+  }
+
+  // What the selected session is: where it runs, on what, what it reads,
+  // and where it stands. Hidden while composing.
+  function drawSessionFacts(v) {
+    const s = v.composing ? null : selectedSession(v);
+    const box = $('session-facts');
+    const phase = s && sessionPhase(s);
+    const env = s && environmentOf(v, s);
+    let where = null;
+    if (env) where = `${env.label} (${PROVIDERS[env.provider] || env.provider})`;
+    else if (s && s.preset) where = s.preset;
+    else if (s && v.environments.state === 'ready') where = 'started without a preset';
+    const facts = s ? [
+      where, s.harness, s.model || 'harness default model', s.access,
+      s.access === 'reviewer' ? `reviews ${plural((s.artifacts || []).length, 'output')}` : null,
+      `reads ${plural((s.sources || []).length, 'source')}`,
+      s.access === 'reviewer' ? null : s.result_contract ? 'collects outputs' : 'collects no outputs',
+    ].filter(Boolean) : [];
+    const signature = JSON.stringify([facts, phase && [phase.label, phase.lane]]);
+    if (signature === v.drawn.facts) return;
+    v.drawn.facts = signature;
+    box.hidden = !s;
+    fill(box, facts.map((text) => h('li', { text })), s ? h('li', { class: 'fact-phase' }, dot(phase.lane), phase.label) : null);
   }
 
   // Messages are turned into turns by the branch conversation's reducer:
@@ -2346,7 +2713,8 @@
     const box = $('convo');
     const s = selectedSession(v);
     const m = s ? v.messages.get(s.id) : null;
-    const signature = JSON.stringify([s && s.id, s && sessionText(s), m && [m.list.length, m.error, m.loaded]]);
+    const restart = workspaceCanRun(v) || workspaceCanComment(v);
+    const signature = JSON.stringify([s && s.id, s && sessionText(s), m && [m.list.length, m.error, m.loaded], restart]);
     if (signature === v.drawn.convo) return;
     const fresh = !v.drawn.convo || JSON.parse(v.drawn.convo)[0] !== (s && s.id);
     v.drawn.convo = signature;
@@ -2356,6 +2724,7 @@
       return;
     }
     const working = sessionActive(s);
+    const phase = sessionPhase(s);
     const turns = conversation((m ? m.list : []).map((x) => ({
       activity: x.role === 'user' ? { prompt: x.text } : { harness: { type: 'message_delta', text: x.text } },
     })));
@@ -2367,7 +2736,10 @@
         t.said.length ? h('div', { class: 'agent' }, t.said.map((x) => h('p', { text: x }))) : null,
         working && i === turns.length - 1 ? workingLine() : null)),
       working && !turns.length ? workingLine() : null,
-      unstarted(s) ? h('p', { class: 'outcome outcome-needs' }, dot('needs'), cap(sessionText(s))) : null,
+      RECOVERABLE_PHASES.includes(phase.key) ? h('section', { class: 'recovery', 'aria-label': `${s.name}: ${phase.label}` },
+        h('p', { class: 'recovery-head' }, dot(phase.lane), h('span', { text: sessionText(s) })),
+        h('p', { class: 'recovery-next', text: phase.next }),
+        restart ? h('button', { type: 'button', id: 'try-again', text: 'Try again', onclick: () => tryAgain(v, s) }) : null) : null,
       !working && !unstarted(s) && !turns.length && m && m.loaded ? h('p', { class: 'muted', text: 'No messages yet.' }) : null);
     if (atEnd || fresh) box.scrollTop = box.scrollHeight;
   }
@@ -2462,13 +2834,15 @@
     let unsent = [];
     for (const [i, file] of files.entries()) {
       let source = null;
+      const title = sourceTitle(file.name);
       try {
         source = await revised(v, `Could not upload ${file.name}`, (revision) => call(`${workspacePath(v.id)}/sources`, {
           method: 'POST',
           headers: {
             Accept: 'application/json',
             'Content-Type': file.type || 'application/octet-stream',
-            'X-Source-Title': asciiTitle(file.name),
+            'X-Source-Title-Encoded': encodedTitle(title),
+            'X-Source-Title': asciiTitle(title),
             'X-Workspace-Revision': String(revision),
             'Idempotency-Key': key(),
           },
@@ -2491,6 +2865,13 @@
     drawWorkspace(v);
   }
 
+  // Refusals that mean the page's list was out of date: what happened, and
+  // what to do once the outputs are read again.
+  const ACCEPT_REFUSED = {
+    deliverable_not_current: ['an output you chose is no longer its session\'s current result', 'The outputs are reloaded; accept the ones marked Current.'],
+    producer_busy: ['the session that made these outputs is working on a newer turn', 'The outputs are reloaded; accept the ones marked Current once that turn finishes.'],
+  };
+
   async function acceptSelected(v) {
     const ids = Array.from(v.selected);
     const names = ids.map((id) => ((v.artifacts || []).find((a) => a.id === id) || { name: id }).name);
@@ -2503,7 +2884,15 @@
     try {
       result = await revised(v, 'Could not accept', (revision) => api('POST', `${workspacePath(v.id)}/finalize`, { revision, artifacts: ids }));
     } catch (e) {
-      toast(`Could not accept: ${e.message}`);
+      const refused = e.status === 409 && ACCEPT_REFUSED[e.code];
+      if (refused) {
+        let reloaded = true;
+        try { await reloadDetail(v); } catch (_) { reloaded = false; }
+        if (wsView === v) scheduleWorkspace(v);
+        toast(`Not accepted: ${refused[0]}. ${reloaded ? refused[1] : 'Reload the page, then try again.'}`);
+      } else {
+        toast(`Could not accept: ${e.message}`);
+      }
     }
     v.busy = null;
     if (wsView !== v) return;
@@ -2515,95 +2904,142 @@
     drawWorkspace(v);
   }
 
+  // A source's or output's name: it opens that file in the preview.
+  function previewButton(v, item) {
+    return h('button', {
+      type: 'button', class: 'file-name', 'data-preview': item.key, 'aria-pressed': String(v.previewing === item.key),
+      title: `Preview ${item.name}`, text: item.name, onclick: () => openPreview(v, item),
+    });
+  }
+
   function drawSources(v) {
-    const sources = (v.workspace.sources || []).slice().sort((x, y) => x.created_at_ms - y.created_at_ms);
+    const sources = sourcesOf(v);
     $('sources-count').textContent = sources.length ? String(sources.length) : '';
     const signature = JSON.stringify(sources.map((src) => src.id));
     if (signature === v.drawn.sources) return;
     v.drawn.sources = signature;
-    fill($('sources'), sources.length ? sources.map((src) => h('li', { class: 'file-item', 'data-source': src.id },
-      h('div', { class: 'file-main' },
-        h('span', { class: 'file-title', text: src.title, title: src.title }),
-        h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
-      h('button', {
-        type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`,
-        onclick: () => download(`${workspacePath(v.id)}/sources/${enc(src.id)}/content`, src.title),
-      })))
+    fill($('sources'), sources.length ? sources.map((src) => {
+      const base = `${workspacePath(v.id)}/sources/${enc(src.id)}`;
+      return h('li', { class: 'file-item', 'data-source': src.id },
+        h('div', { class: 'file-main' },
+          previewButton(v, { key: `source:${src.id}`, name: src.title, mediaType: src.media_type, base }),
+          h('span', { class: 'item-meta', title: src.media_type }, `${formatOf(src.media_type, src.title)} · ${size(src.size_bytes)} · `, ago(src.created_at_ms))),
+        h('button', { type: 'button', class: 'ghost', text: 'Download', 'aria-label': `Download ${src.title}`, onclick: () => download(`${base}/content`, src.title) }));
+    })
       : h('li', { class: 'muted pad', text: 'No sources yet. Upload the documents this workspace\'s sessions should read; each new session gets the ones you tick.' }));
+  }
+
+  // Where an output stands toward acceptance. The server accepts an output
+  // only from its session's current turn, once that turn finished with its
+  // result and nothing more is queued for the session (`finalize` in
+  // console/sources.rs); `current` is exactly that.
+  function standing(a, s, accepted) {
+    if (accepted.has(a.id)) return 'accepted';
+    if (s && a.turn < s.turns) return 'earlier';
+    if (s && sessionActive(s)) return 'working';
+    const info = s && sessionStatus(s);
+    const finished = info && ['ready', 'no_changes', 'merged'].includes(info.status.state) && s.result_event != null && !s.result_error;
+    return finished ? 'current' : 'unsettled';
+  }
+
+  const STANDING = {
+    accepted: { pick: false, tag: 'Accepted', note: (a) => `turn ${a.turn}` },
+    current: { pick: true, tag: 'Current', note: (a) => `turn ${a.turn}` },
+    working: { pick: false, note: (a) => `turn ${a.turn} · a newer turn is running` },
+    earlier: { pick: false, note: (a) => `Earlier turn ${a.turn} — not the current result` },
+    unsettled: { pick: false, note: (a) => `turn ${a.turn} · this turn ended without its result` },
+  };
+
+  // Outputs under the session that made them, in session order; within a
+  // session, the newest turn first.
+  function outputGroups(v) {
+    const accepted = new Set((v.workspace.accepted_deliverables || []).map((d) => d.artifact_id));
+    const sessions = sessionsOf(v);
+    const byBranch = new Map(sessions.map((s) => [s.branch, s]));
+    const groups = new Map();
+    for (const a of v.artifacts || []) {
+      const s = byBranch.get(a.publisher_branch) || null;
+      if (!groups.has(a.publisher_branch)) groups.set(a.publisher_branch, { s, name: s ? s.name : a.publisher_branch, rows: [] });
+      groups.get(a.publisher_branch).rows.push({ a, standing: standing(a, s, accepted) });
+    }
+    const order = (g) => (g.s ? sessions.indexOf(g.s) : sessions.length);
+    return Array.from(groups.values()).sort((x, y) => order(x) - order(y))
+      .map((g) => ({ ...g, rows: g.rows.sort((x, y) => y.a.turn - x.a.turn) }));
+  }
+
+  // The outputs a reviewer can be given: each session's latest, named as
+  // listed, with its session and turn when two share a name.
+  function reviewable(v) {
+    const rows = outputGroups(v).flatMap((g) => g.rows.filter((r) => r.standing !== 'earlier').map((r) => ({ ...r.a, from: g.name })));
+    return rows.map((a) => ({ ...a, label: rows.filter((b) => b.name === a.name).length > 1 ? `${a.name} (${a.from}, turn ${a.turn})` : a.name }));
+  }
+
+  // Ticked outputs that can no longer be accepted are unticked.
+  function prune(v) {
+    if (!v.artifacts) return;
+    const pickable = new Set(outputGroups(v).flatMap((g) => g.rows).filter((r) => STANDING[r.standing].pick).map((r) => r.a.id));
+    for (const id of v.selected) if (!pickable.has(id)) v.selected.delete(id);
   }
 
   function drawOutputs(v) {
     const list = $('outputs-list');
     if (!list || wsView !== v) return;
-    const accepted = new Set((v.workspace.accepted_deliverables || []).map((a) => a.artifact_id));
     const all = v.artifacts || [];
+    const groups = outputGroups(v);
     $('outputs-count').textContent = all.length ? String(all.length) : '';
-    const signature = JSON.stringify([all.map((a) => a.id), Array.from(accepted), v.artifactsError, v.artifacts === null, workspaceCanRun(v)]);
+    const signature = JSON.stringify([groups.map((g) => [g.name, g.s && sessionText(g.s), g.rows.map((r) => [r.a.id, r.standing])]),
+      v.artifactsError, v.artifacts === null, workspaceCanRun(v)]);
     if (signature === v.drawn.outputs) return;
     v.drawn.outputs = signature;
-    const names = new Map((v.workspace.sessions || []).map((s) => [s.branch, s.name]));
-    const row = (a) => {
-      const done = accepted.has(a.id);
-      const box = h('input', { type: 'checkbox', 'aria-label': `Select ${a.name}`, checked: done || v.selected.has(a.id), disabled: done || !workspaceCanRun(v) });
+    const row = ({ a, standing: st }) => {
+      const meaning = STANDING[st];
+      const note = nextId('output-note');
+      const box = h('input', {
+        type: 'checkbox', 'aria-label': `Select ${a.name}`, 'aria-describedby': note,
+        checked: st === 'accepted' || v.selected.has(a.id), disabled: !meaning.pick || !workspaceCanRun(v),
+      });
       box.addEventListener('change', () => {
         if (box.checked) v.selected.add(a.id); else v.selected.delete(a.id);
         drawStrip(v);
+        drawGuide(v);
       });
-      return h('li', { class: done ? 'output-row accepted' : 'output-row', 'data-artifact': a.id },
+      return h('li', { class: 'output-row', 'data-artifact': a.id, 'data-standing': st },
         box,
         h('div', { class: 'file-main' },
-          h('button', { type: 'button', class: 'output-name', 'aria-pressed': String(v.previewing === a.id), title: `Preview ${a.name}`, text: a.name, onclick: () => openPreview(v, a) }),
-          h('span', { class: 'item-meta', title: a.media_type, text: `${formatOf(a.media_type)} · ${size(a.size)} · ${names.get(a.publisher_branch) || a.publisher_branch}, turn ${a.turn}` })),
-        done ? h('span', { class: 'tag tag-accepted' }, checkMark(false), 'Accepted') : null);
+          previewButton(v, { key: `output:${a.id}`, name: a.name, mediaType: a.media_type, base: `${workspacePath(v.id)}/artifacts/${enc(a.id)}` }),
+          h('span', { class: 'item-meta', id: note, title: a.media_type, text: `${formatOf(a.media_type, a.name)} · ${size(a.size)} · ${meaning.note(a)}` })),
+        meaning.tag ? h('span', { class: `tag tag-${st}` }, st === 'accepted' ? checkMark(false) : null, meaning.tag) : null);
+    };
+    const group = (g) => {
+      const heading = nextId('output-group');
+      return h('section', { class: 'output-group', 'aria-labelledby': heading },
+        h('h3', { id: heading }, g.s ? dot(sessionLane(g.s)) : null, h('span', { class: 'group-name', text: g.name }),
+          g.s ? h('span', { class: 'group-meta', text: cap(sessionText(g.s)) }) : null),
+        h('ul', { class: 'file-list', 'aria-labelledby': heading }, g.rows.map(row)));
     };
     fill(list,
       v.artifactsError ? h('p', { class: 'error pad', text: `Could not list outputs: ${v.artifactsError}` }) : null,
       v.artifacts === null ? h('p', { class: 'muted pad', text: 'Loading outputs…' })
         : !all.length ? h('p', { class: 'muted pad', text: `No outputs yet. A session started with Collect outputs publishes the files it lists in ${OUTPUT_MANIFEST} when its turn ends.` })
-          : h('ul', { class: 'files file-list', id: 'outputs', 'aria-label': 'Outputs' }, all.map(row)));
+          : groups.map(group));
   }
 
-  // Mount the preview component for one output. It asks the workspace's
-  // preview route; when this server answers 404 there, it has none, and
-  // the inspector says so in place of a preview.
-  function openPreview(v, a) {
+  // Mount the preview component for one source or output in the open
+  // panel. A table, a page, or why the server made neither is the
+  // component's to show; the original stays one click away.
+  function openPreview(v, item) {
     closePreview();
-    v.previewing = a.id;
-    for (const b of document.querySelectorAll('#outputs .output-name')) {
-      b.setAttribute('aria-pressed', String(b.closest('[data-artifact]').dataset.artifact === a.id));
-    }
-    const base = `${workspacePath(v.id)}/artifacts/${enc(a.id)}`;
+    v.previewing = item.key;
+    for (const b of document.querySelectorAll('#inspector button[data-preview]')) b.setAttribute('aria-pressed', String(b.dataset.preview === item.key));
+    const slot = $('preview');
+    $(`panel-${v.tab}`).append(slot);
     const host = h('div', { class: 'preview-host', id: 'preview-host' });
-    fill($('preview'),
+    fill(slot,
       h('div', { class: 'preview-head' },
-        h('h3', { id: 'preview-title', text: a.name, title: a.name }),
-        h('button', { type: 'button', text: 'Download original', onclick: () => download(`${base}/content`, a.name) })),
+        h('h3', { id: 'preview-title', text: item.name, title: item.name }),
+        h('button', { type: 'button', text: 'Download original', onclick: () => download(`${item.base}/content`, item.name) })),
       host);
-    const live = { handle: null };
-    livePreview = live;
-    live.handle = window.BranchyardArtifactPreview.mount(host, {
-      baseUrl: base,
-      displayName: a.name,
-      mediaType: a.media_type,
-      fetchAuthenticated: (path, init) => authFetch(path, init).then(async (response) => {
-        if (response.status === 404 && path.startsWith(`${base}/preview?`) && livePreview === live) {
-          let message = null;
-          try { message = (await response.clone().json()).error.message; } catch (_) { /* not the error envelope */ }
-          // The router's fallback answers an unknown route; a 404 from a
-          // preview route itself (an output gone) is the component's to show.
-          if (livePreview === live && message === 'no such route') previewMissing(host, message);
-        }
-        return response;
-      }),
-    });
-  }
-
-  function previewMissing(host, message) {
-    disposePreview();
-    fill(host, h('div', { class: 'preview-missing', role: 'status' },
-      h('p', { class: 'preview-missing-title', text: 'This server cannot preview workspace outputs yet.' }),
-      h('p', { text: 'Download the original to open it on this device.' }),
-      message ? h('p', { class: 'hint', text: `The server answered: ${message}.` }) : null));
+    livePreview = window.BranchyardArtifactPreview.mount(host, { baseUrl: item.base, mediaType: item.mediaType, fetchAuthenticated: authFetch });
   }
 
   function drawDetails(v) {
@@ -2635,95 +3071,293 @@
       : h('li', { class: 'muted', text: 'This server lists no members.' }));
   }
 
-  // The form for a new session, in the conversation pane until started or
-  // cancelled. A poll does not redraw it.
-  async function openSessionForm(v) {
+  // An environment's or a harness's readiness, one row each in words: the
+  // state, where it was measured, how long ago, the server's reason and
+  // what an operator can do. The dot only repeats the state.
+  function readinessList(rows, id, at) {
+    return h('ul', { class: 'readiness', id }, rows.map((r) => {
+      if (!r.state) {
+        return h('li', { class: 'readiness-row' }, h('span', { class: 'readiness-mark', 'aria-hidden': 'true' }),
+          h('span', {}, h('b', { text: `${r.name}: ` }), `${r.fact}.`));
+      }
+      const [word, lane] = READY[r.state] || READY.unknown;
+      return h('li', { class: 'readiness-row', 'data-state': r.state }, dot(lane), h('span', {},
+        h('b', { text: `${r.name}: ` }), `${word}, ${SCOPE[r.scope] || r.scope}`,
+        r.checkedMsAgo == null ? null : [', checked ', ago(at - r.checkedMsAgo)], '. ', r.reason,
+        r.action ? [' ', h('span', { class: 'readiness-action', text: `Operator: ${r.action}` })] : null));
+    }));
+  }
+
+  // The guided form for a new session, in the conversation pane until it
+  // starts or is cancelled. It is drawn from `v.draft`, which every control
+  // writes, so leaving it and coming back loses nothing. A poll redraws only
+  // the parts whose content changed and puts focus back where it was; the
+  // name and the prompt are never redrawn.
+  function openSessionForm(v) {
     const box = $('convo');
     if (!box || box.querySelector('#session-form')) return;
-    const ids = { name: nextId('session'), harness: nextId('harness'), access: nextId('access'), prompt: nextId('first'), model: nextId('model') };
-    const name = h('input', { id: ids.name, type: 'text', autocomplete: 'off', placeholder: 'For example: Analyst' });
-    let harness = h('select', { id: ids.harness, disabled: true }, h('option', { value: '', text: 'Loading…' }));
-    const harnessSlot = h('div', {}, h('label', { class: 'block', for: ids.harness, text: 'Harness' }), harness);
-    const access = h('select', { id: ids.access },
-      h('option', { value: 'writer', text: 'Writer: works in its own copy' }),
-      h('option', { value: 'reviewer', text: 'Reviewer: reads outputs you choose' }));
-    if (!workspaceCanRun(v)) { access.value = 'reviewer'; access.disabled = true; }
-    const canStart = () => access.value === 'reviewer' ? workspaceCanComment(v) : workspaceCanRun(v);
-    const prompt = h('textarea', { id: ids.prompt, rows: '5', placeholder: 'What should this session do?' });
-    const model = h('input', { id: ids.model, type: 'text', autocomplete: 'off', placeholder: 'Harness default' });
-    const checkbox = (label, checked, value) => {
-      const input = h('input', { type: 'checkbox', checked, value });
-      return h('label', { class: 'toggle' }, input, h('span', { text: label }));
-    };
-    // The sources and outputs to choose from follow the workspace while the
-    // form is open, keeping what was ticked; a new source starts ticked.
-    const sourcesBox = h('fieldset', { class: 'choices' });
-    const outputsBox = h('fieldset', { class: 'choices', hidden: true });
-    const choices = (box, legend, items, ticked, empty) => {
-      const was = new Map(Array.from(box.querySelectorAll('input'), (i) => [i.value, i.checked]));
-      fill(box, h('legend', { text: legend }), items.length
-        ? items.map(([value, label]) => checkbox(label, was.has(value) ? was.get(value) : ticked, value))
-        : h('p', { class: 'hint', text: empty }));
-    };
-    let synced = null;
-    let start = null;
-    let submitting = false;
-    v.syncForm = () => {
-      if (start) start.disabled = submitting || v.workspace.state !== 'ready' || !canStart();
-      const sources = (v.workspace.sources || []).map((src) => [src.id, src.title]);
-      const outputs = (v.artifacts || []).map((a) => [a.id, a.name]);
-      const signature = JSON.stringify([sources, outputs]);
-      if (signature === synced) return;
-      synced = signature;
-      choices(sourcesBox, 'Sources to give it', sources, true, 'No sources yet: the Sources tab uploads them.');
-      choices(outputsBox, 'Outputs to review', outputs, false, 'No outputs yet: a reviewer needs at least one.');
-    };
-    v.syncForm();
-    const collect = checkbox(`Collect outputs (${OUTPUT_MANIFEST})`, v.workspace.result_mode !== 'code');
-    const allow = checkbox('Allow every tool', false);
-    const acknowledgement = checkbox('I accept tools without per-tool approval', false);
-    const error = h('p', { class: 'error', role: 'alert' });
-    const ready = v.workspace.state === 'ready';
-    start = h('button', { type: 'button', class: 'primary', text: 'Start session', disabled: !ready || !canStart() });
+    if (!v.draft) v.draft = freshDraft(v);
+    const choices = () => startChoices(v.environments, { run: workspaceCanRun(v), comment: workspaceCanComment(v) }, v.draft, reviewable(v));
+    const blocked = (c) => (notReady(v.workspace) ? { field: 'workspace', text: notReady(v.workspace) } : c.missing);
+    const heading = h('h2', { id: 'session-form-h', tabindex: '-1', text: 'New session' });
+    const sourcesSlot = h('div', { class: 'slot', id: 'sf-sources' });
+    const envSlot = h('div', { class: 'slot', id: 'sf-environments' });
+    const agentSlot = h('div', { class: 'slot', id: 'sf-agent' });
+    const collectSlot = h('div', { class: 'slot', id: 'sf-collect-slot' });
+    const advancedSlot = h('div', { class: 'slot', id: 'sf-advanced-slot' });
+    const advanced = h('details', { class: 'advanced', id: 'sf-advanced' }, h('summary', { id: 'sf-advanced-summary', text: 'Advanced' }), advancedSlot);
+    const name = h('input', { id: 'sf-name', type: 'text', autocomplete: 'off', placeholder: 'For example: Analyst' });
+    name.value = v.draft.name;
+    name.addEventListener('input', () => { v.draft.name = name.value; syncForm(); });
+    const prompt = h('textarea', { id: 'sf-prompt', rows: '5', placeholder: 'What should this session do?', 'aria-describedby': 'sf-prompt-hint' });
+    prompt.value = v.draft.prompt;
+    prompt.addEventListener('input', () => { v.draft.prompt = prompt.value; syncForm(); });
+    const start = h('button', { type: 'button', class: 'primary', id: 'sf-start', text: 'Start session' });
+    const status = h('p', { class: 'form-status', id: 'sf-status', role: 'status' });
+    const error = h('p', { class: 'error form-error', id: 'sf-error', role: 'alert' });
     const cancel = h('button', {
-      type: 'button', text: 'Cancel',
-      onclick: () => { v.composing = false; v.drawn.convo = null; drawWorkspace(v); $('composer-text').focus(); },
+      type: 'button', id: 'sf-cancel', text: 'Cancel',
+      onclick: () => {
+        v.composing = false;
+        v.drawn.convo = null;
+        drawWorkspace(v);
+        const area = $('composer-text');
+        (area.disabled ? $('new-session') || $('workspace').querySelector('h1') : area).focus();
+      },
     });
-    access.addEventListener('change', () => {
-      outputsBox.hidden = access.value !== 'reviewer';
-      const reviewing = access.value === 'reviewer';
-      collect.hidden = reviewing;
-      for (const control of [allow, acknowledgement]) {
-        const input = control.querySelector('input');
-        input.disabled = reviewing;
-        if (reviewing) input.checked = false;
+    const toggle = (id, label, checked, change, describedby) => {
+      const input = h('input', { type: 'checkbox', id, checked, 'aria-describedby': describedby });
+      input.addEventListener('change', () => change(input.checked));
+      return h('label', { class: 'toggle', for: id }, input, h('span', { text: label }));
+    };
+    const field = (id, label, control) => [h('label', { class: 'block', for: id, text: label }), control];
+    const reasons = (id, lines) => (lines.length ? h('p', { class: 'hint reasons', id }, lines.map((text) => h('span', { text }))) : null);
+
+    const drawSources = () => {
+      const sources = sourcesOf(v);
+      return [
+        sources.length
+          ? h('div', { class: 'choices' }, sources.map((src) => toggle(`sf-source-${src.id}`, src.title, v.draft.sources.get(src.id) !== false,
+            (on) => { v.draft.sources.set(src.id, on); syncForm(); })))
+          : h('p', { class: 'hint', text: 'No sources yet. Upload the files it should read, such as a spreadsheet, a document or a CSV.' }),
+        workspaceCanRun(v) ? h('div', { class: 'row step-tools' },
+          h('button', { type: 'button', id: 'sf-upload', text: 'Upload files', onclick: () => $('source-file').click() })) : null,
+      ];
+    };
+
+    const environmentCard = (env, why, checked) => {
+      const id = `sf-env-${env.key}`;
+      const radio = h('input', {
+        type: 'radio', name: 'environment', id, value: env.key, checked, disabled: !!why,
+        'aria-describedby': `${id}-provider ${id}-about ${id}-ready`,
+      });
+      radio.addEventListener('change', () => { if (radio.checked) { v.draft.env = env.key; syncForm(); } });
+      const card = h('div', { class: 'env-card', 'data-environment': env.key },
+        radio,
+        h('div', { class: 'env-body' },
+          h('div', { class: 'env-head' }, h('label', { class: 'env-name', for: id, text: env.label }),
+            h('span', { class: 'tag', id: `${id}-provider`, text: PROVIDERS[env.provider] || env.provider })),
+          h('p', { class: 'env-about', id: `${id}-about` }, env.description, why ? h('span', { class: 'env-why', text: ` ${why}` }) : null),
+          readinessList(env.readiness, `${id}-ready`, v.environments.at)));
+      card.addEventListener('click', (ev) => { if (!radio.disabled && !ev.target.closest('label, input')) radio.click(); });
+      return card;
+    };
+    const drawEnvironments = (c) => {
+      const loaded = v.environments.state;
+      if (c.envs.length) return h('div', { class: 'env-list' }, c.envs.map(({ env, why }) => environmentCard(env, why, env === c.env)));
+      if (loaded === 'failed') {
+        return [h('p', { class: 'error', text: `The environments did not load: ${said(v.environments.error)}` }),
+          h('div', { class: 'row step-tools' }, h('button', { type: 'button', id: 'sf-retry', text: 'Retry', onclick: () => loadEnvironments(v) }))];
       }
-      v.syncForm();
-    });
+      return h('p', { class: 'hint', text: loaded === 'loading' ? 'Loading the environments this server offers…' : 'This server offers no environment for this workspace; an operator can add one.' });
+    };
+
+    const drawAgent = (c) => {
+      if (!c.env) {
+        return h('p', { class: 'hint', text: v.environments.state === 'ready' ? 'Choose where it runs; each environment offers its own harnesses.' : 'The harnesses follow once the environments load.' });
+      }
+      let harness;
+      const closed = c.harnesses.filter((x) => x.why);
+      if (c.typed) {
+        harness = h('input', { id: 'sf-harness', type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'A harness this server runs', 'aria-describedby': 'sf-harness-why' });
+        harness.value = v.draft.harness || '';
+        harness.addEventListener('input', () => { v.draft.harness = harness.value; syncForm(); });
+      } else {
+        const describedby = [closed.length ? 'sf-harness-why' : null, c.harness ? 'sf-harness-ready' : null].filter(Boolean).join(' ');
+        harness = h('select', { id: 'sf-harness', 'aria-describedby': describedby || null },
+          c.harness ? null : h('option', { value: '', disabled: true, text: 'Choose a harness' }),
+          c.harnesses.map(({ harness: x, why }) => h('option', { value: x.id, disabled: !!why, text: why ? `${x.id} (not available: ${why})` : x.id })));
+        harness.value = c.harness ? c.harness.id : '';
+        harness.addEventListener('change', () => { v.draft.harness = harness.value; v.draft.ack = false; syncForm(); });
+      }
+      let model = null;
+      if (c.model.kind === 'select') {
+        const select = h('select', { id: 'sf-model' }, c.model.options.map((m) => h('option', { value: m, text: m === c.harness.defaultModel ? `${m} (default)` : m })));
+        select.value = c.model.value;
+        select.addEventListener('change', () => { v.draft.model = select.value; syncForm(); });
+        model = field('sf-model', 'Model', select);
+      } else if (c.model.kind === 'free') {
+        const input = h('input', { id: 'sf-model', type: 'text', autocomplete: 'off', placeholder: 'Harness default' });
+        input.value = v.draft.model;
+        input.addEventListener('input', () => { v.draft.model = input.value; syncForm(); });
+        model = field('sf-model', 'Model (optional)', input);
+      } else if (c.harness) {
+        model = [h('p', { class: 'field-title', text: 'Model' }), h('p', { class: 'hint', id: 'sf-model-none', text: 'This environment chooses the model.' })];
+      }
+      return [
+        h('div', { class: 'agent-grid' },
+          h('div', {}, field('sf-harness', 'Harness', harness),
+            c.typed ? reasons('sf-harness-why', ['This environment lists no harness; type one this server runs.'])
+              : reasons('sf-harness-why', closed.map(({ harness: x, why }) => `${x.id} is not available: ${why}.`))),
+          h('div', {}, model)),
+        c.harness && c.harness.readiness.length ? readinessList(c.harness.readiness, 'sf-harness-ready', v.environments.at) : null,
+        c.acknowledgement ? h('div', { class: 'ack' },
+          toggle('sf-ack', 'I accept tools without per-tool approval', v.draft.ack, (on) => { v.draft.ack = on; syncForm(); }, 'sf-ack-why'),
+          h('p', { class: 'hint', id: 'sf-ack-why', text: `${c.harness.id} cannot ask before each tool it uses, so as a writer it runs them without asking. Tick this only if you accept that.` })) : null,
+      ];
+    };
+
+    const drawCollect = (c) => (c.access.value !== 'writer' ? null : [
+      toggle('sf-collect', `Collect outputs (${OUTPUT_MANIFEST})`, v.draft.collect, (on) => { v.draft.collect = on; syncForm(); }, 'sf-collect-hint'),
+      h('p', { class: 'hint', id: 'sf-collect-hint', text: `Collect outputs asks the session to list its result files in ${OUTPUT_MANIFEST} and end with a JSON summary; the server publishes those files as outputs you can preview and accept.` }),
+    ]);
+
+    const drawAdvanced = (c) => {
+      const closed = [['writer', 'Writer'], ['reviewer', 'Reviewer']].filter(([k]) => c.access[k]).map(([k, label]) => `${label} is not available: ${c.access[k]}.`);
+      const access = h('select', { id: 'sf-access', disabled: c.access.fixed, 'aria-describedby': closed.length ? 'sf-access-why' : null },
+        h('option', { value: 'writer', disabled: !!c.access.writer && c.access.value !== 'writer', text: 'Writer: works in its own copy' }),
+        h('option', { value: 'reviewer', disabled: !!c.access.reviewer && c.access.value !== 'reviewer', text: 'Reviewer: reads outputs you choose' }));
+      access.value = c.access.value;
+      access.addEventListener('change', () => { v.draft.access = access.value; syncForm(); });
+      const outputs = reviewable(v);
+      const writer = c.access.value === 'writer';
+      let effort = null;
+      if (c.effort.offered) {
+        effort = h('select', { id: 'sf-effort' }, h('option', { value: '', text: 'Harness default' }), EFFORTS.map((e) => h('option', { value: e, text: e })));
+        effort.value = c.effort.value;
+        effort.addEventListener('change', () => { v.draft.effort = effort.value; syncForm(); });
+      }
+      return [
+        field('sf-access', 'Access', access),
+        reasons('sf-access-why', closed),
+        writer ? null : h('fieldset', { class: 'choices', id: 'sf-outputs' }, h('legend', { text: 'Outputs to review' }),
+          outputs.length ? outputs.map((a) => toggle(`sf-output-${a.id}`, a.label, v.draft.outputs.has(a.id), (on) => {
+            if (on) v.draft.outputs.add(a.id); else v.draft.outputs.delete(a.id);
+            syncForm();
+          })) : h('p', { class: 'hint', text: 'No outputs yet: a reviewer needs at least one.' })),
+        effort ? field('sf-effort', 'Effort', effort) : null,
+        writer ? h('div', { class: 'row choices-row' }, toggle('sf-allow', 'Allow every tool', v.draft.allowAll, (on) => { v.draft.allowAll = on; syncForm(); }, 'sf-tools-hint')) : null,
+        h('p', { class: 'hint', id: 'sf-tools-hint', text: 'A writer asks before each tool it uses unless you allow every tool (like --yes). A harness that cannot ask starts as a writer only with the acknowledgement under Agent, and only where this server permits it. Reviewers stay read-only.' }),
+      ];
+    };
+
+    const readyText = (c) => {
+      const reads = sourcesOf(v).filter((src) => v.draft.sources.get(src.id) !== false).length;
+      const reviews = reviewable(v).filter((a) => v.draft.outputs.has(a.id)).length;
+      return `Ready to start: ${[c.env.label, c.harness.id, `reads ${plural(reads, 'source')}`, c.access.value === 'reviewer' ? `reviews ${plural(reviews, 'output')}` : null].filter(Boolean).join(' · ')}`;
+    };
+    const FOCUS = {
+      workspace: () => $('strip').querySelector('details.menu > summary'),
+      environments: () => $('sf-retry'),
+      environment: () => envSlot.querySelector('input[type="radio"]:not(:disabled)'),
+      harness: () => $('sf-harness'),
+      ack: () => $('sf-ack'),
+      name: () => name,
+      prompt: () => prompt,
+      outputs: () => {
+        advanced.open = true;
+        return advancedSlot.querySelector('#sf-outputs input:not(:disabled)') || $('sf-access');
+      },
+    };
+    const focusField = (key) => {
+      const el = FOCUS[key] && FOCUS[key]();
+      if (el) el.focus();
+    };
+
+    // Each part keeps the signature it was drawn from; one that changed is
+    // drawn again and gets back the focus it held, by id.
+    const drawnParts = new Map();
+    const redraw = (slot, signature, draw) => {
+      if (drawnParts.get(slot) === signature) return;
+      drawnParts.set(slot, signature);
+      const focused = slot.contains(document.activeElement) ? document.activeElement.id : null;
+      fill(slot, draw());
+      if (!focused) return;
+      const back = $(focused) || slot.querySelector('input:not(:disabled), select:not(:disabled), button:not(:disabled)') || heading;
+      back.focus({ preventScroll: true });
+    };
+    let submitting = false;
+    let forcedShown = false;
+    let settling = true;
+    const syncForm = () => {
+      if (!heading.isConnected) return;
+      const c = choices();
+      const harnesses = c.harnesses.map(({ harness: x, why }) => [x.id, why]);
+      redraw(sourcesSlot, JSON.stringify([sourcesOf(v).map((src) => [src.id, src.title]), workspaceCanRun(v)]), drawSources);
+      redraw(envSlot, JSON.stringify([v.environments.state, v.environments.error, v.environments.at, c.envs.map(({ env, why }) => [env.key, why])]), () => drawEnvironments(c));
+      redraw(agentSlot, JSON.stringify([v.environments.at, c.env && c.env.key, c.typed, harnesses, c.typed || !c.harness ? null : c.harness.id,
+        c.model.kind, c.model.options, c.acknowledgement]), () => drawAgent(c));
+      redraw(collectSlot, c.access.value, () => drawCollect(c));
+      redraw(advancedSlot, JSON.stringify([c.access, reviewable(v).map((a) => [a.id, a.label]), c.effort.offered]), () => drawAdvanced(c));
+      if (c.access.forced && !forcedShown) {
+        advanced.open = true;
+        forcedShown = true;
+      }
+      const missing = blocked(c);
+      const text = missing ? missing.text : readyText(c);
+      if (status.textContent !== text) status.textContent = text;
+      start.disabled = submitting || v.environments.state !== 'ready';
+      const label = submitting ? 'Starting…' : 'Start session';
+      if (start.textContent !== label) start.textContent = label;
+      // Once the environments are in, focus left on the heading moves to
+      // what the start needs first.
+      if (settling && v.environments.state === 'ready') {
+        settling = false;
+        if (document.activeElement !== heading) return;
+        if (!missing) start.focus();
+        else if (missing.field !== 'workspace') focusField(missing.field);
+      }
+    };
+
+    const refuse = async (e) => {
+      const known = START_REFUSED[e.code];
+      if (known && known.reload === 'workspace') {
+        try { await reloadDetail(v); } catch (_) { /* the refusal is still said */ }
+        if (wsView === v) drawWorkspace(v);
+      }
+      if (known && known.reload === 'environments') await loadEnvironments(v);
+      if (wsView !== v) return;
+      error.textContent = known ? known.text(e, v) : `${said(e.message)} Your draft is kept.`;
+    };
     start.addEventListener('click', async () => {
-      const body = { name: name.value.trim(), prompt: prompt.value.trim(), harness: harness.value.trim(), access: access.value };
-      const missing = !body.name ? [name, 'Name the session.'] : !body.harness ? [harness, 'Choose a harness.'] : !body.prompt ? [prompt, 'Give it a first prompt.'] : null;
-      if (missing) { error.textContent = missing[1]; missing[0].focus(); return; }
-      const ticked = (box) => Array.from(box.querySelectorAll('input:checked'), (i) => i.value);
-      if (ticked(sourcesBox).length) body.sources = ticked(sourcesBox);
-      if (body.access === 'reviewer') {
-        body.artifacts = ticked(outputsBox);
-        if (!body.artifacts.length) { error.textContent = 'Choose at least one output to review.'; return; }
-      } else if (collect.querySelector('input').checked) body.result_contract = OUTPUT_CONTRACT;
-      if (allow.querySelector('input').checked) body.policy = { mode: 'allow' };
-      if (acknowledgement.querySelector('input').checked) body.unapproved_tools = true;
-      if (model.value.trim()) body.model = model.value.trim();
-      submitting = true;
-      v.syncForm();
+      if (submitting) return;
+      const c = choices();
+      const missing = blocked(c);
       error.textContent = '';
+      if (missing) {
+        status.textContent = missing.text;
+        focusField(missing.field);
+        return;
+      }
+      const body = startRequest(c, v.draft, sourcesOf(v), reviewable(v));
+      submitting = true;
+      syncForm();
       let op = null;
+      let refusal = null;
       try {
         op = await revised(v, 'Could not start the session', () => api('POST', `${workspacePath(v.id)}/sessions`, body));
       } catch (e) {
-        error.textContent = e.message;
+        refusal = e;
       }
+      submitting = false;
       if (wsView !== v) return;
-      if (!op) { submitting = false; v.syncForm(); return; }
+      if (refusal) await refuse(refusal);
+      if (!op) {
+        if (wsView === v && v.composing) syncForm();
+        return;
+      }
+      v.sent.set(op.session_id, body);
+      v.draft = freshDraft(v, { env: c.env.key, harness: c.harness.id, model: c.model.kind === 'none' ? v.draft.model : c.model.value });
       toast('Session started.');
       v.composing = false;
       v.drawn.convo = null;
@@ -2731,42 +3365,24 @@
       follow(v, op, 'Session');
       if (wsView === v) go(workspaceHref(v.id, op.session_id));
     });
+
     fill(box, h('section', { class: 'card form session-form', id: 'session-form', 'aria-labelledby': 'session-form-h' },
-      h('h2', { id: 'session-form-h', text: 'New session' }),
-      h('label', { class: 'block', for: ids.name, text: 'Session name' }), name,
-      h('div', { class: 'form-grid' }, harnessSlot,
-        h('div', {}, h('label', { class: 'block', for: ids.access, text: 'Access' }), access)),
-      h('label', { class: 'block', for: ids.model, text: 'Model (optional)' }), model,
-      h('label', { class: 'block', for: ids.prompt, text: 'First prompt' }), prompt,
-      sourcesBox,
-      outputsBox,
-      h('div', { class: 'row choices-row' }, collect, allow),
-      h('details', {}, h('summary', { text: 'Tool approval compatibility' }), acknowledgement,
-        h('p', { class: 'hint', text: 'AGY and some other harnesses cannot enforce per-tool approvals. Acknowledge this only when you accept that behavior. The server must also permit it; reviewers remain read-only.' })),
-      h('p', { class: 'hint', text: `Collect outputs asks the session to list its result files in ${OUTPUT_MANIFEST} and end with a JSON summary; the server publishes those files as outputs you can preview and accept.` }),
-      ready ? null : h('p', { class: 'hint', text: `The workspace is ${workspaceStateText(v.workspace)}; sessions start once it is ready.` }),
+      heading,
+      h('fieldset', { class: 'step' }, h('legend', { text: 'Sources it reads' }), sourcesSlot),
+      h('fieldset', { class: 'step' }, h('legend', { text: 'Where it runs' }), envSlot),
+      h('fieldset', { class: 'step' }, h('legend', { text: 'Agent' }), agentSlot),
+      h('fieldset', { class: 'step' }, h('legend', { text: 'Task' }),
+        field('sf-name', 'Session name', name),
+        field('sf-prompt', 'First prompt', prompt),
+        h('p', { class: 'hint', id: 'sf-prompt-hint', text: 'Say what it should do and which files it should produce, for example: Summarise the backlog by owner in an XLSX and a one-page DOCX.' }),
+        collectSlot),
+      advanced,
       h('div', { class: 'row form-actions' }, start, cancel),
+      status,
       error));
-    access.dispatchEvent(new Event('change'));
-    name.focus();
-    let listed = null;
-    let why = null;
-    try {
-      listed = (await api('GET', '/v1/harnesses')).harnesses;
-    } catch (e) {
-      why = e.message;
-    }
-    if (!harness.isConnected) return;
-    const usable = (listed || []).filter((x) => x.available);
-    if (usable.length) {
-      fill(harness, usable.map((x) => h('option', { value: x.default ? x.harness : x.profile, text: x.default ? x.harness : `${x.harness} (${x.profile})` })));
-      harness.disabled = false;
-    } else {
-      const typed = h('input', { id: ids.harness, type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'A harness this server runs' });
-      harness.replaceWith(typed);
-      harness = typed;
-      harnessSlot.append(h('p', { class: 'hint', text: why ? `The server lists no harnesses for this token (${why}); type one it runs.` : 'The server lists no available harness; type one it runs.' }));
-    }
+    v.syncForm = syncForm;
+    heading.focus({ preventScroll: true });
+    syncForm();
   }
 
   // ---------------------------------------------------------------

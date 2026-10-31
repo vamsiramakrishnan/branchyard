@@ -19,7 +19,7 @@ from typing import Any
 
 OWNER_LABEL = "branchyard-deployment"
 # Checked and rewritten by tools/release_version.py before release packaging.
-RELEASE_VERSION = "0.3.0"
+RELEASE_VERSION = "0.3.1"
 IMAGE_REPOSITORY = "ghcr.io/vamsiramakrishnan/branchyard-agy"
 MSB_VERSION = "0.7.3"
 MSB_ARCHIVE_SHA256 = "2d5da7de187246c804dce2a1a23f06626b6f7cb892d9a0c7c5c620784ba412ea"
