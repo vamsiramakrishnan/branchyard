@@ -973,7 +973,20 @@ async fn sessions_without_a_preset_read_as_the_engine_serializes_them(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_branch_takes_the_projection_of_its_nearest_session_on_the_same_repository() {
-    let case = Case::build(|config| config.allow_delegation = true, true, &[]);
+    let case = Case::build(
+        |config| {
+            use std::os::unix::fs::PermissionsExt as _;
+            config.allow_delegation = true;
+            // Delegating branches need a `by` for their tools; CI has none on PATH,
+            // and the fake agent never calls it.
+            let by = config.data_dir.parent().unwrap().join("fake-by");
+            std::fs::write(&by, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&by, std::fs::Permissions::from_mode(0o755)).unwrap();
+            config.by_path = Some(by);
+        },
+        true,
+        &[],
+    );
     let f = &case.fixture;
     for (name, parent) in [
         ("root", None),
