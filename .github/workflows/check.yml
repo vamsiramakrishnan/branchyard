@@ -49,6 +49,13 @@ jobs:
     # controls and the rest. `--exclude` keeps a crate added later in this
     # job; a crate tested by two jobs, or by none, fails tests/test_check.py.
     # The timeouts below are a cold cache plus the margin a hung test needs.
+    #
+    # The test jobs run cargo-nextest with the `ci` profile of
+    # .config/nextest.toml: a process per test, every binary's tests in one
+    # pool of threads (`cargo test` runs the binaries one after another), a
+    # hung test killed and named after five minutes, no retries, and a JUnit
+    # report uploaded with the job. nextest does not run doctests, so
+    # `cargo test --doc` runs them for the same packages.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -61,6 +68,7 @@ jobs:
           # The key nightly.yml reads: this job builds most of the workspace.
           shared-key: workspace-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: python tools/install_ci_tool.py cargo-nextest
       # Resolve crates from Cargo.lock once; every later cargo step runs offline.
       - run: cargo fetch --locked
       - name: Compare generated files, never rewrite them
@@ -69,10 +77,17 @@ jobs:
         # BRANCHYARD_BLESS and BY_UPDATE_SCHEMA would make those tests
         # rewrite what they compare.
         run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
-      - run: cargo test --workspace --exclude branchyard-cli --exclude branchyard-server --exclude branchyard-client --exclude branchyard-herdr --locked --offline
+      - run: cargo nextest run --workspace --exclude branchyard-cli --exclude branchyard-server --exclude branchyard-client --exclude branchyard-herdr --locked --offline --profile ci
+      - run: cargo test --doc --workspace --exclude branchyard-cli --exclude branchyard-server --exclude branchyard-client --exclude branchyard-herdr --locked --offline
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-test-engine
+          path: target/nextest/ci/junit.xml
   test-cli:
     # The `by` command: its unit tests and every file of
-    # crates/branchyard-cli/tests, the SDK client examples among them.
+    # crates/branchyard-cli/tests, the SDK client examples among them. The
+    # crate has no library, so it has no doctests.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -84,10 +99,16 @@ jobs:
         with:
           shared-key: test-cli
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: python tools/install_ci_tool.py cargo-nextest
       - run: cargo fetch --locked
       - name: Compare generated files, never rewrite them
         run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
-      - run: cargo test -p branchyard-cli --locked --offline
+      - run: cargo nextest run -p branchyard-cli --locked --offline --profile ci
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-test-cli
+          path: target/nextest/ci/junit.xml
   test-server:
     # The server, its client and the Herdr bridge: the crates that serve the
     # HTTP API or call it.
@@ -102,10 +123,17 @@ jobs:
         with:
           shared-key: test-server
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: python tools/install_ci_tool.py cargo-nextest
       - run: cargo fetch --locked
       - name: Compare generated files, never rewrite them
         run: test -z "${BRANCHYARD_BLESS+x}" && test -z "${BY_UPDATE_SCHEMA+x}"
-      - run: cargo test -p branchyard-server -p branchyard-client -p branchyard-herdr --locked --offline
+      - run: cargo nextest run -p branchyard-server -p branchyard-client -p branchyard-herdr --locked --offline --profile ci
+      - run: cargo test --doc -p branchyard-server -p branchyard-client -p branchyard-herdr --locked --offline
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-test-server
+          path: target/nextest/ci/junit.xml
   walkthrough:
     # docs/getting-started.md run for real on the built programs.
     runs-on: ubuntu-latest

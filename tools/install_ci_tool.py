@@ -39,6 +39,11 @@ TOOLS = {
         "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a",
         "cargo-llvm-cov",
     ),
+    "cargo-nextest": (
+        f"{RELEASES}/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/cargo-nextest-0.9.148-x86_64-unknown-linux-gnu.tar.gz",
+        "223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc",
+        "cargo-nextest",
+    ),
 }
 
 
