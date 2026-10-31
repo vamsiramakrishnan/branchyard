@@ -722,7 +722,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.config = tomllib.loads((ROOT / "dist-workspace.toml").read_text())
 
     def test_releases_are_tagged_and_smoke_tests_gate_publication(self):
-        self.assertIn("  push:\n    tags:", self.text)
+        self.assertIn("  push:\n    branches: [main]\n    tags:\n      - 'v[0-9]+.[0-9]+.[0-9]+*'\n", self.text)
         self.assertIn("  pull_request:\n    paths:", self.text)
         self.assertIn("  workflow_dispatch:", self.text)
         self.assertIn("--draft --verify-tag", self.text)
@@ -731,6 +731,41 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("needs.custom-release-smoke.result == 'success'", host)
         self.assertIn("uses: ./.github/workflows/release-smoke.yml", self.text)
         self.assertIn("uses: ./.github/workflows/agy-image.yml", self.text)
+
+    def test_pull_requests_plan_and_main_rehearses_the_release_inputs(self):
+        # A pull request runs `dist plan` alone; a push to main that changes a release input builds
+        # every target, the image and the smoke tests without publishing; a tag builds and drafts.
+        self.assertEqual(self.config["dist"]["pr-run-mode"], "plan")
+        spec = importlib.util.spec_from_file_location("release_triggers", ROOT / "tools/release_workflow.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        triggers = self.text.split("\non:\n", 1)[1].split("\njobs:\n", 1)[0]
+        pull_request = triggers.split("  pull_request:\n    paths:\n", 1)[1].split("  push:\n", 1)[0]
+        push = triggers.split("  push:\n", 1)[1].split("    paths:\n", 1)[1].split("\n\n", 1)[0] + "\n"
+        for paths in (pull_request, push):
+            self.assertEqual(re.findall(r"^      - (\S+)$", paths, re.M), list(module.RELEASE_INPUTS))
+        for path in (
+            "Cargo.lock",
+            "dist-workspace.toml",
+            "packaging/**",
+            "install.sh",
+            ".github/workflows/release*.yml",
+        ):
+            self.assertIn(path, module.RELEASE_INPUTS)
+        builds = module.BUILDS
+        self.assertTrue(builds.startswith("github.event_name != 'pull_request' || "), builds)
+        for name in ("build-local-artifacts", "custom-agy-image"):
+            job = re.split(r"\n  [\w-]+:\n", self.text.split(f"\n  {name}:\n", 1)[1], maxsplit=1)[0]
+            condition = next(line for line in job.splitlines() if line.startswith("    if: "))
+            self.assertIn(builds, condition, name)
+            self.assertNotIn("publishing", condition, name)
+        # The bootstrap and smoke jobs follow the builds, on a tag as on a rehearsal.
+        for name in ("custom-release-extras", "custom-release-smoke"):
+            job = re.split(r"\n  [\w-]+:\n", self.text.split(f"\n  {name}:\n", 1)[1], maxsplit=1)[0]
+            self.assertNotIn("\n    if:", job, name)
+        # Build caches are written by main alone: a tag reads them, and its own would serve no other run.
+        setup = (ROOT / ".github/dist-build-setup.yml").read_text()
+        self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", setup)
 
     def test_rehearsals_do_not_mutate_a_release_or_push_an_image(self):
         plan = self.text.split("\n  plan:\n", 1)[1].split("\n  build-local-artifacts:\n", 1)[0]
@@ -801,11 +836,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_portable_and_native_artifacts_have_dist_owned_targets_and_resources(self):
         self.assertEqual(self.config["dist"]["cargo-dist-version"], "0.33.1")
         smoke = (ROOT / ".github/workflows/release-smoke.yml").read_text()
+        entries = re.findall(r"- runner: (\S+)\n\s+target: (\S+)\n\s+runtime: (true|false)\n", smoke)
+        runtime_targets = tomllib.loads((ROOT / "packaging/runtime/dist.toml").read_text())["dist"]["targets"]
         self.assertEqual(
-            set(re.findall(r"^\s+- runner: (\S+)$", smoke, re.M)),
-            set(self.config["dist"]["github-custom-runners"].values()),
-            "every native build runner needs a matching installation smoke runner",
+            sorted((target, runtime) for _, target, runtime in entries),
+            sorted(
+                [(target, "false") for target in self.config["dist"]["targets"]]
+                + [(t, "true") for t in runtime_targets]
+            ),
+            "every packaged target needs an installation smoke entry that executes it",
         )
+        # x86_64-apple-darwin is cross-built on Apple silicon; its binary still runs on an Intel Mac.
+        self.assertEqual(self.config["dist"]["github-custom-runners"]["x86_64-apple-darwin"], "macos-15")
+        self.assertIn(("macos-15-intel", "x86_64-apple-darwin", "false"), entries)
+        self.assertIn('--runtime "$RUNTIME" --target "$TARGET"', smoke)
         self.assertEqual(
             set(self.config["dist"]["targets"]),
             {

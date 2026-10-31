@@ -11,6 +11,14 @@ import tempfile
 from pathlib import Path
 
 
+def host_target(runtime: bool) -> str:
+    """The target whose archive the installer picks on this host."""
+    machine = {"arm64": "aarch64", "AMD64": "x86_64"}.get(platform.machine(), platform.machine())
+    if platform.system() == "Darwin":
+        return machine + "-apple-darwin"
+    return machine + ("-unknown-linux-gnu" if runtime else "-unknown-linux-musl")
+
+
 def run_smoke(artifacts: Path, runtime: bool) -> dict:
     """Check install, repeat install, setup and checksum rejection on this host."""
     with tempfile.TemporaryDirectory(prefix="branchyard-release-") as directory:
@@ -77,16 +85,8 @@ def run_smoke(artifacts: Path, runtime: bool) -> dict:
         for path in artifacts.iterdir():
             if path.is_file():
                 (bad / path.name).symlink_to(path)
-        machine = {"arm64": "aarch64", "AMD64": "x86_64"}.get(platform.machine(), platform.machine())
-        target = machine + (
-            "-apple-darwin"
-            if platform.system() == "Darwin"
-            else "-unknown-linux-gnu"
-            if runtime
-            else "-unknown-linux-musl"
-        )
         package = "branchyard-runtime" if runtime else "branchyard-cli"
-        archive = bad / f"{package}-{target}.tar.gz"
+        archive = bad / f"{package}-{host_target(runtime)}.tar.gz"
         source = archive.resolve()
         archive.unlink()
         shutil.copyfile(source, archive)
@@ -125,8 +125,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifacts", type=Path, required=True)
     parser.add_argument("--runtime", choices=["true", "false"], default="false")
+    parser.add_argument("--target", help="refuse to run unless this host installs that target's archive")
     args = parser.parse_args()
-    print(json.dumps(run_smoke(args.artifacts.resolve(), args.runtime == "true")))
+    runtime = args.runtime == "true"
+    if args.target and args.target != host_target(runtime):
+        raise SystemExit(f"this host installs {host_target(runtime)}, not {args.target}; run it on a matching runner")
+    print(json.dumps(run_smoke(args.artifacts.resolve(), runtime)))
 
 
 if __name__ == "__main__":
