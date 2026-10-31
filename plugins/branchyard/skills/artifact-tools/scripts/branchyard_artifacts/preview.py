@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import zipfile
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -182,6 +183,12 @@ def _truncate_text(text: str, warnings: list[str]) -> str:
     return text
 
 
+def _trimmed_csv_row(raw_row: list[str], warnings: list[str]) -> list[str]:
+    if any(raw_row[MAX_COLUMNS:]):
+        _warn_once(warnings, "Truncated columns to " + str(MAX_COLUMNS))
+    return raw_row[:MAX_COLUMNS]
+
+
 def _preview_csv(path: Path, offset: int, limit: int) -> dict[str, Any]:
     payload = _read_regular(path, MAX_INPUT_BYTES)
     if b"\x00" in payload:
@@ -198,9 +205,7 @@ def _preview_csv(path: Path, offset: int, limit: int) -> dict[str, Any]:
         raise ArtifactError("Malformed CSV header: " + str(error)) from error
     if raw_header is None or not raw_header or all(cell == "" for cell in raw_header):
         raise ArtifactError("CSV input has no header row")
-    if len(raw_header) > MAX_COLUMNS:
-        raw_header = raw_header[:MAX_COLUMNS]
-        _warn_once(warnings, "Truncated columns to " + str(MAX_COLUMNS))
+    raw_header = _trimmed_csv_row(raw_header, warnings)
     columns = [
         _truncate_text(label, warnings) if label != "" else "column_" + str(index + 1)
         for index, label in enumerate(raw_header)
@@ -214,9 +219,7 @@ def _preview_csv(path: Path, offset: int, limit: int) -> dict[str, Any]:
                 _warn_once(warnings, "Row preview stops at " + str(MAX_SCAN_ROWS) + " rows")
                 next_offset = None
                 break
-            if len(raw_row) > MAX_COLUMNS:
-                raw_row = raw_row[:MAX_COLUMNS]
-                _warn_once(warnings, "Truncated columns to " + str(MAX_COLUMNS))
+            raw_row = _trimmed_csv_row(raw_row, warnings)
             if len(raw_row) > len(columns):
                 for extra in range(len(columns), len(raw_row)):
                     columns.append("column_" + str(extra + 1))
@@ -276,11 +279,12 @@ def _xlsx_cell(value: Any, warnings: list[str]) -> Any:
     return _truncate_text(str(value), warnings)
 
 
-def _trimmed_xlsx_row(raw_row: tuple[Any, ...], warnings: list[str]) -> list[Any]:
-    cells = list(raw_row)
-    if len(cells) > MAX_COLUMNS:
-        cells = cells[:MAX_COLUMNS]
+def _trimmed_xlsx_row(raw_row: Sequence[Any], warnings: list[str]) -> list[Any]:
+    overflow = raw_row[MAX_COLUMNS:]
+    # count() stays in C; a styled empty cell in column XFD pads the row to 16,384 entries.
+    if overflow.count(None) < len(overflow):
         _warn_once(warnings, "Truncated columns to " + str(MAX_COLUMNS))
+    cells = list(raw_row[:MAX_COLUMNS])
     while cells and cells[-1] is None:
         cells.pop()
     return [_xlsx_cell(cell, warnings) for cell in cells]
@@ -311,9 +315,10 @@ def _preview_xlsx_table(path: Path, sheet: str | None, offset: int, limit: int) 
         if selected not in sheets:
             raise ArtifactError("Worksheet does not exist: " + str(selected))
         worksheet = workbook[selected]
-        if (worksheet.max_column or 0) > MAX_COLUMNS:
-            _warn_once(warnings, "Truncated columns to " + str(MAX_COLUMNS))
-        row_iter = worksheet.iter_rows(max_col=MAX_COLUMNS + 1, values_only=True)
+        # The stored <dimension> counts styled empty cells and can understate the data; read-only rows are
+        # padded to it, or to any max_col, so each row is read at its own width instead.
+        worksheet.reset_dimensions()
+        row_iter = worksheet.iter_rows(values_only=True)
         first_row = next(row_iter, None)
         if first_row is None:
             return {
