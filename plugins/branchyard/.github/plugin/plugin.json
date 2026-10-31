@@ -1,7 +1,7 @@
 {
   "name": "branchyard",
   "description": "Guided setup, delegated code and knowledge work, and skills for documents, data and evidence. Follow branch progress and review results. Requires the by CLI.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "Apache-2.0",
   "category": "development",
   "skills": "skills/",

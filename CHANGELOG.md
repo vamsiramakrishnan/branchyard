@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.1 - 2026-10-31
+
+Operators can name the environments console sessions run in.
+`execution_presets` in the server configuration lists each environment's
+provider, harnesses, models, secrets by name, tenants and worker labels, and
+`require_workspace_execution_presets` makes workspace sessions choose one. The
+browser sends a preset ID, and the server resolves the rest and validates it
+through the existing checks. A session on a remote preset never falls back to
+local execution, and members see placeholders where an error would name a
+preset's paths, endpoints or secrets. `GET /v1/execution-presets` reports each
+environment's readiness from configuration and offline checks only, and the
+manager MCP starts sessions on a preset.
+
+The console guides a workspace start: choose sources, an environment, a harness
+and model, and the outputs to collect, then follow several sessions side by
+side, each with its own draft and outputs. Sources open in the inspector like
+outputs, outputs are grouped by session and turn, and only the current turn's
+outputs can be accepted. Source titles may be any Unicode text, sent with
+`X-Source-Title-Encoded`, and downloads keep the title. XLSX and CSV previews no
+longer warn about columns they did not cut, a session's first message shows
+what the person typed, and follow-ups in a session that collects outputs keep
+collecting them.
+
+A repository's own skills in `.agents/skills/` reach a branch once a person
+trusts that set with `by skills trust` or a server operator allows them. Every
+turn records the skills it ran with, and copied sandboxes record their ready
+time and transfer sizes. `by up`, `by doctor`, `by setup` and
+`by substrate check` report remote readiness as seven separate checks and never
+treat a found binary as ready to run; `by up --plan --smoke` adds one bounded,
+read-only call to the control plane.
+
+CI runs the test jobs under cargo-nextest and splits the PostgreSQL and coverage
+jobs into partitions. Pull requests plan releases instead of building every
+target, and main rehearses the build. The README says why Branchyard exists and
+shows the console.
+
+The evidence for this release is hermetic: fake agents, fake providers and
+recorded fixtures. No live model, GKE or Substrate run was made for it.
+
 ## 0.3.0 - 2026-10-29
 
 One desktop console now handles coding and knowledge work. Projects contain

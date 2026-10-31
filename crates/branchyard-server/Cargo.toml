@@ -32,8 +32,8 @@ branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 # Execution presets read a harness profile's protocol and ask its
 # provisioner whether it takes an effort, as branchyard-setup does.
-branchyard-harness = { version = "0.3.0", path = "../branchyard-harness" }
-branchyard-provision = { version = "0.3.0", path = "../branchyard-provision" }
+branchyard-harness = { version = "0.3.1", path = "../branchyard-harness" }
+branchyard-provision = { version = "0.3.1", path = "../branchyard-provision" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = { workspace = true }
 hmac = "0.13"
@@ -61,7 +61,7 @@ tracing-subscriber = { workspace = true }
 tower-http = { version = "0.6.11", features = ["trace", "tracing"] }
 schemars = { workspace = true, optional = true }
 backon = { workspace = true, features = ["tokio-sleep"] }
-branchyard-setup = { version = "0.3.0", path = "../branchyard-setup" }
+branchyard-setup = { version = "0.3.1", path = "../branchyard-setup" }
 # `sync`: served repositories replicated to durable storage (docs/sync.md).
 branchyard-sync = { path = "../branchyard-sync" }
 # Cron schedules in a time zone (docs/triggers.md). Already in Cargo.lock.

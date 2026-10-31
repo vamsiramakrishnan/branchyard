@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "branchyard"
-version = "0.3.0"
+version = "0.3.1"
 description = "Run and coordinate agent tasks from Python, with optional tools for documents, data and evidence."
 readme = "README.md"
 requires-python = ">=3.9"
