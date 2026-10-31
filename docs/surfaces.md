@@ -975,7 +975,11 @@ See [knowledge](knowledge.md) and [pull requests](pull-requests.md#the-events).
 Substrate template setup; `--yes` applies it. `by substrate check --smoke
 --harness agy` verifies bridge execution, file transfer and cleanup without a
 model call. These are operator commands, run outside a harness session.
-`by up` and `by doctor` check the saved connection and remote credential sources.
+`by up` and `by doctor` check the saved connection and remote credential sources,
+and report seven readiness checks, each `verified`, `unverified`, `unknown`,
+`failed` or `not_applicable` (`checks` in `by up --json`, `readiness` in `by doctor
+--json`). `by up --plan --smoke` also lists the Substrate workers: one read-only
+`ListWorkers` call that creates no actor and calls no model.
 `by setup --guided` selects a repository and compute backend, then checks readiness.
 `by setup --up --json` includes readiness in one setup report; `--directory PATH`
 selects the repository. Cloud creation is reviewed before resources change.

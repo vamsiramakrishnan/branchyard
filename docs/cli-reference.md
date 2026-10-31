@@ -2809,6 +2809,7 @@ by up [OPTIONS]
 |---|---|
 | `--json` | Print JSON |
 | `--plan` | Inspect readiness without installing harnesses or starting services |
+| `--smoke` | Also list the Substrate workers to check capacity (read-only; no actor, no model) |
 | `--yes` | Make the installs the [harnesses] policy would ask about, without asking |
 
 ## Exit status

@@ -104,7 +104,7 @@ impl Topic {
             Topic::Rig => "A rig TOML: a lead seat and the seats it delegates to, each with its harness, budget and policy",
             Topic::Server => "A server configuration: listen address and TLS, SQLite or PostgreSQL, tenants with hashed credentials and 0600 token files, quotas, providers, secrets, webhooks",
             Topic::Deploy => "compose.yaml with PostgreSQL, a server configuration and generated secret files",
-            Topic::Plugin => "Install Branchyard's hooks, commands and skills into each harness you use (Claude Code, Codex, Gemini CLI, ...), detected ones first (plugins/branchyard/install)",
+            Topic::Plugin => "Install Branchyard's hooks, commands and skills into each harness you use (Antigravity, Claude Code, Codex, ...), detected ones first (plugins/branchyard/install)",
         }
     }
 }

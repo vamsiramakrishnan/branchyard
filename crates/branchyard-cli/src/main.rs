@@ -75,6 +75,7 @@ mod ports;
 mod pr;
 mod pr_threads;
 mod preflight;
+mod readiness;
 mod recipe_cmd;
 mod remote;
 mod render;
@@ -291,7 +292,12 @@ fn run(env: &Env, globals: &Globals, command: Command) -> commands::Outcome {
             return doctor_cmd::main(env, globals, path.as_deref(), json);
         }
         // Up acts on this machine's repository, whatever [remote] says.
-        Command::Up { json, plan, yes } => return up_cmd::main(env, globals, plan, yes, json),
+        Command::Up {
+            json,
+            plan,
+            smoke,
+            yes,
+        } => return up_cmd::main(env, globals, plan, smoke, yes, json),
         Command::Substrate { action } => return substrate_cmd::main(env, globals, &action),
         Command::Compute { action } => return cloud_setup::compute(globals, &action),
         // The meters read this machine's session files; no repository needed.

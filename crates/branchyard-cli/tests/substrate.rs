@@ -467,6 +467,17 @@ fn substrate_setup_is_repeatable_and_smoke_cleans_success_and_failure() {
     assert_eq!(checked["model"], "not_checked");
     assert_eq!(checked["template"], "validated");
     assert_eq!(checked["template_details"]["signer"], "matches");
+    let check = |id: &str| {
+        checked["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == id)
+            .map(|check| check["status"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(check("worker_capacity_available"), "verified", "{checked}");
+    assert_eq!(check("cli_and_harness_installed"), "verified", "{checked}");
     assert!(setup.fake.actor_names().is_empty());
 
     let failed = run(
@@ -982,4 +993,156 @@ fn by_remote_run_in_a_substrate_actor_on_the_server() {
         "{}",
         String::from_utf8_lossy(&relative.stderr)
     );
+}
+
+/// The readiness journey against the fake cluster: `by up --plan`, `by up
+/// --plan --smoke`, `by doctor` and `by substrate check` authenticate,
+/// inspect the template and (with `--smoke`) list workers, and none of them
+/// creates an actor; an expired token is a credential failure from a
+/// control plane that answered.
+#[test]
+fn readiness_lists_workers_with_smoke_and_never_creates_an_actor() {
+    let setup = Setup::new("readiness");
+    let token = setup.dir.join("control.token");
+    fs::write(&token, "tok-current\n").unwrap();
+    setup.fake.require_api_token("tok-current");
+    let config = branchyard::config::ProjectConfig {
+        defaults: branchyard::config::Defaults {
+            harness: Some("antigravity".into()),
+            provider: Some(branchyard::config::ProviderKind::Substrate),
+            ..Default::default()
+        },
+        substrate: Some(branchyard::config::Substrate {
+            endpoint: setup.fake.endpoint().into(),
+            router: setup.fake.router().into(),
+            template: "by-harness".into(),
+            atespace: "yard".into(),
+            key: "../bridge.key".into(),
+            api_token_file: Some(token.display().to_string()),
+            workdir: setup.workdir.display().to_string(),
+            home: setup.home.display().to_string(),
+            egress: branchyard::config::SubstrateEgress::Deny,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    fs::write(
+        setup.root.join("branchyard.toml"),
+        branchyard::config::render(&config, "Hermetic readiness"),
+    )
+    .unwrap();
+    let worker = |capacity: i32, allocated: i32| pb::Worker {
+        status: Some(pb::WorkerStatus {
+            state: pb::WorkerState::Active as i32,
+            capacity: Some(pb::WorkerResources {
+                actors: capacity,
+                ..Default::default()
+            }),
+            allocated: Some(pb::WorkerResources {
+                actors: allocated,
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    setup.fake.set_workers(vec![worker(4, 1)]);
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = run(&setup.root, BY, args);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "by {args:?}: {e}\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    };
+    let status = |checks: &serde_json::Value, id: &str| -> String {
+        checks
+            .as_array()
+            .unwrap_or_else(|| panic!("no checks: {checks}"))
+            .iter()
+            .find(|check| check["id"] == id)
+            .and_then(|check| check["status"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    let plan = json(&["up", "--plan", "--json"]);
+    let checks = &plan["checks"];
+    assert_eq!(
+        status(checks, "operator_credentials_available"),
+        "verified",
+        "{plan}"
+    );
+    assert_eq!(status(checks, "remote_control_plane_reachable"), "verified");
+    assert_eq!(
+        status(checks, "execution_capabilities_supported"),
+        "verified"
+    );
+    assert_eq!(status(checks, "worker_capacity_available"), "unknown");
+    assert_eq!(status(checks, "cli_and_harness_installed"), "unverified");
+    let installed = checks[0]["next"].as_str().unwrap();
+    assert!(
+        installed.starts_with("by substrate check --smoke --harness agy"),
+        "{installed}"
+    );
+    // No local fallback: no harness was looked for on this machine.
+    assert!(
+        !plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["name"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("harness.")),
+        "{plan}"
+    );
+
+    let smoked = json(&["up", "--plan", "--smoke", "--json"]);
+    assert_eq!(
+        status(&smoked["checks"], "worker_capacity_available"),
+        "verified",
+        "{smoked}"
+    );
+    setup.fake.set_workers(vec![worker(2, 2)]);
+    let full = json(&["up", "--plan", "--smoke", "--json"]);
+    assert_eq!(
+        status(&full["checks"], "worker_capacity_available"),
+        "failed"
+    );
+
+    let doctor = json(&["doctor", "--json"]);
+    assert_eq!(doctor["format"], 4);
+    assert_eq!(
+        status(&doctor["readiness"], "remote_control_plane_reachable"),
+        "verified"
+    );
+    assert_eq!(
+        status(&doctor["readiness"], "worker_capacity_available"),
+        "unknown"
+    );
+
+    let check = json(&["substrate", "check", "--json"]);
+    assert_eq!(
+        status(&check["checks"], "remote_control_plane_reachable"),
+        "verified"
+    );
+
+    fs::write(&token, "tok-expired\n").unwrap();
+    let expired = json(&["up", "--plan", "--json"]);
+    assert_eq!(
+        status(&expired["checks"], "operator_credentials_available"),
+        "failed"
+    );
+    assert_eq!(
+        status(&expired["checks"], "remote_control_plane_reachable"),
+        "verified"
+    );
+    assert!(
+        !String::from_utf8_lossy(&run(&setup.root, BY, &["up", "--plan"]).stdout).contains("tok-")
+    );
+
+    assert_eq!(setup.fake.created_actors(), 0, "readiness never provisions");
+    assert!(setup.fake.actor_names().is_empty());
 }

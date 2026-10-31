@@ -74,7 +74,29 @@ ordinary setup too. For a saved HTTP or SSH server, setup authenticates to that
 server and checks its serving workers' advertised harness and credential
 evidence. These checks make no model call. With either option, a readiness step
 that needs attention exits 1; `--json` includes `readiness` and `ready` in the
-same setup object. A dry run skips application and readiness. Without a terminal,
+same setup object. `readiness.checks` holds the seven
+[readiness checks](up.md#readiness-checks). For a server, they say which stage
+failed: no usable token file fails the operator credentials; no answer fails the
+control plane; a refused (for example expired) token fails the credentials of a
+server that answered; a live worker serving the repository is capacity, and that
+worker's own detection of the harness is the installed and login evidence. A
+server that cannot be reached is a readiness result, not an error, so `--json`
+still holds the setup object. Rerunning setup after fixing the cause leaves
+`branchyard.toml` as it was.
+
+In a new project, *Existing remote environment* (and *Existing Agent Substrate*)
+lists the deployments guided setup provisioned on this machine before, from its
+private records under `~/.local/state/branchyard/cloud` (owned by you, directory
+mode 0700 and answers file 0600; anything else is skipped), and applies the chosen
+one's answers. *Enter connection details manually* asks for a server URL, token
+file and CA file, or the Substrate fields. A `[remote]` or `[substrate]` in your
+user file is not listed: it already applies to every repository.
+
+The journey, then: install; `by setup --guided`; choose or provision the
+environment; read the seven checks; `by up --plan --smoke` to list Substrate
+workers (one read-only call; no actor, no model); `by substrate check --smoke
+--harness agy` to run the harness in a disposable actor (it creates and deletes
+one actor and calls no model); then follow each check's `next`. A dry run skips application and readiness. Without a terminal,
 guided setup requires explicit `--yes`; a missing terminal reports `manual`
 with exit 3. Initializing a repository also requires
 an explicit `--directory`. Headless defaults select local execution, while cloud
@@ -471,4 +493,5 @@ by config schema                     # the JSON Schema
 - **CLI** (`crates/branchyard-cli/tests/setup.rs`): the built `by` in temporary repositories: a scripted harness completing every topic through `--next`, `--dry-run` and `--apply`; applying twice writes nothing; every generated file passes the tool that reads it (`by serve --check`, `by rig check`, `by config validate`); a multi-tenant server with one 0600 token per tenant and only hashes in the configuration; an off-loopback server without TLS refused by the server's loader; refusal to replace a file without `--force`; a pasted secret never echoed; no generated secret in any output; the non-terminal refusal; configuration defaults under flags and variables, and not inside a harness's branch; a Codex auth file holding a refresh token, a fake Gemini CLI and `GEMINI_API_KEY`: the login shown with its `auth_mode`, recorded as `CODEX_AUTH` by path, `[fleet.default]` and the Gemini backend with a Claude route written, the file passing `by config validate`, and the token in no output and no file. The machine's own credential variables are removed from every setup command. The wizard runs on a pseudo-terminal (util-linux `script`) accepting every default and writing after review; its question-to-prompt mapping and review rendering are unit-tested.
 - **Unloadable file, scripts, plugin** (`crates/branchyard-setup/src/hint.rs`, the project topic's tests, `tests/install.rs`, `crates/branchyard-cli/tests/setup.rs`): an unknown key in the project or the user file named with its line and its replacement (`agent`, `budget`, a `[defaults]` key at the top, a typo), the plan's first note, the `--apply` refusal; a run script proposed only for a `package.json` script that exists (`dev`, then `start`, in the lockfile's package manager) and the question absent otherwise, a run script the file already has kept; `by workspace trust` first only for scripts that changed; the default harness missing from `PATH`; `by init project` and `by up` outside a repository, and from a subdirectory; `by init plugin` with nothing named refused with the way out (exit 2), one installer for the interview and for named harnesses, a line per harness of what it gets, diffs headed relative to the home directory, Claude Code's status line merged when absent and kept, with the line to choose, when present.
 - **`by setup`** (`crates/branchyard-cli/tests/setup_cmd.rs`): the built `by` with four fake harness executables first on `PATH` (and `by` itself, to check its hooks), a private HOME and a throwaway repository: `--yes` writes `branchyard.toml` and merges the hooks into all four harnesses' files and prints the card; a second run changes no byte; `--dry-run` and a missing terminal write nothing; the `--json` object; `--harness`, `--no-hooks`, `--no-config`; a guessed login called *not verified* with its auth source, and a credentials file naming its source; the `[workspace]` scripts shown and trusted with `--yes`; hooks `silent` (once, for all four) when `by` is not on `PATH`; each harness `never heard` after the install, `heard` once a Codex session's hook call is made, `stale` after setup writes Codex's file again and `heard` after the next call, in the card, the JSON, bare `by` and `by init plugin --status`; a differing file holding back one harness; bare `by` in a set-up, not-set-up and no-git directory and with a finished branch; `by init plugin --status` current, stale, missing; `by init` without a terminal exiting 2; the gateway left out of the generated file; and, on a pseudo-terminal, the questions, the review, the single write confirmation and the declined trust.
-- Not tested: a real harness running the skill (no model call was made), the wizard on macOS, and `docker compose up` of a generated deployment.
+- **Remote readiness** (`crates/branchyard-cli/src/readiness.rs`, `crates/branchyard-cli/tests/setup_cmd.rs`): each server answer (no usable token file, no answer, a refused token, another error, an `ssh://` remote doctor leaves alone, a repository list, a worker inventory) on its own checks; `by setup --up --json` against a refused port, then a mock server refusing an expired token, then one answering with a worker that has Antigravity, each run naming the failing stage and keeping `branchyard.toml` byte for byte; saved deployments listed only when owned and private (`cloud_setup.rs`); the GCE helper saving its answers with mode 0600 (`tests/test_cloud_setup.py`).
+- Not tested: a real harness running the skill (no model call was made), the wizard on macOS, `docker compose up` of a generated deployment, and the interactive saved-environment prompt (only its discovery is unit-tested).

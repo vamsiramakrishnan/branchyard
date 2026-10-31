@@ -285,6 +285,139 @@ fn managed_state(token: Option<&str>, prefix: &Path) -> Result<Option<PathBuf>, 
     Ok(Some(state))
 }
 
+/// A previously provisioned or configured remote environment that setup can select.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SavedEnvironment {
+    /// Stable identifier used in interactive selection prompts.
+    pub id: String,
+    /// What it runs tasks on.
+    pub kind: SavedKind,
+    /// Human-readable label for the environment.
+    pub label: String,
+    /// Short connection hint (endpoint or remote URL).
+    pub hint: String,
+    /// Setup answers that configure a repository to use this environment.
+    pub answers: BTreeMap<String, Value>,
+}
+
+/// What a saved deployment runs tasks on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SavedKind {
+    /// Agent Substrate on GKE: `[defaults] provider = "substrate"`.
+    Substrate,
+    /// A Branchyard server, such as a GCE worker over SSH: `[remote]`.
+    Server,
+}
+
+/// The deployments guided setup provisioned on this machine before, from
+/// the private state it keeps under `~/.local/state/branchyard/cloud`. A
+/// `[remote]` or `[substrate]` in your user file needs no selecting: it
+/// already applies to every repository.
+pub(crate) fn discover_saved_environments() -> Vec<SavedEnvironment> {
+    dirs::home_dir().map_or_else(Vec::new, |home| {
+        discover_saved_environments_in(&home.join(".local/state/branchyard/cloud"))
+    })
+}
+
+/// Scan `<prefix>/<kind>/<project>/<zone>/<name>` for owned private `project-answers.json` files.
+pub(crate) fn discover_saved_environments_in(prefix: &Path) -> Vec<SavedEnvironment> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = rustix::process::getuid().as_raw();
+    let mut environments = Vec::new();
+    for kind_dir in ["gke", "gce"] {
+        let kind_root = prefix.join(kind_dir);
+        let Ok(projects) = fs::read_dir(&kind_root) else {
+            continue;
+        };
+        let mut project_paths: Vec<PathBuf> =
+            projects.flatten().map(|entry| entry.path()).collect();
+        project_paths.sort();
+        for project_path in project_paths {
+            let Some(project) = project_path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(zones) = fs::read_dir(&project_path) else {
+                continue;
+            };
+            let mut zone_paths: Vec<PathBuf> = zones.flatten().map(|entry| entry.path()).collect();
+            zone_paths.sort();
+            for zone_path in zone_paths {
+                let Some(zone) = zone_path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Ok(names) = fs::read_dir(&zone_path) else {
+                    continue;
+                };
+                let mut name_paths: Vec<PathBuf> =
+                    names.flatten().map(|entry| entry.path()).collect();
+                name_paths.sort();
+                for state in name_paths {
+                    let Some(name) = state.file_name().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    let Ok(meta) = fs::symlink_metadata(&state) else {
+                        continue;
+                    };
+                    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+                        continue;
+                    }
+                    let answers_path = state.join("project-answers.json");
+                    let Ok(ans_meta) = fs::symlink_metadata(&answers_path) else {
+                        continue;
+                    };
+                    if !ans_meta.is_file() || ans_meta.uid() != uid || ans_meta.mode() & 0o077 != 0
+                    {
+                        continue;
+                    }
+                    let Ok(bytes) = fs::read(&answers_path) else {
+                        continue;
+                    };
+                    let Ok(mut answers) = serde_json::from_slice::<BTreeMap<String, Value>>(&bytes)
+                    else {
+                        continue;
+                    };
+                    answers
+                        .entry("harness".into())
+                        .or_insert_with(|| Value::from("antigravity"));
+                    let (kind, label, hint) = if kind_dir == "gke"
+                        || answers.get("provider").and_then(Value::as_str) == Some("substrate")
+                    {
+                        let hint = answers
+                            .get("substrate.endpoint")
+                            .and_then(Value::as_str)
+                            .unwrap_or("substrate")
+                            .to_string();
+                        (
+                            SavedKind::Substrate,
+                            format!("GKE Agent Substrate · {name} ({project}, {zone})"),
+                            hint,
+                        )
+                    } else {
+                        let hint = answers
+                            .get("remote.url")
+                            .and_then(Value::as_str)
+                            .unwrap_or("ssh://")
+                            .to_string();
+                        (
+                            SavedKind::Server,
+                            format!("GCE SSH worker · {name} ({project}, {zone})"),
+                            hint,
+                        )
+                    };
+                    environments.push(SavedEnvironment {
+                        id: format!("{kind_dir}/{project}/{zone}/{name}"),
+                        kind,
+                        label,
+                        hint,
+                        answers,
+                    });
+                }
+            }
+        }
+    }
+    environments
+}
+
 /// Refresh authentication and local forwards for an owned saved GKE connection.
 pub(crate) fn refresh_saved(directory: &Path) -> Result<(), Failure> {
     let Some(effective) = branchyard::configure::configuration(directory)? else {
@@ -683,5 +816,61 @@ mod tests {
         assert!(updated.contains(":20001"));
         assert!(updated_connection(&updated, &answers).unwrap().is_none());
         assert!(updated_connection(previous, &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn discover_saved_environments_in_only_returns_owned_private_deployments() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = branchyard_testkit::Scratch::new("cloud-discover");
+        let prefix = scratch.path().join("cloud");
+        let gke = prefix.join("gke/proj-a/us-central1-a/by-dev");
+        let gce = prefix.join("gce/proj-a/us-central1-a/by-worker");
+        let world_readable = prefix.join("gce/proj-a/us-central1-a/insecure");
+        for dir in [&gke, &gce, &world_readable] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::set_permissions(&gke, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&gce, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&world_readable, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            gke.join("project-answers.json"),
+            r#"{"provider":"substrate","substrate.endpoint":"https://127.0.0.1:18443"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            gke.join("project-answers.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(
+            gce.join("project-answers.json"),
+            r#"{"remote":"server","remote.url":"ssh://branchyard-w/srv/branchyard/r"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            gce.join("project-answers.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(
+            world_readable.join("project-answers.json"),
+            r#"{"remote":"server","remote.url":"ssh://insecure/srv/branchyard/r"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            world_readable.join("project-answers.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let envs = discover_saved_environments_in(&prefix);
+        assert_eq!(envs.len(), 2);
+        assert_eq!(envs[0].id, "gke/proj-a/us-central1-a/by-dev");
+        assert_eq!(envs[0].kind, SavedKind::Substrate);
+        assert_eq!(
+            envs[0].answers.get("harness").and_then(Value::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(envs[1].id, "gce/proj-a/us-central1-a/by-worker");
+        assert_eq!(envs[1].kind, SavedKind::Server);
     }
 }

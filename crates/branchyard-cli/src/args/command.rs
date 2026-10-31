@@ -1018,6 +1018,9 @@ pub enum Command {
         /// Inspect readiness without installing harnesses or starting services
         #[arg(long)]
         plan: bool,
+        /// Also list the Substrate workers to check capacity (read-only; no actor, no model)
+        #[arg(long)]
+        smoke: bool,
         /// Make the installs the [harnesses] policy would ask about, without asking
         #[arg(long)]
         yes: bool,

@@ -13,6 +13,8 @@ The checks reuse what `by` already knows rather than looking again: the loaders 
 
 `by up` ([up](up.md)) is the command that acts: it installs the harnesses the configuration names where your user file allows, starts the connector gateway, and lists what only you can do. Run `by doctor` to see where you stand and `by up` to get there.
 
+When Substrate is the provider, or a server is configured (`--remote`, `BRANCHYARD_REMOTE` or `[remote] url`), the report adds the seven [readiness checks](up.md#readiness-checks) under the table, and `readiness` in the JSON. They read the same answers as the rows: the one Substrate Control call behind `provider.default`, the one request behind `server.reachable`. For a server, doctor reads only the repository list, so the installed, capacity and login checks are `unknown` with `by setup --up` (which reads the server's worker inventory) as the next step. Doctor never lists workers or starts an actor: `by up --plan --smoke` and `by substrate check --smoke` do.
+
 ## Statuses and exit codes
 
 | Status | Means |
@@ -72,7 +74,7 @@ Rows come in this order, and their names are stable: a script may match on them.
 | `harnesses.default` | `[defaults] harness`, or `claude-code` (what `by run` starts) when unset, is installed, and its login is not known to be missing | unset and `claude-code` is not installed; or it is installed and its login is not verified, or it is logged out | set to a harness that is not installed |
 | `hooks.ID` | One row for each harness on `PATH` whose Branchyard hooks are installed (`by init plugin --status` is not `missing`) or were heard: whether a session of it called `by hook` or `by statusline`, from the notes those keep beside the user configuration ([heard](harness-hooks.md#heard-did-the-harness-run-it)). `ok`: `install current · heard 3m ago (session-start) in /home/me/app, as SessionStart`. `todo`: `install current · never heard`, or heard only before `by setup` last wrote the hooks; the fix is to start a new session of the harness (or to put `by` on `PATH`, when it is not) | | |
 | `harnesses.credentials` | Which of the usual credential variables are set (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, `GH_TOKEN` and the rest of the list `by init` detects), by name only; each `[secrets]` entry's source (a variable, or an `@file`); and the [provider logins](harness-lifecycle.md#through-a-gateway-provider) of `[logins]` (`claude-code via zai (ZAI_API_KEY)`) | a `[secrets]` entry whose variable is unset or file is missing; a `[logins]` entry whose provider key `[secrets]` does not name (the fix is `by harnesses login ID --provider NAME`) | |
-| `provider.default` | `[defaults] provider`. Local always passes. Microsandbox goes through the engine's own check (a build with the `microsandbox` feature, an image). A recipe must be defined and trusted | a recipe that is not trusted as it is now; or the check could not run without the store | Microsandbox the engine refuses; a recipe that is not defined |
+| `provider.default` | `[defaults] provider`. Local always passes. Microsandbox goes through the engine's own check (a build with the `microsandbox` feature, an image). Substrate: the bridge key and API token file are readable, then one authenticated `GetActorTemplate` to Control, then the template's bridge contract and verifying key (no actor). A recipe must be defined and trusted | a recipe that is not trusted as it is now; or the check could not run without the store | Microsandbox the engine refuses; a Substrate stage that did not pass (an unreadable key or token file, no answer, a refused token, a key mismatch, a template it cannot use); a recipe that is not defined |
 | `provider.sandboxes` | With Microsandbox as the default: the kept sandboxes and snapshots the store holds, the oldest kept one's age, and any older than `[microsandbox] max_kept_minutes` | a kept sandbox past `max_kept_minutes`: nothing destroys it until a turn ends on the provider or its branch takes its next turn; `by rm BRANCH` destroys it now | the rows cannot be read |
 | `host.namespaces` | Whether this host can confine a local harness to the egress proxy in an unprivileged user and network namespace ([egress](egress.md)): the engine's own probe | it cannot (a kernel or security-module setting, `BRANCHYARD_EGRESS_NETNS=off`, or not Linux): a network policy would be advisory | `[network] enforce = "required"` with an allowlist, on a host that cannot: every branch with that policy is refused |
 | `host.landlock` | Whether this host can hold a local harness to its permission preset's write scope with Landlock ([file guard](modes.md#the-file-guard)), and the ABI: the engine's own probe, a restricted `/bin/sh` refused a write | it cannot (a kernel before 5.13 or without Landlock enabled, `BRANCHYARD_GUARD=off`, or not Linux): `read-only` and `edit-worktree` then decide only the tool calls a harness asks about | |
@@ -94,7 +96,7 @@ A repository with no `.branchyard/` is a `todo` (`not set up yet`, with `by setu
 
 The row is `ok` for a harness that can be used, including one whose login cannot be read. `todo` is a login still to make (`login not verified`, or `logged out` by the harness's own command), with `by harnesses login ID` as the fix, the same command `by up` gives. `warn` is a harness found off `PATH` or at its usage limit. A login that is only not verified is never called "cannot run". `harnesses.default` says the same about the default harness: `warn` with that command when its login is not verified.
 
-A route whose model is a pattern (`claude-*`) is priced per model when a call is made; the row names such patterns as not checked. A saved Substrate connection is also checked for connection and credential readiness; `by substrate check --smoke` runs a disposable bridge probe without a model. See [Substrate setup](substrate-setup.md).
+A route whose model is a pattern (`claude-*`) is priced per model when a call is made; the row names such patterns as not checked. A saved Substrate connection is checked through Control as `provider.default` says; `by substrate check --smoke` creates and deletes one disposable actor to prove bridge execution, without a model. See [Substrate setup](substrate-setup.md).
 
 ## An example
 
@@ -160,7 +162,7 @@ and exits 0.
 
 ```json
 {
-  "format": 3,
+  "format": 4,
   "mode": "local, no isolation · SQLite (.branchyard/state.db) · no server",
   "checks": [
     {
@@ -183,11 +185,11 @@ and exits 0.
 
 `status` is the worst of the rows. `fix` is a string for every row that is not `ok` and `null` for every `ok`; `detail` and `fix` are one line each. (The example shows two rows; the real list has every check above, in the order above.) `hooks` has one object for each `hooks.ID` row: `harness`, `label`, `install` and `heard` (`state`: `heard`, `never` or `stale`; `kind`, `harness_event`, `at_ms`, `age_seconds`, `session`, a digest of the session id, `repository` and `installed_at_ms`).
 
-**`format`.** The report is versioned. Format 3, this one, adds `hooks` and the `hooks.ID` rows to format 2. Format 2 differs from the unversioned report before it in four ways: the `todo` status (a repository with no `.branchyard/` was a `fail`, exit 1); `mode`; `harnesses.summary` and one `harnesses.ID` row for each installed harness in place of the single `harnesses.installed` row; and `format` itself. Rows that were there keep their names. A reader that treats any status it does not know as "not ok, not fail" reads both formats; the Python SDK's `Report` ([sdk](sdk.md)) passes the strings through.
+**`format`.** The report is versioned. Format 4, this one, adds `readiness` to format 3: the seven [readiness checks](up.md#readiness-checks) (`id`, `label`, `status`, `detail`, `next`), present only when Substrate or a server is configured. Format 3 adds `hooks` and the `hooks.ID` rows to format 2. Format 2 differs from the unversioned report before it in four ways: the `todo` status (a repository with no `.branchyard/` was a `fail`, exit 1); `mode`; `harnesses.summary` and one `harnesses.ID` row for each installed harness in place of the single `harnesses.installed` row; and `format` itself. Rows that were there keep their names. A reader that treats any status it does not know as "not ok, not fail" reads both formats; the Python SDK's `Report` ([sdk](sdk.md)) passes the strings through.
 
 ## What it reads, writes and costs
 
-- **Offline.** The only network use is one `GET /v1/repos` to a server you configured, with a five-second deadline however the network behaves. An `ssh://` remote is not contacted (it starts its own server; `by remote ssh status` shows it).
+- **Offline, except what you configured.** The network use is one `GET /v1/repos` to a server you configured, with a five-second deadline however the network behaves, and, with Substrate as the provider, one authenticated `GetActorTemplate` to its Control endpoint, bounded at 30 seconds. An `ssh://` remote is not contacted (it starts its own server; `by remote ssh status` shows it).
 - **Quick.** Harness detection comes from the cache `by harnesses` keeps beside the user configuration, so a run takes well under a second once it is warm; the first run, or one after the cache expires, asks every installed harness for its version at once (ten seconds at most each, as `by harnesses` does: nine real CLIs took 4.4 seconds cold). `by harnesses --refresh` refreshes the cache.
 - **Changes nothing you keep.** It creates no `.branchyard/` and writes no exclude entry in a repository that has none, opens a `.branchyard/` that exists as every command does, and does not open one whose schema is older (opening would upgrade it) or newer. It runs no `[workspace]` script and no recipe. It opens a listener on loopback and starts one confined `/bin/sh -c 'exit 0'` for the namespace probe, both gone before it prints.
 - **No secret.** Credentials and keys are reported by variable or file name. The server's token is sent to the server and printed nowhere.
@@ -203,7 +205,7 @@ and exits 0.
 ## What it does not do
 
 - It does not repair. Each fix is a command for you to run: `by setup`, `by workspace trust`, `by services gc`, `by harnesses login ID`.
-- It does not run a recipe's own doctor (`by recipe check NAME` does, and a smoke test), a harness, a model call or a sandbox. It does not reach a Microsandbox or Substrate provider.
+- It does not run a recipe's own doctor (`by recipe check NAME` does, and a smoke test), a harness, a model call or a sandbox. It starts no Microsandbox VM and no Substrate actor, and lists no Substrate workers; its one Substrate call reads the template.
 - It does not look at `[connectors]`, `[sync]`, `[usage]`, trackers, the `gh` CLI, or the recipes other than the default provider's. Of `[serve]` it reads only whether the server file names a PostgreSQL database, for the `Mode:` line.
 - The `Mode:` line is read from configuration. It connects to no database and no server, so `PostgreSQL` there means a server file names one, not that it answers.
 - Not done: the harness rows were checked against fake harnesses and the nine real CLIs on this machine (no model call); no Claude Code that is really logged out was available, so the `loggedIn: false` case in the unit tests is written from the shape of the logged-in output, not recorded.
@@ -231,7 +233,8 @@ A check is a function from the shared context to rows, in `crates/branchyard-cli
 - credentials appear by name and their values are in no output, stdout or stderr;
 - a provider that cannot run, an undefined or untrusted recipe, a default harness that is not installed, and `enforce = "required"` on a host that cannot confine (made deterministic with `BRANCHYARD_EGRESS_NETNS=off`);
 - `host.landlock` naming the Landlock ABI where the host has it, and warning with `BRANCHYARD_GUARD=off` (`crates/branchyard-cli/tests/guard.rs`);
-- a configured server asked once with its token against a mock, a refused token, a missing token file, a repository it does not serve, a server that stopped, and an `ssh://` remote left alone;
+- a configured server asked once with its token against a mock, a refused token, a missing token file, a repository it does not serve, a server that stopped, and an `ssh://` remote left alone, with `readiness` saying in each case whether the credentials or the control plane failed, from the same single request;
+- Substrate with a missing bridge key: `readiness` fails the operator credentials and leaves the control plane, capacity and installed checks `unknown`; against the fake cluster (`crates/branchyard-cli/tests/substrate.rs`) the control plane `verified`, capacity `unknown`, and no actor created;
 - the model gateway's key variables named and never shown, and an unpriced routed model.
 
 Unit tests cover the rendering (the table never cuts a detail, the summary with to-dos, the mode line, the JSON shape, colour on the status only), each check's pure part (stale services, sandbox age against `max_kept_minutes`, the harness summary and rows and the default-harness row, a server URL without its credentials, `[secrets]` sources, key rows, trust rows), and a request to a server that hangs ending at its deadline. The engine's read-only schema reader, its sandbox listing and its price lookup are tested in `crates/branchyard/src/doctor.rs`.

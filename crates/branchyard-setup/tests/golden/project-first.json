@@ -106,11 +106,6 @@
           "description": "not found on PATH"
         },
         {
-          "value": "gemini-cli",
-          "label": "Gemini CLI",
-          "description": "not found on PATH"
-        },
-        {
           "value": "opencode",
           "label": "OpenCode",
           "description": "not found on PATH"
@@ -153,6 +148,11 @@
         {
           "value": "hermes",
           "label": "Hermes",
+          "description": "not found on PATH"
+        },
+        {
+          "value": "gemini-cli",
+          "label": "Gemini CLI",
           "description": "not found on PATH"
         }
       ],

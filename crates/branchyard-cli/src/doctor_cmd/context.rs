@@ -85,6 +85,8 @@ pub(crate) struct Context {
     store: OnceCell<Store>,
     inventory: OnceCell<Result<Inventory, String>>,
     hooks: OnceCell<Result<Vec<super::hooks::Hooked>, String>>,
+    substrate: OnceCell<branchyard::up::SubstrateProbe>,
+    server: OnceCell<(super::Check, Option<crate::readiness::Answer>)>,
 }
 
 impl Context {
@@ -134,7 +136,24 @@ impl Context {
             store: OnceCell::new(),
             inventory: OnceCell::new(),
             hooks: OnceCell::new(),
+            substrate: OnceCell::new(),
+            server: OnceCell::new(),
         }
+    }
+
+    /// The saved Substrate connection, checked once: `provider.default` and
+    /// the readiness checks read the same answer.
+    pub(crate) fn substrate(&self) -> &branchyard::up::SubstrateProbe {
+        self.substrate.get_or_init(|| match self.config() {
+            Some(config) => branchyard::up::probe_substrate(config, false),
+            None => branchyard::up::SubstrateProbe::Unconfigured,
+        })
+    }
+
+    /// The configured server, asked once: the `server.reachable` row and
+    /// what it answered (`None` when no server is configured).
+    pub(crate) fn server(&self) -> &(super::Check, Option<crate::readiness::Answer>) {
+        self.server.get_or_init(|| super::checks::ask_server(self))
     }
 
     /// The merged configuration, when the files load and merge.

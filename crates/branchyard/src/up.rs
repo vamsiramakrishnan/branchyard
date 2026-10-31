@@ -49,6 +49,13 @@ use crate::inventory::{
 use crate::models::KeySource;
 use crate::{doctor, harness, projection, Error, Yard};
 
+mod readiness;
+
+pub use readiness::{
+    probe_substrate, readiness_checks, substrate_checks, CheckStatus, Findings, HarnessFindings,
+    ReadinessCheck, ReadinessCheckId, SubstrateProbe,
+};
+
 /// The harness a task runs on when the configuration names none, as
 /// [`crate::TaskOptions::harness`] documents.
 pub const DEFAULT_HARNESS: &str = "claude-code";
@@ -187,9 +194,24 @@ impl Step {
 pub struct Plan {
     /// The steps, in report order.
     pub steps: Vec<Step>,
+    /// The seven readiness checks, from the steps and [`Findings`].
+    pub checks: Vec<ReadinessCheck>,
+    /// What the checks were computed from besides the steps, kept so that
+    /// applying the plan can compute them again.
+    findings: Findings,
 }
 
 impl Plan {
+    /// A plan of `steps` whose checks were computed elsewhere: a server's
+    /// readiness as `by setup` reads it.
+    pub fn new(steps: Vec<Step>, checks: Vec<ReadinessCheck>) -> Plan {
+        Plan {
+            steps,
+            checks,
+            findings: Findings::default(),
+        }
+    }
+
     /// Every step is ready.
     pub fn ready(&self) -> bool {
         self.steps.iter().all(|s| s.state == State::Ready)
@@ -234,11 +256,12 @@ impl Plan {
         }
     }
 
-    /// The plan as `by up --json` prints it: `{"steps": [...], "state",
-    /// "ready"}`.
+    /// The plan as `by up --json` prints it: `{"steps": [...], "checks": [...],
+    /// "state", "ready"}`.
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "steps": self.steps,
+            "checks": self.checks,
             "state": self.state(),
             "ready": self.ready(),
         })
@@ -254,6 +277,9 @@ pub struct Options {
     /// Whether a person can be asked: a terminal. Without one, an install
     /// the policy would ask about needs `yes`.
     pub interactive: bool,
+    /// Also list the remote workers (`by up --smoke`): one read-only
+    /// Substrate `ListWorkers` call. It creates nothing and calls no model.
+    pub smoke: bool,
 }
 
 /// Whether something a person must trust may run here, as the machine
@@ -536,8 +562,10 @@ fn plan(
         "store",
         format!("{}", root.join(".branchyard").display()),
     )];
+    let mut findings = Findings::default();
     if config.defaults.provider == Some(ProviderKind::Substrate) {
         steps.extend(remote_harness_readiness(root, config, machine));
+        findings.substrate = Some(probe_substrate(config, options.smoke));
     } else {
         match machine.inventory() {
             Ok(mut inventory) => {
@@ -548,6 +576,11 @@ fn plan(
                 let policy = install_policy(config, options);
                 for harness in needed_harnesses(config) {
                     steps.extend(harness_steps(&harness, &inventory, &policy, options));
+                    if let Some(state) = inventory.get(&harness) {
+                        findings
+                            .harnesses
+                            .insert(harness.clone(), HarnessFindings::of(state));
+                    }
                 }
             }
             Err(why) => steps.push(Step::blocked(
@@ -564,13 +597,18 @@ fn plan(
     if let Some(step) = connectors_step(yard, &config.connectors, machine)? {
         steps.push(step);
     }
-    if let Some(step) = provider_step(yard, config, machine) {
+    if let Some(step) = provider_step(yard, config, machine, findings.substrate.as_ref()) {
         steps.push(step);
     }
     if let Some(step) = workspace_step(yard, config, machine) {
         steps.push(step);
     }
-    Ok(Plan { steps })
+    let checks = readiness_checks(config, &steps, &findings);
+    Ok(Plan {
+        steps,
+        checks,
+        findings,
+    })
 }
 
 /// Inspect credentials that can actually be provisioned into remote harness homes.
@@ -804,8 +842,14 @@ fn connectors_step(
     }))
 }
 
-/// `provider`: what `[defaults] provider` names, when it is not local.
-fn provider_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) -> Option<Step> {
+/// `provider`: what `[defaults] provider` names, when it is not local;
+/// for Substrate, what `substrate` (the staged check) found.
+fn provider_step(
+    yard: &Yard,
+    config: &ProjectConfig,
+    machine: &dyn Machine,
+    substrate: Option<&SubstrateProbe>,
+) -> Option<Step> {
     const NAME: &str = "provider";
     match config.defaults.provider {
         None | Some(ProviderKind::Local) => None,
@@ -836,7 +880,10 @@ fn provider_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) -> 
                 }
             }
         }),
-        Some(ProviderKind::Substrate) => Some(substrate_readiness(config)),
+        Some(ProviderKind::Substrate) => Some(
+            substrate
+                .map_or_else(|| probe_substrate(config, false).step(), SubstrateProbe::step),
+        ),
         Some(ProviderKind::Recipe) => Some(match config.defaults.recipe.as_deref() {
             None => Step::blocked(
                 NAME,
@@ -893,29 +940,6 @@ fn workspace_step(yard: &Yard, config: &ProjectConfig, machine: &dyn Machine) ->
     })
 }
 
-/// Authenticate to the configured Control API and inspect its bridge template.
-///
-/// This read-only check creates no actor and proves neither execution nor model access.
-pub fn substrate_readiness(config: &ProjectConfig) -> Step {
-    let Some(section) = config.substrate.as_ref() else {
-        return Step::blocked(
-            "provider",
-            "Substrate selected without [substrate] configuration",
-            "configure [substrate] endpoint, router, template and key (docs/substrate.md)",
-        );
-    };
-    let options = configure::substrate_options(section);
-    match options.connection_config().map_err(|error| error.to_string())
-        .and_then(|connection| branchyard_substrate::SubstrateProvider::connect(connection)
-            .map_err(|error| error.to_string()))
-        .and_then(|provider| provider.inspect_template().map_err(|error| error.to_string())) {
-        Ok(template) => Step::ready("provider", format!(
-            "Substrate Control authenticated; template {} inspected; actor execution and model access unverified", template.name)),
-        Err(error) => Step::blocked("provider", error,
-            "check [substrate] endpoint, api_token_file, TLS server_name/CA and template; rerun `by up --plan` (docs/substrate.md)"),
-    }
-}
-
 // Applying.
 
 fn apply(
@@ -954,6 +978,9 @@ fn apply(
                             ),
                         );
                         logins.push((index + 1, login_step(&install.harness, found)));
+                        plan.findings
+                            .harnesses
+                            .insert(install.harness.clone(), HarnessFindings::of(found));
                         continue;
                     }
                 }
@@ -1010,6 +1037,9 @@ fn apply(
                 };
                 if let Some(after) = &installed.after {
                     logins.push((index + 1, login_step(&install.harness, after)));
+                    plan.findings
+                        .harnesses
+                        .insert(install.harness.clone(), HarnessFindings::of(after));
                 }
             }
             Action::StartGateway => {
@@ -1044,6 +1074,7 @@ fn apply(
     for (offset, (index, step)) in logins.into_iter().enumerate() {
         plan.steps.insert(index + offset, step);
     }
+    plan.checks = readiness_checks(config, &plan.steps, &plan.findings);
     Ok(plan)
 }
 
@@ -1287,9 +1318,207 @@ mod tests {
         );
     }
 
+    fn statuses(plan: &Plan) -> Vec<CheckStatus> {
+        plan.checks.iter().map(|c| c.status).collect()
+    }
+
+    #[test]
+    fn a_local_plan_reports_the_seven_checks_and_marks_remote_ones_not_applicable() {
+        use CheckStatus::*;
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed("[defaults]\nharness = \"antigravity\"\n");
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(
+            &[harness("antigravity", "1.20.0", LoginState::LoggedIn)],
+            &[],
+        ));
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        let ids: Vec<ReadinessCheckId> = plan.checks.iter().map(|c| c.id).collect();
+        assert_eq!(ids, ReadinessCheckId::ALL);
+        assert_eq!(
+            statuses(&plan),
+            [
+                Verified,
+                Verified,
+                NotApplicable,
+                NotApplicable,
+                NotApplicable,
+                Verified,
+                Verified
+            ]
+        );
+        let value = plan.json();
+        assert_eq!(value["checks"].as_array().unwrap().len(), 7);
+        assert_eq!(value["checks"][0]["id"], "cli_and_harness_installed");
+        assert_eq!(value["checks"][2]["status"], "not_applicable");
+        assert_eq!(value["ready"], true);
+    }
+
+    #[test]
+    fn a_binary_found_with_an_unchecked_login_is_ready_as_a_step_but_not_verified() {
+        use CheckStatus::*;
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed("[defaults]\nharness = \"codex\"\n");
+        let mut machine = Fake::new();
+        let found = HarnessState {
+            version: None,
+            version_note: Some("timed out".into()),
+            login: Login::default(),
+            ..harness("codex", "0", LoginState::Unknown)
+        };
+        machine.inventory = Ok(inventory(&[found], &[]));
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        assert!(plan.ready(), "the steps need nothing: {:?}", plan.steps);
+        assert_eq!(plan.checks[0].status, Unverified);
+        assert!(
+            plan.checks[0].detail.contains("gave no version"),
+            "{:?}",
+            plan.checks[0]
+        );
+        assert_eq!(plan.checks[6].status, Unknown);
+        assert!(plan.checks[6].next.as_deref().unwrap().contains("codex"));
+        for check in &plan.checks {
+            assert!(!check.detail.contains("ready"), "{check:?}");
+        }
+    }
+
+    #[test]
+    fn a_harness_that_is_not_installed_leaves_its_login_unknown_with_a_next_step() {
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed("[defaults]\nharness = \"codex\"\n");
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(&[], &["npm"]));
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        assert_eq!(
+            plan.checks[0].status,
+            CheckStatus::Failed,
+            "{:?}",
+            plan.checks[0]
+        );
+        assert!(plan.checks[0].next.is_some());
+        assert_eq!(plan.checks[6].status, CheckStatus::Unknown);
+        assert!(plan.checks[6].next.is_some());
+    }
+
+    #[test]
+    fn a_blocked_connector_gateway_fails_the_capability_check() {
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let config = parsed(
+            "[defaults]\nharness = \"codex\"\n[connectors]\ngateway = \"http://127.0.0.1:7/mcp\"\n",
+        );
+        let mut machine = Fake::new();
+        machine.inventory = Ok(inventory(
+            &[harness("codex", "0.150.0", LoginState::LoggedIn)],
+            &[],
+        ));
+        let plan = yard
+            .up_plan(&config, &Options::default(), &mut machine)
+            .unwrap();
+        assert_eq!(step(&plan, "connectors").state, State::Blocked);
+        let capabilities = &plan.checks[5];
+        assert_eq!(capabilities.status, CheckStatus::Failed);
+        assert!(capabilities.next.as_deref().unwrap().contains("Anvil"));
+    }
+
+    #[test]
+    fn substrate_without_a_reachable_control_plane_creates_nothing_and_says_which_stage_failed() {
+        let dir = repository();
+        let yard = Yard::open(dir.path()).unwrap();
+        let key = dir.path().join("bridge.key");
+        branchyard_bridge::Signer::write(&key).unwrap();
+        let config = parsed(&format!(
+            r#"
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+[substrate]
+endpoint = "http://127.0.0.1:1"
+router = "http://127.0.0.1:1"
+atespace = "yard"
+template = "agy"
+key = "{}"
+egress = {{ mode = "deny" }}
+[secrets]
+GEMINI_API_KEY = "REMOTE_MODEL_KEY"
+"#,
+            key.display()
+        ));
+        let mut machine = Fake::new();
+        machine.vars.insert("REMOTE_MODEL_KEY".into());
+        let smoke = Options {
+            smoke: true,
+            ..Options::default()
+        };
+        let plan = yard.up_plan(&config, &smoke, &mut machine).unwrap();
+        assert_eq!(step(&plan, "provider").state, State::Blocked);
+        use CheckStatus::*;
+        assert_eq!(
+            statuses(&plan),
+            [Unknown, Verified, Unverified, Failed, Unknown, Unknown, Unverified]
+        );
+        assert!(plan.checks[3].next.as_deref().unwrap().contains("endpoint"));
+        assert!(
+            machine.runs.is_empty(),
+            "nothing was run: {:?}",
+            machine.runs
+        );
+    }
+
+    #[test]
+    fn substrate_checks_read_the_remote_credential_sources_beside_the_probe() {
+        let dir = repository();
+        let config = parsed(
+            r#"
+[defaults]
+harness = "antigravity"
+provider = "substrate"
+[substrate]
+endpoint = "https://control.example"
+router = "https://router.example"
+atespace = "yard"
+template = "agy"
+key = "/keys/bridge"
+egress = { mode = "deny" }
+[secrets]
+GEMINI_API_KEY = "REMOTE_MODEL_KEY"
+"#,
+        );
+        let probe = SubstrateProbe::Inspected {
+            template: "agy".into(),
+            image: "registry.example/agy@sha256:00".into(),
+            workers: None,
+        };
+        let mut machine = Fake::new();
+        let without = substrate_checks(dir.path(), &config, &machine, probe.clone());
+        assert_eq!(
+            without[6].status,
+            CheckStatus::Failed,
+            "no credential source"
+        );
+        machine.vars.insert("REMOTE_MODEL_KEY".into());
+        let with = substrate_checks(dir.path(), &config, &machine, probe);
+        assert_eq!(with.len(), 7);
+        assert_eq!(with[3].status, CheckStatus::Verified);
+        assert_eq!(
+            with[6].status,
+            CheckStatus::Unverified,
+            "a source, not a model call"
+        );
+    }
+
     #[test]
     fn substrate_without_configuration_is_actionable() {
-        let step = substrate_readiness(&ProjectConfig::default());
+        let step = probe_substrate(&ProjectConfig::default(), false).step();
         assert_eq!(step.state, State::Blocked);
         assert!(step.todo.unwrap().contains("[substrate]"));
     }
@@ -1361,6 +1590,7 @@ distiller = { harness = "qwen-code" }
         let interactive = Options {
             yes: false,
             interactive: true,
+            ..Options::default()
         };
         let mut plan = yard.up_plan(&config, &interactive, &mut machine).unwrap();
         let codex = step(&plan, "harness.codex");
@@ -1375,6 +1605,7 @@ distiller = { harness = "qwen-code" }
         let yes = Options {
             yes: true,
             interactive: true,
+            ..Options::default()
         };
         let plan = yard.up_plan(&config, &yes, &mut machine).unwrap();
         assert_eq!(step(&plan, "harness.codex").state, State::Planned);
@@ -1382,6 +1613,7 @@ distiller = { harness = "qwen-code" }
         let yes_off_terminal = Options {
             yes: true,
             interactive: false,
+            ..Options::default()
         };
         let plan = yard
             .up_plan(&config, &yes_off_terminal, &mut machine)
@@ -1407,7 +1639,15 @@ distiller = { harness = "qwen-code" }
                 LoginState::LoggedOut,
             ),
         );
+        assert_eq!(
+            plan.checks[0].status,
+            CheckStatus::Unknown,
+            "{:?}",
+            plan.checks
+        );
         let applied = yard.up_apply(&config, plan, &mut machine).unwrap();
+        assert_eq!(applied.checks[0].status, CheckStatus::Verified);
+        assert_eq!(applied.checks[6].status, CheckStatus::Failed, "logged out");
         assert_eq!(machine.runs.len(), 1);
         assert!(machine.runs[0].contains("npm"), "{:?}", machine.runs);
         assert_eq!(names(&applied), ["store", "harness.codex", "login.codex"]);

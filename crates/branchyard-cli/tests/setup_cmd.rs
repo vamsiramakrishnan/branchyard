@@ -80,6 +80,8 @@ impl Setup {
             &format!("{}:{}", fakebin.display(), tools.display()),
         );
         repo.remove_env("XDG_CONFIG_HOME");
+        // A harness's own home override would point detection at a real login.
+        repo.remove_env("CODEX_HOME");
         repo.set_env("BRANCHYARD_HARNESS_DIRS", "");
         // The credential variables setup reports, by name: none of this
         // machine's, so the logins it finds are the test's choice.
@@ -1325,4 +1327,116 @@ fn existing_remote_setup_does_not_require_workstation_logins() {
         fs::read_to_string(s.repo.root.join("branchyard.toml")).unwrap(),
         config
     );
+}
+
+/// The journey against a server: unreachable, then a refused token, then
+/// answering with a worker that has the harness. Each run reports the stage
+/// that failed in its readiness checks, and none rewrites the configuration.
+#[test]
+fn remote_setup_names_the_failing_stage_and_a_repeat_keeps_the_configuration() {
+    use branchyard::inventory::{HarnessState, Inventory, Login, LoginState};
+    use branchyard_client::api::{InventoryReport, WorkerInventory};
+    use branchyard_testkit::{MockHttp, Response};
+
+    let s = Setup::new();
+    let token = s.repo.dir.join("token");
+    fs::write(&token, "tok-secret\n").unwrap();
+    let configure = |url: &str| {
+        let config = format!(
+            "[defaults]\nharness = \"antigravity\"\n[remote]\nurl = \"{url}\"\ntoken_file = \"{}\"\n",
+            token.display()
+        );
+        fs::write(s.repo.root.join("branchyard.toml"), &config).unwrap();
+        config
+    };
+    let readiness = |config: &str| {
+        let out = s.by(&["setup", "--up", "--yes", "--json", "--no-hooks"]);
+        let report: Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}\n{}", text(&out)));
+        assert_eq!(
+            fs::read_to_string(s.repo.root.join("branchyard.toml")).unwrap(),
+            config,
+            "setup kept the configuration"
+        );
+        assert!(!text(&out).contains("tok-secret"), "{}", text(&out));
+        let checks = report["readiness"]["checks"].as_array().unwrap().clone();
+        assert_eq!(checks.len(), 7, "{report}");
+        let status = move |id: &str| {
+            checks
+                .iter()
+                .find(|check| check["id"] == id)
+                .and_then(|check| check["status"].as_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        (out.status.code(), status)
+    };
+
+    let config = configure("http://127.0.0.1:1");
+    let (code, status) = readiness(&config);
+    assert_eq!(code, Some(1));
+    assert_eq!(status("remote_control_plane_reachable"), "failed");
+    assert_eq!(status("operator_credentials_available"), "unverified");
+    assert_eq!(status("worker_capacity_available"), "unknown");
+
+    let refusing = MockHttp::start(|_| {
+        Response::json(
+            401,
+            &serde_json::json!({"error": {"code": "unauthorized", "message": "the token has expired"}}),
+        )
+    });
+    let config = configure(&refusing.url());
+    let (code, status) = readiness(&config);
+    assert_eq!(code, Some(1));
+    assert_eq!(status("operator_credentials_available"), "failed");
+    assert_eq!(status("remote_control_plane_reachable"), "verified");
+    refusing.finish();
+
+    let report = InventoryReport {
+        workers: vec![WorkerInventory {
+            id: "w1".into(),
+            host: "worker".into(),
+            labels: Vec::new(),
+            repos: vec!["app".into()],
+            seen_ms_ago: 10,
+            this: true,
+            inventory: Some(Inventory {
+                harnesses: vec![HarnessState {
+                    id: "antigravity".into(),
+                    path: "/usr/local/bin/agy".into(),
+                    on_path: true,
+                    version: Some("1.4.8".into()),
+                    login: Login {
+                        state: LoginState::LoggedIn,
+                        detail: "GEMINI_API_KEY is set".into(),
+                        key: Some("GEMINI_API_KEY".into()),
+                        ..Login::default()
+                    },
+                    ..HarnessState::default()
+                }],
+                ..Inventory::default()
+            }),
+        }],
+    };
+    let inventory = serde_json::to_value(&report).unwrap();
+    let answering = MockHttp::start(move |request| match request.path.as_str() {
+        "/v1/repos" => Response::json(
+            200,
+            &serde_json::json!({"repos": [{"name": "app", "root": "/srv/app"}]}),
+        ),
+        _ => Response::json(200, &inventory),
+    });
+    let config = configure(&answering.url());
+    let (code, status) = readiness(&config);
+    assert_eq!(code, Some(0));
+    assert_eq!(status("cli_and_harness_installed"), "verified");
+    assert_eq!(status("operator_credentials_available"), "verified");
+    assert_eq!(status("worker_capacity_available"), "verified");
+    assert_eq!(status("execution_capabilities_supported"), "unknown");
+    assert_eq!(
+        status("harness_auth_verified"),
+        "unverified",
+        "a key set is not a verified login"
+    );
+    answering.finish();
 }

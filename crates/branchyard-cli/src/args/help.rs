@@ -461,11 +461,18 @@ Steps, each ready, planned, needs_person or blocked, with a line on what to do:
   provider         [defaults] provider: build and host access, Substrate connection,
                    or a recipe you trust
   workspace        [workspace] scripts trusted (by workspace trust)
+Then seven readiness checks, each verified, unverified, unknown, failed or
+not_applicable: CLI and native harness installed, configuration valid, operator
+credentials available, remote control plane reachable, worker capacity available,
+requested execution capabilities supported, native harness authentication verified.
+A harness found on PATH is not a harness that can run a task: only what this run
+established is verified.
 Exit 0 when every step is ready, 1 otherwise. Nothing prints a secret's value.
 
 Examples:
   by up                    # install what is allowed, start the gateway, list the rest
   by up --plan             # inspect readiness without installing or starting services
+  by up --plan --smoke     # also list Substrate workers: one read-only call, no actor, no model
   by up --yes              # confirm the installs the policy asks about
   by up --json             # the steps as JSON, for a script or the Python SDK
 

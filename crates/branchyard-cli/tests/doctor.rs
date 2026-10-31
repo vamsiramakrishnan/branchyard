@@ -338,7 +338,8 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
     let report = repo.doctor(&[]);
     let object = report.value.as_object().unwrap();
     // `format` 2: the `todo` status, `mode`, and a row for each harness; 3:
-    // `hooks`, what was heard of each harness's hooks.
+    // `hooks`, what was heard of each harness's hooks; 4: `readiness`, only
+    // when Substrate or a server is configured, so not here.
     let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(
@@ -346,7 +347,7 @@ fn the_json_has_the_documented_shape_and_every_row_that_is_not_ok_says_what_to_d
         ["checks", "format", "hooks", "mode", "status"],
         "{object:?}"
     );
-    assert_eq!(report.value["format"], 3);
+    assert_eq!(report.value["format"], 4);
     assert!(report.value["hooks"].is_array());
     assert!(report.value["mode"].as_str().unwrap().contains(" · "));
     assert!(["ok", "todo", "warn", "fail"].contains(&report.overall()));
@@ -1014,7 +1015,27 @@ fn a_configured_server_is_asked_once_with_its_token() {
         .detail("server.reachable")
         .contains("serves repository app"));
     assert!(!report.stdout.contains("tok-secret"));
-    assert_eq!(mock.requests().len(), 1);
+    assert_eq!(mock.requests().len(), 1, "readiness reads the same answer");
+    let readiness = |report: &Report, id: &str| -> String {
+        let found = report.value["readiness"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no readiness: {}", report.stdout))
+            .iter()
+            .find(|check| check["id"] == id)
+            .unwrap_or_else(|| panic!("no {id}: {}", report.stdout))
+            .clone();
+        found["status"].as_str().unwrap_or_default().to_owned()
+    };
+    assert_eq!(report.value["format"], 4);
+    assert_eq!(
+        readiness(&report, "operator_credentials_available"),
+        "verified"
+    );
+    assert_eq!(
+        readiness(&report, "remote_control_plane_reachable"),
+        "verified"
+    );
+    assert_eq!(readiness(&report, "cli_and_harness_installed"), "unknown");
 
     // The repository the configuration names must be one it serves.
     let report = repo.doctor(&[
@@ -1036,6 +1057,15 @@ fn a_configured_server_is_asked_once_with_its_token() {
     assert!(report
         .detail("server.reachable")
         .contains("the token is not accepted"));
+    // An expired or replaced token: credentials fail, the server answered.
+    assert_eq!(
+        readiness(&report, "operator_credentials_available"),
+        "failed"
+    );
+    assert_eq!(
+        readiness(&report, "remote_control_plane_reachable"),
+        "verified"
+    );
 
     // No token file at all.
     let report = repo.doctor(&["--remote", &url]);
@@ -1057,6 +1087,14 @@ fn a_configured_server_is_asked_once_with_its_token() {
     assert!(report
         .detail("server.reachable")
         .contains("did not answer GET /v1/repos"));
+    assert_eq!(
+        readiness(&report, "remote_control_plane_reachable"),
+        "failed"
+    );
+    assert_eq!(
+        readiness(&report, "operator_credentials_available"),
+        "unverified"
+    );
 
     // An ssh remote starts its own server; doctor does not.
     repo.project_file("");
@@ -1065,6 +1103,10 @@ fn a_configured_server_is_asked_once_with_its_token() {
     assert!(report
         .detail("server.reachable")
         .contains("not checked here"));
+    assert_eq!(
+        readiness(&report, "remote_control_plane_reachable"),
+        "unknown"
+    );
 }
 
 #[test]
@@ -1160,4 +1202,19 @@ GEMINI_API_KEY = "REMOTE_MODEL_KEY"
         .contains("model authentication unverified"));
     assert_eq!(report.status("provider.default"), "fail");
     assert!(!report.stdout.contains("test-secret-never-print"));
+    let checks = report.value["readiness"].as_array().unwrap();
+    let status = |id: &str| {
+        checks
+            .iter()
+            .find(|check| check["id"] == id)
+            .and_then(|check| check["status"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // The bridge key is missing: a credential failure before Control is asked.
+    assert_eq!(status("operator_credentials_available"), "failed");
+    assert_eq!(status("remote_control_plane_reachable"), "unknown");
+    assert_eq!(status("worker_capacity_available"), "unknown");
+    assert_eq!(status("harness_auth_verified"), "unverified");
+    assert_eq!(status("cli_and_harness_installed"), "unknown");
 }

@@ -154,18 +154,32 @@ pub(crate) fn answers(
                 "New GCE worker",
                 "review and provision a dedicated remote machine",
             )
+            .item(
+                "remote",
+                "Existing remote environment",
+                "select a saved deployment, HTTPS server or SSH worker",
+            )
             .interact()
             .map_err(crate::wizard::cancelled)?
     } else {
         "local"
     };
-    if matches!(backend, "gke" | "gce") {
+    let saved = match interactive && matches!(backend, "remote" | "substrate") {
+        true => choose_saved(backend)?,
+        false => None,
+    };
+    let selected_saved = saved.is_some();
+    if let Some(saved) = saved {
+        answers = saved;
+    } else if matches!(backend, "gke" | "gce") {
         let kind = if backend == "gke" {
             CloudKind::Gke
         } else {
             CloudKind::Gce
         };
         answers = crate::cloud_setup::guided(env, kind, &std::env::current_dir()?, args.yes)?;
+    } else if backend == "remote" {
+        answers.insert("remote".into(), "server".into());
     } else {
         if backend == "microsandbox" && !facts.build.microsandbox {
             return Err(Report::new("tool_unavailable", "this by build does not include Microsandbox")
@@ -192,22 +206,25 @@ pub(crate) fn answers(
     }
     if interactive {
         let mut ids = vec!["check"];
-        match backend {
-            "local" => ids.push("isolated"),
-            "microsandbox" => ids.extend(["microsandbox.image", "secrets"]),
-            "substrate" => ids.extend([
-                "substrate.endpoint",
-                "substrate.router",
-                "substrate.atespace",
-                "substrate.template",
-                "substrate.key",
-                "substrate.api_token_file",
-                "substrate.ca",
-                "substrate.server_name",
-                "substrate.egress",
-                "secrets",
-            ]),
-            _ => {}
+        if !selected_saved {
+            match backend {
+                "local" => ids.push("isolated"),
+                "microsandbox" => ids.extend(["microsandbox.image", "secrets"]),
+                "remote" => ids.extend(["remote.url", "remote.token_file", "remote.ca_file"]),
+                "substrate" => ids.extend([
+                    "substrate.endpoint",
+                    "substrate.router",
+                    "substrate.atespace",
+                    "substrate.template",
+                    "substrate.key",
+                    "substrate.api_token_file",
+                    "substrate.ca",
+                    "substrate.server_name",
+                    "substrate.egress",
+                    "secrets",
+                ]),
+                _ => {}
+            }
         }
         if !answers.contains_key("harness") {
             ids.insert(0, "harness");
@@ -229,4 +246,43 @@ pub(crate) fn answers(
         }
     }
     Ok(answers)
+}
+
+/// On a terminal, offer the deployments guided setup provisioned before
+/// (`backend` `substrate` lists only Substrate ones), and the answers of the
+/// one chosen; `None` to enter connection details instead.
+fn choose_saved(backend: &str) -> Result<Option<BTreeMap<String, Value>>, Failure> {
+    let saved: Vec<_> = crate::cloud_setup::discover_saved_environments()
+        .into_iter()
+        .filter(|saved| {
+            backend == "remote" || saved.kind == crate::cloud_setup::SavedKind::Substrate
+        })
+        .collect();
+    let Some(first) = saved.first() else {
+        return Ok(None);
+    };
+    let choice = {
+        let mut prompt = cliclack::select("Select an existing remote environment")
+            .initial_value(first.id.as_str());
+        for environment in &saved {
+            prompt = prompt.item(
+                environment.id.as_str(),
+                &environment.label,
+                &environment.hint,
+            );
+        }
+        prompt = prompt.item(
+            "manual",
+            "Enter connection details manually",
+            "provide a server URL, SSH target or Substrate endpoint",
+        );
+        prompt
+            .interact()
+            .map_err(crate::wizard::cancelled)?
+            .to_owned()
+    };
+    Ok(saved
+        .into_iter()
+        .find(|environment| environment.id == choice)
+        .map(|environment| environment.answers))
 }

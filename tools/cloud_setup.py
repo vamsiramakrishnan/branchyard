@@ -782,6 +782,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.runtime == "microsandbox":
                 answers.update({"provider": "microsandbox", "microsandbox.image": image})
+            private_file(state / "project-answers.json", json.dumps(answers))
             if deployment.get("workspace_approval"):
                 print(
                     "Remote workspace scripts need explicit review and trust; "

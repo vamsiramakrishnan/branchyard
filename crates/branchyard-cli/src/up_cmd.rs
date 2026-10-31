@@ -1,4 +1,4 @@
-//! `by up [--plan] [--yes] [--json]`: bring this repository's configured
+//! `by up [--plan] [--smoke] [--yes] [--json]`: bring this repository's configured
 //! backends up, the engine's [`branchyard::up`] over this machine, with
 //! what `by` knows that the engine's own machine does not: the trust
 //! decisions `by recipe trust` and `by workspace trust` record, and `by
@@ -9,11 +9,15 @@
 //! terminal, an install the `[harnesses]` policy leaves to you is asked
 //! about first; `--yes` answers them. Exit status: 0 when every step is
 //! ready, 1 otherwise. Nothing here prints a secret's value.
+//!
+//! Below the steps, the seven readiness checks ([`branchyard::up::readiness_checks`])
+//! say what this run established and what it did not. `--smoke` adds one
+//! read-only Substrate worker listing; it creates nothing and calls no model.
 
 use std::path::{Path, PathBuf};
 
 use branchyard::inventory::{HarnessEvent, Inventory, RunResult};
-use branchyard::up::{Action, LocalMachine, Machine, Options, Plan, Readiness, State};
+use branchyard::up::{Action, CheckStatus, LocalMachine, Machine, Options, Plan, Readiness, State};
 use branchyard::Yard;
 use branchyard_setup::config::Connectors;
 
@@ -109,7 +113,14 @@ impl Machine for Here {
     }
 }
 
-pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: bool) -> Outcome {
+pub fn main(
+    env: &Env,
+    globals: &Globals,
+    plan_only: bool,
+    smoke: bool,
+    yes: bool,
+    as_json: bool,
+) -> Outcome {
     if globals.remote.is_some() {
         return Err(crate::errors::Report::usage(
             "by up brings up the repository on this machine; it takes no --remote (a server \
@@ -129,13 +140,19 @@ pub fn main(env: &Env, globals: &Globals, plan_only: bool, yes: bool, as_json: b
         .next("run by up in your own terminal, outside any branch")
         .into());
     }
-    let plan = run(env, plan_only, yes, as_json)?;
+    let plan = run(env, plan_only, smoke, yes, as_json)?;
     report(env, &plan, as_json)
 }
 
 /// Compute and optionally apply readiness without writing its final report.
 /// Setup embeds this result in its own single structured response.
-pub(crate) fn run(env: &Env, plan_only: bool, yes: bool, as_json: bool) -> Result<Plan, Failure> {
+pub(crate) fn run(
+    env: &Env,
+    plan_only: bool,
+    smoke: bool,
+    yes: bool,
+    as_json: bool,
+) -> Result<Plan, Failure> {
     let yard = commands::open().map_err(|failure| match failure {
         // The fix, and where: not "`.` is not inside a git work tree".
         Failure::Sdk(branchyard::Error::NotARepository(_)) => crate::errors::Report::new(
@@ -147,13 +164,24 @@ pub(crate) fn run(env: &Env, plan_only: bool, yes: bool, as_json: bool) -> Resul
     })?;
     let config = yard.configured().unwrap_or_default();
     let interactive = env.stdin_tty && env.stderr_tty && !as_json;
-    let options = Options { yes, interactive };
+    let options = Options {
+        yes,
+        interactive,
+        smoke,
+    };
     let mut machine = Here {
         inner: LocalMachine::new(),
     };
     let progress = (env.stderr_tty && !as_json).then(cliclack::spinner);
     if let Some(progress) = &progress {
-        progress.start("Checking configured backends and credential sources");
+        let listing =
+            smoke && config.defaults.provider == Some(branchyard::config::ProviderKind::Substrate);
+        progress.start(match listing {
+            true => {
+                "Checking configured backends and credential sources; listing Substrate workers"
+            }
+            false => "Checking configured backends and credential sources",
+        });
     }
     let planned = yard.up_plan(&config, &options, &mut machine);
     if let Some(progress) = &progress {
@@ -231,6 +259,50 @@ fn tone(state: State) -> Tone {
     }
 }
 
+fn check_tone(status: CheckStatus) -> Tone {
+    match status {
+        CheckStatus::NotApplicable => Tone::Dim,
+        CheckStatus::Verified => Tone::Green,
+        CheckStatus::Unverified | CheckStatus::Unknown => Tone::Yellow,
+        CheckStatus::Failed => Tone::Red,
+    }
+}
+
+/// The seven readiness checks as a table under a heading; empty for none.
+pub(crate) fn checks_table(checks: &[branchyard::up::ReadinessCheck], style: Style) -> String {
+    if checks.is_empty() {
+        return String::new();
+    }
+    let columns = [
+        Column {
+            header: "STATUS",
+            max: 14,
+            right: false,
+        },
+        Column {
+            header: "CHECK",
+            max: 44,
+            right: false,
+        },
+        Column {
+            header: "DETAIL",
+            max: usize::MAX,
+            right: false,
+        },
+    ];
+    let rows: Vec<Vec<Cell>> = checks
+        .iter()
+        .map(|c| {
+            vec![
+                Cell::toned(c.status.as_str(), check_tone(c.status)),
+                Cell::plain(&c.label),
+                Cell::plain(&c.detail),
+            ]
+        })
+        .collect();
+    format!("\nReadiness checks:\n{}", table(&columns, &rows, style))
+}
+
 /// A table of the steps, what to do about each that is not ready, and a
 /// summary line.
 pub(crate) fn text(plan: &Plan, style: Style) -> String {
@@ -263,6 +335,7 @@ pub(crate) fn text(plan: &Plan, style: Style) -> String {
         })
         .collect();
     let mut out = table(&columns, &rows, style);
+    out.push_str(&checks_table(&plan.checks, style));
     let todo: Vec<&branchyard::up::Step> = plan.steps.iter().filter(|s| s.todo.is_some()).collect();
     if !todo.is_empty() {
         out.push_str("\nTo do:\n");
@@ -272,6 +345,18 @@ pub(crate) fn text(plan: &Plan, style: Style) -> String {
                 step.name,
                 step.todo.as_deref().unwrap_or_default()
             ));
+        }
+    }
+    let to_verify: Vec<(&str, &str)> = plan
+        .checks
+        .iter()
+        .filter_map(|c| Some((c.label.as_str(), c.next.as_deref()?)))
+        .filter(|(_, next)| !todo.iter().any(|s| s.todo.as_deref() == Some(*next)))
+        .collect();
+    if !to_verify.is_empty() {
+        out.push_str("\nTo verify:\n");
+        for (label, next) in to_verify {
+            out.push_str(&format!("  {label}: {next}\n"));
         }
     }
     let count = |state: State| plan.steps.iter().filter(|s| s.state == state).count();
@@ -286,5 +371,21 @@ pub(crate) fn text(plan: &Plan, style: Style) -> String {
     out.push('\n');
     out.push_str(&summary);
     out.push('\n');
+    if !plan.checks.is_empty() {
+        let counts: Vec<String> = [
+            CheckStatus::Verified,
+            CheckStatus::Unverified,
+            CheckStatus::Unknown,
+            CheckStatus::Failed,
+            CheckStatus::NotApplicable,
+        ]
+        .into_iter()
+        .filter_map(|status| {
+            let n = plan.checks.iter().filter(|c| c.status == status).count();
+            (n > 0).then(|| format!("{n} {}", status.as_str().replace('_', " ")))
+        })
+        .collect();
+        out.push_str(&format!("checks: {}\n", counts.join(", ")));
+    }
     out
 }

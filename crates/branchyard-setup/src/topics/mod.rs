@@ -51,7 +51,8 @@ pub(crate) fn harness_question(
     }
     let fact = |h: &str| facts.harnesses.iter().find(|f| f.harness == h);
     let installed = |h: &str| fact(h).is_some_and(|f| f.installed);
-    harnesses.sort_by_key(|h| !installed(h));
+    // Installed first; Antigravity leads them and Gemini CLI, never suggested, trails.
+    harnesses.sort_by_key(|h| (!installed(h), *h != "antigravity", *h == "gemini-cli"));
     let choices = harnesses
         .into_iter()
         .map(|h| {

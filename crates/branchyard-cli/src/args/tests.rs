@@ -2510,14 +2510,20 @@ fn config_has_four_actions() {
 }
 
 #[test]
-fn up_takes_plan_yes_and_json() {
+fn up_takes_plan_smoke_yes_and_json() {
     let up = |line: &str| match parse_str(line).unwrap() {
-        Command::Up { json, plan, yes } => (json, plan, yes),
+        Command::Up {
+            json,
+            plan,
+            smoke,
+            yes,
+        } => (json, plan, smoke, yes),
         other => panic!("{line}: parsed as {other:?}"),
     };
-    assert_eq!(up("up"), (false, false, false));
-    assert_eq!(up("up --plan --json"), (true, true, false));
-    assert_eq!(up("up --yes"), (false, false, true));
+    assert_eq!(up("up"), (false, false, false, false));
+    assert_eq!(up("up --plan --json"), (true, true, false, false));
+    assert_eq!(up("up --plan --smoke"), (false, true, true, false));
+    assert_eq!(up("up --yes"), (false, false, false, true));
     assert!(parse_str("up extra").is_err());
 }
 

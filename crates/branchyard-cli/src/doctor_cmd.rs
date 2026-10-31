@@ -8,7 +8,9 @@
 //! one, write its function and list it there.
 //!
 //! The run is offline except for a configured `[remote]`, asked once with a
-//! deadline. It reads state and changes none that the user keeps: it opens a
+//! deadline, and a saved Substrate connection, whose Control is asked once
+//! to authenticate and read the template (no actor, no model). It reads
+//! state and changes none that the user keeps: it opens a
 //! `.branchyard/` that exists, as every `by` command does, creates none, and
 //! leaves an older store at its schema. Credentials are reported by
 //! variable name, never by value. Exit status: 0 when nothing failed
@@ -20,6 +22,7 @@ mod context;
 mod hooks;
 mod serve;
 
+pub(crate) use checks::without_userinfo;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -179,8 +182,9 @@ const CHECKS: &[CheckFn] = &[
 /// `harnesses.installed` row, and no `mode`; 2 adds the `todo` status,
 /// `harnesses.summary` with one `harnesses.ID` row for each installed
 /// harness in its place, and `mode`; 3 adds `hooks`, what was heard of
-/// each harness's hooks, beside its `hooks.ID` row.
-const FORMAT: u32 = 3;
+/// each harness's hooks, beside its `hooks.ID` row; 4 adds `readiness`,
+/// the seven readiness checks, when Substrate or a server is configured.
+const FORMAT: u32 = 4;
 
 /// Every check's rows, the mode the repository runs in, and what was heard
 /// of the harnesses' hooks.
@@ -190,6 +194,8 @@ struct Report {
     checks: Vec<Check>,
     /// The `hooks` array of `--json`.
     hooks: Value,
+    /// The seven readiness checks, when Substrate or a server is configured.
+    readiness: Vec<branchyard::up::ReadinessCheck>,
 }
 
 impl Report {
@@ -198,6 +204,7 @@ impl Report {
             mode: Some(checks::mode(context)),
             checks: CHECKS.iter().flat_map(|check| check(context)).collect(),
             hooks: hooks::json(context),
+            readiness: readiness(context),
         }
     }
 
@@ -215,15 +222,22 @@ impl Report {
     }
 
     /// `{"format", "mode", "checks": [{"name", "status", "detail", "fix"}],
-    /// "hooks": [{"harness", "label", "install", "heard"}], "status"}`.
+    /// "hooks": [{"harness", "label", "install", "heard"}], "status"}` (plus
+    /// `"readiness"`, the seven checks, when Substrate or a server is configured).
     fn json(&self) -> Value {
-        json!({
+        let mut out = json!({
             "format": FORMAT,
             "mode": self.mode,
             "checks": self.checks,
             "hooks": self.hooks,
             "status": self.status(),
-        })
+        });
+        if !self.readiness.is_empty() {
+            if let Some(map) = out.as_object_mut() {
+                map.insert("readiness".into(), json!(self.readiness));
+            }
+        }
+        out
     }
 
     /// A table of the rows, what to do about each that is not `ok`, and a
@@ -263,6 +277,7 @@ impl Report {
             text.push_str(&format!("Mode: {mode}\n\n"));
         }
         text.push_str(&table(&columns, &rows, style));
+        text.push_str(&crate::up_cmd::checks_table(&self.readiness, style));
         // A row that could not run only points at the row that failed first.
         let todo: Vec<&Check> = self
             .checks
@@ -317,6 +332,32 @@ impl Report {
     }
 }
 
+/// The seven readiness checks when Substrate or a server is configured,
+/// from the same answers the rows read: the engine's for Substrate, the
+/// server's (`crate::readiness`) otherwise; none for local execution, where
+/// `by up --plan` reports them.
+fn readiness(context: &Context) -> Vec<branchyard::up::ReadinessCheck> {
+    let Some(config) = context.config() else {
+        return Vec::new();
+    };
+    if config.defaults.provider == Some(branchyard_setup::config::ProviderKind::Substrate) {
+        return branchyard::up::substrate_checks(
+            context.root().unwrap_or(&context.base),
+            config,
+            &branchyard::up::LocalMachine::new(),
+            context.substrate().clone(),
+        );
+    }
+    match (&context.server().1, context.globals.remote.as_deref()) {
+        (Some(answer), Some(url)) => crate::readiness::server_checks(
+            &without_userinfo(url),
+            answer,
+            config.defaults.harness.as_deref().unwrap_or("claude-code"),
+        ),
+        _ => Vec::new(),
+    }
+}
+
 /// `by doctor`: run every check and print the report. `path` is the
 /// repository to look at, else the one `by` would act on from here;
 /// `globals` carry `--remote` and the flags and variables beside it.
@@ -351,6 +392,7 @@ mod tests {
         Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![
                 Check::ok("repository.git", "/src/app (on branch main)"),
                 Check::warn(
@@ -380,7 +422,8 @@ mod tests {
             Report {
                 mode: None,
                 checks,
-                hooks: hooks.clone()
+                hooks: hooks.clone(),
+                readiness: Vec::new(),
             }
             .status(),
             Status::Warn
@@ -389,7 +432,8 @@ mod tests {
             Report {
                 mode: None,
                 checks: Vec::new(),
-                hooks
+                hooks,
+                readiness: Vec::new(),
             }
             .status(),
             Status::Ok
@@ -400,7 +444,7 @@ mod tests {
     fn the_json_has_the_documented_shape() {
         let value = report().json();
         assert_eq!(value["status"], "fail");
-        assert_eq!(value["format"], 3);
+        assert_eq!(value["format"], 4);
         assert_eq!(value["mode"], Value::Null);
         assert_eq!(value["hooks"], json!([]));
         let rows = value["checks"].as_array().unwrap();
@@ -416,6 +460,22 @@ mod tests {
         );
         assert_eq!(rows[1]["status"], "warn");
         assert_eq!(rows[2]["fix"], "run `by init`");
+        assert!(value.get("readiness").is_none(), "local: none");
+        let mut remote = report();
+        remote.readiness = crate::readiness::server_checks(
+            "https://server.example",
+            &crate::readiness::Answer::Unreachable("connection refused".into()),
+            "antigravity",
+        );
+        let value = remote.json();
+        let readiness = value["readiness"].as_array().unwrap();
+        assert_eq!(readiness.len(), 7);
+        assert_eq!(readiness[3]["id"], "remote_control_plane_reachable");
+        assert_eq!(readiness[3]["status"], "failed");
+        assert!(readiness[3]["next"].is_string());
+        let text = remote.text(Style::PLAIN);
+        assert!(text.contains("Readiness checks:"), "{text}");
+        assert!(text.contains("remote control plane reachable"), "{text}");
     }
 
     #[test]
@@ -449,6 +509,7 @@ mod tests {
         let report = Report {
             mode: Some("local, no isolation · SQLite (.branchyard/state.db) · no server".into()),
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![Check::ok("a.b", "x")],
         };
         let text = report.text(Style::PLAIN);
@@ -469,12 +530,14 @@ mod tests {
         let ok = Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![Check::ok("a.b", "x"), Check::ok("a.c", "y")],
         };
         assert!(ok.text(Style::PLAIN).ends_with("ok: all 2 checks passed\n"));
         let warned = Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![
                 Check::ok("a.b", "x"),
                 Check::warn("a.c", "y", "z"),
@@ -488,6 +551,7 @@ mod tests {
         let new = Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![
                 Check::ok("a.b", "x"),
                 Check::todo("a.c", "not set up yet", "run `by setup`"),
@@ -501,6 +565,7 @@ mod tests {
         let mixed = Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![
                 Check::todo("a.c", "x", "y"),
                 Check::warn("a.d", "x", "y"),
@@ -525,6 +590,7 @@ mod tests {
         let text = Report {
             mode: None,
             hooks: Value::Array(Vec::new()),
+            readiness: Vec::new(),
             checks: vec![check],
         }
         .text(Style::PLAIN);
