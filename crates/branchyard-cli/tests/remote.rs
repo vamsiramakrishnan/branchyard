@@ -630,9 +630,10 @@ fn normalize(text: &str, root: &Path) -> String {
         } else {
             line.to_owned()
         };
-        // `by show`'s "created 10s ago" is relative too.
+        // `by show`'s "created 10s ago" is relative too, and "just now" until
+        // the first second passes: the two sides may print one each.
         let line = match line.trim_start().strip_prefix("created") {
-            Some(rest) if rest.ends_with(" ago") => {
+            Some(rest) if rest.ends_with(" ago") || rest.trim() == "just now" => {
                 let indent = line.len() - line.trim_start().len();
                 format!("{}created <age>", &line[..indent])
             }
@@ -648,6 +649,16 @@ fn normalize(text: &str, root: &Path) -> String {
         out.push('\n');
     }
     out
+}
+
+#[test]
+fn a_created_age_compares_equal_whichever_side_of_a_second_it_was_read() {
+    let root = Path::new("/r");
+    assert_eq!(
+        normalize("created     just now\n", root),
+        normalize("created     3s ago\n", root)
+    );
+    assert_eq!(normalize("created     3s ago\n", root), "created <age>\n");
 }
 
 /// A row's last field, when it is an age such as `now` or `12s`, becomes
