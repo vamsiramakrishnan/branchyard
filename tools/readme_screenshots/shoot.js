@@ -66,7 +66,7 @@ async function openBranch(page) {
     await page.locator(`nav#sessions a.session-tab[data-session="${plan.session}"][aria-current="page"]`).waitFor(TURN);
     await page.locator('#convo .turn .agent', { hasText: plan.sessionSays }).waitFor(TURN);
     await page.locator('#tab-outputs').click();
-    await page.locator(`#outputs li[data-artifact="${plan.output}"] button.output-name`).click();
+    await page.locator(`#outputs-list li[data-artifact="${plan.output}"] button[data-preview="output:${plan.output}"]`).click();
     await page.locator('#preview-host .by-artifact-preview table td').first().waitFor(TURN);
     await shoot(page, desktop.problems, 'console-workspace', ['light', 'dark']);
 
