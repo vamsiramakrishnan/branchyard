@@ -2,6 +2,7 @@
 pub(crate) mod auth;
 mod collaboration;
 mod execution;
+mod harness_input;
 mod presets;
 mod previews;
 mod quotas;

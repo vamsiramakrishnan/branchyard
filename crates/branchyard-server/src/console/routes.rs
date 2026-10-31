@@ -409,12 +409,21 @@ async fn messages(
             "message cursor is past the native event log",
         ));
     }
+    let contract = branch.result_contract().map_err(sdk)?;
+    let first = super::harness_input::Additions::first(&wid, &session, contract.as_ref());
+    let later = super::harness_input::Additions::later(contract.as_ref());
+    let start = events
+        .iter()
+        .position(|event| matches!(event.activity, branchyard::Activity::Prompt(_)));
     let mut next = cursor;
     let mut messages = Vec::new();
     for (index, event) in events.into_iter().enumerate().skip(cursor).take(1000) {
         next = index + 1;
         let (role, text) = match event.activity {
-            branchyard::Activity::Prompt(t) => ("user", t),
+            branchyard::Activity::Prompt(t) => {
+                let additions = if start == Some(index) { &first } else { &later };
+                ("user", additions.typed(&t).to_owned())
+            }
             branchyard::Activity::Harness(branchyard::Event::MessageDelta { text, .. }) => {
                 ("assistant", text)
             }

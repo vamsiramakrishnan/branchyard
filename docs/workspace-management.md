@@ -71,6 +71,17 @@ and names are untrusted metadata encoded as JSON strings. The index contains no
 source contents and has a 64 KiB limit. It travels through the same workspace
 copy step as the immutable input bytes, including to copied remote worktrees.
 
+A session started with a result contract gets the contract's requested-result
+instructions on every turn. The engine appends them to the first prompt, and
+the console repeats them on each follow-up and resume, because every finished
+turn of a capture contract must rewrite its manifest.
+
+A user message in a session message response is the text the person sent.
+The server removes what it added to the harness input: a reviewer's preface,
+the input-index sentence and the requested-result instructions. It removes each
+only where it stands exactly as the server put it, so text a person wrote never
+changes. Native events keep the full harness input.
+
 Session message responses for managed knowledge workspaces replace the operator's
 configured storage root with `<managed-storage>` in user and assistant text,
 including paths inside nested JSON text. This also applies to the default root

@@ -120,7 +120,7 @@ pub(crate) fn execute(
             }
             ConsoleWork::Start {
                 session_id,
-                mut request,
+                request,
                 ..
             } => run_native_turn(app, &repo, std::slice::from_ref(&session_id), || {
                 let session = session(app, &caller, &workspace.id, &session_id)?;
@@ -156,16 +156,7 @@ pub(crate) fn execute(
                     subject: caller.0.connector_subject(),
                     tenant: caller.tenant().into(),
                 });
-                if let Some(index) = super::sources::prepare(
-                    app,
-                    &caller,
-                    &workspace,
-                    &session,
-                    &repo,
-                    &mut options,
-                )? {
-                    request.prompt.push_str(&super::sources::input_hint(&index));
-                }
+                super::sources::prepare(app, &caller, &workspace, &session, &repo, &mut options)?;
                 cancel_observer(app, &repo, &session_id, &mut options);
                 if session.body["access"] == "reviewer" {
                     let harness = options.harness.as_deref().ok_or_else(|| {
@@ -174,13 +165,11 @@ pub(crate) fn execute(
                     branchyard::admit_harness(harness, false).map_err(sdk)?;
                     options.unapproved_tools = false;
                     options.policy = reviewer_policy(options.policy);
-                    request.prompt=format!("Review the frozen candidate and input artifacts. Do not modify or integrate writer branches.\n{}",request.prompt);
                 }
-                repo.yard
-                    .task(request.prompt)
-                    .options(options)
-                    .run()
-                    .map_err(sdk)?;
+                // The engine appends the requested result to a first turn itself.
+                let prompt = super::harness_input::Additions::first(&workspace.id, &session, None)
+                    .compose(&request.prompt);
+                repo.yard.task(prompt).options(options).run().map_err(sdk)?;
                 Ok(OperationResult::default())
             }),
             ConsoleWork::Send {
@@ -210,7 +199,11 @@ pub(crate) fn execute(
                 }
                 crate::work::send_allowed(app, &branch, text(&session.body, "branch")?, &request)?;
                 cancel_observer(app, &repo, &session_id, &mut options);
-                branch.send(&request.prompt, options).map_err(sdk)?;
+                let prompt = super::harness_input::Additions::later(
+                    branch.result_contract().map_err(sdk)?.as_ref(),
+                )
+                .compose(&request.prompt);
+                branch.send(&prompt, options).map_err(sdk)?;
                 Ok(OperationResult::default())
             }),
             ConsoleWork::Control {
