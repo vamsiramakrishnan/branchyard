@@ -25,6 +25,7 @@ Task-focused guides for daily workflows.
 | [Cooperative teams](cooperative-teams.md) | Coordinate native coding and knowledge workers, validate structured JSON deliverables, and pass frozen handoffs between branches. |
 | [Knowledge and design skills](knowledge-skills.md) | Use built-in skills to gather evidence, analyze tables, and generate and validate documents, spreadsheets, and slide decks. |
 | [Tools: one model](tools-model.md) | How connectors, skills and helpers are chosen, mounted as one searched tool tree, and kept out of the context a turn does not need. |
+| [Skill-discovery eval](skill-eval.md) | Measure with a real model whether an agent finds and opens the right skill, connector operation or helper through the mounted tool tree: 48 scenarios, a log scorer, a runner, and the static sizes a turn pays for. |
 | [Document previews](artifact-previews.md) | Preview CSV, Excel, Word, PowerPoint, PDF, and HTML artifacts safely while preserving originals and enforcing read permissions. |
 | [Workspace runtime controls](workspace-runtime.md) | Route interactive terminals and workspace lifecycle actions to the owning worker and sandbox allocation. |
 | [Watching branches](watch.md) | Monitor all branches live in the terminal with `by watch`, run keyboard actions on any branch, and configure desktop or terminal notifications. |
@@ -130,6 +131,8 @@ Architecture notes and internal specifications. Some pages describe target desig
 | [Obligations](obligations.md) | What do my branches still owe (unknown or staged calls, approvals, lost turns, children, closing undo windows), and which command deals with each? |
 | [Durability contract](durability-contract.md) | Which rules about turns, effects, ownership, signals and obligations does a durable agent runtime keep, which does Branchyard keep today, and which test shows each? |
 | [Durability primitives design](superpowers/specs/2026-11-02-durability-primitives-design.md) | Why ideas from Tape and Durable Actors are built inside Branchyard rather than taken as a dependency, what was built (lost-turn effects, liveness, obligations) and what comes next, in order |
+| [Skill registry](skill-registry.md) | Design, not built: one index over every skill source (built-in, repository, user, organisation, connector, memory), references as search documents, every ready skill mounted where the provider links the store, a server registry with a per-turn skills credential and a per-tenant cache, and a build plan the skill-discovery eval gates. |
+| [Memory](memory.md) | Design, not built: memory as a reviewed skill first (team memory through git, personal memory in a local user source), then observations derived from event logs and deterministic consolidation with provenance, review by a person before anything is shared, and publication through the registry so agents find it by search. |
 | [Anvil contract v2](anvil-contract-v2.md) | What Anvil added for remote tools (built in its PR #91, merged 5 November 2026; hermetic, not run live): a Firestore vault with KMS, disconnect, a search index, host install, a Cloud Run gateway, renewing tokens, `by_manifest` and connector icons, and the mock Branchyard tests against. |
 
 ## Roadmap and background

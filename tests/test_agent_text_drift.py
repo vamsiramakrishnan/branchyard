@@ -23,6 +23,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "branchyard"
 SKILL = PLUGIN / "skills" / "delegate" / "SKILL.md"
+# The delegate skill is a core and reference files; these hold the text the checks below read.
+REFERENCES = PLUGIN / "skills" / "delegate" / "references"
+RESULT_CONTRACTS = REFERENCES / "result-contracts.md"
+PYTHON_AND_MCP = REFERENCES / "python-and-mcp.md"
 JSON_SCHEMA = ROOT / "crates" / "branchyard" / "src" / "json_schema.rs"
 MCP = ROOT / "crates" / "branchyard-mcp" / "src" / "lib.rs"
 # The command line: `crates/branchyard-cli/src/args/`, one module per part.
@@ -35,6 +39,7 @@ REFUSED_EXAMPLES = {"$ref", "allOf", "format"}
 
 AGENT_TEXT = [
     PLUGIN / "skills" / "delegate" / "SKILL.md",
+    *sorted(REFERENCES.glob("*.md")),
     PLUGIN / "skills" / "setup" / "SKILL.md",
     PLUGIN / "leaf.md",
     *sorted((PLUGIN / "commands").glob("*.md")),
@@ -57,7 +62,7 @@ def words(text):
 
 def skill_keywords():
     """(keywords, type names) the delegate skill says a result schema may use."""
-    text = SKILL.read_text()
+    text = RESULT_CONTRACTS.read_text()
     found = re.search(r"schema may use only(.*?)is refused by name", text, re.S)
     assert found, "the skill no longer says which keywords a result schema may use"
     allowed, refused = re.split(r";\s*any\s+other\s+keyword", found.group(1), maxsplit=1)
@@ -106,7 +111,7 @@ class McpToolNames(unittest.TestCase):
     def test_every_tool_the_skill_names_is_registered(self):
         registered = set(re.findall(r'Tool::new\(\s*"([a-z_]+)"', MCP.read_text()))
         self.assertGreater(len(registered), 30)
-        section = SKILL.read_text().split("## Without a shell", 1)[1]
+        section = PYTHON_AND_MCP.read_text().split("## Without a shell", 1)[1]
         # Parameter names sit in parentheses; the rest of the backticked words are tools.
         section = re.sub(r"\([^)]*\)", "", section)
         named = set(re.findall(r"`([a-z_]+)`", section)) - {"branchyard"}

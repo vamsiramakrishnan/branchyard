@@ -30,6 +30,8 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::target;
+
 use crate::{
     frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open, Opened,
     Output, PermissionDecision, PermissionKey, Rejected, SessionMode, Submitted, TurnOutcome,
@@ -63,6 +65,8 @@ const DIALOGS: [&str; 4] = ["select", "confirm", "input", "editor"];
 #[derive(Debug)]
 pub struct Pi {
     command: Vec<String>,
+    /// The session's working directory, for the paths of tool targets.
+    cwd: String,
     mode: Option<SessionMode>,
     ready: bool,
     session: Option<NativeSession>,
@@ -85,6 +89,7 @@ impl Pi {
     pub fn new(command: Vec<String>) -> Self {
         Self {
             command,
+            cwd: String::new(),
             mode: None,
             ready: false,
             session: None,
@@ -394,6 +399,11 @@ impl Pi {
                     .unwrap_or_default()
                     .to_owned(),
                 name: message["toolName"].as_str().unwrap_or_default().to_owned(),
+                target: target::from_input(
+                    message["toolName"].as_str().unwrap_or_default(),
+                    &message["args"],
+                    &self.cwd,
+                ),
             }),
             "message_end" => self.message_end(turn, &message["message"]),
             "auto_retry_start" => Output::event(Event::Warning {
@@ -482,6 +492,7 @@ impl Driver for Pi {
             SessionMode::Resume(session) => argv.extend(["--session".into(), session.to_string()]),
             SessionMode::Fork(session) => argv.extend(["--fork".into(), session.to_string()]),
         }
+        self.cwd.clone_from(&open.cwd);
         self.mode = Some(open.mode);
         let state = self.command(Pending::State, json!({"type": "get_state"}));
         Ok(Opened {

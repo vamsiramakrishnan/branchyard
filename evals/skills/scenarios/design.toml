@@ -1,0 +1,48 @@
+# Design skills and the composed workflow.
+
+[[scenario]]
+id = "visual-design-report"
+area = "design"
+prompt = "My report.md reads like a wall of text when exported. Suggest and apply a clear hierarchy, type scale, spacing and a restrained colour palette for the PDF export."
+files = { "report.md" = "# Report\nLots of text.\n## Findings\nMore text.\n" }
+skills = ["visual-design", "pdf", "docx", "chart-design"]
+expect_skills = ["visual-design"]
+
+[[scenario]]
+id = "chart-design-revenue"
+area = "design"
+prompt = "Plot monthly revenue from revenue.csv with its uncertainty band for the board pack; it must not mislead about scale, and I want the chart editable afterwards."
+files = { "revenue.csv" = "month,revenue,low,high\nJan,10,9,11\nFeb,12,10,14\nMar,15,13,17\n" }
+skills = ["chart-design", "visual-design", "xlsx", "pptx", "diagram-design"]
+expect_skills = ["chart-design"]
+must_not = ["diagram-design"]
+
+[[scenario]]
+id = "chart-design-pie"
+area = "design"
+prompt = "Someone asked for a 3D pie chart of 14 budget categories. What should I show instead, and can you make it from budget.csv?"
+files = { "budget.csv" = "category,amount\nA,10\nB,20\nC,5\n" }
+skills = ["chart-design", "visual-design", "xlsx"]
+expect_skills = ["chart-design"]
+
+[[scenario]]
+id = "diagram-design-flow"
+area = "design"
+prompt = "Draw the order-to-cash process as an editable flow diagram: order, credit check (pass or fail branch), invoice, payment, ledger entry."
+skills = ["diagram-design", "visual-design", "chart-design", "pptx"]
+expect_skills = ["diagram-design"]
+must_not = ["chart-design"]
+
+[[scenario]]
+id = "diagram-design-architecture"
+area = "design"
+prompt = "Sketch our system: a web app calls an API, which uses a queue and a database, with a worker reading the queue. Something I can still edit later, not a screenshot."
+skills = ["diagram-design", "visual-design", "pptx"]
+expect_skills = ["diagram-design"]
+
+[[scenario]]
+id = "parallel-deck-large"
+area = "workflows"
+prompt = "We need a 40-slide board deck covering eight business units. Split the work so different workers own different sections, and then put the deck back together consistently."
+skills = ["parallel-deck", "pptx", "visual-design", "chart-design", "inspect-layout"]
+expect_skills = ["parallel-deck"]

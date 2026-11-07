@@ -194,6 +194,17 @@ Separate `Ready`, `TurnAccepted`, `MessageDelta`, `ToolStarted`, `PermissionRequ
 
 Transient display deltas may be coalesced under load. Permission requests, terminal outcomes, durable commands, and artifact publication may not be silently discarded. A reconnecting client gets a durable cursor; raw process byte streams are not assumed replayable.
 
+### Tool call targets
+
+`ToolStarted` carries the tool's name and, when the harness reports the call's input, an optional `target` (`{"kind": "file" | "command" | "mcp" | "skill", "value": ...}`; absent otherwise, and absent in logs written before the field). It exists so the event log, and tools built on it such as the [skill-discovery eval](skill-eval.md), can tell what an agent opened or ran without a permission request, which Antigravity's stream, Pi and Amp never send. A target is a summary for the log, never the input:
+
+- **File** (a read, an edit, a delete): the path relative to the session's working directory; `tools/...` for a path in the mounted tool tree (`/tools/...` or anything under `.branchyard/tools/`); and only the last component of any other absolute path, so the log carries no host layout. Never the file's content.
+- **Command**: one line, at most 120 characters, a plain `sh -c`/`bash -lc` wrapper removed, each word that is an absolute path reduced as a file's path is (so `/tmp/run/.branchyard/tools/bin/tools search x` is `tools/bin/tools search x` and the bound keeps the subcommand), with secrets replaced by `[redacted]`: the value of a `NAME=value` assignment or a `--flag=value` whose name holds `key`, `token`, `secret`, `password`, `auth` or similar, the word after `Bearer`, `Authorization:` or such a flag, the credentials in a URL, and well-known token shapes (`sk-`, `ghp_`, `github_pat_`, `AKIA`, long random-looking words). The scrub is a heuristic for a log that people read, not a guarantee; `permission_requested` still carries the full input where the harness routes approvals.
+- **MCP**: `server.tool` from a `mcp__server__tool` name, or the server and tool Codex names; never the arguments.
+- **Skill**: the name a harness's own skill tool opens (Claude Code's `Skill`).
+
+Which drivers report one: Claude Code (`tool_use` input), Codex (`commandExecution`, `fileChange`, `mcpToolCall`, `dynamicToolCall`), every ACP profile whose `tool_call` carries `rawInput` or a location for a call that reads or changes files (the title is the agent's description and is not used), Amp (`tool_use` input) and Pi (`args`). Antigravity's own stream names a tool on its first step and sends the parameters on a later one, so its target stays absent. A harness that sends no input leaves it absent. The code is `crates/branchyard-harness/src/target.rs`. The [timeline](server.md#reading-a-branch) shows tool names only and stays free of targets; the event pages, `by log` and `by log --json` carry them.
+
 ## Implemented drivers
 
 `crates/branchyard-harness` implements the driver contract above as sans-IO state machines. A driver builds the argument vector and the frames to write, and turns each line the harness prints into normalized events. The process runs through `SandboxProvider.exec`. Profiles map each harness ID in `branchyard_controls::harness` to a driver and launch command. [Writing a driver](writing-a-driver.md) explains how to add a profile or driver, test it with the conformance kit, and qualify it.

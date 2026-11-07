@@ -6,7 +6,8 @@ use branchyard_harness::claude_code::{mcp_config, ClaudeCode};
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
     Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
-    PermissionKey, Rejected, RemoteMcpServer, RemoteTransport, SessionMode, TurnOutcome,
+    PermissionKey, Rejected, RemoteMcpServer, RemoteTransport, SessionMode, ToolTarget,
+    TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -2218,6 +2219,63 @@ fn each_model_calls_usage_is_reported_during_the_turn() {
         .map(|u| u.cache_write_tokens.unwrap_or(0) + u.cache_write_1h_tokens.unwrap_or(0))
         .sum();
     assert_eq!(written, 35146, "the result's cache writes, call by call");
+}
+
+/// A tool call's target is what its input names, reduced for the log: the
+/// recorded `Bash` and `Read` inputs of `claude-code-2.1.293-*` and
+/// `claude-code-2.1.317-hook-routes-allowed-call` (the `/workspace` path),
+/// the native `Skill` tool, an MCP tool by its name, and a write that logs its
+/// path and never its content. A tool with no input leaves the target absent.
+#[test]
+fn a_tool_use_block_logs_a_target_and_never_its_content() {
+    let mut driver = ready(SessionMode::Fresh);
+    driver.submit("go").unwrap();
+    let blocks = [
+        json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 33; echo 391", "description": "Sleep then print 391", "run_in_background": false}}),
+        json!({"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "/workspace/note.txt"}}),
+        json!({"type": "tool_use", "id": "t3", "name": "Read", "input": {"file_path": "/home/me/.branchyard/tools/skills/docx/SKILL.md"}}),
+        json!({"type": "tool_use", "id": "t4", "name": "Skill", "input": {"skill": "pptx", "args": "deck"}}),
+        json!({"type": "tool_use", "id": "t5", "name": "mcp__branchyard__spawn", "input": {"prompt": "private task text"}}),
+        json!({"type": "tool_use", "id": "t6", "name": "Write", "input": {"file_path": "/workspace/out/report.md", "content": "the whole document"}}),
+        json!({"type": "tool_use", "id": "t7", "name": "Bash", "input": {"command": "curl -H 'Authorization: Bearer abc.def' https://u:pw@host/x"}}),
+        json!({"type": "tool_use", "id": "t8", "name": "Bash"}),
+    ];
+    let mut targets = Vec::new();
+    for (n, block) in blocks.into_iter().enumerate() {
+        let message =
+            json!({"type": "assistant", "message": {"id": format!("m{n}"), "content": [block]}});
+        for event in feed(&mut driver, &message).0 {
+            if let Event::ToolStarted { target, .. } = event {
+                targets.push(target);
+            }
+        }
+    }
+    assert_eq!(
+        targets,
+        [
+            ToolTarget::command("sleep 33; echo 391"),
+            ToolTarget::file("note.txt", "/workspace"),
+            ToolTarget::file(
+                "/home/me/.branchyard/tools/skills/docx/SKILL.md",
+                "/workspace"
+            ),
+            ToolTarget::skill("pptx"),
+            ToolTarget::mcp(Some("branchyard"), "spawn"),
+            ToolTarget::file("out/report.md", "/workspace"),
+            ToolTarget::command(
+                "curl -H 'Authorization: Bearer [redacted] https://[redacted]@host/x"
+            ),
+            None,
+        ]
+    );
+    let tree = targets[2].as_ref().unwrap();
+    assert_eq!(tree.value, "tools/skills/docx/SKILL.md");
+    let json = serde_json::to_string(&targets).unwrap();
+    assert!(
+        !json.contains("whole document")
+            && !json.contains("private task")
+            && !json.contains("abc.def")
+    );
 }
 
 /// Claude Code prints whole text blocks, not fragments: a block that

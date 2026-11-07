@@ -22,6 +22,9 @@ characters (Unicode code points) has a cap in tools/model_surface_budget.json:
   `INSTRUCTIONS` (crates/branchyard-mcp/src/manager/mod.rs).
 - `generic-agents`: plugins/branchyard/harnesses/generic/AGENTS.md, which a person
   copies into the instructions file a harness without hooks reads every session.
+- `references:delegate`: the delegate skill's `references/*.md` together. An agent reads one
+  only when the skill's table names it; the cap bounds their growth. Their stated limits are
+  checked in STATED_LIMITS.
 - `skill:NAME`: each other plugins/branchyard/skills/NAME/SKILL.md, whole; a harness
   loads one at a time, when it needs it.
 
@@ -64,6 +67,11 @@ ROOT = Path(__file__).resolve().parent.parent
 BUDGET = "tools/model_surface_budget.json"
 SKILLS = "plugins/branchyard/skills"
 DELEGATE = f"{SKILLS}/delegate/SKILL.md"
+# The delegate skill's reference files, which an agent reads on demand and which no group counts.
+DELEGATE_REFERENCES = f"{SKILLS}/delegate/references"
+REFERENCE_MESSAGING = f"{DELEGATE_REFERENCES}/messaging-and-artifacts.md"
+REFERENCE_MANAGER = f"{DELEGATE_REFERENCES}/existing-lead-and-manager.md"
+REFERENCE_WAITING = f"{DELEGATE_REFERENCES}/spawn-wait-steer.md"
 
 
 class Unreadable(Exception):
@@ -169,6 +177,8 @@ def groups(root: Path = ROOT) -> dict[str, tuple[Source, ...]]:
         "mcp-manager": (MANAGER,),
         "generic-agents": (Source("plugins/branchyard/harnesses/generic/AGENTS.md"),),
     }
+    references = sorted((root / DELEGATE_REFERENCES).glob("*.md"))
+    table["references:delegate"] = tuple(Source(f.relative_to(root).as_posix()) for f in references)
     for skill in sorted((root / SKILLS).glob("*/SKILL.md")):
         if skill.parent.name != "delegate":
             table[f"skill:{skill.parent.name}"] = (Source(skill.relative_to(root).as_posix()),)
@@ -197,7 +207,7 @@ PREVIEW_ROWS = Source(MANAGER_LIB), r'number\(&args, "limit", (\d+)\)'
 STATED_LIMITS = (
     StatedLimit(
         "report_status summary, delegate skill",
-        Source(DELEGATE),
+        Source(REFERENCE_MESSAGING),
         r"`failure`,\s+in\s+at\s+most\s+(\d+)\s+characters",
         *SUMMARY_MAX,
     ),
@@ -209,7 +219,7 @@ STATED_LIMITS = (
     ),
     StatedLimit(
         "manager response JSON budget, delegate skill",
-        Source(DELEGATE),
+        Source(REFERENCE_MANAGER),
         r"a\s+(\d+)\s+KiB\s+JSON\s+budget",
         Source("crates/branchyard-mcp/src/manager/output.rs"),
         r"const JSON_BUDGET: usize = ([\d_ *]+);",
@@ -217,7 +227,7 @@ STATED_LIMITS = (
     ),
     StatedLimit(
         "background hold without a duration limit, delegate skill",
-        Source(DELEGATE),
+        Source(REFERENCE_WAITING),
         r"at\s+most\s+(\d+)\s+minutes\s+without\s+a\s+duration\s+limit",
         Source("crates/branchyard/src/engine.rs"),
         r"const HOLD_CAP: Duration = Duration::from_secs\(([\d_ *]+)\);",
@@ -225,7 +235,7 @@ STATED_LIMITS = (
     ),
     StatedLimit(
         "manager preview rows, delegate skill",
-        Source(DELEGATE),
+        Source(REFERENCE_MANAGER),
         r"previews\s+default\s+to\s+(\d+)\s+rows",
         *PREVIEW_ROWS,
     ),

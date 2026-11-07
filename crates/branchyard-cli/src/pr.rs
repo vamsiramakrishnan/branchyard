@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use branchyard::{
     Activity, Branch, BranchInfo, BranchStatus, CheckRun, CiSummary, FeedbackItem, FeedbackKind,
     FeedbackSource, IssueLink, PullRequestActivity, PullRequestObservation, PullRequestRef, Pushed,
-    RecordedEvent, Yard,
+    RecordedEvent, Restack, StackLink, Yard,
 };
 use branchyard_workspace::Git;
 use serde_json::{json, Value};
@@ -342,6 +342,45 @@ pub fn issue_task(
     ))
 }
 
+/// `by issue`: fetch the issue as `--issue` would and print what a run
+/// would start from. Starts nothing; the server runs it to resolve an
+/// issue for a task or session.
+pub fn show_issue(target: &Target, given: &str, extra: &str, as_json: bool) -> Outcome {
+    if let Target::Remote(_) = target {
+        return Err(crate::errors::Report::new(
+            "unsupported",
+            "by issue fetches the issue on this machine, with its gh login and tracker \
+             credentials",
+        )
+        .next("run it without --remote")
+        .into());
+    }
+    let yard = commands::open().ok();
+    let task = TaskArgs {
+        issue: Some(given.to_owned()),
+        ..TaskArgs::default()
+    };
+    let (prompt, task, link) = issue_task(extra, &task, yard.as_ref())?;
+    let Some(Link::Issue(issue)) = link else {
+        return Err(crate::errors::Report::usage("by issue takes an issue").into());
+    };
+    let branch = task.name.unwrap_or_default();
+    if as_json {
+        return print(&json::text(&json!({
+            "issue": issue,
+            "branch": branch,
+            "prompt": prompt,
+        })));
+    }
+    print(&format!(
+        "{} {}: {}\n{}\nbranch  {branch}\n\n{prompt}",
+        issue.tracker.as_deref().unwrap_or("github"),
+        link_reference(&issue),
+        issue.title,
+        issue.url
+    ))
+}
+
 /// `--pr N`: start from pull request N's head commit, fetched from
 /// `origin` when it is not here yet. The prompt names the pull request;
 /// when its head is a branch of this repository (not a fork), `by pr`
@@ -521,6 +560,13 @@ pub struct PrState {
     pub rounds: u32,
     /// Review threads the watch answered and resolved, or tried to.
     pub resolved_threads: BTreeSet<String>,
+    /// The branch it is stacked on, while it is (`by run --base BRANCH`).
+    pub stack: Option<StackLink>,
+    /// The last rebase after a parent's pull request merged.
+    pub restacked: Option<Restack>,
+    /// The stack's Markdown lines for the pull request body; set by
+    /// [`publish`], not folded from the log.
+    pub stack_listing: Vec<String>,
 }
 
 impl PrState {
@@ -567,6 +613,15 @@ pub fn state(info: &BranchInfo, events: &[RecordedEvent]) -> PrState {
                     .resolved_threads
                     .extend(threads.iter().map(|t| t.id.clone()));
             }
+            PullRequestActivity::Stacked(link) => state.stack = Some(link.clone()),
+            PullRequestActivity::Restacked(restack) => {
+                state.stack = restack.new_parent.as_ref().map(|parent| StackLink {
+                    parent: parent.clone(),
+                    base: restack.onto_commit.clone(),
+                });
+                state.restacked = Some(restack.clone());
+            }
+            PullRequestActivity::RestackBlocked { .. } => {}
         }
     }
     state
@@ -810,6 +865,33 @@ pub fn log_line(activity: &PullRequestActivity) -> (String, Tone) {
             ),
             Tone::Cyan,
         ),
+        PullRequestActivity::Stacked(link) => (
+            format!("stacked on {} at {}", link.parent, short(&link.base)),
+            Tone::Cyan,
+        ),
+        PullRequestActivity::Restacked(r) => (
+            format!(
+                "{}'s pull request merged: rebased onto {} ({}), {} to {}",
+                r.parent,
+                r.onto,
+                short(&r.onto_commit),
+                short(&r.from),
+                short(&r.to)
+            ),
+            Tone::Green,
+        ),
+        PullRequestActivity::RestackBlocked {
+            parent,
+            onto,
+            files,
+        } => (
+            format!(
+                "{parent}'s pull request merged, but rebasing onto {onto} conflicts in {}; \
+                 nothing was changed",
+                files.join(", ")
+            ),
+            Tone::Red,
+        ),
         PullRequestActivity::Checked(run) => {
             let outcome = match (run.passed, run.timed_out) {
                 (true, _) => "passed",
@@ -1028,9 +1110,31 @@ fn publishable(info: &BranchInfo, allow_not_ready: bool) -> Result<(), Failure> 
 /// branch's pull request or update the open one, recording each step.
 /// Prints nothing; `gh` must be ready (see [`Gh::ready`]).
 pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, PublishError> {
+    publishable(branch.info(), args.allow_not_ready)?;
+    // A stacked branch is opened against its parent's pull request head;
+    // once the parent merged it is rebased onto what the parent merged
+    // into first, which moves its candidate (docs/pull-requests.md).
+    let stack_base = match args.base {
+        Some(_) => None,
+        None => crate::stack::plan(branch, gh, args)?,
+    };
+    let moved;
+    let branch = match state(branch.info(), &branch.events()?).restacked {
+        Some(_) => {
+            moved = branch.yard().branch(&branch.info().name)?;
+            &moved
+        }
+        None => branch,
+    };
     let info = branch.info().clone();
-    publishable(&info, args.allow_not_ready)?;
-    let before = state(&info, &branch.events()?);
+    let mut before = state(&info, &branch.events()?);
+    // After a rebase, the pull request targets where the parent merged.
+    let base = args.base.clone().or(stack_base).or_else(|| {
+        let restacked = before.restacked.as_ref()?;
+        let recorded = before.pull_request.as_ref().and_then(|pr| pr.base.as_ref());
+        (recorded != Some(&restacked.onto)).then(|| restacked.onto.clone())
+    });
+    before.stack_listing = crate::stack::listing(branch.yard(), &info, &before);
     let candidate = info.candidate.clone().ok_or_else(|| {
         Failure::from(
             crate::errors::Report::new("no_candidate", format!("{} has no candidate", info.name))
@@ -1058,7 +1162,25 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
         .clone()
         .or_else(|| before.pull_request.as_ref().map(|pr| pr.head.clone()))
         .unwrap_or_else(|| info.git_branch.clone());
-    let pushed = branch.push_candidate(&args.git_remote, &head, args.force)?;
+    // A rebase rewrote the history that was pushed before; the remote head
+    // may be replaced if it is still where this branch left it.
+    let rewritten = before.pushed.as_ref().is_some_and(|p| {
+        p.remote_branch == head
+            && p.commit != candidate.commit
+            && !Git::new(branch.yard().root())
+                .args(["merge-base", "--is-ancestor", &p.commit, &candidate.commit])
+                .succeeds()
+                .unwrap_or(true)
+    });
+    let force = args.force
+        || (rewritten
+            && crate::stack::may_replace(
+                branch.yard().root(),
+                &args.git_remote,
+                &head,
+                before.pushed.as_ref().map(|p| p.commit.as_str()),
+            ));
+    let pushed = branch.push_candidate(&args.git_remote, &head, force)?;
     branch.record_pull_request(PullRequestActivity::Pushed(pushed.clone()))?;
 
     let existing: Value = gh.json(
@@ -1091,7 +1213,12 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
             if let Some(title) = &args.title {
                 argv.extend(["--title", title]);
             }
-            if let Some(base) = &args.base {
+            let current = Some(text(&pr["baseRefName"])).filter(|b| !b.is_empty());
+            // Given with --base: always; from a stack: when it differs.
+            let retarget = base
+                .clone()
+                .filter(|b| args.base.is_some() || current.as_ref() != Some(b));
+            if let Some(base) = &retarget {
                 argv.extend(["--base", base]);
             }
             gh.run(&argv, Some(&body))?;
@@ -1099,10 +1226,7 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
                 number,
                 url,
                 head: head.clone(),
-                base: args
-                    .base
-                    .clone()
-                    .or_else(|| Some(text(&pr["baseRefName"])).filter(|b| !b.is_empty())),
+                base: retarget.or(current),
                 draft: pr["isDraft"].as_bool().unwrap_or(false),
             };
             branch.record_pull_request(PullRequestActivity::Updated(pr.clone()))?;
@@ -1121,7 +1245,7 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
                 "--body-file",
                 "-",
             ];
-            if let Some(base) = &args.base {
+            if let Some(base) = &base {
                 argv.extend(["--base", base]);
             }
             if args.draft {
@@ -1159,7 +1283,7 @@ pub fn publish(branch: &Branch, gh: &Gh, args: &PrArgs) -> Result<Published, Pub
                 number,
                 url,
                 head: head.clone(),
-                base: args.base.clone(),
+                base: base.clone(),
                 draft: args.draft,
             };
             branch.record_pull_request(PullRequestActivity::Opened(pr.clone()))?;
@@ -1274,6 +1398,10 @@ pub fn body(
         };
         body.push('\n');
         body.push_str(&closing_line(issue, same_repo));
+    }
+    if !state.stack_listing.is_empty() {
+        body.push('\n');
+        body.push_str(&state.stack_listing.join("\n"));
     }
     body.push_str("\n## Branchyard\n\n| | |\n|---|---|\n");
     body.push_str(&format!(
@@ -1768,6 +1896,20 @@ fn watch(env: &Env, target: &Target, yard: &Yard, name: &str, gh: &Gh, args: &Pr
         print(&format!("stopped watching: {reason}\n"))
     };
     loop {
+        let branch = yard.branch(name)?;
+        // A stacked branch follows its parent: once the parent's pull
+        // request merges, it is rebased and (below) pushed again, and its
+        // own pull request retargeted. A conflict ends the watch.
+        if branch.info().status != BranchStatus::Running
+            && state(branch.info(), &branch.events()?).stack.is_some()
+        {
+            if let Err(failure) = crate::stack::plan(&branch, gh, args) {
+                branch.record_pull_request(PullRequestActivity::WatchStopped {
+                    reason: "its stack could not follow the parent".into(),
+                })?;
+                return Err(failure);
+            }
+        }
         let branch = yard.branch(name)?;
         let state = state(branch.info(), &branch.events()?);
         let mut feedback = Vec::new();

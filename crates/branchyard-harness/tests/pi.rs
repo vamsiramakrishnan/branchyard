@@ -6,7 +6,7 @@ use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcrip
 use branchyard_harness::pi::Pi;
 use branchyard_harness::{
     Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
-    SessionMode, TurnOutcome, Usage,
+    SessionMode, ToolTarget, TurnOutcome, Usage,
 };
 use serde_json::{json, Value};
 
@@ -320,9 +320,33 @@ fn streams_text_and_tools() {
             Event::ToolStarted {
                 turn: 1,
                 call_id: "call_1".into(),
-                name: "bash".into()
+                name: "bash".into(),
+                target: ToolTarget::command("ls"),
             }
         ]
+    );
+    // Written from Pi's RPC documentation (`args` on tool_execution_start),
+    // not recorded: a file tool's path is relative to the working directory.
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"type": "tool_execution_start", "toolCallId": "call_2", "toolName": "read", "args": {"path": "/workspace/src/a.rs", "offset": 1}}),
+    );
+    assert_eq!(
+        events,
+        [Event::ToolStarted {
+            turn: 1,
+            call_id: "call_2".into(),
+            name: "read".into(),
+            target: ToolTarget::file("src/a.rs", "/workspace"),
+        }]
+    );
+    let (events, _) = feed(
+        &mut driver,
+        &json!({"type": "tool_execution_start", "toolCallId": "call_3", "toolName": "custom"}),
+    );
+    assert!(
+        matches!(&events[..], [Event::ToolStarted { target: None, .. }]),
+        "a call that reports no input has no target: {events:?}"
     );
 }
 

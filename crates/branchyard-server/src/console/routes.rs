@@ -26,6 +26,7 @@ pub(crate) fn router() -> Router<Shared> {
             "/v1/workspaces/{workspace}/sessions",
             get(sessions).post(start_session),
         )
+        .route("/v1/workspaces/{workspace}/issue", get(issue))
         .route(
             "/v1/workspaces/{workspace}/sessions/{session}/messages",
             get(messages).post(send),
@@ -380,16 +381,46 @@ async fn start_session(
     Path(wid): Path<String>,
     Extension(caller): Extension<Caller>,
     headers: HeaderMap,
-    crate::api::JsonBody(request, _): crate::api::JsonBody<
+    crate::api::JsonBody(mut request, _): crate::api::JsonBody<
         branchyard_client::workspace_api::StartSessionRequest,
     >,
 ) -> Result<Json<Value>, ApiError> {
+    // Start from an issue: the prompt becomes the issue under a header (the
+    // request's own prompt added), fetched with the server's gh login and
+    // tracker credentials; the stored request carries only the result.
+    if let Some(reference) = request.issue.take() {
+        let workspace = auth::authorize_workspace(&app, &caller, &wid, "run")?;
+        let repo = super::resolve_source(&app, &workspace)?;
+        let found =
+            crate::issues::resolve(&app.by_exe(), repo.yard.root(), &reference, &request.prompt)
+                .await?;
+        request.prompt = found.prompt.clone();
+        if request.name.trim().is_empty() {
+            request.name = found.title().to_owned();
+        }
+    }
     let body =
         serde_json::to_value(request).map_err(|error| ApiError::internal(error.to_string()))?;
     // Off the async runtime: admitting connectors asks the gateway.
     crate::api::blocking(move || super::runtime::start(&app, &caller, &wid, &headers, body))
         .await?
         .map(Json)
+}
+/// `GET /v1/workspaces/{id}/issue?ref=REF`: the issue a session would start
+/// from (`StartSessionRequest::issue`), without starting anything, so the
+/// composer can show its title first.
+async fn issue(
+    State(app): State<Shared>,
+    Path(wid): Path<String>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<branchyard_client::api::IssuePreview>, ApiError> {
+    let reference = crate::issues::reference_of(raw_query.as_deref())
+        .ok_or_else(|| ApiError::bad_request("give the issue as ?ref=URL, #N or KEY"))?;
+    let workspace = auth::authorize_workspace(&app, &caller, &wid, "run")?;
+    let repo = super::resolve_source(&app, &workspace)?;
+    let found = crate::issues::resolve(&app.by_exe(), repo.yard.root(), &reference, "").await?;
+    Ok(Json(crate::api::issue_preview(found)?))
 }
 async fn execution_presets(
     State(app): State<Shared>,

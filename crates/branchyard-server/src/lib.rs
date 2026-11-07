@@ -70,6 +70,7 @@ pub mod cli;
 pub mod companion;
 pub mod config;
 mod console;
+mod review_routes;
 /// Durable console commands admitted to the existing operation queue.
 pub use console::ConsoleWork;
 pub mod connectors;
@@ -82,6 +83,7 @@ pub mod error;
 pub mod federated;
 pub mod feed;
 pub mod gcp;
+mod issues;
 pub mod kms;
 pub mod knowledge_routes;
 pub mod logging;

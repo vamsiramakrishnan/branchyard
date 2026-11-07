@@ -483,6 +483,7 @@ mod tests {
                     turn: 1,
                     call_id: "c".into(),
                     name: "Bash".into(),
+                    target: None,
                 }),
             ),
             event(

@@ -129,6 +129,13 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         Target::Remote(remote) => remote::inspect(remote, &info.name).ok(),
     };
     let (readiness, line) = crate::pr::show_readiness(&info, &events, env.style());
+    // The stack it is in (`by run --base BRANCH`), in local mode.
+    let stack = match target {
+        Target::Local => open()
+            .ok()
+            .and_then(|yard| crate::stack::show(&yard, &info, &crate::pr::state(&info, &events))),
+        Target::Remote(_) => None,
+    };
     // The task it is an attempt of (docs/task-repos.md); a server too old
     // to say has none.
     let task = match target {
@@ -155,6 +162,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
             }
         }
         value["merge_readiness"] = readiness;
+        if let Some((stack, _)) = &stack {
+            value["stack"] = stack.clone();
+        }
         // Only when something listens, so local and remote `show --json`
         // agree for a branch with no servers.
         if let Some(listening) = listening.as_ref().filter(|l| !l.is_empty()) {
@@ -185,6 +195,9 @@ pub fn show(env: &Env, target: &Target, branch: &str, as_json: bool, refresh: bo
         .map(|line| ("merge readiness", line))
         .into_iter()
         .collect();
+    if let Some((_, text)) = stack {
+        extra.push(("stack", text));
+    }
     if let Some((text, _)) = task {
         extra.push(("task", text));
     }

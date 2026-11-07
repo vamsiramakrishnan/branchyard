@@ -1165,6 +1165,7 @@ mod tests {
                 turn: 1,
                 call_id: "c".into(),
                 name: "Bash".into(),
+                target: None,
             }),
         ));
         doing.apply(&at(
@@ -1217,6 +1218,7 @@ mod tests {
                 turn: 1,
                 call_id: "c".into(),
                 name: name.into(),
+                target: None,
             })
         };
         let mut doing = Doing::default();
@@ -1264,6 +1266,7 @@ mod tests {
                 turn: 1,
                 call_id: "c".into(),
                 name: "Bash".into(),
+                target: None,
             }),
         ));
         doing.apply(&at(

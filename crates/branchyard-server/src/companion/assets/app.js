@@ -126,6 +126,7 @@
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const branchHref = (name) => `#/b/${enc(state.repo)}/${enc(name)}`;
   const trajectoryHref = (name) => `#/trajectory/${enc(state.repo)}/${enc(name)}`;
+  const changesHref = (name) => `#/changes/${enc(state.repo)}/${enc(name)}`;
   let uid = 0;
   const nextId = (prefix) => `${prefix}-${++uid}`;
 
@@ -1011,6 +1012,7 @@
     home: renderHome,
     branch: renderBranch,
     trajectory: renderTrajectory,
+    changes: renderChangesPage,
     new: renderNew,
     attention: () => {
       // The project's cards are read again on arrival; the repository's
@@ -1033,25 +1035,27 @@
     const parts = hash.replace(/^#\/?/, '').split('/').map((p) => { try { return decodeURIComponent(p); } catch (_) { return p; } });
     if (parts[0] === 'b') return { name: 'branch', repo: parts[1], branch: parts.slice(2).join('/') };
     if (parts[0] === 'trajectory' && parts[1] && parts[2]) return { name: 'trajectory', repo: parts[1], branch: parts.slice(2).join('/') };
+    if (parts[0] === 'changes' && parts[1] && parts[2]) return { name: 'changes', repo: parts[1], branch: parts.slice(2).join('/') };
     if (parts[0] === 'p' && parts[1] === 'new') return { name: 'newProject' };
     if (parts[0] === 'p' && parts[1]) return { name: 'project', project: parts[1], creating: parts[2] === 'new' };
     if (parts[0] === 'w' && parts[1] && parts[2] === 'doc' && parts[3]) return { name: 'document', workspace: parts[1], artifact: parts[3] };
     if (parts[0] === 'w' && parts[1]) return { name: 'workspace', workspace: parts[1], session: parts[2] === 's' && parts[3] ? parts[3] : null };
     if (parts[0] === 'settings' && parts[1] === 'tools') return { name: 'settingsTools' };
     const name = ALIASES[parts[0]] || parts[0];
-    return { name: VIEWS[name] && !['branch', 'trajectory', 'newProject', 'project', 'workspace', 'document'].includes(name) ? name : 'home' };
+    return { name: VIEWS[name] && !['branch', 'trajectory', 'changes', 'newProject', 'project', 'workspace', 'document'].includes(name) ? name : 'home' };
   }
 
   async function route() {
     if (!state.token) return;
     closePreview();
     closeTrajectory();
+    closeChanges();
     document.body.classList.remove('sheet-open');
     // Connections became a page of Settings; an old link lands there.
     if (/^#\/connections\/?$/.test(location.hash)) history.replaceState(null, '', '#/settings/tools');
     state.route = parseRoute();
     const r = state.route;
-    if ((r.name === 'branch' || r.name === 'trajectory') && r.repo && state.repos.includes(r.repo)) {
+    if ((r.name === 'branch' || r.name === 'trajectory' || r.name === 'changes') && r.repo && state.repos.includes(r.repo)) {
       if (state.source.kind !== 'repo') useSource({ kind: 'repo' });
       if (r.repo !== state.repo) { await switchRepo(r.repo); renderPicker(); }
     }
@@ -1087,6 +1091,7 @@
     if (state.route.name === 'attention') redraw(attentionSignature(), renderAttention);
     if (state.route.name === 'branch') updateBranch();
     if (state.route.name === 'trajectory' && trajView) trajView.branchesChanged();
+    if (state.route.name === 'changes' && chView) chView.branchChanged();
   }
 
   // ---------------------------------------------------------------
@@ -1150,7 +1155,7 @@
     $('branch-count').textContent = needle
       ? `Showing ${shown.length} of ${all.length} branches`
       : plural(all.length, 'branch', 'branches');
-    const current = state.route.name === 'branch' || state.route.name === 'trajectory' ? state.route.branch : null;
+    const current = state.route.name === 'branch' || state.route.name === 'trajectory' || state.route.name === 'changes' ? state.route.branch : null;
     const row = (b, lane) => h('li', {}, h('a', {
       class: 'branch-row', href: branchHref(b.name), 'data-branch': b.name, 'data-key': `b:${b.name}`, title: b.name,
       'aria-current': b.name === current ? 'page' : null,
@@ -1421,7 +1426,8 @@
       'data-track': entry && entry.track && !entry.loading ? 'loaded' : 'loading' },
       h('span', { class: 'board-name' }, dot(lane.key),
         h('span', { class: 'board-id' }, h('a', { href: branchHref(b.name), text: b.name }), h('span', { class: 'board-meta' }, meta, ' · ',
-          h('a', { class: 'board-traj', href: trajectoryHref(b.name), 'aria-label': `Trajectory of ${b.name}`, text: 'trajectory' })))),
+          h('a', { class: 'board-traj', href: trajectoryHref(b.name), 'aria-label': `Trajectory of ${b.name}`, text: 'trajectory' }),
+          b.candidate ? [' · ', h('a', { class: 'board-traj board-changes', href: changesHref(b.name), 'aria-label': `Review the changes of ${b.name}`, text: 'review' })] : null))),
       rail,
       h('span', { class: `board-cost mono${b.cost_usd == null ? ' muted' : ''}`, title: b.cost_usd == null ? 'its harness reports no cost' : `what ${b.harness} reported spending` }, cents(b.cost_usd)),
       h('span', { class: 'board-act' }, action));
@@ -2342,6 +2348,7 @@
           h('p', { class: 'lede', text: 'What this agent did, step by step: its turns, tool calls, waits and the helpers it delegated to.' }),
           h('div', { class: 'tj-head-links' },
             h('a', { class: 'button small', href: branchHref(name), text: 'Open the branch' }),
+            info.candidate ? h('a', { class: 'button small', href: changesHref(name), 'data-changes': name, text: 'Review changes' }) : null,
             info.parent ? h('a', { class: 'button small', href: trajectoryHref(info.parent), text: `Parent: ${info.parent}` }) : null))),
       host));
     if (!window.BranchyardTrajectory) {
@@ -2357,6 +2364,53 @@
       href: { branch: branchHref, trajectory: trajectoryHref },
       status: statusOf,
       describe,
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // The Changes page: a branch's diff, file by file, where a person
+  // comments on lines and sends the comments as one review
+  // (changes.js, docs/companion.md#changes-and-review).
+
+  let chView = null;
+  function closeChanges() {
+    if (chView) chView.destroy();
+    chView = null;
+  }
+
+  async function renderChangesPage() {
+    const name = state.route.branch;
+    let info = state.branches.get(name);
+    if (!info) {
+      try { info = await api('GET', branchPath(name)); state.branches.set(name, info); } catch (e) {
+        main(h('div', { class: 'page' }, h('a', { class: 'back', href: '#/', text: '‹ Branches' }),
+          h('h1', { text: name }), h('p', { class: 'error', text: e.message })));
+        return;
+      }
+    }
+    const host = h('div', { class: 'ch-host' });
+    main(h('div', { class: 'page full ch-page' },
+      h('a', { class: 'back', href: branchHref(name), text: '‹ Branch' }),
+      h('div', { class: 'page-head' },
+        h('div', {},
+          h('h1', { text: `Changes: ${name}` }),
+          h('p', { class: 'lede', text: 'What this branch changes against its base. Select lines, write comments, and send them to the agent as one review.' }),
+          h('div', { class: 'tj-head-links' },
+            h('a', { class: 'button small', href: branchHref(name), text: 'Open the branch' }),
+            h('a', { class: 'button small', href: trajectoryHref(name), text: 'Trajectory' })))),
+      host));
+    if (!window.BranchyardChanges) {
+      host.append(h('p', { class: 'error', role: 'alert', text: 'The changes component did not load.' }));
+      return;
+    }
+    chView = window.BranchyardChanges.mount(host, {
+      repo: state.repo,
+      branch: name,
+      path: branchPath(name),
+      api: (method, path, body) => api(method, path, body),
+      info: () => state.branches.get(name),
+      can,
+      toast: (text) => toast(text),
     });
   }
 
@@ -2636,6 +2690,7 @@
         ? h('p', { class: 'state state-merged' }, checkMark(state.merged.has(info.name)), cap(s.text))
         : h('p', { class: `state state-${lane}` }, dot(lane), cap(s.text)),
       h('div', { class: 'strip-actions' },
+        info.candidate ? h('a', { class: 'button small', href: changesHref(info.name), 'data-changes': info.name, text: 'Review changes' }) : null,
         h('a', { class: 'button small', href: trajectoryHref(info.name), 'data-trajectory': info.name, text: 'Trajectory' }),
         action, menu.length ? menuOf(menu, info) : null),
     ];
@@ -3090,7 +3145,8 @@
         return { field: 'harness', text: typed ? 'Type a harness this server runs.' : usable.length ? 'Choose a harness.' : `No harness in ${env.label} can start a session for your role; choose another environment.` };
       }
       if (acknowledgement && !draft.ack) return { field: 'ack', text: `Tick “I accept tools without per-tool approval” to start ${harness.id} as a writer, or choose another harness.` };
-      if (!draft.prompt.trim()) return { field: 'prompt', text: 'Say what it should do.' };
+      if (draft.issueRef.trim() && !draft.issue) return { field: 'issue', text: 'Look up the issue first, or clear it.' };
+      if (!draft.prompt.trim() && !draft.issue) return { field: 'prompt', text: 'Say what it should do, or start from an issue.' };
       if (t.blocked) return { field: 'tools', text: `${t.blocked.x.name}: ${t.blocked.why} Connect it or remove it under Tools.` };
       if (value === 'reviewer' && !outputs.some((a) => draft.outputs.has(a.id))) {
         return { field: 'outputs', text: outputs.length ? 'Choose at least one output to review (under Advanced).' : 'No outputs to review yet: a reviewer needs at least one.' };
@@ -3104,7 +3160,12 @@
   // The body of a start for a draft whose choices miss nothing.
   function startRequest(c, draft, sources, outputs) {
     const writer = c.access.value === 'writer';
-    const body = { name: draft.name.trim() || nameFrom(draft.prompt), prompt: draft.prompt.trim(), harness: c.harness.id, access: c.access.value };
+    const body = {
+      name: draft.name.trim() || (draft.issue ? draft.issue.issue.title : nameFrom(draft.prompt)),
+      prompt: draft.prompt.trim(), harness: c.harness.id, access: c.access.value,
+    };
+    // Resolved by the server when it starts (its own gh login and tracker credentials).
+    if (draft.issue) body.issue = draft.issueRef.trim();
     if (c.env.preset !== null) body.preset = c.env.preset;
     const model = c.model.kind === 'none' ? '' : c.model.value.trim();
     if (model) body.model = model;
@@ -3125,7 +3186,7 @@
     const mode = keep.mode || (v.workspace.result_mode === 'code' ? 'code' : 'work');
     const kept = rememberedTools(v.id);
     return {
-      name: '', prompt: '', env: keep.env || null, harness: keep.harness || null, model: keep.model || '', effort: '',
+      name: '', prompt: '', issueRef: '', issue: null, issueError: '', env: keep.env || null, harness: keep.harness || null, model: keep.model || '', effort: '',
       access: workspaceCanRun(v) ? 'writer' : 'reviewer', sources: new Map(), outputs: new Set(),
       collect: mode === 'work' || v.workspace.result_mode !== 'code', allowAll: false, ack: false,
       mode, tools: null, remembered: kept, helperLimit: undefined,
@@ -4848,6 +4909,40 @@
     const prompt = h('textarea', { id: 'sf-prompt', rows: '5', placeholder: 'What should this session do?', 'aria-describedby': 'sf-prompt-hint' });
     prompt.value = v.draft.prompt;
     prompt.addEventListener('input', () => { v.draft.prompt = prompt.value; syncForm(); });
+    // Start from an issue: looked up through the server first, so its title
+    // shows before anything starts.
+    const issueInput = h('input', { id: 'sf-issue', type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'A GitHub issue URL, #12, or a Linear key such as ENG-123', 'aria-describedby': 'sf-issue-note' });
+    issueInput.value = v.draft.issueRef;
+    const issueLook = h('button', { type: 'button', id: 'sf-issue-look', text: 'Look up' });
+    const issueNote = h('p', { class: 'hint', id: 'sf-issue-note', role: 'status' });
+    let looking = false;
+    issueInput.addEventListener('input', () => {
+      v.draft.issueRef = issueInput.value;
+      v.draft.issue = null;
+      v.draft.issueError = '';
+      syncForm();
+    });
+    const lookUp = async () => {
+      const ref = issueInput.value.trim();
+      if (!ref || looking) return;
+      looking = true;
+      v.draft.issueError = '';
+      syncForm();
+      let found = null;
+      let failure = '';
+      try {
+        found = await api('GET', `${workspacePath(v.id)}/issue?ref=${enc(ref)}`);
+      } catch (e) {
+        failure = said(e.message);
+      }
+      looking = false;
+      if (wsView !== v || issueInput.value.trim() !== ref) return;
+      v.draft.issue = found;
+      v.draft.issueError = failure;
+      syncForm();
+    };
+    issueLook.addEventListener('click', lookUp);
+    issueInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); lookUp(); } });
     const start = h('button', { type: 'button', class: 'primary', id: 'sf-start', text: 'Start session' });
     const status = h('p', { class: 'form-status', id: 'sf-status', role: 'status' });
     const error = h('p', { class: 'error form-error', id: 'sf-error', role: 'alert' });
@@ -5294,6 +5389,7 @@
         return (blocked && ($(`${rowId(blocked.x)}-connect`) || $(rowId(blocked.x)))) || toolsSearch;
       },
       name: () => name,
+      issue: () => issueInput,
       prompt: () => prompt,
       outputs: () => {
         advanced.open = true;
@@ -5360,6 +5456,13 @@
         advanced.open = true;
         forcedShown = true;
       }
+      const found = v.draft.issue;
+      const note = looking ? 'Looking it up…'
+        : found ? `${found.issue.key || `#${found.issue.number}`}: ${found.issue.title}. The session starts from this issue; what you write below is added to it.`
+          : v.draft.issueError;
+      if (issueNote.textContent !== note) issueNote.textContent = note;
+      issueNote.classList.toggle('error', !!v.draft.issueError && !found);
+      issueLook.disabled = looking || !issueInput.value.trim();
       const missing = blocked(c);
       const text = missing ? missing.text : readyText(c);
       if (status.textContent !== text) status.textContent = text;
@@ -5440,6 +5543,8 @@
       h('fieldset', { class: 'step' }, h('legend', { text: 'Task' }),
         field('sf-name', 'Session name', name),
         h('p', { class: 'hint', id: 'sf-name-hint', text: 'Optional: without one, it is named from the first line of the prompt.' }),
+        field('sf-issue', 'Start from an issue (optional)', h('div', { class: 'row' }, issueInput, issueLook)),
+        issueNote,
         field('sf-prompt', 'First prompt', prompt),
         promptHint,
         toolsBar,

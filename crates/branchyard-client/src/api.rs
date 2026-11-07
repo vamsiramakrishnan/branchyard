@@ -174,7 +174,18 @@ impl PolicySpec {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskRequest {
+    /// The task. With `issue`, instructions added to the issue's text, and
+    /// may be empty (`""`).
     pub prompt: String,
+    /// Start from this issue, as `by run --issue` does: a GitHub issue URL,
+    /// `#N` or `N` (in the repository's own GitHub project), `linear:KEY`,
+    /// `jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab
+    /// URL. The server fetches it with its own `gh` login and tracker
+    /// credentials, names the branch after it unless `name` is given, and
+    /// the pull request `by pr` opens closes it. Refused with
+    /// `issue_unavailable` (and a `next` step) when it cannot be fetched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1043,10 +1054,81 @@ pub struct OperationList {
     pub operations: Vec<Operation>,
 }
 
+/// `GET /v1/repos/{repo}/issue?ref=REF` and
+/// `GET /v1/workspaces/{id}/issue?ref=REF`: the issue a task or session
+/// would start from (`TaskRequest::issue`), fetched with the server's own
+/// `gh` login and tracker credentials, without starting anything.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuePreview {
+    /// The issue: number, URL and title, and for another tracker its name
+    /// and key.
+    pub issue: branchyard::IssueLink,
+    /// The branch name `by run --issue` would give it.
+    pub branch: String,
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diff {
     pub diff: String,
+}
+
+/// How a review reaches the branch. Serialized in snake case.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDelivery {
+    /// As the branch's next turn: a send, which waits for a running turn
+    /// to end.
+    #[default]
+    NextTurn,
+    /// Into the running turn without interrupting it, as a steer; refused
+    /// (`409 not_running`) when no turn runs.
+    Steer,
+}
+
+/// `POST /v1/repos/{repo}/branches/{branch}/reviews`: comments written on
+/// the branch's diff, delivered as one prompt like `by review`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRequest {
+    /// The comments, each on lines the diff shows; at most
+    /// [`branchyard::MAX_REVIEW_COMMENTS`].
+    #[serde(default)]
+    pub comments: Vec<branchyard::ReviewComment>,
+    /// An overall note, sent with the comments or alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The candidate commit the line numbers were read from
+    /// (`Changes::commit`). When it is not the branch's candidate any more
+    /// the review is refused with `409 stale_candidate`, so a comment
+    /// never lands on other code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Next turn (the default) or steer a running turn.
+    #[serde(default)]
+    pub delivery: ReviewDelivery,
+}
+
+/// What `POST .../reviews` did: the prompt it wrote and how it went.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReviewSent {
+    /// How it was delivered.
+    pub delivery: ReviewDelivery,
+    /// How many comments it carried.
+    pub comments: u32,
+    /// The prompt the branch received.
+    pub prompt: String,
+    /// The ID of the send operation, for `next_turn`
+    /// (`GET /v1/operations/{id}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// The steer, for `steer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steer: Option<branchyard::Steer>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

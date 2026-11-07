@@ -383,6 +383,7 @@ fn typed_client_reads_durable_console_metadata_and_native_conversations() {
                 preset: None,
                 name: "Writer".into(),
                 prompt: "Hello".into(),
+                issue: None,
                 harness: "gemini-cli".into(),
                 model: None,
                 effort: None,

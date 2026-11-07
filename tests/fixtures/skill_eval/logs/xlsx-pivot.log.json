@@ -1,0 +1,13 @@
+{"activity": "lifecycle", "state": "started", "reason": null, "idle_since_ms": null, "at_ms": 900}
+{"activity": "prompt", "text": "p", "at_ms": 1000}
+{"activity": "harness", "event": {"type": "ready"}, "at_ms": 1010}
+{"activity": "harness", "event": {"type": "turn_accepted", "turn": 1, "native": null}, "at_ms": 1020}
+{"activity": "harness", "event": {"type": "tool_started", "turn": 1, "call_id": "c1100", "name": "Skill"}, "at_ms": 1100}
+{"activity": "harness", "event": {"type": "permission_requested", "turn": 1, "key": "k1101", "tool": "Skill", "input": {"skill": "xlsx"}}, "at_ms": 1101}
+{"activity": "decision", "tool": "Skill", "allowed": true, "message": null, "source": "policy", "at_ms": 1102}
+{"activity": "harness", "event": {"type": "tool_started", "turn": 1, "call_id": "c1200", "name": "Bash"}, "at_ms": 1200}
+{"activity": "harness", "event": {"type": "permission_requested", "turn": 1, "key": "k1201", "tool": "Bash", "input": {"command": "cat /home/u/.branchyard/tools/skills/google-sheets/SKILL.md | head -40"}}, "at_ms": 1201}
+{"activity": "decision", "tool": "Bash", "allowed": true, "message": null, "source": "policy", "at_ms": 1202}
+{"activity": "harness", "event": {"type": "usage_observed", "turn": 1, "cumulative": true, "input_tokens": 900, "output_tokens": 50, "cached_input_tokens": null, "cost_usd": null, "cache_write_tokens": null, "cache_write_1h_tokens": null, "model": "m"}, "at_ms": 2000}
+{"activity": "harness", "event": {"type": "usage_observed", "turn": 1, "cumulative": true, "input_tokens": 2100, "output_tokens": 300, "cached_input_tokens": null, "cost_usd": null, "cache_write_tokens": null, "cache_write_1h_tokens": null, "model": "m"}, "at_ms": 4000}
+{"activity": "harness", "event": {"type": "turn_ended", "turn": 1, "outcome": {"kind": "completed"}}, "at_ms": 5000}

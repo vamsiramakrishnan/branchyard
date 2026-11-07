@@ -1,0 +1,22 @@
+# Tools and runtime topics.
+
+[[scenario]]
+id = "artifact-tools-deps"
+area = "runtime"
+prompt = "Before I start on documents, check what this machine is missing to make Word, Excel and PowerPoint files, and set up what it can."
+skills = ["artifact-tools", "docx", "xlsx", "pptx", "find-tools"]
+expect_skills = ["artifact-tools"]
+
+[[scenario]]
+id = "artifact-tools-capture"
+area = "runtime"
+prompt = "Run the document tools you need and make sure every file they write ends up in the output folder where I will pick it up, not scattered in temp directories."
+skills = ["artifact-tools", "docx", "pdf", "find-tools"]
+expect_skills = ["artifact-tools"]
+
+[[scenario]]
+id = "find-tools-vague"
+area = "runtime"
+prompt = "I'm not sure what you have available. What tools or skills do you have here that could help me check that a spreadsheet's totals are right?"
+skills = ["xlsx", "calculate", "claim-verify", "find-tools"]
+expect_skills = ["find-tools"]

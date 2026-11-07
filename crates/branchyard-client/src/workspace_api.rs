@@ -235,8 +235,16 @@ pub struct StartSessionRequest {
     pub preset: Option<String>,
     /// Human title.
     pub name: String,
-    /// Initial instruction.
+    /// Initial instruction. With `issue`, instructions added to the issue's
+    /// text, and may be empty (`""`).
     pub prompt: String,
+    /// Start from this issue (a GitHub URL, `#N`, `linear:KEY`, a Linear,
+    /// Jira or GitLab URL, ...): the server fetches it with its own `gh`
+    /// login and tracker credentials and the prompt becomes the issue under
+    /// a header. Refused with `issue_unavailable` and a `next` step when it
+    /// cannot be fetched. See `GET /v1/workspaces/{id}/issue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
     /// Configured harness.
     pub harness: String,
     /// Model choice.
@@ -1087,6 +1095,21 @@ impl crate::Client {
         key: &str,
     ) -> Result<WorkspaceOperation, crate::Error> {
         self.post("/v1/workspaces", request, key)
+    }
+
+    /// The issue `reference` names as a session with
+    /// `StartSessionRequest::issue` would start from it, fetched with the
+    /// server's own `gh` login and tracker credentials. Starts nothing.
+    pub fn workspace_issue(
+        &self,
+        workspace: &str,
+        reference: &str,
+    ) -> Result<crate::api::IssuePreview, crate::Error> {
+        self.get(&format!(
+            "/v1/workspaces/{}/issue?ref={}",
+            crate::http::encode(workspace),
+            crate::http::encode(reference)
+        ))
     }
 
     /// List isolated native attempts within a workspace.

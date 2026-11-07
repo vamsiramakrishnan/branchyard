@@ -333,6 +333,7 @@ mod tests {
             turn,
             call_id: format!("{name}-{turn}"),
             name: name.into(),
+            target: None,
         })
     }
 

@@ -143,6 +143,7 @@ fn run_takes_every_task_option() {
             recipe: None,
             local: false,
             delegate: None,
+            helpers: Vec::new(),
             allow_delegation: false,
             no_wake: false,
             unapproved_tools: false,
@@ -650,6 +651,59 @@ fn provider_recipe_names_a_recipe_and_its_paths() {
     assert!(err("run go --provider recipe:devbox --sandbox-snapshots 2").contains("no snapshots"));
     assert!(err("run go --provider recipe:devbox --image a")
         .contains("--image needs --provider microsandbox"));
+}
+
+#[test]
+fn skill_flags_repeat_choose_built_in_skills_and_refuse_unknown_ones() {
+    for line in [
+        "run go --skill docx --skill pdf",
+        "fan go --harness a,b --skill docx --skill pdf",
+        "fork b go --skill docx --skill pdf",
+        "send b go --skill docx --skill pdf",
+    ] {
+        let spec = task(line).provision.unwrap_or_else(|| panic!("{line}"));
+        assert_eq!(
+            spec.skills,
+            Some(vec!["docx".to_owned(), "pdf".to_owned()]),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        task("run go").provision,
+        None,
+        "no flag, no choice: every skill"
+    );
+    let refused = err("run go --skill docz");
+    assert!(
+        refused.contains("skill \"docz\" is not a built-in skill"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("the built-in skills are") && refused.contains("docx"),
+        "{refused}"
+    );
+    assert!(help("run").contains("--skill <NAME>"));
+}
+
+#[test]
+fn helpers_widen_the_envelope_only_with_delegate_and_only_to_known_harnesses() {
+    let args = task("run go --delegate --helpers claude-code,codex");
+    assert_eq!(args.helpers, ["claude-code", "codex"]);
+    let envelope = args.envelope(1);
+    assert_eq!(envelope.max_depth, 1);
+    assert_eq!(envelope.harnesses, ["claude-code", "codex"]);
+    assert!(
+        task("run go --delegate").envelope(2).harnesses.is_empty(),
+        "own profile only"
+    );
+    assert!(task("send b go --delegate=2 --helpers codex").helpers == ["codex"]);
+    assert!(
+        err("run go --helpers codex").contains("--delegate"),
+        "{}",
+        err("run go --helpers codex")
+    );
+    assert!(err("run go --delegate --helpers nope").contains("nope is not a harness"));
+    assert!(err("run go --delegate --helpers codex,codex").contains("twice"));
 }
 
 #[test]

@@ -1,0 +1,50 @@
+[
+  {
+    "activity": "lifecycle",
+    "state": "started",
+    "reason": null,
+    "idle_since_ms": null,
+    "at_ms": 900
+  },
+  {
+    "activity": "prompt",
+    "text": "p",
+    "at_ms": 1000
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "ready"
+    },
+    "at_ms": 1010
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_accepted",
+      "turn": 1,
+      "native": null
+    },
+    "at_ms": 1020
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "message_delta",
+      "turn": 1,
+      "text": "391"
+    },
+    "at_ms": 1100
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_ended",
+      "turn": 1,
+      "outcome": {
+        "kind": "completed"
+      }
+    },
+    "at_ms": 1500
+  }
+]

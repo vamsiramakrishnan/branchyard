@@ -66,7 +66,16 @@ pub fn event(event: &Event) -> Value {
             turn,
             call_id,
             name,
-        } => json!({ "type": "tool_started", "turn": turn, "call_id": call_id, "name": name }),
+            target,
+        } => {
+            let mut event =
+                json!({ "type": "tool_started", "turn": turn, "call_id": call_id, "name": name });
+            // Absent when the harness reports no input, as in the stored log.
+            if let Some(target) = target {
+                event["target"] = json!({ "kind": target.kind, "value": target.value });
+            }
+            event
+        }
         Event::PermissionRequested { turn, request } => json!({
             "type": "permission_requested",
             "turn": turn,
@@ -489,6 +498,34 @@ mod tests {
                 "available",
                 "qualification"
             ]
+        );
+    }
+
+    /// `by log --json` writes a tool call's target as `{kind, value}` and
+    /// leaves the key out when the harness reported no input, so a log from
+    /// before the field and one from a harness without it read the same.
+    #[test]
+    fn a_tool_call_carries_its_target_only_when_it_has_one() {
+        let with = Event::ToolStarted {
+            turn: 1,
+            call_id: "c".into(),
+            name: "Read".into(),
+            target: branchyard::ToolTarget::file("/w/a.txt", "/w"),
+        };
+        assert_eq!(
+            event(&with),
+            json!({ "type": "tool_started", "turn": 1, "call_id": "c", "name": "Read",
+                    "target": { "kind": "file", "value": "a.txt" } })
+        );
+        let without = Event::ToolStarted {
+            turn: 1,
+            call_id: "c".into(),
+            name: "Read".into(),
+            target: None,
+        };
+        assert_eq!(
+            event(&without),
+            json!({ "type": "tool_started", "turn": 1, "call_id": "c", "name": "Read" })
         );
     }
 

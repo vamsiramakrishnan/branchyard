@@ -4,8 +4,8 @@
 // its own (encrypted) text, and a tap only opens the page.
 'use strict';
 
-const CACHE = 'branchyard-app-v3';
-const SHELL = ['./', 'app.js', 'app.css', 'artifact-preview.js', 'artifact-preview.css', 'trajectory.js', 'trajectory.css', 'icon.svg', 'connector-icons.svg', 'manifest.webmanifest'];
+const CACHE = 'branchyard-app-v4';
+const SHELL = ['./', 'app.js', 'app.css', 'artifact-preview.js', 'artifact-preview.css', 'trajectory.js', 'trajectory.css', 'changes.js', 'changes.css', 'icon.svg', 'connector-icons.svg', 'manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -44,6 +44,8 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
+use crate::target;
+
 use crate::{
     frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
@@ -438,6 +440,31 @@ impl Codex {
             .collect()
     }
 
+    /// What a tool item acted on: its command, its first changed file, or
+    /// the MCP server and tool it called. Search and image items name none.
+    fn item_target(&self, kind: &str, item: &Value) -> Option<target::ToolTarget> {
+        let cwd = self.open.as_ref().map_or("", |open| open.cwd.as_str());
+        match kind {
+            "commandExecution" => {
+                let action = item["commandActions"][0]["command"].as_str();
+                let command = |raw| target::ToolTarget::command_in(raw, cwd);
+                action
+                    .and_then(command)
+                    .or_else(|| item["command"].as_str().and_then(command))
+            }
+            "fileChange" => item["changes"]
+                .as_array()?
+                .iter()
+                .find_map(|change| change["path"].as_str())
+                .and_then(|path| target::ToolTarget::file(path, cwd)),
+            "mcpToolCall" => {
+                target::ToolTarget::mcp(item["server"].as_str(), item["tool"].as_str()?)
+            }
+            "dynamicToolCall" => target::ToolTarget::mcp(None, item["tool"].as_str()?),
+            _ => None,
+        }
+    }
+
     fn notification(&mut self, message: &Value, method: &str) -> Output {
         let params = &message["params"];
         if QUIET.contains(&method) {
@@ -479,6 +506,7 @@ impl Codex {
                         turn,
                         call_id: item["id"].as_str().unwrap_or_default().to_owned(),
                         name: kind.to_owned(),
+                        target: self.item_target(kind, item),
                     })
                 } else {
                     Output::default()

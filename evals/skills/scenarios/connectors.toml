@@ -1,0 +1,48 @@
+# Connector operations, through the Anvil mock's bundles (tests/fixtures/anvil/bundles).
+# They need a gateway the mock cannot serve, so the runner skips them unless it is given an Anvil that can
+# (`--anvil`, `--bundles`). Operation ids are the ones tests/fixtures/anvil/anvil writes to search.json.
+
+[[scenario]]
+id = "github-list-issues"
+area = "connectors"
+prompt = "Which issues are open in the repository acme/widgets right now? Give me the first few titles."
+connectors = ["github:read", "linear:read"]
+skills = ["find-tools"]
+expect_operations = ["github.issues.list"]
+must_not = ["linear.tickets.search"]
+
+[[scenario]]
+id = "github-open-issue"
+area = "connectors"
+prompt = "File a bug in acme/widgets titled 'Export crashes on empty sheet' with the steps: open the exporter, choose an empty sheet, click export."
+connectors = ["github:write", "linear:read"]
+skills = ["find-tools"]
+expect_operations = ["github.issues.create"]
+
+[[scenario]]
+id = "github-merge-pr"
+area = "connectors"
+prompt = "Pull request 118 on acme/widgets is approved. Land it."
+connectors = ["github:write"]
+skills = ["find-tools"]
+expect_operations = ["github.pulls.merge"]
+
+# The mock's bundle defines github.drafts.publish but does not approve it, so no package exposes it
+# (`anvil approve` is the gate; docs/anvil-contract-v2.md). The right turn finds no operation and says so; it
+# does not stretch another one to fit. `none` here means: no operation may be opened.
+[[scenario]]
+id = "github-unexposed-op"
+area = "connectors"
+prompt = "The release draft on acme/widgets is ready; make it public."
+connectors = ["github:write"]
+skills = ["find-tools"]
+none = true
+
+[[scenario]]
+id = "linear-find-ticket"
+area = "connectors"
+prompt = "Find the tickets about 'login timeout' in our tracker and tell me who has them."
+connectors = ["github:read", "linear:read"]
+skills = ["find-tools"]
+expect_operations = ["linear.tickets.search"]
+must_not = ["github.issues.list"]

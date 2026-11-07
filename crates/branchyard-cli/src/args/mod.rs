@@ -135,6 +135,9 @@ pub struct TaskArgs {
     pub local: bool,
     /// From `--delegate[=DEPTH]`: levels of children the harness may create.
     pub delegate: Option<u32>,
+    /// From `--helpers`: the harnesses and profiles the envelope lets the
+    /// harness delegate to; empty is its own profile only.
+    pub helpers: Vec<String>,
     /// `--allow-delegation`: auto-allow the harness's own `by` delegation
     /// commands.
     pub allow_delegation: bool,
@@ -204,6 +207,14 @@ pub struct TaskArgs {
     /// `--no-preflight`: do not check, before the branch is created, that
     /// the harness is installed and not logged out; see `crate::preflight`.
     pub no_preflight: bool,
+}
+
+impl TaskArgs {
+    /// The delegation envelope for `--delegate DEPTH`, with the harnesses
+    /// `--helpers` allows (its own profile only without them).
+    pub fn envelope(&self, depth: u32) -> branchyard::Envelope {
+        branchyard::Envelope::depth(depth).harnesses(self.helpers.iter().cloned())
+    }
 }
 
 /// The variables behind [`Globals`], each also a `--flag`.

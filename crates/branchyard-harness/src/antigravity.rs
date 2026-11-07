@@ -144,6 +144,8 @@ impl Antigravity {
                         turn,
                         call_id: index.map(|i| i.to_string()).unwrap_or_default(),
                         name: name.to_owned(),
+                        // The stream names the tool and reports no input.
+                        target: None,
                     });
                 }
             }

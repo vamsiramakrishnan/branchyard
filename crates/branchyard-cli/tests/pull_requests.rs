@@ -356,6 +356,47 @@ fn an_issue_names_the_branch_prompts_it_and_closes_with_its_pull_request() {
 }
 
 #[test]
+fn issue_shows_what_run_would_start_from_and_starts_nothing() {
+    let repo = Repo::new();
+    repo.answer(
+        "issue.json",
+        &json!({
+            "number": 12,
+            "title": "Parser crash on empty input",
+            "body": "The parser panics on an empty file.",
+            "url": "https://github.com/acme/widgets/issues/12",
+            "labels": [{"name": "bug"}]
+        }),
+    );
+    let shown = repo.json(&["issue", "#12", "Keep the change small.", "--json"]);
+    assert_eq!(shown["issue"]["number"], 12);
+    assert_eq!(shown["issue"]["title"], "Parser crash on empty input");
+    assert_eq!(shown["branch"], "issue-12-parser-crash-on-empty-input");
+    let prompt = shown["prompt"].as_str().unwrap();
+    assert!(
+        prompt.starts_with("Resolve GitHub issue #12: Parser crash on empty input\n"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.ends_with("\nAdditional instructions:\nKeep the change small.\n"),
+        "{prompt}"
+    );
+    let text = repo.ok(repo.by(&["issue", "12"]));
+    assert!(
+        text.contains("github #12: Parser crash on empty input")
+            && text.contains("branch  issue-12-parser-crash-on-empty-input"),
+        "{text}"
+    );
+    // Nothing was started.
+    assert_eq!(repo.json(&["ls", "--json"]), json!([]));
+
+    // An issue gh cannot show is a failure with gh's reason, not a branch.
+    fs::remove_file(repo.gh.join("issue.json")).unwrap();
+    let out = repo.by(&["issue", "99"]);
+    assert!(!out.status.success());
+}
+
+#[test]
 fn watch_sends_ci_failures_and_review_comments_back_once_and_pushes_each_fix() {
     let repo = Repo::new();
     repo.ok(repo.by_agent(&[

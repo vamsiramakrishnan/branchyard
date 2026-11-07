@@ -460,6 +460,7 @@ _BY_CODE: dict[str, Callable[..., BranchyardError]] = {
     "no_plan": ConflictError,
     "stale_revision": StaleRevisionError,
     "checkpoint_unavailable": ConflictError,
+    "stale_candidate": ConflictError,
     "service_held": ConflictError,
     "invalid_candidate": ConflictError,
     "check_failed": CheckFailedError,
@@ -1639,9 +1640,14 @@ class Client:
         helpers: Optional[Sequence[str]] = None,
         max_helpers: Optional[int] = None,
         tools: Optional[Sequence[JSON]] = None,
+        issue: Optional[str] = None,
         key: Optional[str] = None,
     ) -> Operation:
         """Queue an isolated writer or reviewer using the existing harness.
+        `issue` starts it from an issue (a GitHub URL, `#N`, `linear:KEY`, ...):
+        the server fetches it with its own `gh` login and tracker credentials
+        and the prompt becomes the issue under a header, with `prompt` added
+        (it may be empty); see `workspace_issue()`.
         `connectors` (grants, beside a preset), `skills` (built-in skill IDs;
         unset stages all) and `helpers` (harness IDs it may delegate to, at
         most `max_helpers` at once) are the choices `session_tools()` offers;
@@ -1679,8 +1685,14 @@ class Client:
             artifacts=artifacts,
             candidate=candidate,
             tools=chosen,
+            issue=issue,
             key=key,
         )
+
+    def workspace_issue(self, workspace: str, ref: str) -> Record:
+        """`GET /v1/workspaces/{workspace}/issue?ref=REF`: the issue a session
+        would start from, without starting anything: `issue` and `branch`."""
+        return Record(self.get(self._workspace(workspace, "/issue"), **{"ref": ref}))
 
     def tools(self, workspace: Optional[str] = None) -> Record:
         """`GET /v1/tools`: every connector, skill and helper as the caller
@@ -1791,6 +1803,7 @@ class Client:
         candidate: Optional[str],
         tools: JSON,
         key: Optional[str],
+        issue: Optional[str] = None,
     ) -> Operation:
         """The body of `start_workspace_session`: the existing fields.
         Omitted policy retains the server's deny default. Sources and review
@@ -1819,6 +1832,7 @@ class Client:
                 "sources": list(sources) if sources is not None else None,
                 "artifacts": list(artifacts) if artifacts is not None else None,
                 "candidate": candidate,
+                "issue": issue,
                 **tools,
             },
             key,
@@ -2678,10 +2692,17 @@ class Repo:
         priority: Optional[int] = None,
         plan: bool = False,
         goal: Optional[JSON] = None,
+        issue: Optional[str] = None,
         key: Optional[str] = None,
         **extra: Any,
     ) -> Operation:
         """`POST .../tasks`: a branch running `prompt` (`docs/server.md#requests`).
+        `issue` starts it from an issue as `by run --issue` does (a GitHub URL,
+        `#N`, `linear:KEY`, a Linear, Jira or GitLab URL): the server fetches
+        it with its own `gh` login and tracker credentials, `prompt` is added
+        to the issue's text (and may be empty), and the branch is named after
+        it. Refused with `issue_unavailable` when it cannot be fetched; see
+        `issue()`.
         `connectors` is the branch's grant, in either form; a grant needs a
         private home, so `isolated` defaults to true when one is given.
         `budget_usd` is `budget.max_usd`. `delegation` is the envelope
@@ -2707,9 +2728,17 @@ class Repo:
             priority=priority,
             plan=plan,
             goal=goal,
+            **({"issue": issue} if issue is not None else {}),
             **extra,
         )
         return self.client._operation(f"{self._base}/tasks", body, key)
+
+    def issue(self, ref: str) -> Record:
+        """`GET .../issue?ref=REF`: the issue `run(issue=REF)` would start
+        from, without starting anything: `issue` (its `number`, `url`,
+        `title`, and for another tracker `tracker` and `key`) and the
+        `branch` name it would get. Raises when the server cannot fetch it."""
+        return Record(self.client.get(f"{self._base}/issue", **{"ref": ref}))
 
     # -- maps and task records ---------------------------------------------
 
@@ -3017,6 +3046,39 @@ class Repo:
     def diff(self, name: str) -> str:
         """The unified diff of `name`'s candidate against its base, as text; empty for a branch with no changes."""
         return str(self.client.get(self._branch(name, "/diff")).get("diff", ""))
+
+    def changes(self, name: str) -> Record:
+        """`Changes`: `name`'s candidate against its base, file by file: `base`, `commit` (none while it has no
+        candidate), `files` (each `path`, `status`, `additions`, `deletions`, `binary`, `truncated` and `hunks` of
+        numbered `lines`), the totals `additions` and `deletions`, and `omitted_files` and `truncated` when the answer
+        was bounded (`docs/server.md`, "Reviewing a branch's diff")."""
+        return Record(self.client.get(self._branch(name, "/changes")))
+
+    def reviews(self, name: str) -> Record:
+        """`Reviews`: the reviews sent to `name` by `by review` and the console, oldest first (`reviews`, each with
+        `id`, `at_ms`, `commit`, `note` and `comments`), and its `candidate` now. A comment carries `addressed_in`, the
+        candidate commit that changed its lines since it was sent, once one did."""
+        return Record(self.client.get(self._branch(name, "/reviews")))
+
+    def review(
+        self,
+        name: str,
+        comments: Sequence[JSON],
+        *,
+        note: Optional[str] = None,
+        commit: Optional[str] = None,
+        delivery: str = "next_turn",
+        key: Optional[str] = None,
+    ) -> Record:
+        """`POST .../reviews`: comments written on `name`'s diff, sent as one prompt that names each file, line and
+        the code quoted, as `by review` does. Each comment is `{"path", "line", "start_line"?, "side"?: "new"|"old",
+        "body"}` on lines the diff shows; `note` is an overall note; `commit` is the candidate the lines were read from
+        (`Repo.changes(...)["commit"]`), and a different candidate is refused (`stale_candidate`, a `ConflictError`).
+        `delivery` is `"next_turn"` (a send; the result's `operation` is its ID) or `"steer"` (into the running turn;
+        `not_running` when none runs). A repeat with the same `key` sends once. The result has `delivery`, `comments`,
+        `prompt` and `operation` or `steer`."""
+        body: JSON = {"comments": list(comments), "note": note, "commit": commit, "delivery": delivery}
+        return Record(self.client.post(self._branch(name, "/reviews"), _drop_none(body), key=key or new_key()))
 
     def inspect(self, branch: str) -> Inspection:
         """`branch` as a delegating parent sees it, grant included."""

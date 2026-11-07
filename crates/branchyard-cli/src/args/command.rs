@@ -458,6 +458,24 @@ pub enum Command {
         #[command(flatten)]
         pr: Checked<PrFlags>,
     },
+    /// Show the issue by run --issue would start from, and start nothing
+    ///
+    /// Fetches it as --issue does (gh for GitHub; Linear, Jira and GitLab through their API or
+    /// the connector gateway) and prints its title, URL, the branch name by run would give it
+    /// and the prompt it would send. The server runs this to resolve an issue for a task or a
+    /// session; see docs/pull-requests.md.
+    #[command(display_order = 111)]
+    Issue {
+        /// The issue: a GitHub URL, #N or N, linear:KEY, jira:KEY, gitlab:GROUP/PROJECT#N, or a
+        /// Linear, Jira or GitLab URL
+        reference: String,
+        /// Instructions to add to the prompt, as by run --issue REF "..." would
+        #[arg(default_value = "", hide_default_value = true)]
+        prompt: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List branches
     #[command(display_order = 200)]
     Ls {

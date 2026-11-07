@@ -963,7 +963,7 @@ details.advanced select { width: 100%; max-width: 360px; }
   .strip-title { flex-basis: 100%; flex-direction: column; gap: 0; }
   .strip h1 { white-space: normal; overflow-wrap: anywhere; font-size: 18px; }
   .strip .state { margin-right: auto; }
-  .strip-actions { padding-left: 0; border-left: 0; }
+  .strip-actions { padding-left: 0; border-left: 0; flex-wrap: wrap; }
   .strip { box-shadow: 0 4px 12px -8px rgba(var(--shade), .2); }
   .convo { padding: 20px 16px; gap: 28px; }
   .composer { width: auto; align-self: stretch; }
@@ -1516,3 +1516,6 @@ body.sheet-open { overflow: hidden; }
   .tool-action button { min-height: 44px; }
   .tool-about, .tool-name > .hint, .tool-name > .conn-flow { margin-left: 0; }
 }
+
+/* Start from an issue: the reference grows, the button stays. */
+#sf-issue { flex: 1 1 16rem; min-width: 0; }

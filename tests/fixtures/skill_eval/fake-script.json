@@ -1,0 +1,5 @@
+{
+  "docx-status-report": "SH {tools}/bin/tools search word document | head -3\nREAD {tools}/skills/docx/SKILL.md\nSH echo x > status.docx",
+  "xlsx-pivot": "SH {tools}/bin/tools search pivot table | head -3\nSH {tools}/bin/tools show google-sheets | head -3",
+  "none-write-text-file": "SH echo 'hello from the eval' > hello.txt"
+}

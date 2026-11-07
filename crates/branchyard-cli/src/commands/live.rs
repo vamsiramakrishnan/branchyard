@@ -160,8 +160,8 @@ impl Live {
             command: task.command.clone(),
             provider: provider(task)?,
             delegation: task.delegate.map(|depth| match task.no_wake {
-                true => Envelope::depth(depth).no_wake(),
-                false => Envelope::depth(depth),
+                true => task.envelope(depth).no_wake(),
+                false => task.envelope(depth),
             }),
             delegation_cli: exe,
             delegation_server: None,

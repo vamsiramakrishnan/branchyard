@@ -14,8 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use branchyard::{
-    Activity, BranchEvent, BranchInfo, Children, Envelope, EventPage, Inspection, Merged, Provider,
-    Sent,
+    Activity, BranchEvent, BranchInfo, Children, EventPage, Inspection, Merged, Provider, Sent,
 };
 use branchyard_client::api::{
     BudgetSpec, ErrorBody, FeedEntry, ForkRequest, GraphRequest, MapRequest, MergeRequest,
@@ -918,6 +917,7 @@ fn run_request(
     let provider = provider(task)?;
     let request = TaskRequest {
         prompt: prompt.to_owned(),
+        issue: None,
         harness: task.harness.clone(),
         harnesses: Vec::new(),
         name: task.name.clone(),
@@ -927,7 +927,7 @@ fn run_request(
         check: task.check.clone(),
         isolated: task.isolated,
         command: task.command.clone(),
-        delegation: task.delegate.map(Envelope::depth),
+        delegation: task.delegate.map(|depth| task.envelope(depth)),
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
@@ -1104,6 +1104,7 @@ fn fan_request(
     let provider = provider(task)?;
     let request = TaskRequest {
         prompt: prompt.to_owned(),
+        issue: None,
         harness: None,
         harnesses: harnesses.to_vec(),
         name: task.name.clone(),
@@ -1113,7 +1114,7 @@ fn fan_request(
         check: task.check.clone(),
         isolated: task.isolated,
         command: task.command.clone(),
-        delegation: task.delegate.map(Envelope::depth),
+        delegation: task.delegate.map(|depth| task.envelope(depth)),
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
@@ -1155,6 +1156,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
         retry_failed: args.retry_failed,
         task: TaskRequest {
             prompt: prompt.clone(),
+            issue: None,
             harness: task.harness.clone(),
             harnesses: Vec::new(),
             name: None,
@@ -1270,7 +1272,7 @@ fn send_request(
             policy,
             check: task.check.clone(),
             command: task.command.clone(),
-            delegation: task.delegate.map(Envelope::depth),
+            delegation: task.delegate.map(|depth| task.envelope(depth)),
             allow_delegation: task.allow_delegation,
             unapproved_tools: task.unapproved_tools,
             provision: provision(task)?,
@@ -1452,7 +1454,7 @@ fn fork_request(
         check: task.check.clone(),
         isolated: task.isolated,
         command: task.command.clone(),
-        delegation: task.delegate.map(Envelope::depth),
+        delegation: task.delegate.map(|depth| task.envelope(depth)),
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider,
@@ -1474,7 +1476,7 @@ pub fn reincarnate(env: &Env, remote: &Remote, branch: &str, task: &TaskArgs) ->
         check: task.check.clone(),
         isolated: task.isolated,
         command: task.command.clone(),
-        delegation: task.delegate.map(Envelope::depth),
+        delegation: task.delegate.map(|depth| task.envelope(depth)),
         allow_delegation: task.allow_delegation,
         unapproved_tools: task.unapproved_tools,
         provider: provider.clone(),
@@ -1675,6 +1677,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         .collect();
     let request = TaskRequest {
         prompt: prompt.to_owned(),
+        issue: None,
         harness: Some(root.harness.clone()),
         harnesses: Vec::new(),
         name: Some(args.name.clone().unwrap_or_else(|| root.name.clone())),

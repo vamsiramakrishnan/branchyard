@@ -7,7 +7,7 @@ use branchyard_harness::amp::Amp;
 use branchyard_harness::conformance::{decode, feed, Replay, Transcript};
 use branchyard_harness::{
     Driver, Event, NativeSession, Open, Opened, PermissionDecision, PermissionKey, Rejected,
-    SessionMode, TurnOutcome, Usage,
+    SessionMode, ToolTarget, TurnOutcome, Usage,
 };
 use serde_json::{json, Value};
 
@@ -127,8 +127,15 @@ fn replays_the_documented_tool_turn() {
     assert!(events.contains(&Event::ToolStarted {
         turn: 1,
         call_id: "toolu_019cyniPYrSgaJitUSMyxyNV".into(),
-        name: "read".into()
+        name: "read".into(),
+        // The recorded input is `{"path": "/Users/orb/project"}`, outside
+        // the session's `/workspace`: only its last component is kept.
+        target: ToolTarget::file("/Users/orb/project", "/workspace"),
     }));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::ToolStarted { target: Some(t), .. } if t.value == "project"
+    )));
     let accepted = events
         .iter()
         .filter(|e| matches!(e, Event::TurnAccepted { .. }))

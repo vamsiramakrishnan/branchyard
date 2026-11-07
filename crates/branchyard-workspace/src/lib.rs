@@ -46,4 +46,4 @@ pub use integrate::{
     CheckResult, Integrated, IntegratedMany, IntegrationError, MergedCandidate, MergedWorktree,
     Verified,
 };
-pub use repo::{Candidate, Commit, DiffStat, Repository, Workspace};
+pub use repo::{Candidate, Commit, DiffStat, Rebased, Repository, Workspace};

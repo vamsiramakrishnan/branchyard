@@ -12,7 +12,7 @@ Surfaces:
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 - **workspace manager MCP**: an external operator agent starts `by mcp manager --url URL --token-file FILE`, with optional `--ca-file FILE`. Its separate HTTP credential reaches the same authorized project, workspace, session, artifact, lifecycle and operation actions as the console. It refuses managed harness turns and never adds account authority to the delegation tools. See [workspace management](workspace-management.md).
 
-The server registers <!-- fact:http.route_count -->145<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->149<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
 
 The external manager bounds each tool's text and structured JSON payload to
 32 KiB. Larger responses return an explicit error with small identifiers and
@@ -98,7 +98,7 @@ their private-home credential choices, and leaves workload readiness unverified.
 | `isolated` | yes | `--isolated` | yes | yes | yes | inherited |
 | `command` | yes | `--command` | server opt-in `--allow-client-commands` | same | same | inherited for the same harness |
 | Provider: Microsandbox, Substrate, Container, Agent Sandbox | `TaskOptions::provider` | `--provider` | server admission and operator presets; `pass_env` and connection credentials are the server's | `provider`, or an approved execution `preset` | yes | inherited; a sandboxed turn gets no tools |
-| Delegation envelope | `TaskOptions::delegation` | `--delegate` | server opt-in `--allow-delegation` | `delegation` | yes | a child gets a narrower one |
+| Delegation envelope | `TaskOptions::delegation` | `--delegate [DEPTH]`, with `--helpers ID,ID` for the harnesses children may run (the envelope's `harnesses`; the harness's own profile only without it) | server opt-in `--allow-delegation` | `delegation` (its `harnesses` list is the same) | yes | a child gets a narrower one |
 | Rig seats ([rigs](rigs.md)) | `TaskOptions::seats` | `rig run` | server opt-in `--allow-delegation`; each seat's provisioning under the same rules as provisioning below | `seats`, on task requests only | yes | a child gets the seats below its own |
 | Allow delegation commands | `Policy::allow_delegation_commands` | `--allow-delegation` | server opt-in `--allow-delegation` | `allow_delegation` | yes | inherited |
 | Unapproved tools | `TaskOptions::unapproved_tools` | `--allow-unapproved-tools` | server opt-in `--allow-unapproved-tools` | `unapproved_tools` | yes | inherited |
@@ -343,7 +343,9 @@ GitHub is reached through the user's `gh`, which runs where the repository and i
 
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
-| Start from an issue | no: pass the prompt; `slug` names the branch | `run`, `fan`, `spawn` `--issue URL\|#N\|N` | yes: `gh` runs on the client, the server gets the prompt (the link is its header; no `issue_linked` event) | n/a | n/a | `spawn --issue`, with the harness's own `gh` login; the link is the prompt's header |
+| Start from an issue | no: pass the prompt; `slug` names the branch | `run`, `fan`, `spawn` `--issue URL\|#N\|N`; `issue REF` shows what it would start from | yes: `gh` runs on the client, the server gets the prompt (the link is its header; no `issue_linked` event); or `TaskRequest.issue`, which the server resolves with its own credentials | `POST .../tasks` with `issue`; `GET /v1/repos/{repo}/issue?ref=`; `POST /v1/workspaces/{id}/sessions` with `issue`; `GET /v1/workspaces/{id}/issue?ref=` | `Repo::issue`, `Client::workspace_issue`; Python `task(issue=)`, `issue()`, `start_workspace_session(issue=)`, `workspace_issue()` | `spawn --issue`, with the harness's own `gh` login; the link is the prompt's header |
+| Stack a branch on another's candidate | `run`'s `base` is a revision; `Branch::record_pull_request(Stacked)` records it | `run`, `fan` `--base BRANCH` (a branch name stacks) | no: the server's `base` is a revision | n/a | n/a | no |
+| Rebase a stacked branch after its parent merged | `Branch::restack` (`branchyard-workspace`'s `Workspace::rebase_onto`) | inside `pr` and `pr --watch` | no: `pr` is local only | no | no | no |
 | Check the candidate alone | `Branch::verify_candidate` | inside `pr` | no: `pr` is local only | no | no | no |
 | Push the candidate | `Branch::push_candidate` | inside `pr` | no: the server's repository has its own remote and credentials; not built | no | no | no |
 | Open or update a pull request | no: the CLI's, through `gh` | `pr` | no, `unsupported` | no | no | no: `by pr` refuses inside a harness, since it pushes with the user's credentials |
@@ -354,8 +356,8 @@ GitHub is reached through the user's `gh`, which runs where the repository and i
 
 | Surface | Before | Now |
 |---|---|---|
-| `Activity` | no pull-request steps | `pull_request` (`PullRequestActivity`, tagged by `kind`: `issue_linked`, `checked`, `pushed`, `opened`, `updated`, `observed`, `feedback_delivered`, `feedback_undelivered`, `watch_stopped`); `schema/contract.json` regenerated |
-| `by show --json` | the branch | the branch and `merge_readiness` (`null` without pull-request steps) |
+| `Activity` | no pull-request steps | `pull_request` (`PullRequestActivity`, tagged by `kind`: `issue_linked`, `checked`, `pushed`, `opened`, `updated`, `observed`, `feedback_delivered`, `feedback_undelivered`, `watch_stopped`, and for stacks `stacked`, `restacked`, `restack_blocked`); `schema/contract.json` regenerated |
+| `by show --json` | the branch | the branch and `merge_readiness` (`null` without pull-request steps), and `stack` for a branch in a stack |
 | `by run`, `fan`, `spawn` | a prompt was required | optional with `--issue`; `Usage: by run [OPTIONS] [PROMPT]` |
 | `Repository::verify`, `Repository::push` (`branchyard-workspace`) | none | a check on one commit in a temporary worktree; a push of one commit to a remote branch, without hooks or a terminal prompt |
 
@@ -502,7 +504,9 @@ A person connects accounts and chooses, per session, its connectors, skills and 
 | `GET/PUT /v1/me/policy` (`PolicyRecord`, `self:<tenant>:<subject>`) | none | a person narrows their own tools, never beyond the administrator's policy ([tool policy](server.md#tool-policy)); the Tools page's Mine column; `Client::my_policy`, `put_my_policy`; Python `my_policy()`, `put_my_policy()` |
 | `POST/GET /v1/tools/helpers/{id}/install` (`HelperInstall`), `harness_install` | `by harnesses install ID` on the machine | an administrator installs a helper's harness on the server's host from the console, closed until `harness_install.allow` ([install a helper's harness](server.md#install-a-helpers-harness)); `Client::install_helper`, `helper_install`; Python `install_helper()`, `helper_install()` |
 | `helpers/INDEX.md` in the tool tree | none | a turn with helpers lists the harnesses it may delegate to and its limits; `tools search --kind helper` ([tools-model](tools-model.md#3-context-a-mounted-tool-tree-searched-not-pasted)) |
-| `Provisioning::skills`, `branchyard_provision::built_in` | every built-in skill staged | only the chosen built-in skills and what they need, with indexes listing only those; `provision.skills` over HTTP; refused when unknown |
+| `bin/tools search --plain`, `--kind reference`, `bin/tools show SKILL/references/FILE.md` in the tool tree | a skill's `references/` were not searched; `tools show` printed a whole skill | each `references/*.md` of a staged skill is a document of its own, found and shown alone; a chosen tool scores 1.5 times an unchosen one unless `--plain`; frontmatter `keywords` are indexed ([tools-model](tools-model.md#3-context-a-mounted-tool-tree-searched-not-pasted)); `python3 tools/skill_eval.py rank` measures the ranking without a model ([skill-eval](skill-eval.md#ranking-without-a-model)) |
+| `Provisioning::skills`, `branchyard_provision::built_in` | every built-in skill staged | only the chosen built-in skills and what they need, with indexes listing only those; `--skill NAME` (repeatable) on `run`, `fan`, `map`, `send`, `fork` and `reincarnate`; `provision.skills` over HTTP and `by --remote`; refused when unknown, with the built-in skills listed |
+| `Event::ToolStarted::target` (`ToolTarget`, `TargetKind`) | `tool_started` named the tool and not its input | an optional bounded, scrubbed `target` (`file`, `command`, `mcp` or `skill`) for harnesses that report the call's input ([harness integration](harness-integration.md#tool-call-targets)); in `by log`, `by log --json`, the event pages and stream, and `schema/contract.json`; absent for a harness that reports no input and in older logs; the timeline stays free of it |
 
 ## Added with the ports
 
@@ -511,6 +515,7 @@ Ports from emdash and Orca ([roadmap](roadmap.md), Wave 1). The review and catal
 | Operation | SDK | by | by --remote | HTTP | client | delegation |
 |---|---|---|---|---|---|---|
 | Comment on a diff and send the comments as one prompt | no: `Branch::diff` and `send`; the editor and format are the CLI's | `review [--print] [--file F] [--detach]` | yes: the diff comes from the server, the editor runs here, the prompt is a `send` | `GET` the diff, then a send | `diff`, then a send | no: `by review` refuses inside a harness (it needs a person and an editor); send a prompt with `by send` |
+| Comment on a diff in the console and send the comments as one prompt, with the code they quote | `Branch::changes`, `Branch::reviews`, `review_prompt`, `check_review` | no: `by review` is the editor's form of the same | yes (the console is a browser page) | `GET …/branches/{b}/changes` (`Changes`), `GET …/branches/{b}/reviews` (`Reviews`), `POST …/branches/{b}/reviews` (`ReviewRequest`, `ReviewSent`) | `Repo::changes`, `reviews`, `review`; Python `Repo.changes`, `reviews`, `review` | no: a person reviews |
 | Run a local turn detached from the terminal | no: the CLI starts itself again in its own process group | `run`, `send`, `fork` with `--detach [--json]`: returns once the turn has started, prints the branch, its log under `.branchyard/detached/` and `log -f`/`watch`/`wait`/`cancel` to follow it (`run --json` and `fork --json` without `--detach` wait for the turn, activity on stderr, and print what `show --json` prints); `--ask` is a usage error, and an `ask` from the configuration, `--prompt-file -` and a call inside a harness are refused; `fan` has none | no: refused, since a server's turn already outlives the command | no | no | no: inside a harness, `spawn` and `send` already return |
 | Answer and resolve the review threads a push addressed | `PullRequestActivity::ThreadsResolved` records it | inside `pr --watch` (`--no-resolve` to leave them) | no: `pr` is local only | no | no | no |
 | Harness CLIs Branchyard knows of | `branchyard_controls::catalog::harnesses` | `harnesses --all [--json]` | yes: the catalog is built in; profiles are listed, `PATH` is not checked | no | no | the `by` command |

@@ -1,0 +1,9 @@
+{
+  "harness": "claude-code",
+  "model": "m",
+  "checks": {
+    "files": {
+      "status.docx": true
+    }
+  }
+}

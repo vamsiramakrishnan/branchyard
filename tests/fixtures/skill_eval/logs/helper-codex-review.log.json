@@ -1,0 +1,111 @@
+[
+  {
+    "activity": "lifecycle",
+    "state": "started",
+    "reason": null,
+    "idle_since_ms": null,
+    "at_ms": 900
+  },
+  {
+    "activity": "prompt",
+    "text": "p",
+    "at_ms": 1000
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "ready"
+    },
+    "at_ms": 1010
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_accepted",
+      "turn": 1,
+      "native": null
+    },
+    "at_ms": 1020
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1100",
+      "name": "Read"
+    },
+    "at_ms": 1100
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k1101",
+      "tool": "Read",
+      "input": {
+        "file_path": "/home/u/.branchyard/tools/helpers/INDEX.md"
+      }
+    },
+    "at_ms": 1101
+  },
+  {
+    "activity": "decision",
+    "tool": "Read",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 1102
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1200",
+      "name": "Bash"
+    },
+    "at_ms": 1200
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k1201",
+      "tool": "Bash",
+      "input": {
+        "command": "by spawn review --harness codex 'review parser.py'"
+      }
+    },
+    "at_ms": 1201
+  },
+  {
+    "activity": "decision",
+    "tool": "Bash",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 1202
+  },
+  {
+    "activity": "delegation",
+    "tool": "spawn",
+    "branch": "review",
+    "outcome": "started",
+    "refused": false,
+    "at_ms": 1300
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_ended",
+      "turn": 1,
+      "outcome": {
+        "kind": "completed"
+      }
+    },
+    "at_ms": 3000
+  }
+]

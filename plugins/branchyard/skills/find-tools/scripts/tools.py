@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
-"""Find a skill, a connector operation or a helper in this turn's tool tree.
+"""Find a skill, one of its references, a connector operation or a helper in this turn's tool tree.
 
-    tools search WORDS...      rank everything in the tree against the words (BM25)
-    tools show ID              print one skill, connector, operation or helper
-    tools schema CONNECTOR.OP  print one operation's input schema
+    tools search WORDS... [--plain]   rank everything in the tree against the words (BM25)
+    tools show ID                     print one skill, reference, connector, operation or helper
+    tools schema CONNECTOR.OP         print one operation's input schema
 
 The tree is the directory this script's `bin/` sits in: `INDEX.md`, `skills/`,
 `connectors/` and, when helpers were chosen, `helpers/INDEX.md`. Pass `--root DIR`
 or set BRANCHYARD_TOOLS_DIR (or BRANCHYARD_TOOLS, which a sandbox sets to /tools) to read
 another. Standard library only.
+
+Every document is built from the tree when a command runs; nothing is written beside a skill.
+A skill is one document (its id, frontmatter `keywords`, its description and its headings,
+weighted as FIELD_WEIGHTS says) and each of its `references/*.md` is another (the skill's and the
+file's name, its first heading, the content words of its body), so a search can land on one
+reference without the skill. A reference adds nothing to the corpus statistics, so the references
+a tree carries never reorder the tools among themselves. Ids are
+`[kind:][source:]name[/references/FILE.md]`: `pptx`, `repository:tone`,
+`pptx/references/layouts.md`, `skill:pptx`. A tool `INDEX.md` lists (chosen for the turn) scores
+CHOSEN times one it does not, and a reference is scored on its words alone; `--plain` ranks by
+BM25 alone.
 
 A connector package with a `search.json` (Anvil's operation search index, which `anvil
 package harness` writes; docs/anvil-contract-v2.md item 3) is read from it, and strictly: a malformed one is refused
@@ -35,6 +46,79 @@ from typing import Any, NamedTuple
 K1 = 1.5
 B = 0.75
 SNIPPET = 110
+#: How many times each field of a skill or reference document counts (docs/skill-registry.md, section 3;
+#: docs/skill-eval.md records the measurements behind the numbers). A connector, operation or helper
+#: document has its id (counted as `id`) and one `text`.
+FIELD_WEIGHTS = {"id": 4, "keywords": 3, "description": 1, "headings": 1, "title": 1, "body": 1}
+#: The score of a chosen tool (a skill or connector `INDEX.md` lists, the connector's operations, or a
+#: helper) is multiplied by this unless `--plain`; a reference is scored on its words alone.
+CHOSEN = 1.5
+#: The most characters of a document's first paragraph that are shown as its summary.
+SUMMARY_CAP = 600
+#: English function words left out of a reference's indexed body, so a paragraph is found by what it
+#: says. A skill's own document (its id, description and headings) is indexed whole, as before.
+STOPWORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "can",
+        "do",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "our",
+        "so",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "up",
+        "us",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    ]
+)
+REFERENCES = "references"
+KINDS = ("skill", "reference", "connector", "operation", "helper")
 OP_ID = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+")
 HEADING_OP = re.compile(r"^#{2,5}\s+`?(" + OP_ID.pattern + r")`?\s*(?:[-:—]\s*(.*))?$")
 TABLE_OP = re.compile(r"^\|\s*`?(" + OP_ID.pattern + r")`?\s*\|\s*([^|]*)\|")
@@ -72,7 +156,12 @@ class SearchIndexError(Exception):
 
 
 class Doc(NamedTuple):
-    """One thing that can be found: its kind, id, one-line description and where it lives."""
+    """One thing that can be found: its kind, id, one-line description and where it lives.
+
+    `fields` are the weighted fields of a skill or reference document, `(name, text)` with
+    the names of FIELD_WEIGHTS; a document without them is ranked on its id and `text`.
+    `skill` is the skill a skill or reference document belongs to.
+    """
 
     kind: str
     id: str
@@ -81,6 +170,8 @@ class Doc(NamedTuple):
     text: str
     connector: str = ""
     op: str = ""
+    fields: tuple[tuple[str, str], ...] = ()
+    skill: str = ""
 
 
 def read(path: Path) -> str:
@@ -92,7 +183,11 @@ def read(path: Path) -> str:
 
 
 def frontmatter(text: str) -> dict[str, str]:
-    """`name` and `description` from a SKILL.md's leading YAML block (plain, quoted or folded)."""
+    """`name`, `description` and `keywords` from a SKILL.md's leading YAML block.
+
+    Values may be plain, quoted or folded; `keywords` may be a flow list (`[a, b]`), a block
+    list (`- a` lines) or words, and comes back as one space-separated string.
+    """
     lines = text.lstrip("﻿").split("\n")
     if not lines or lines[0].strip() != "---":
         return {}
@@ -112,15 +207,57 @@ def frontmatter(text: str) -> dict[str, str]:
             elif value in (">", "|", ">-", "|-"):
                 value = ""
             found[key] = str(value)
-        elif key and line.startswith(" ") and line.strip():
-            found[key] = (found.get(key, "") + " " + line.strip()).strip()
-    return {k: " ".join(v.split()) for k, v in found.items() if k in ("name", "description")}
+        elif key and (line.startswith(" ") or line.startswith("- ")) and line.strip():
+            found[key] = (found.get(key, "") + " " + line.strip().removeprefix("- ")).strip()
+    out = {k: " ".join(v.split()) for k, v in found.items() if k in ("name", "description", "keywords")}
+    if "keywords" in out:
+        out["keywords"] = " ".join(re.findall(r"[A-Za-z0-9_-]+", out["keywords"]))
+    return out
+
+
+def body_of(text: str) -> str:
+    """The markdown after a leading frontmatter block, or the whole text without one."""
+    text = text.lstrip("﻿")
+    if text.startswith("---\n") and "\n---\n" in text:
+        return text.split("\n---\n", 1)[1]
+    return text
 
 
 def headings(text: str) -> str:
     """The markdown headings of a body, which name what a skill covers."""
-    body = text.split("\n---\n", 1)[1] if text.startswith("---\n") and "\n---\n" in text else text
-    return " ".join(line.lstrip("# ").strip() for line in body.split("\n") if line.startswith("#"))
+    return " ".join(line.lstrip("# ").strip() for line in body_of(text).split("\n") if line.startswith("#"))
+
+
+def title_of(text: str, fallback: str) -> str:
+    """The first heading of a document, or `fallback` (a file stem, read as words) without one."""
+    for line in body_of(text).split("\n"):
+        if line.startswith("#"):
+            return line.lstrip("# ").strip()
+    return fallback.replace("-", " ").replace("_", " ")
+
+
+def summary_of(text: str) -> str:
+    """The first paragraph after the title: prose, not a heading, list, table, rule or code fence."""
+    paragraph: list[str] = []
+    for line in [*body_of(text).split("\n"), ""]:
+        stripped = line.strip()
+        if stripped and not paragraph and (stripped[0] in "#-*|>`" or re.match(r"\d+\.\s", stripped)):
+            continue
+        if stripped:
+            paragraph.append(stripped)
+        elif paragraph:
+            break
+    summary = " ".join(paragraph)
+    return summary if len(summary) <= SUMMARY_CAP else summary[: SUMMARY_CAP - 3].rstrip() + "..."
+
+
+def content_words(text: str) -> str:
+    """The words of a reference's body worth indexing: what it says, without code fences, link targets,
+    the lines that only cite where the text came from (`Source:`, `License:`) and STOPWORDS."""
+    body = re.sub(r"```.*?```", " ", body_of(text), flags=re.S)
+    body = "\n".join(line for line in body.split("\n") if not line.startswith(("Source:", "License:")))
+    body = re.sub(r"\(https?://[^)\s]*\)|https?://\S+", " ", body)
+    return " ".join(word for word in tokens(body) if word not in STOPWORDS)
 
 
 def load_json(path: Path) -> Any:
@@ -151,9 +288,46 @@ def skill_docs(root: Path) -> list[Doc]:
             text = read(directory_ / "SKILL.md")
             meta = frontmatter(text)
             description = meta.get("description", "")
-            docs.append(
-                Doc("skill", label, description, directory_ / "SKILL.md", f"{label} {description} {headings(text)}")
+            name = meta.get("name") or directory_.name
+            fields = (
+                ("id", label),
+                ("keywords", meta.get("keywords", "")),
+                ("description", description),
+                ("headings", headings(text)),
             )
+            docs.append(
+                Doc(
+                    "skill",
+                    label,
+                    description,
+                    directory_ / "SKILL.md",
+                    f"{label} {description} {headings(text)}",
+                    fields=fields,
+                    skill=label,
+                )
+            )
+            docs.extend(reference_docs(directory_, label, name))
+    return docs
+
+
+def reference_docs(skill_dir: Path, label: str, name: str) -> list[Doc]:
+    """One document per `references/*.md` of a skill: `LABEL/references/FILE.md`, indexed by the skill's name
+    and the file's, its first heading and the content words of its body; shown with its first paragraph."""
+    base = skill_dir / REFERENCES
+    if not base.is_dir():
+        return []
+    docs: list[Doc] = []
+    for file in sorted(base.glob("*.md")):
+        if not file.is_file():
+            continue
+        text = read(file)
+        title = title_of(text, file.stem)
+        # A reference that carries frontmatter (a vendored skill) says what it is for there.
+        summary = frontmatter(text).get("description") or summary_of(text)
+        ident = f"{label}/{REFERENCES}/{file.name}"
+        fields = (("id", f"{name} {file.stem}"), ("title", title), ("body", content_words(text)))
+        description = f"{title}. {summary}" if summary else title
+        docs.append(Doc("reference", ident, description, file, f"{title} {summary}", fields=fields, skill=label))
     return docs
 
 
@@ -416,12 +590,56 @@ def tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def rank(docs: list[Doc], words: list[str]) -> list[tuple[float, Doc]]:
-    """BM25 of the words against each document's id (counted three times) and text."""
-    corpus = [tokens(d.id) * 3 + tokens(d.text) for d in docs]
+def bag(doc: Doc) -> list[str]:
+    """A document's terms, each field repeated FIELD_WEIGHTS times; without fields, the id (less once, since
+    the text opens with it) and the text."""
+    if not doc.fields:
+        return tokens(doc.id) * (FIELD_WEIGHTS["id"] - 1) + tokens(doc.text)
+    out: list[str] = []
+    for name, text in doc.fields:
+        out += tokens(text) * FIELD_WEIGHTS.get(name, 1)
+    return out
+
+
+def chosen_tools(root: Path) -> frozenset[str]:
+    """The skills and connectors `INDEX.md` lists: what was chosen for the turn. Behind an overflow line
+    (`- ...N more`) the list is cut, not the choice, so every tool in the tree counts as chosen (`*`)."""
+    listed: set[str] = set()
+    inside = False
+    for line in read(root / "INDEX.md").split("\n"):
+        if line.startswith("## "):
+            inside = line.startswith("## Skills") or line.startswith("## Connectors")
+            continue
+        if inside and line.startswith("- "):
+            name = line[2:].split(":", 1)[0].strip()
+            if name.startswith("..."):
+                return frozenset({"*"})
+            listed.add(name)
+    return frozenset(listed)
+
+
+def is_chosen(doc: Doc, chosen: frozenset[str]) -> bool:
+    """A skill, a connector and its operations, when `INDEX.md` lists the tool; a helper always; never a
+    reference, which is scored on its words alone so a tool of equal match is read first."""
+    if doc.kind == "reference":
+        return False
+    if doc.kind == "helper" or "*" in chosen:
+        return True
+    return (doc.connector or doc.id) in chosen
+
+
+def rank(docs: list[Doc], words: list[str], chosen: frozenset[str] = frozenset()) -> list[tuple[float, Doc]]:
+    """BM25 of the words against each document's weighted fields; a chosen tool's score times CHOSEN.
+
+    The corpus statistics (term rarity, average length) are those of the tools: skills, connectors,
+    operations and helpers. A reference is scored against them and adds nothing to them, so the
+    references a tree carries never reorder the tools among themselves.
+    """
+    corpus = [bag(d) for d in docs]
+    tools = [terms for doc, terms in zip(docs, corpus, strict=True) if doc.kind != "reference"] or corpus
     if not corpus:
         return []
-    average = sum(len(c) for c in corpus) / len(corpus) or 1.0
+    average = sum(len(c) for c in tools) / len(tools) or 1.0
     query = list(dict.fromkeys(tokens(" ".join(words))))
     scored = []
     for doc, terms in zip(docs, corpus, strict=True):
@@ -430,10 +648,12 @@ def rank(docs: list[Doc], words: list[str]) -> list[tuple[float, Doc]]:
             frequency = terms.count(word)
             if not frequency:
                 continue
-            holding = sum(1 for c in corpus if word in c)
-            idf = math.log(1 + (len(corpus) - holding + 0.5) / (holding + 0.5))
+            holding = sum(1 for c in tools if word in c)
+            idf = math.log(1 + (len(tools) - holding + 0.5) / (holding + 0.5))
             score += idf * frequency * (K1 + 1) / (frequency + K1 * (1 - B + B * len(terms) / average))
         if score > 0:
+            if chosen and is_chosen(doc, chosen):
+                score *= CHOSEN
             scored.append((score, doc))
     scored.sort(key=lambda pair: (-pair[0], pair[1].kind, pair[1].id))
     return scored
@@ -453,13 +673,13 @@ def report(refused: list[str]) -> int:
     return 3 if refused else 0
 
 
-def search(root: Path, words: list[str], limit: int, kind: str | None) -> int:
+def search(root: Path, words: list[str], limit: int, kind: str | None, plain: bool = False) -> int:
     refused: list[str] = []
     docs = [d for d in documents(root, refused) if kind in (None, d.kind)]
     if not docs:
         print(f"nothing to search: {root} holds no skills, connectors or helpers", file=sys.stderr)
         return report(refused) or 1
-    hits = rank(docs, words)[:limit]
+    hits = rank(docs, words, frozenset() if plain else chosen_tools(root))[:limit]
     if not hits:
         print(f"no tool matches {' '.join(words)!r}; read {root / 'INDEX.md'} for the whole list", file=sys.stderr)
         return report(refused) or 1
@@ -469,10 +689,13 @@ def search(root: Path, words: list[str], limit: int, kind: str | None) -> int:
 
 
 def find(docs: list[Doc], ident: str) -> Doc | None:
+    """The document an id names: `[kind:][source:]name[/references/FILE.md]`, or CONNECTOR.OP, or OP alone."""
     kind, _, rest = ident.partition(":")
-    if rest and kind in ("skill", "connector", "operation", "helper"):
+    if rest and kind in KINDS:
+        if kind == "skill" and f"/{REFERENCES}/" in rest:
+            kind = "reference"  # `skill:pptx/references/layouts.md` is the skill's reference
         return next((d for d in docs if d.kind == kind and d.id == rest), None)
-    for wanted in ("skill", "connector", "operation", "helper"):
+    for wanted in KINDS:
         for doc in docs:
             if doc.kind == wanted and doc.id == ident:
                 return doc
@@ -490,7 +713,7 @@ def show(root: Path, ident: str) -> int:
         hint = f"; closest: {', '.join(near)}" if near else ""
         print(f"no tool {ident!r} here{hint}", file=sys.stderr)
         return report(refused) or 1
-    if doc.kind == "skill" and doc.path is not None:
+    if doc.kind in ("skill", "reference") and doc.path is not None:
         print(f"# {doc.path}\n")
         print(read(doc.path).rstrip())
     elif doc.kind == "connector":
@@ -571,11 +794,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tools", description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--root", help="the tool tree (default: the directory above this script's bin/)")
     sub = parser.add_subparsers(dest="command", required=True)
-    finder = sub.add_parser("search", help="rank skills, connector operations and helpers against WORDS")
+    finder = sub.add_parser("search", help="rank skills, their references, connector operations and helpers")
     finder.add_argument("words", nargs="+")
     finder.add_argument("--limit", type=int, default=8)
-    finder.add_argument("--kind", choices=["skill", "connector", "operation", "helper"])
-    shower = sub.add_parser("show", help="print one tool: a skill, a connector, CONNECTOR.OP or a helper")
+    finder.add_argument("--kind", choices=list(KINDS))
+    finder.add_argument("--plain", action="store_true", help="BM25 alone: no extra weight for a chosen tool")
+    shower = sub.add_parser("show", help="print one tool: a skill, SKILL/references/FILE.md, a connector, CONNECTOR.OP")
     shower.add_argument("id")
     schemer = sub.add_parser("schema", help="print one operation's input schema")
     schemer.add_argument("operation", metavar="CONNECTOR.OP")
@@ -583,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:
     chosen = args.root or os.environ.get("BRANCHYARD_TOOLS_DIR") or os.environ.get("BRANCHYARD_TOOLS")
     root = Path(chosen) if chosen else Path(__file__).resolve().parent.parent
     if args.command == "search":
-        return search(root, args.words, max(1, args.limit), args.kind)
+        return search(root, args.words, max(1, args.limit), args.kind, args.plain)
     if args.command == "show":
         return show(root, args.id)
     return schema(root, args.operation)

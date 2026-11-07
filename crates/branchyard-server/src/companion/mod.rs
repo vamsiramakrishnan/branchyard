@@ -106,6 +106,16 @@ const ASSETS: &[(&str, &str, &str)] = &[
         include_str!("assets/trajectory.css"),
     ),
     (
+        "changes.js",
+        "text/javascript; charset=utf-8",
+        include_str!("assets/changes.js"),
+    ),
+    (
+        "changes.css",
+        "text/css; charset=utf-8",
+        include_str!("assets/changes.css"),
+    ),
+    (
         "sw.js",
         "text/javascript; charset=utf-8",
         include_str!("assets/sw.js"),
@@ -818,6 +828,8 @@ mod tests {
             "artifact-preview.css",
             "trajectory.js",
             "trajectory.css",
+            "changes.js",
+            "changes.css",
         ] {
             assert!(named(file), "{file} is not served");
             assert!(

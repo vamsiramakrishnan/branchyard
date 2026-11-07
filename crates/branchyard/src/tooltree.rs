@@ -10,8 +10,11 @@
 //!   bin/tools     the find-tools skill's script: `search`, `show`, `schema`
 //!   skills        link to ../capabilities, where the skills are staged
 //!   connectors    link to ../connectors, where Anvil's packages are placed
-//!   helpers/INDEX.md  only for a turn that may delegate: one line per
-//!                 harness it may hand work to, and the envelope
+//!   helpers/INDEX.md  only for a turn that may delegate: the envelope, one
+//!                 line per delegate-skill reference, one per harness it may
+//!                 hand work to
+//!   helpers/delegate/references/NAME.md  those references, which `tools
+//!                 search` finds and the delegate skill's table names
 //! ```
 //!
 //! Nothing is copied twice: the links point at the directories
@@ -37,6 +40,9 @@ pub(crate) const DIRECTORY: &str = ".branchyard/tools";
 pub(crate) const INDEX_BUDGET: usize = 4096;
 /// The most bytes `helpers/INDEX.md` takes.
 pub(crate) const HELPERS_BUDGET: usize = 2048;
+/// Where the delegate skill's reference files sit below the tree, for a
+/// turn with helpers: `helpers/delegate/references/NAME.md`.
+const DELEGATE_REFERENCES: &str = "helpers/delegate/references";
 /// The most characters of the one line given to the harness.
 pub(crate) const LINE_BUDGET: usize = 300;
 /// The skill that carries the script, and the script's path in it.
@@ -113,6 +119,16 @@ pub(crate) fn mount(
             None => Edit::Remove,
         },
     );
+    for (name, text) in delegate_references() {
+        plan.edit(
+            &format!("{DIRECTORY}/{DELEGATE_REFERENCES}/{name}.md"),
+            false,
+            match helpers {
+                Some(_) => Edit::Put(text.into()),
+                None => Edit::Remove,
+            },
+        );
+    }
     let script_path = format!("{DIRECTORY}/bin/tools");
     plan.edit(&script_path, false, Edit::Put(script.into()));
     let applied =
@@ -305,8 +321,21 @@ fn index_with(
     text
 }
 
-/// `helpers/INDEX.md`: the envelope's limits, then one `- id: description`
-/// line for each harness it lets the turn delegate to. The catalog records
+/// The delegate skill's reference files, as `(name without .md, text)`: what
+/// a turn that may delegate reads on demand instead of being given them.
+fn delegate_references() -> Vec<(&'static str, &'static str)> {
+    crate::projection::references()
+        .into_iter()
+        .filter_map(|(path, text)| {
+            let name = path.strip_prefix("references/")?.strip_suffix(".md")?;
+            Some((name, text))
+        })
+        .collect()
+}
+
+/// `helpers/INDEX.md`: the envelope's limits, then one line for each of the
+/// pointer to the delegate skill's reference files, then one
+/// `- id: description` line for each harness it lets the turn delegate to. The catalog records
 /// a harness's name and models, not what it is best at, so a line says what
 /// it is and which models it takes. Small by construction: lines past
 /// [`HELPERS_BUDGET`] are replaced by a count.
@@ -327,6 +356,10 @@ fn render_helpers(envelope: &crate::Envelope) -> String {
         } else {
             "levels"
         },
+    ));
+    text.push_str(&format!(
+        "The delegate skill's details are files in this tree: `{DELEGATE_REFERENCES}/NAME.md`, \
+         named in the skill's table.\n\n"
     ));
     if envelope.harnesses.is_empty() {
         text.push_str("Helpers run your own harness; no other is allowed.\n");
@@ -828,6 +861,43 @@ mod tests {
             !tree.join("helpers/INDEX.md").exists(),
             "the next turn is a leaf"
         );
+    }
+
+    #[test]
+    fn a_turn_with_helpers_gets_the_delegate_references_and_a_leaf_does_not() {
+        let host = tempfile::tempdir().unwrap();
+        let skills = staged(host.path());
+        let grant = envelope(&["codex"], 2, 1);
+        mount(
+            host.path(),
+            Path::new("/g"),
+            &skills,
+            &[],
+            Some(&grant),
+            None,
+        )
+        .unwrap();
+        let tree = host.path().join(DIRECTORY);
+        let references = delegate_references();
+        assert!(references.len() >= 10, "{}", references.len());
+        let index = std::fs::read_to_string(tree.join("helpers/INDEX.md")).unwrap();
+        assert!(index.len() <= HELPERS_BUDGET, "{}", index.len());
+        assert!(
+            index.contains("helpers/delegate/references/NAME.md"),
+            "{index}"
+        );
+        for (name, text) in &references {
+            let staged = tree.join(DELEGATE_REFERENCES).join(format!("{name}.md"));
+            assert_eq!(std::fs::read_to_string(&staged).unwrap(), *text, "{name}");
+        }
+        // A leaf's next turn drops them.
+        mount(host.path(), Path::new("/g"), &skills, &[], None, None).unwrap();
+        for (name, _) in references {
+            assert!(!tree
+                .join(DELEGATE_REFERENCES)
+                .join(format!("{name}.md"))
+                .exists());
+        }
     }
 
     #[test]

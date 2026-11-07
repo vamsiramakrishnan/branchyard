@@ -35,6 +35,8 @@
 
 use serde_json::json;
 
+use crate::target;
+
 use crate::{
     frame, parse, Capabilities, Driver, Event, Frame, LaunchSpec, NativeSession, Open, Opened,
     Output, PermissionDecision, PermissionKey, Rejected, SessionMode, Submitted, TurnOutcome,
@@ -45,6 +47,8 @@ use crate::{
 #[derive(Debug)]
 pub struct Amp {
     command: Vec<String>,
+    /// The session's working directory, for the paths of tool targets.
+    cwd: String,
     mode: Option<SessionMode>,
     ready: bool,
     session: Option<NativeSession>,
@@ -58,6 +62,7 @@ impl Amp {
     pub fn new(command: Vec<String>) -> Self {
         Self {
             command,
+            cwd: String::new(),
             mode: None,
             ready: false,
             session: None,
@@ -175,6 +180,11 @@ impl Amp {
                     turn,
                     call_id: block["id"].as_str().unwrap_or_default().to_owned(),
                     name: block["name"].as_str().unwrap_or_default().to_owned(),
+                    target: target::from_input(
+                        block["name"].as_str().unwrap_or_default(),
+                        &block["input"],
+                        &self.cwd,
+                    ),
                 }),
                 _ => {}
             }
@@ -293,6 +303,7 @@ impl Driver for Amp {
             argv.extend(["threads".into(), "continue".into(), thread.to_string()]);
         }
         argv.extend(["--execute", "--stream-json", "--stream-json-input"].map(String::from));
+        self.cwd.clone_from(&open.cwd);
         self.mode = Some(open.mode);
         Ok(Opened {
             launch: LaunchSpec {

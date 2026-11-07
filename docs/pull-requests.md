@@ -56,9 +56,38 @@ gateway_tool = "linear__get_issue"   # the tool the gateway serves for your Line
 
 `[trackers]` takes `url` and `gateway_tool` for each of `linear`, `jira` and `gitlab`, and never a credential; `by config validate` checks the URLs and that a `gateway_tool` has a gateway. With `by --remote`, the issue is fetched on your machine with the environment's credentials, and the server receives the prompt, as for GitHub; the gateway is used in local mode only. `by spawn --issue` inside a harness reads only the harness's environment.
 
+## `by issue`, and starting from an issue on a server
+
+`by issue <REF> ["more instructions"] [--json]` fetches the issue exactly as `--issue` does and prints what a run would start from: the tracker and key, the title and URL, the branch name `by run` would give it, and the prompt. It starts nothing; `--json` prints `{"issue": {number, url, title, tracker?, key?}, "branch", "prompt"}`. It works in local mode only.
+
+A server starts from an issue by running this command. `TaskRequest.issue` (`POST /v1/repos/{repo}/tasks`) and `StartSessionRequest.issue` (`POST /v1/workspaces/{id}/sessions`) take the same references as `--issue`; the request's own `prompt` becomes the additional instructions and may be empty. At admission the server runs the operator's `by` (`by_path`, else `by` on `PATH`) as `by issue --json -- REF PROMPT` in the repository, with its **own** environment: the server's `gh` login, `LINEAR_API_KEY` and the other tracker credentials, `[trackers]` settings and connector gateway, never the caller's. `BRANCHYARD_*` variables are removed from that environment. The result replaces the prompt, names the branch after the issue unless the request names it, and, as for a run on a server from the CLI, the prompt's header is what links the branch to the issue (`by pr` reads it back). `GET /v1/repos/{repo}/issue?ref=REF` and `GET /v1/workspaces/{id}/issue?ref=REF` return the `{issue, branch}` the start would use without starting anything; the console's "Start from an issue" calls the second so the title is on screen before the session starts. Both need the `run` scope.
+
+An issue the server cannot fetch is refused with `422 issue_unavailable`, a message that quotes why (the command's own words, such as `needs LINEAR_API_KEY in the environment`) and a `next:` step, also in `detail.next`; nothing is admitted. The Rust client has `Repo::issue` and `Client::workspace_issue`; the Python client `Repo.task(..., issue=REF)`, `Repo.issue(REF)`, `Client.start_workspace_session(..., issue=REF)` and `Client.workspace_issue(workspace, REF)`.
+
 ## Starting from a pull request
 
 `by run --pr N ["more instructions"]` (and `by fan --pr N`) starts the branch from GitHub pull request N's head commit: `gh pr view N --json number,title,body,url,headRefName,headRefOid,baseRefName,isCrossRepository,state`, then, if the commit is not here yet, `git fetch origin refs/pull/N/head` (GitHub keeps every pull request's head there, fork or not). The branch is named `pr-<n>-<slug of its title>`, its base is that commit, and its prompt names the pull request (`Continue GitHub pull request #7: Faster parser`, its URL, its head, its description, then your instructions). When the head is a branch of this repository, a `started` event records the pull request (`by log`: `started from pull request #7's head (feature): <url>`), so `by pr` pushes the branch's candidate to that head branch and updates that pull request instead of opening another; a fork's head is not ours to push to, so `by pr` then opens a new one, and `by run` says so. `--pr` takes no `--base` or `--issue`, and runs in local mode only.
+
+## Stacked pull requests
+
+`by run --base BRANCH ["prompt"]` (and `by fan --base BRANCH`), where `BRANCH` is the name of a branch of this repository, starts a new branch on that branch's **candidate** instead of on a revision, and records the stack as a `stacked` event (`by log`: `stacked on parent at 1a2b3c4d5e`). A base that names no branch is a revision, as before; a branch with no candidate yet is refused (`no_candidate`, with `by log` as the next step). `--pr` takes no `--base`, so a branch continued from a pull request cannot be stacked on another; it can be a parent (a fork's branch has no pull request of its own until `by pr` opens a new one, and its children wait for that). Stacking is local mode only: with `--remote` the base is a revision on the server.
+
+```sh
+by run "add the parser" --name parser --check "cargo test" --yes
+by pr parser                                   # pull request #7, base main
+by run "use it in the CLI" --name cli --base parser --check "cargo test" --yes
+by pr cli                                      # pull request #8, base by/parser, with the stack in its body
+by show cli                                    # stack  on parser (pull request #7)
+by pr cli --watch --yes                        # when #7 merges: rebase onto main, retarget #8
+```
+
+- **Opening.** `by pr` on a stacked branch opens its pull request against the parent's pull request head (`gh pr create --base by/parser`), so the diff shows only the child's own commits. A parent with no pull request yet is refused (`state`, next: `by pr PARENT` first). A parent whose pull request was closed unmerged is refused too, with `--base` as the way out. `--base` on `by pr` wins over the stack, the automatic rebase included.
+- **The body lists the stack**, bottom first, under `## Stack`: each branch's pull request link, and this one as `this pull request`. The parent's body, regenerated by its next `by pr`, lists the children above it.
+- **When the parent merges** (`gh pr view` says `MERGED`, checked on every `by pr` of the child and on every poll of `by pr --watch`), the child is rebased onto the branch the parent merged into: `git fetch <git remote> <that branch>`, then `git rebase --onto <it> <the child's base>` in the child's worktree, without hooks. Only the child's own commits are replayed, so a squash or rebase merge of the parent does not matter. The child's base and candidate move with it, a `restacked` event records the old and new candidate and the commit it sits on (`by log`: `parent's pull request merged: rebased onto main (…), 1a2b… to 3c4d…`), the check runs again on the new candidate, it is pushed over its old head (replacing the remote branch only if it is still where `by pr` left it, so a push someone else made is never overwritten) and `gh pr edit <n> --base main` retargets its pull request. If the parent was itself stacked, the child stays stacked, now on the grandparent.
+- **A conflict is reported, not forced.** If a commit does not apply, the rebase is aborted, the branch and its worktree are left as they were, a `restack_blocked` event names the conflicting paths, `by pr` fails with `conflict` and a `next:` that sends the branch a turn to resolve it, and `--watch` stops. Resolving it is yours: send the branch a turn, or rebase in its worktree (`by open`), then `by pr BRANCH --base main`, which skips the stack (the automatic rebase is not retried, and does not try to recognise a history you rewrote). A branch with a running turn, or uncommitted work in its worktree, is not rebased (`running`, `denied`).
+- **`by show`** adds a `stack` line (`on parent (pull request #7)`, `rebased onto main after parent's pull request merged`, `below cli`), and `by show --json` a `stack` object: `parent`, `base`, `children` and `restacked`.
+
+GitHub's own `gh stack` extension is not used or required; the stack lives in the branch's event log, so it works in any repository `gh` can reach.
 
 ## `by pr`
 
@@ -180,6 +209,9 @@ Every step is an `Activity::PullRequest` event on the branch's log, shown by `by
 | `observed` | the observation above | `pull request #7 open, CI 3 passed, 1 failed (lint); 2 unresolved threads; mergeable` |
 | `feedback_delivered` | `keys`, `via`, `summary` | `pull request feedback sent into the branch (send), 2 pieces: …` |
 | `feedback_undelivered` | `keys`, `reason` | `pull request feedback not delivered (…)` |
+| `stacked` | `parent`, `base` (`--base BRANCH`) | `stacked on parent at 1a2b3c4d5e` |
+| `restacked` | `parent`, `onto`, `onto_commit`, `from`, `to`, `new_parent` | `parent's pull request merged: rebased onto main (…), 1a2b… to 3c4d…` |
+| `restack_blocked` | `parent`, `onto`, `files` | `parent's pull request merged, but rebasing onto main conflicts in a.txt; nothing was changed` |
 | `watch_stopped` | `reason` | `stopped watching the pull request: the pull request was merged` |
 | `threads_resolved` | `commit`, `threads` (`id`, `path`, `replied`, `resolved`, `error`) | `1 review thread addressed in 1a2b3c4d5e resolved (a.txt)` |
 
@@ -191,6 +223,9 @@ The CLI folds these (`pr::state`) into the branch's issue, last check, last push
 
 - Pull requests only on GitHub, through `gh`. Issues may come from Linear, Jira or GitLab ([other trackers](#other-trackers)), fetched hermetically from local mock servers and a mock gateway in the tests and never from the real services; a GitLab merge request (`glab`) would fit the same events.
 - The watch replies only to the review threads a push addressed, and only to resolve them; it does not answer reviews or comments, request re-review, or merge the pull request; merging stays a person's decision (or `gh pr merge`). Whether a thread was really addressed is judged by the file it is on, not by reading the change.
+- A session start with `issue` resolves it before the start is admitted, so its idempotency key covers the resolved request: a retry after the issue was edited may not replay (not tested). A task's key covers the request as sent and replays before anything is fetched.
+- Starting from an issue on a server reads the issue with the server's credentials, so what the caller may read on GitHub or Linear does not limit what the server fetches for them: the `run` scope on the repository is the only gate. Tested with a stand-in for `by issue` and in the console only by its form's logic and a syntax check, never in a browser, and never against a tracker.
+- Stacks: the parent's merge is seen through `gh pr view` of its recorded pull request, not through a local `by merge`; a parent merged locally is not followed. The rebase is a plain `git rebase --onto`, journaled by nothing: a process killed mid-rebase leaves git's own rebase state in the child's worktree. After a conflict you resolved by hand the stack does not recognise the rewritten history (use `by pr --base`). There is no `by stack` command; `--base` is the whole surface. Tested against a fake `gh` and real repositories, never GitHub, and never with `gh stack`.
 - `--draft` applies when the pull request is created; turning a draft ready is `gh pr ready`.
 - Comments from bots are fed back like anyone's; there is no filter by author yet.
 - Remote mode: a server would need its own git remote and `gh` login per repository, and an operator's decision to let clients push through it. Not built.

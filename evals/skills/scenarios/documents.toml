@@ -1,0 +1,141 @@
+# Document skills: Word, Excel, PDF, PowerPoint and the Google Workspace skills.
+# Keys are described in docs/skill-eval.md. A prompt never names a skill.
+
+[[scenario]]
+id = "docx-status-report"
+area = "documents"
+prompt = "Write up this week's status as a Word document I can send to my manager: three sections (Done, In progress, Blocked) using the bullets in status.txt. Save it as status.docx."
+files = { "status.txt" = "Done: shipped the importer\nDone: fixed login bug\nIn progress: billing export\nBlocked: waiting on legal review\n" }
+skills = ["docx", "pdf", "xlsx", "pptx", "visual-design", "artifact-tools"]
+expect_skills = ["docx"]
+must_not = ["pptx", "xlsx"]
+check_files = ["status.docx"]
+
+[[scenario]]
+id = "docx-redline-edit"
+area = "documents"
+prompt = "contract.docx has 'Acme Ltd' in several places; our company is now 'Acme Holdings Ltd'. Update it without breaking the formatting and keep the original as contract.orig.docx."
+fixtures = ["contract.docx"]
+check_files = ["contract.orig.docx"]
+check_archive = { "contract.docx" = "Acme Holdings Ltd" }
+skills = ["docx", "pdf", "claim-verify", "artifact-tools"]
+expect_skills = ["docx"]
+
+[[scenario]]
+id = "docx-layout-check"
+area = "documents"
+prompt = "I made a one-page flyer in flyer.docx. Check that nothing spills onto a second page and tell me what you changed to fix it."
+fixtures = ["flyer.docx"]
+skills = ["docx", "inspect-layout", "visual-design", "pdf"]
+expect_skills = ["docx"]
+
+[[scenario]]
+id = "xlsx-budget-workbook"
+area = "documents"
+prompt = "Build a monthly budget workbook for 2027: a row per category from categories.csv, months across, and a total row and total column that update when I change a cell. Save as budget.xlsx."
+files = { "categories.csv" = "category\nRent\nFood\nTravel\nSoftware\n" }
+skills = ["xlsx", "docx", "data-clean", "calculate", "artifact-tools"]
+expect_skills = ["xlsx"]
+must_not = ["docx"]
+check_files = ["budget.xlsx"]
+
+[[scenario]]
+id = "xlsx-pivot"
+area = "documents"
+prompt = "sales.xlsx has a Sales sheet with region, product and amount. Add a sheet that totals amount by region and product as a real pivot table, not pasted values."
+fixtures = ["sales.xlsx"]
+check_archive = { "sales.xlsx" = "pivotTable" }
+skills = ["xlsx", "google-sheets", "data-clean", "chart-design"]
+expect_skills = ["xlsx"]
+must_not = ["google-sheets"]
+
+[[scenario]]
+id = "xlsx-fix-formulas"
+area = "documents"
+prompt = "The totals in forecast.xlsx look wrong after I inserted a column. Find formulas that no longer cover the right range and fix them, then tell me which cells changed."
+fixtures = ["forecast.xlsx"]
+check_archive = { "forecast.xlsx" = "SUM\\(B2:D2\\)" }
+skills = ["xlsx", "calculate", "claim-verify"]
+expect_skills = ["xlsx"]
+
+[[scenario]]
+id = "pdf-merge-stamp"
+area = "documents"
+prompt = "Combine part1.pdf and part2.pdf into one file and put 'DRAFT' diagonally across every page. Output draft-all.pdf."
+fixtures = ["part1.pdf", "part2.pdf"]
+check_files = ["draft-all.pdf"]
+skills = ["pdf", "docx", "inspect-layout", "artifact-tools"]
+expect_skills = ["pdf"]
+
+[[scenario]]
+id = "pdf-extract-text"
+area = "documents"
+prompt = "Pull all the text out of report.pdf page by page into report.txt, and tell me honestly if any page looks scanned and needed OCR."
+fixtures = ["report.pdf"]
+check_files = ["report.txt"]
+check_matches = { "report.txt" = "(?i)quarterly report" }
+skills = ["pdf", "table-extract", "source-capture"]
+expect_skills = ["pdf"]
+must_not = ["table-extract"]
+
+[[scenario]]
+id = "pdf-fill-form"
+area = "documents"
+prompt = "Fill in the fields of application.pdf (name: Dana Reyes, date: 2026-11-07) and save the result as application-filled.pdf."
+fixtures = ["application.pdf"]
+check_files = ["application-filled.pdf"]
+skills = ["pdf", "docx", "inspect-layout"]
+expect_skills = ["pdf"]
+
+[[scenario]]
+id = "pptx-quarterly-deck"
+area = "documents"
+prompt = "Turn quarter.md into a short deck: a title slide, one slide per heading, and a native bar chart of the revenue numbers on the last slide. Save as quarter.pptx."
+files = { "quarter.md" = "# Q3 results\nRevenue grew.\n# Risks\nSupply delays.\n# Revenue\nQ1 10\nQ2 14\nQ3 19\n" }
+skills = ["pptx", "chart-design", "visual-design", "parallel-deck", "docx"]
+expect_skills = ["pptx"]
+must_not = ["parallel-deck"]
+check_files = ["quarter.pptx"]
+
+[[scenario]]
+id = "pptx-update-template"
+area = "documents"
+prompt = "Take the existing pitch.pptx and replace the customer name on slides 2 and 5 with 'Northwind', keeping its layouts, then check every slide still fits."
+fixtures = ["pitch.pptx"]
+check_archive = { "pitch.pptx" = "Northwind" }
+skills = ["pptx", "inspect-layout", "google-slides", "visual-design"]
+expect_skills = ["pptx"]
+must_not = ["google-slides"]
+
+[[scenario]]
+id = "pptx-speaker-notes"
+area = "documents"
+prompt = "Add speaker notes to each slide of keynote.pptx: two sentences per slide summarising what to say. Don't change the visible slides."
+fixtures = ["keynote.pptx"]
+check_archive = { "keynote.pptx" = "notesSlide" }
+skills = ["pptx", "visual-design", "docx"]
+expect_skills = ["pptx"]
+
+[[scenario]]
+id = "google-docs-update"
+area = "documents"
+prompt = "Fix the typo 'recieve' to 'receive' in the Google Doc at https://docs.google.com/document/d/1AbC/edit and confirm which revision you changed."
+skills = ["google-docs", "docx", "google-sheets", "google-slides"]
+expect_skills = ["google-docs"]
+must_not = ["docx"]
+
+[[scenario]]
+id = "google-sheets-append"
+area = "documents"
+prompt = "Append today's signups (42) to the next free row of the 'Signups' tab in my Google Sheet https://docs.google.com/spreadsheets/d/1XyZ/edit and keep the running total column right."
+skills = ["google-sheets", "xlsx", "google-docs", "calculate"]
+expect_skills = ["google-sheets"]
+must_not = ["xlsx"]
+
+[[scenario]]
+id = "google-slides-retitle"
+area = "documents"
+prompt = "In my Google Slides deck https://docs.google.com/presentation/d/1Sld/edit change the title on slide 1 to 'Roadmap 2027' without touching the theme."
+skills = ["google-slides", "pptx", "google-docs"]
+expect_skills = ["google-slides"]
+must_not = ["pptx"]

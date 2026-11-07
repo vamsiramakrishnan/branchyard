@@ -312,6 +312,27 @@ class ServerCase(unittest.TestCase):
 
 
 class Requests(ServerCase):
+    def test_a_task_can_start_from_an_issue_and_the_issue_can_be_previewed_first(self):
+        link = {"number": 12, "url": "https://github.com/acme/widgets/issues/12", "title": "Crash"}
+        self.fake.answer(
+            "GET",
+            f"{REPO}/issue",
+            (200, {"issue": link, "branch": "issue-12-crash"}),
+        )
+        found = self.app.issue("#12")
+        self.assertEqual(found.branch, "issue-12-crash")
+        self.assertEqual(found.issue["title"], "Crash")
+        ((_m, path, _h, _b),) = self.requests("GET", f"{REPO}/issue")
+        self.assertEqual(parse_qs(urlsplit(path).query), {"ref": ["#12"]})
+        self.fake.always("POST", f"{REPO}/tasks", 202, self.op("op1", "queued", "issue-12-crash", kind="task"))
+        self.app.task("", issue="#12")
+        ((_m, _p, _h, body),) = self.requests("POST", f"{REPO}/tasks")
+        self.assertEqual(body["issue"], "#12")
+        self.assertEqual(body["prompt"], "")
+        # Without one, the body carries no `issue` at all.
+        self.app.task("plain")
+        self.assertNotIn("issue", self.requests("POST", f"{REPO}/tasks")[-1][3])
+
     def test_a_task_carries_the_token_a_key_and_the_grant_with_a_private_home(self):
         self.fake.answer("POST", f"{REPO}/tasks", (202, self.op("op1", "queued", "slack-c1", kind="task")))
         op = self.app.task(
@@ -3714,6 +3735,7 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
     "/v1/projects/{project}/decisions": [lambda c, _r: c.project_decisions("p1")],
     "/v1/workspaces": [lambda c, _r: c.workspaces(), lambda c, _r: c.create_workspace("p1", "Brief")],
     "/v1/workspaces/{workspace}": [lambda c, _r: c.workspace("w1")],
+    "/v1/workspaces/{workspace}/issue": [lambda c, _r: c.workspace_issue("w1", "#1")],
     "/v1/workspaces/{workspace}/sessions": [
         lambda c, _r: c.workspace_sessions("w1"),
         lambda c, _r: c.start_workspace_session("w1", "Draft", "Write", harness="codex"),
@@ -3834,6 +3856,11 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
     "/v1/repos/{repo}/branches/{branch}/escalate": [lambda _c, r: r.escalate("b", "help")],
     "/v1/repos/{repo}/branches/{branch}/event-page": [lambda _c, r: r.event_page("b")],
     "/v1/repos/{repo}/branches/{branch}/timeline": [lambda _c, r: r.timeline("b")],
+    "/v1/repos/{repo}/branches/{branch}/changes": [lambda _c, r: r.changes("b")],
+    "/v1/repos/{repo}/branches/{branch}/reviews": [
+        lambda _c, r: r.reviews("b"),
+        lambda _c, r: r.review("b", [{"path": "a.txt", "line": 1, "body": "x"}], note="n", commit="c"),
+    ],
     "/v1/repos/{repo}/branches/{branch}/events": [lambda _c, r: r.events("b"), lambda _c, r: r.said("b")],
     "/v1/repos/{repo}/branches/{branch}/fork": [lambda _c, r: r.fork("b", "go", at=1)],
     "/v1/repos/{repo}/branches/{branch}/graph": [
@@ -3866,6 +3893,7 @@ COVERED: dict[str, list[Callable[[bc.Client, bc.Repo], Any]]] = {
     "/v1/repos/{repo}/effects/{id}/promote": [lambda _c, r: r.promote_effect("e1")],
     "/v1/repos/{repo}/events/stream": [lambda _c, r: list(r.stream(0, max_failures=0))],
     "/v1/repos/{repo}/operations": [lambda _c, r: r.operations()],
+    "/v1/repos/{repo}/issue": [lambda _c, r: r.issue("#1")],
     "/v1/repos/{repo}/tasks": [lambda _c, r: r.task("go")],
     "/v1/repos/{repo}/wait": [lambda _c, r: r.wait_for(["b"])],
     "/v1/triggers": [lambda c, _r: c.triggers(), lambda c, _r: c.create_trigger({"name": "t"})],

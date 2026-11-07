@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::changes::DiffSide;
 use crate::record::Recorder;
 use crate::{Activity, Branch, Error};
 
@@ -55,6 +56,10 @@ pub struct FeedbackItem {
     /// Who wrote it, such as a GitHub login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// For a review written on a diff: the side its line numbers are on.
+    /// Absent means the branch's file (`new`), as `by review` writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<DiffSide>,
     /// Its text, as written: not quoted, escaped or numbered.
     pub body: String,
 }
@@ -65,7 +70,8 @@ pub struct FeedbackItem {
 pub struct Feedback {
     /// Where it came from: a pull request or a review.
     pub source: FeedbackSource,
-    /// What it is about, such as the pull request's URL.
+    /// What it is about: the pull request's URL, or for a review of the
+    /// console's Changes view the candidate commit its line numbers refer to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     /// The comments and checks, in the order they were sent.

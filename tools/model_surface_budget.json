@@ -1,9 +1,10 @@
 {
   "work-turn-no-helpers": 1000,
-  "spawning-branch": 44500,
+  "spawning-branch": 12500,
   "leaf-branch": 9000,
   "mcp-manager": 2000,
   "generic-agents": 1500,
+  "references:delegate": 42000,
   "skill:artifact-tools": 2500,
   "skill:calculate": 1500,
   "skill:chart-design": 1500,

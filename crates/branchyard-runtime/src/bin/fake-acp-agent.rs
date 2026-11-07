@@ -50,7 +50,14 @@
 //!   JSON, so a test can read a URL or a token no event records.
 //! - `SH <command>`, one per line: runs the command with `sh -c` in its
 //!   working directory and environment, and replies `sh: <exit status>`
-//!   followed by the command's output, for each line.
+//!   followed by the command's output, for each line. Each is first
+//!   reported as an `execute` `tool_call` whose title and `rawInput.command`
+//!   are the command, as a real agent reports a shell call, so the log
+//!   shows the call and its command target.
+//! - `READ <path>`, one per line: shows the file's first lines (the path may
+//!   hold a glob) and replies `read: <path>` and them, for each line; each is
+//!   reported as a `read`
+//!   `tool_call` with `rawInput.path` and a location.
 //! - `REPLY_FILE <path>`, on a line of its own, checked before every other
 //!   keyword: replies the file's contents verbatim (or `reply file <path>:
 //!   <error>`) and does nothing else; a judge's canned verdict.
@@ -375,8 +382,11 @@ fn main() {
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
-                if text.lines().any(|line| line.starts_with("SH ")) {
-                    chunk(&session, &shell(text));
+                if text
+                    .lines()
+                    .any(|line| line.starts_with("SH ") || line.starts_with("READ "))
+                {
+                    chunk(&session, &shell(&session, text));
                     reply(&id, json!({"stopReason": "end_turn"}));
                     continue;
                 }
@@ -940,10 +950,44 @@ fn wait(client: &mut McpClient, branch: &str) -> Result<(bool, String), String> 
     }
 }
 
-/// Run every `SH` line of `text` and describe the results.
-fn shell(text: &str) -> String {
+/// Run every `SH` and `READ` line of `text` and describe the results, each
+/// reported first as the tool call a real agent would make.
+fn shell(session: &str, text: &str) -> String {
     let mut out = String::new();
-    for command in text.lines().filter_map(|l| l.strip_prefix("SH ")) {
+    let mut call = 0;
+    for line in text.lines() {
+        call += 1;
+        if let Some(path) = line.strip_prefix("READ ") {
+            update(
+                session,
+                json!({"sessionUpdate": "tool_call", "toolCallId": format!("read-{call}"),
+                       "name": "read", "title": format!("Read {path}"), "kind": "read", "status": "in_progress",
+                       "rawInput": {"path": path}, "locations": [{"path": path}]}),
+            );
+            // Through `sh`, so a glob in the path (a tool tree's hashed
+            // directory) expands as it would in a command.
+            match Command::new("sh")
+                .args(["-c", "head -n 3 -- $1", "sh", path])
+                .stdin(Stdio::null())
+                .output()
+            {
+                Ok(done) => {
+                    out.push_str(&format!("read: {path}\n"));
+                    out.push_str(&String::from_utf8_lossy(&done.stdout));
+                }
+                Err(error) => out.push_str(&format!("read: {path}: {error}\n")),
+            }
+            continue;
+        }
+        let Some(command) = line.strip_prefix("SH ") else {
+            continue;
+        };
+        update(
+            session,
+            json!({"sessionUpdate": "tool_call", "toolCallId": format!("sh-{call}"),
+                   "name": "run_command", "title": command, "kind": "execute", "status": "in_progress",
+                   "rawInput": {"command": command}}),
+        );
         match Command::new("sh")
             .args(["-c", command])
             .stdin(Stdio::null())

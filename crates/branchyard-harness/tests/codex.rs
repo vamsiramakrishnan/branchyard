@@ -6,7 +6,7 @@ use branchyard_harness::codex::Codex;
 use branchyard_harness::conformance::{decode, feed, handshake, Replay, Transcript};
 use branchyard_harness::{
     Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
-    PermissionKey, Rejected, SessionMode, TurnOutcome,
+    PermissionKey, Rejected, SessionMode, ToolTarget, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -247,7 +247,7 @@ fn streaming_tools_and_usage_are_normalized() {
     driver.submit("go").unwrap();
     let events: Vec<Event> = [
         json!({"method": "item/agentMessage/delta", "params": {"delta": "Hel", "itemId": "m", "threadId": "t1", "turnId": "u1"}}),
-        json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "c1"}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
+        json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "c1", "command": "/bin/bash -lc \"ls -la\""}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
         json!({"method": "item/started", "params": {"item": {"type": "reasoning", "id": "r1"}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
         json!({"method": "thread/tokenUsage/updated", "params": {"threadId": "t1", "turnId": "u1", "tokenUsage": {
             "total": {"inputTokens": 10, "outputTokens": 5, "cachedInputTokens": 2, "reasoningOutputTokens": 0, "totalTokens": 15},
@@ -268,7 +268,8 @@ fn streaming_tools_and_usage_are_normalized() {
         Event::ToolStarted {
             turn: 1,
             call_id: "c1".into(),
-            name: "commandExecution".into()
+            name: "commandExecution".into(),
+            target: ToolTarget::command("ls -la"),
         }
     );
     let Event::UsageObserved { usage, .. } = &events[2] else {
@@ -629,10 +630,70 @@ fn a_recorded_file_change_turn_names_its_file_and_reports_nothing_unrecognized()
     assert_eq!(asked[0], ("fileChange", "rec.txt".into()));
     assert_eq!(asked[1].0, "commandExecution");
     assert!(asked[1].1.contains("cat rec.txt"), "{asked:?}");
+    // The log's targets: the file relative to the working directory, and the
+    // command without Codex's `bash -lc` wrapper. Recorded payloads.
+    assert_eq!(
+        started(&events),
+        [
+            (
+                "fileChange".to_owned(),
+                ToolTarget::file("/workspace/rec.txt", "/workspace")
+            ),
+            (
+                "commandExecution".to_owned(),
+                ToolTarget::command("cat rec.txt && printf '\\nbytes=' && wc -c < rec.txt")
+            ),
+        ]
+    );
     assert!(events.contains(&Event::TurnEnded {
         turn: 1,
         outcome: TurnOutcome::Completed
     }));
+}
+
+/// The tool calls in `events`, each with the name and target it was logged with.
+fn started(events: &[Event]) -> Vec<(String, Option<ToolTarget>)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ToolStarted { name, target, .. } => Some((name.clone(), target.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Items that name no file or command leave the target absent; an MCP call
+/// names its server and tool and never its arguments.
+#[test]
+fn a_tool_item_targets_its_server_and_tool_and_others_name_nothing() {
+    let (mut driver, _, _) = ready(SessionMode::Fresh, "t1");
+    driver.submit("go").unwrap();
+    let events: Vec<Event> = [
+        json!({"method": "item/started", "params": {"item": {"type": "mcpToolCall", "id": "m1", "server": "github", "tool": "list_issues", "arguments": {"token": "hunter2"}}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
+        json!({"method": "item/started", "params": {"item": {"type": "webSearch", "id": "w1", "query": "private question"}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
+        json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "c2", "command": "deploy --token=abc123 --env prod"}, "startedAtMs": 0, "threadId": "t1", "turnId": "u1"}}),
+    ]
+    .iter()
+    .flat_map(|m| feed(&mut driver, m).0)
+    .collect();
+    assert_eq!(
+        started(&events),
+        [
+            (
+                "mcpToolCall".to_owned(),
+                ToolTarget::mcp(Some("github"), "list_issues")
+            ),
+            ("webSearch".to_owned(), None),
+            (
+                "commandExecution".to_owned(),
+                ToolTarget::command("deploy --token=abc123 --env prod")
+            ),
+        ]
+    );
+    let Some(Some(command)) = started(&events).pop().map(|(_, t)| t) else {
+        panic!("{events:?}")
+    };
+    assert_eq!(command.value, "deploy --token=[redacted] --env prod");
 }
 
 /// The text a permission line shows for `input`: its `path`, else its `command`.

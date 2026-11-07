@@ -102,6 +102,7 @@ mod bundle;
 pub mod bundles;
 mod capabilities;
 mod capacity;
+mod changes;
 mod checkpoint;
 mod compare;
 pub mod configure;
@@ -226,18 +227,23 @@ pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};
 pub use adopt::{AdoptSpec, Adoption};
 pub use branchyard_harness::{
     Event, HarnessTask, NativeSession, PermissionDecision, PermissionKey, PermissionRequest,
-    TurnOutcome, Usage,
+    TargetKind, ToolTarget, TurnOutcome, Usage,
 };
 pub use branchyard_provision::network::{
     narrow as network_narrow, Enforce as NetworkEnforce, HostRule as NetworkRule, Network,
 };
 pub use branchyard_provision::{
-    logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec, RemoteMcpTransport,
-    SecretFrom, SecretSource, SessionPatch, Telemetry, Via,
+    built_in, logins, Delivery, Effort, McpServerSpec, Provisioning, RemoteMcpSpec,
+    RemoteMcpTransport, SecretFrom, SecretSource, SessionPatch, Telemetry, Via,
 };
 use branchyard_workspace::Repository;
 pub use bundle::BundleEntry;
 pub use capacity::AUTO as AUTO_HARNESS;
+pub use changes::{
+    check_review, review_prompt, ChangedFile, Changes, DiffLine, DiffSide, FileStatus, Hunk,
+    LineKind, Review, ReviewComment, Reviews, SentComment, MAX_FILES, MAX_FILE_LINES,
+    MAX_LINE_CHARS, MAX_REVIEW_COMMENTS, MAX_REVIEW_TEXT, MAX_TOTAL_LINES,
+};
 pub use checkpoint::{
     entries as checkpoint_entries, recorded as recorded_checkpoints, CheckpointEntry, Checkpoints,
     Rewound,
@@ -322,7 +328,7 @@ pub use pool::{
 pub use projection::{ENV_BRANCH, ENV_BY, ENV_ROOT, ENV_TOKEN};
 pub use pull_request::{
     slug, CheckRun, CiSummary, IssueLink, PullRequestActivity, PullRequestObservation,
-    PullRequestRef, Pushed, ResolvedThread,
+    PullRequestRef, Pushed, ResolvedThread, Restack, Restacked, StackLink,
 };
 pub use reported::{Reported, ReportedState, StatusReport};
 pub use review::ReviewSpec;

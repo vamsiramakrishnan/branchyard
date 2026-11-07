@@ -81,6 +81,8 @@ use agent_client_protocol_schema::v1::{
 };
 use serde_json::json;
 
+use crate::target;
+
 use crate::{
     frame, parse, rpc_error, Capabilities, Driver, Event, Frame, LaunchSpec, McpServer,
     NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey, PermissionRequest,
@@ -816,6 +818,7 @@ impl Acp {
                     turn,
                     call_id: call.tool_call_id.to_string(),
                     name: call.name.unwrap_or(call.title),
+                    target: self.update_target(&params["update"]),
                 })
             }
             SessionUpdate::ToolCallUpdate(update) => {
@@ -824,6 +827,26 @@ impl Acp {
             }
             _ => Output::default(),
         }
+    }
+
+    /// What the tool call `update` describes acted on: its input's command
+    /// or path, else the first location of a call that reads or changes
+    /// files. The title is the agent's description, not a command, so it is
+    /// never a target.
+    fn update_target(&self, update: &Value) -> Option<target::ToolTarget> {
+        let cwd = self.open.as_ref().map_or("", |open| open.cwd.as_str());
+        let name = update["name"]
+            .as_str()
+            .or_else(|| update["title"].as_str())
+            .unwrap_or_default();
+        target::from_input(name, &update["rawInput"], cwd).or_else(|| {
+            match update["kind"].as_str().unwrap_or_default() {
+                "read" | "edit" | "delete" | "move" => update["locations"][0]["path"]
+                    .as_str()
+                    .and_then(|path| target::ToolTarget::file(path, cwd)),
+                _ => None,
+            }
+        })
     }
 
     /// Keep what `update` says of call `id`: a `tool_call` starts its

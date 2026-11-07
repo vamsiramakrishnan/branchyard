@@ -133,6 +133,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
+use crate::target;
+
 use crate::{
     frame, parse, Capabilities, Driver, Event, Frame, HarnessTask, Instructions, LaunchSpec,
     McpServer, NativeSession, Open, Opened, Output, PermissionDecision, PermissionKey,
@@ -216,6 +218,8 @@ fn pre_tool_use_answer(request_id: &str) -> Value {
 #[derive(Debug)]
 pub struct ClaudeCode {
     command: Vec<String>,
+    /// The session's working directory, for the paths of tool targets.
+    cwd: String,
     /// The session asked for a structured answer (`Open::json_schema`), so
     /// the CLI's `StructuredOutput` tool is allowed without the policy.
     structured: bool,
@@ -314,6 +318,7 @@ impl ClaudeCode {
     pub fn new(command: Vec<String>) -> Self {
         Self {
             command,
+            cwd: String::new(),
             mode: None,
             ready: false,
             session: None,
@@ -1007,6 +1012,11 @@ impl ClaudeCode {
                         turn,
                         call_id: block["id"].as_str().unwrap_or_default().to_owned(),
                         name: block["name"].as_str().unwrap_or_default().to_owned(),
+                        target: target::from_input(
+                            block["name"].as_str().unwrap_or_default(),
+                            &block["input"],
+                            &self.cwd,
+                        ),
                     });
                 }
                 _ => {}
@@ -1405,6 +1415,7 @@ impl Driver for ClaudeCode {
             return Err(Rejected::InvalidOpen("the session is already open".into()));
         }
         self.structured = open.json_schema.is_some();
+        self.cwd.clone_from(&open.cwd);
         let mut argv = self.command.clone();
         argv.extend(
             [

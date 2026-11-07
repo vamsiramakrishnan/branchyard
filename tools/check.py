@@ -217,6 +217,8 @@ STEPS = (
     Step("check_model_surface", "fast", (PY, "tools/check_model_surface.py")),
     Step("test_check_model_surface", "fast", (PY, "tests/test_check_model_surface.py")),
     Step("test_find_tools", "fast", (PY, "tests/test_find_tools.py")),
+    # The skill-discovery eval: scenarios that cannot rot, a scorer on hand-written logs, the runner's argv. No model.
+    Step("test_skill_eval", "fast", (PY, "tests/test_skill_eval.py")),
     # The Anvil mock follows docs/anvil-contract-v2.md; the tests that put it on PATH stand on it.
     Step("test_anvil_mock", "fast", (PY, "tests/test_anvil_mock.py")),
     # The same shapes against a built real Anvil (ANVIL_BIN); skipped, with the reason, when there is none.
@@ -371,6 +373,15 @@ STEPS = (
         "test_getting_started_built",
         "walkthrough",
         (PY, "tests/test_getting_started.py"),
+        cargo=True,
+        env=(("REQUIRE_BINARIES", "1"),),
+    ),
+    # The eval's runner against the fake ACP agent, scripted to search and open a skill: runner, `by log --json`
+    # and scorer together, with the built binaries.
+    Step(
+        "test_skill_eval_built",
+        "walkthrough",
+        (PY, "tests/test_skill_eval.py", "FakeAgentEndToEnd"),
         cargo=True,
         env=(("REQUIRE_BINARIES", "1"),),
     ),

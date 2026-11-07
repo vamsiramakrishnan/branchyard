@@ -301,7 +301,13 @@ pub fn event_line(event: &Event, style: Style) -> Option<String> {
         } => dim(format!("session {session} forked from {parent}")),
         Event::OpenFailed { reason } => style.paint(Tone::Red, &format!("open failed: {reason}")),
         Event::TurnAccepted { turn, .. } => dim(format!("turn {turn} accepted")),
-        Event::ToolStarted { name, .. } => format!("{} {name}", style.paint(Tone::Cyan, "▸")),
+        Event::ToolStarted { name, target, .. } => {
+            let arrow = style.paint(Tone::Cyan, "▸");
+            match target {
+                Some(target) => format!("{arrow} {name} {}", dim(target.value.clone())),
+                None => format!("{arrow} {name}"),
+            }
+        }
         Event::PermissionRequested { request, .. } => style.paint(
             Tone::Yellow,
             format!("asks {}: {}", request.tool, compact_input(&request.input))
@@ -2619,8 +2625,18 @@ mod tests {
                     turn: 1,
                     call_id: "c".into(),
                     name: "Bash".into(),
+                    target: None,
                 },
                 "▸ Bash",
+            ),
+            (
+                Event::ToolStarted {
+                    turn: 1,
+                    call_id: "c".into(),
+                    name: "Bash".into(),
+                    target: branchyard_harness::ToolTarget::command("cargo test -q"),
+                },
+                "▸ Bash cargo test -q",
             ),
             (
                 Event::PermissionRequested {
@@ -2764,6 +2780,7 @@ mod tests {
             turn: 1,
             call_id: "c".into(),
             name: "Edit".into(),
+            target: None,
         };
         assert_eq!(event_line(&tool, color).unwrap(), "\x1b[36m▸\x1b[0m Edit");
     }

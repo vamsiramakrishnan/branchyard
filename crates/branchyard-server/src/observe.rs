@@ -258,6 +258,7 @@ pub fn record_events(
                 name,
                 call_id,
                 turn,
+                ..
             }) => {
                 metrics.inc(metrics::TOOL_CALLS, &[("harness", &harness)]);
                 if let Some(open) = turns.get_mut(branch) {
@@ -800,6 +801,7 @@ mod tests {
                     turn: 1,
                     call_id: "c1".into(),
                     name: "Bash".into(),
+                    target: None,
                 }),
             ),
             entry(6, "a", 2_000, Activity::ConnectorCall(Box::new(call))),

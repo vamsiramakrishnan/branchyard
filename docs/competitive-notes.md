@@ -2,7 +2,7 @@
 
 emdash, Superset and Conductor are desktop workbenches for running several coding agents side by side, each in its own git worktree. Branchyard is a different kind of thing: an SDK, CLI and server that a meta-harness (or a person) drives. The engine underneath is comparable, though: branches as worktrees, parallel agents, review and merge. And these three have put far more care into the moments a person actually lives through. This page records the mechanisms that make them pleasant to use, where Branchyard stands on each, and what to take.
 
-Surveyed on 27 September 2026 from each project's own docs, releases and issue trackers; claims marked *unverified* could not be confirmed against a primary source.
+Surveyed on 27 September 2026 from each project's own docs, releases and issue trackers; claims marked *unverified* could not be confirmed against a primary source. Conductor's changes since then are in [Since Conductor 0.73](#since-conductor-073-july-to-november-2026), read on 7 November 2026; the Conductor cells in the table below were brought up to that date.
 
 ## The three
 
@@ -10,8 +10,8 @@ Surveyed on 27 September 2026 from each project's own docs, releases and issue t
 |---|---|---|---|
 | What | Desktop "agentic development environment" (Electron) | Desktop "agentic IDE" (Electron), plus CLI, TypeScript SDK, MCP server, iPhone app | Native macOS app |
 | Source | [generalaction/emdash](https://github.com/generalaction/emdash), Apache-2.0 | [superset-sh/superset](https://github.com/superset-sh/superset), Elastic License 2.0 | Closed; binaries and changelog in `meltylabs/conductor-releases` |
-| Platforms | macOS, Windows, Linux | macOS; Linux AppImage experimental; no Windows | macOS only |
-| Activity | v1.2.7, 2026-09-27; 5.9k stars | v1.30.2, 2026-09-22, plus daily canary; 14.7k stars | 0.87.5, 2026-09-25; several releases a week |
+| Platforms | macOS, Windows, Linux | macOS; Linux AppImage experimental; no Windows | macOS for local workspaces; an iPhone app since 0.90.0 that controls them remotely |
+| Activity | v1.2.7, 2026-09-27; 5.9k stars | v1.30.2, 2026-09-22, plus daily canary; 14.7k stars | 0.87.5 when surveyed (2026-09-25); 0.93.0 on 4 November 2026 (title only read) |
 | Price | Free | Free locally; paid tier for remote/iPhone features (*details unverified*) | Free locally; Pro $50/month (cloud workspaces, multiplayer, API), Teams $60/user/month |
 | Agents | Drives the CLIs already installed (Claude Code, Codex, Cursor, OpenCode, Amp, Copilot and more; "25+") | Launches any agent CLI with the user's own subscription | Claude Code, Codex, Cursor, OpenCode, using each tool's own login |
 
@@ -193,6 +193,27 @@ Superset and emdash open the workspace in VS Code, Cursor, JetBrains, Xcode or a
 | Agents can't coordinate | None of the three offers delegation, messaging or dependencies between agents | Delegation trees, inbox with steering, task graphs, rigs |
 
 The recurring sceptical comment about all three: native agent CLIs keep absorbing orchestration, so a separate workbench may lose its reason to exist ([emdash Show HN](https://news.ycombinator.com/item?id=47140322), [Conductor Show HN](https://news.ycombinator.com/item?id=44594584)). This is why Branchyard's plugin shape matters. Branchyard lives inside the harness as a skill and MCP tools, and as a durable server behind it, rather than competing with the harness for the user's window.
+
+## Since Conductor 0.73 (July to November 2026)
+
+Conductor's changelog, read on 7 November 2026: [conductor.build/changelog](https://www.conductor.build/changelog). Version numbers in the first column are its releases. The Branchyard column is checked against this repository's docs.
+
+| Conductor feature | Branchyard today | Take |
+|---|---|---|
+| Start a workspace from a GitHub issue, a Linear issue or a PR, including PRs from forks (0.66.0, 0.78.0) | Done. `by run --issue` takes a GitHub, Linear, Jira or GitLab issue, and `--pr N` starts from a pull request's head. For a fork, the head is read but never pushed to ([pull requests](pull-requests.md#starting-from-a-pull-request)). | Nothing for issues. Check `--pr` against a real fork before calling fork support done. |
+| Stacked PRs: GitHub stacks and Graphite, recovered when a lower PR merges (0.80.0, 0.84.0) | None. `by pr` opens each branch's pull request against its base, and nothing tracks a stack. | Open, and not on the roadmap yet: a child branch based on its parent, and retargeting children when the parent merges. |
+| Review in the app: diff with inline and multiline comments, editing files in the diff, a PR page with checks, deployments and comments (0.73.0, 0.84.0, 0.87.0) | `by review` sends comments written on the diff in an editor as one prompt. `by pr --watch` and `by show` carry checks and review threads. The web console has no diff review. | Review on the diff in the console: inline and multiline comments sent to the branch as one prompt, as `by review` does from an editor. |
+| Multiplayer cloud: share a workspace link, presence, follow, prompt together, private workspaces, sidebar sections (0.77.0 to 0.85.0) | A server shared by several people, with roles ([server](server.md)). Nothing shows who else is viewing a branch, and nothing follows another person's view. | Open. Presence and follow could ride the event stream the console already reads. |
+| Conductor for iOS (0.90.0), and remote control of local Mac workspaces through an end-to-end-encrypted relay with one-time pairing codes (0.92.0, October 2026) | The web console works at phone width. Pairing is a one-time code in a link, redeemed for a token that expires ([companion](companion.md)). The console reaches only a server the phone can reach, so a laptop the phone cannot reach directly is out of reach. | Open: a relay that lets a phone reach a machine behind a firewall. Read Conductor's design for its encryption before copying any part of it. |
+| Prompts: personal and team prompts, prompt links, org instructions for code review, PR creation and conflict resolution (0.83.0, 0.86.0) | None as a product feature. A prompt is a file you write or a flag you pass. Repository knowledge reaches matching harnesses ([knowledge](knowledge.md)). | Open. Team prompts could reuse the knowledge store rather than a new one. |
+| Conductor Cloud (0.78.0): sandboxes that keep running with the app closed, org-shared builds with history, an environment variables UI, Chrome preinstalled, remote desktop and computer use (experimental), cost estimates, sleep and wake | Sandbox providers ([agent sandbox](agent-sandbox.md)), toolchain images ([images](images.md)), warm pools ([pools](pools.md)), durable turns ([durability](durability.md)) and budgets ([delegation](delegation.md#budgets)). No build history UI and no desktop. Cost is recorded per turn, but there is no estimate before a run. | Open: a build history and an environment-variables view in the console. Desktop and computer use are not in these docs' plan. |
+| Conductor API, CLI and MCP: agents in cloud workspaces create workspaces and drive other sessions (0.77.0 to 0.82.0) | Already there: delegation, `by spawn`, the MCP server and the HTTP API let an agent create branches and drive them, under budgets and permission policy ([delegation](delegation.md), [server](server.md)). | None. Keep it in the comparison as a point Branchyard leads on. |
+| Routines: scheduled or GitHub-triggered agents (0.85.0) | Done: cron schedules, intervals and signed webhooks from GitHub, Slack and Linear ([triggers](triggers.md)). | None. |
+| Model picker loadouts that can be shared, effort and speed keys, a context-usage ring (0.84.0 to 0.86.0) | `--model` and `--effort` per run ([CLI reference](cli-reference.md)). No saved loadouts, no speed key and no context-usage display. | Open, small: a named model and effort profile in `branchyard.toml`, so a loadout can be shared inside a repository. |
+| Memory: none (closest are a `.context` folder and shared prompts) | Repository knowledge ([knowledge](knowledge.md)) and knowledge skills ([knowledge skills](knowledge-skills.md)). No team memory. | Open opportunity: team memory fed from reviewed branches, adopted after review as repository knowledge is now. |
+| Conductor 0.93.0 (4 November 2026), titled "Conductor is joining Meta" | Not applicable. Only the release title was read. | Watch. Read its notes before judging what changes for pricing, for Cloud or for the macOS app. |
+
+**Status, 7 November 2026.** Read from Conductor's changelog and docs only. Nothing here was run against Conductor, and the Branchyard column is a reading of this repository's docs, not a test. The 0.93.0 entry was read by its title alone. Not done: a check of each Conductor feature's behaviour, or a run of Branchyard's pull-request fork path against a real fork.
 
 ## Plan
 

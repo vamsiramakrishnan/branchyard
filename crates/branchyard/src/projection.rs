@@ -101,6 +101,39 @@ pub(crate) fn skill_text() -> &'static str {
         .trim()
 }
 
+/// The delegate skill's reference files as `(path below the skill, text)`:
+/// `references/NAME.md`, embedded with the rest of the skill.
+pub(crate) fn references() -> Vec<(&'static str, &'static str)> {
+    let files = branchyard_provision::skills::skill("delegate").map_or(&[][..], |s| s.files);
+    files
+        .iter()
+        .filter(|(path, _)| path.starts_with("references/"))
+        .copied()
+        .collect()
+}
+
+/// The skill text for instructions, with the installed path of its
+/// reference files, which a harness given text alone cannot resolve from
+/// "beside this file". A sandboxed harness cannot read the host's plugin
+/// directory, so it is pointed at the tool tree.
+pub(crate) fn skill_with_references(plugin: &Path, sandboxed: bool) -> String {
+    let place = match sandboxed {
+        true => "`helpers/delegate/references/` in your tools tree".to_owned(),
+        false => format!(
+            "`{}`",
+            plugin
+                .join("skills")
+                .join("delegate")
+                .join("references")
+                .display()
+        ),
+    };
+    format!(
+        "{}\n\nThe reference files named above are in {place}.",
+        skill_text()
+    )
+}
+
 /// A running turn's delegation authority.
 pub(crate) struct Context {
     pub token: String,
@@ -472,14 +505,7 @@ pub(crate) fn project(
     install(&python.join("branchyard.py"), PYTHON_MODULE)?;
     install(&python.join("branchyard_client.py"), PYTHON_CLIENT)?;
     if spawns {
-        install(
-            &plugin.join(".claude-plugin").join("plugin.json"),
-            PLUGIN_MANIFEST,
-        )?;
-        install(
-            &plugin.join("skills").join("delegate").join("SKILL.md"),
-            SKILL,
-        )?;
+        install_plugin(&plugin)?;
     }
 
     let token = new_token()?;
@@ -528,7 +554,10 @@ pub(crate) fn project(
         env,
         instructions: match spawns {
             true => Instructions {
-                text: skill_text().to_owned(),
+                text: skill_with_references(
+                    &plugin,
+                    crate::placement::sandboxed(record.provider.as_ref()),
+                ),
                 plugin_dir: Some(plugin.display().to_string()),
             },
             false => Instructions {
@@ -559,6 +588,21 @@ fn prepend(dir: &Path, inherited: Option<std::ffi::OsString>) -> String {
         Some(rest) if !rest.is_empty() => format!("{dir}:{rest}"),
         _ => dir,
     }
+}
+
+/// Write the plugin a Claude Code branch with helpers loads: the manifest,
+/// the delegate skill and, beside it, the reference files its table names.
+fn install_plugin(plugin: &Path) -> Result<(), Error> {
+    let skill = plugin.join("skills").join("delegate");
+    install(
+        &plugin.join(".claude-plugin").join("plugin.json"),
+        PLUGIN_MANIFEST,
+    )?;
+    install(&skill.join("SKILL.md"), SKILL)?;
+    for (path, text) in references() {
+        install(&skill.join(path), text)?;
+    }
+    Ok(())
 }
 
 /// Write `content` to `path` unless it is already there, through a
@@ -674,6 +718,140 @@ mod tests {
         assert!(text.contains("by spawn"));
         let manifest: serde_json::Value = serde_json::from_str(PLUGIN_MANIFEST).unwrap();
         assert_eq!(manifest["name"], "branchyard");
+    }
+
+    #[test]
+    fn the_plugin_carries_the_skill_and_every_reference_its_table_names() {
+        let dir = tempfile::tempdir().unwrap();
+        install_plugin(dir.path()).unwrap();
+        let skill = dir.path().join("skills/delegate");
+        assert_eq!(fs::read_to_string(skill.join("SKILL.md")).unwrap(), SKILL);
+        let named = named_references(SKILL);
+        assert!(named.len() >= 10, "{named:?}");
+        for name in &named {
+            let file = skill.join("references").join(name);
+            assert!(
+                file.is_file(),
+                "the table names {name}, which is not installed"
+            );
+            let text = fs::read_to_string(&file).unwrap();
+            assert!(text.starts_with("# Delegate reference: "), "{name}");
+            assert!(text.contains("\nRead when: "), "{name}");
+        }
+        // Nothing is installed that the table does not name.
+        let mut installed: Vec<String> = references()
+            .iter()
+            .map(|(path, _)| path.trim_start_matches("references/").to_owned())
+            .collect();
+        installed.sort();
+        let mut named = named;
+        named.sort();
+        assert_eq!(installed, named);
+    }
+
+    /// The `references/NAME.md` files a skill text names.
+    fn named_references(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for part in text.split("`references/").skip(1) {
+            if let Some((name, _)) = part.split_once('`') {
+                if name.ends_with(".md") && !names.iter().any(|n| n == name) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn instructions_name_where_the_references_are_installed() {
+        let local = skill_with_references(Path::new("/y/plugin"), false);
+        assert!(
+            local.ends_with("are in `/y/plugin/skills/delegate/references`."),
+            "{local}"
+        );
+        let sandbox = skill_with_references(Path::new("/y/plugin"), true);
+        assert!(sandbox.contains("`helpers/delegate/references/` in your tools tree"));
+        assert!(!sandbox.contains("/y/plugin"));
+    }
+
+    #[test]
+    fn the_core_is_small_and_the_embedded_skill_is_the_file() {
+        let embedded = branchyard_provision::skills::skill("delegate").unwrap();
+        let on_disk = embedded
+            .files
+            .iter()
+            .find(|(p, _)| *p == "SKILL.md")
+            .unwrap()
+            .1;
+        assert_eq!(on_disk, SKILL);
+        assert!(skill_text().len() < 8_000, "{}", skill_text().len());
+    }
+
+    /// Every section of the skill before it was split, and the file that
+    /// holds it now. A section that moves is edited here; one that is lost
+    /// fails this test.
+    #[test]
+    fn every_section_of_the_old_skill_still_has_a_home() {
+        let homes: &[(&str, &str)] = &[
+            ("# Delegating with Branchyard", "SKILL.md"),
+            (
+                "## An existing lead starts coworkers",
+                "references/existing-lead-and-manager.md",
+            ),
+            ("## When to delegate", "SKILL.md"),
+            (
+                "## A managed code lead can delegate and land",
+                "references/delegate-and-land.md",
+            ),
+            (
+                "## Writing a child's prompt",
+                "references/writing-prompts.md",
+            ),
+            (
+                "## A managed lead coordinates code by hand",
+                "references/spawn-wait-steer.md",
+            ),
+            ("## Choosing a harness", "references/choosing-a-harness.md"),
+            (
+                "## Commits and scratch files",
+                "references/commands-and-finishing.md",
+            ),
+            (
+                "## Before you finish",
+                "references/commands-and-finishing.md",
+            ),
+            ("## With `by`", "references/commands-and-finishing.md"),
+            ("## From a GitHub issue", "references/graph-issues-rigs.md"),
+            (
+                "## When one child needs another's work",
+                "references/graph-issues-rigs.md",
+            ),
+            ("## In a rig", "references/graph-issues-rigs.md"),
+            ("## Asking for a result", "references/result-contracts.md"),
+            (
+                "## Sharing results and asking your parent",
+                "references/messaging-and-artifacts.md",
+            ),
+            ("## Relay a frozen result", "references/handoffs.md"),
+            ("## With Python", "references/python-and-mcp.md"),
+            ("## Without a shell", "references/python-and-mcp.md"),
+            (
+                "## Substrate setup and readiness",
+                "references/operator-setup.md",
+            ),
+            (
+                "## Native sandbox providers",
+                "references/operator-setup.md",
+            ),
+        ];
+        let embedded = branchyard_provision::skills::skill("delegate").unwrap();
+        for (heading, file) in homes {
+            let (_, text) = embedded.files.iter().find(|(p, _)| p == file).unwrap();
+            assert!(
+                text.lines().any(|line| line == *heading),
+                "{heading:?} is not in {file}"
+            );
+        }
     }
 
     #[test]

@@ -33,8 +33,11 @@ pub mod codex;
 pub mod conformance;
 pub mod pi;
 pub mod profiles;
+pub mod target;
 
 use std::fmt;
+
+pub use target::{TargetKind, ToolTarget};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use serde_json::Value;
@@ -558,6 +561,12 @@ pub enum Event {
         turn: u64,
         call_id: String,
         name: String,
+        /// What the call acted on (a path, a command, an MCP tool), bounded
+        /// and scrubbed as [`target`] documents; absent when the harness
+        /// does not report the call's input. Logs written before the field
+        /// existed read as absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<ToolTarget>,
     },
     PermissionRequested {
         turn: Option<u64>,

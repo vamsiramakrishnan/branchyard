@@ -1,0 +1,101 @@
+# Evidence and analysis skills.
+
+[[scenario]]
+id = "source-capture-snapshot"
+area = "knowledge"
+prompt = "I downloaded interview.txt and filing.pdf for a research note. Record exactly where each came from and a fingerprint of each, so a reviewer can later prove I cited the right files."
+fixtures = ["filing.pdf"]
+files = { "interview.txt" = "Q: How big is the market?\nA: About 4 billion.\n" }
+skills = ["source-capture", "claim-verify", "table-extract", "pdf"]
+expect_skills = ["source-capture"]
+
+[[scenario]]
+id = "source-capture-anchors"
+area = "knowledge"
+prompt = "For the quotes I plan to use from notes.txt, keep a record that points at the paragraph each one came from, so I can cite paragraph numbers."
+files = { "notes.txt" = "First paragraph about costs.\n\nSecond paragraph about growth of 12%.\n" }
+skills = ["source-capture", "claim-verify", "data-clean"]
+expect_skills = ["source-capture"]
+
+[[scenario]]
+id = "table-extract-pdf"
+area = "knowledge"
+prompt = "Get the pricing table out of vendor.pdf as rows I can review, and keep a note of which page each row was on."
+fixtures = ["vendor.pdf"]
+skills = ["table-extract", "pdf", "xlsx", "data-clean"]
+expect_skills = ["table-extract"]
+must_not = ["xlsx"]
+
+[[scenario]]
+id = "table-extract-docx"
+area = "knowledge"
+prompt = "There are three tables in spec.docx. List their contents as records, and say which table each came from."
+fixtures = ["spec.docx"]
+skills = ["table-extract", "docx", "data-clean"]
+expect_skills = ["table-extract"]
+
+[[scenario]]
+id = "data-clean-customers"
+area = "knowledge"
+prompt = "customers.csv has stray spaces, 'N/A' and blank cells meaning missing, and some duplicate rows. Clean it into customers.clean.csv, keep customer ids exactly as they are, and give me a list of what you changed."
+files = { "customers.csv" = "id,name,age\n001, Ann ,34\n002,Bob,N/A\n002,Bob,N/A\n003,,41\n" }
+skills = ["data-clean", "xlsx", "calculate", "artifact-tools"]
+expect_skills = ["data-clean"]
+check_files = ["customers.clean.csv"]
+
+[[scenario]]
+id = "data-clean-dates"
+area = "knowledge"
+prompt = "In events.csv the date column mixes 2026-11-07 and 07/11/2026 styles. Make them all ISO and don't silently drop rows that cannot be parsed; report them."
+files = { "events.csv" = "event,date\nlaunch,2026-11-07\nreview,07/11/2026\nparty,someday\n" }
+skills = ["data-clean", "xlsx", "calculate"]
+expect_skills = ["data-clean"]
+
+[[scenario]]
+id = "calculate-units"
+area = "knowledge"
+prompt = "A pipe carries 12 litres per second. How many cubic metres is that over a 36-hour weekend shutdown? Show the inputs and assumptions so I can paste them into a review."
+skills = ["calculate", "xlsx", "claim-verify"]
+expect_skills = ["calculate"]
+
+[[scenario]]
+id = "calculate-reproducible"
+area = "knowledge"
+prompt = "Work out the monthly payment on a 250,000 loan at 6.5% over 25 years and leave a file recording the inputs and the result so someone else can reproduce it."
+skills = ["calculate", "xlsx", "claim-verify", "artifact-tools"]
+expect_skills = ["calculate"]
+must_not = ["xlsx"]
+
+[[scenario]]
+id = "claim-verify-quote"
+area = "knowledge"
+prompt = "My draft says the filing states 'revenue rose 12% year on year'. Check that this exact quote is in filing.txt and that the source is still the file I captured earlier."
+files = { "filing.txt" = "Revenue rose 12% year on year, driven by services.\n" }
+skills = ["claim-verify", "source-capture", "table-extract"]
+expect_skills = ["claim-verify"]
+
+[[scenario]]
+id = "claim-verify-numbers"
+area = "knowledge"
+prompt = "Before I send the memo, confirm every number in memo.md traces back to a captured source, and flag the ones that are only my own inference."
+files = { "memo.md" = "Market is 4 billion [interview.txt]. Growth is probably 12%.\n" }
+skills = ["claim-verify", "source-capture", "calculate"]
+expect_skills = ["claim-verify"]
+
+[[scenario]]
+id = "inspect-layout-preview"
+area = "knowledge"
+prompt = "Render each page of handbook.docx to images so I can look at the layout, and be clear that you only rendered them, you haven't judged the design."
+fixtures = ["handbook.docx"]
+skills = ["inspect-layout", "docx", "visual-design", "pdf"]
+expect_skills = ["inspect-layout"]
+
+[[scenario]]
+id = "xlsx-chart-from-csv"
+area = "documents"
+prompt = "Make a workbook from sales.csv with one sheet per region and, on a summary sheet, a native column chart of total sales by region that stays editable. Save as sales.xlsx."
+files = { "sales.csv" = "region,month,amount\nNorth,Jan,10\nNorth,Feb,12\nSouth,Jan,7\nSouth,Feb,9\n" }
+skills = ["xlsx", "chart-design", "data-clean", "pptx", "visual-design"]
+expect_skills = ["xlsx", "chart-design"]
+must_not = ["pptx"]
+check_files = ["sales.xlsx"]

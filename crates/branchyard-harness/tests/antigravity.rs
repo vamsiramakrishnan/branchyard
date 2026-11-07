@@ -229,7 +229,10 @@ fn streams_text_tools_and_cumulative_usage() {
         Event::ToolStarted {
             turn: 1,
             call_id: "3".into(),
-            name: "run_command".into()
+            name: "run_command".into(),
+            // The first step of a tool carries its name and no input; the
+            // parameters arrive on a later step the driver does not wait for.
+            target: None,
         }
     );
     assert!(

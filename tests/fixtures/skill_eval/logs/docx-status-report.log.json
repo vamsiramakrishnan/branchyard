@@ -1,0 +1,211 @@
+[
+  {
+    "activity": "lifecycle",
+    "state": "started",
+    "reason": null,
+    "idle_since_ms": null,
+    "at_ms": 900
+  },
+  {
+    "activity": "prompt",
+    "text": "p",
+    "at_ms": 1000
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "ready"
+    },
+    "at_ms": 1010
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_accepted",
+      "turn": 1,
+      "native": null
+    },
+    "at_ms": 1020
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1100",
+      "name": "Bash"
+    },
+    "at_ms": 1100
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k1101",
+      "tool": "Bash",
+      "input": {
+        "command": "/home/u/.branchyard/tools/bin/tools search word document"
+      }
+    },
+    "at_ms": 1101
+  },
+  {
+    "activity": "decision",
+    "tool": "Bash",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 1102
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "usage_observed",
+      "turn": 1,
+      "cumulative": false,
+      "input_tokens": 1200,
+      "output_tokens": 80,
+      "cached_input_tokens": null,
+      "cost_usd": null,
+      "cache_write_tokens": null,
+      "cache_write_1h_tokens": null,
+      "model": "m"
+    },
+    "at_ms": 1300
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1400",
+      "name": "Read"
+    },
+    "at_ms": 1400
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k1401",
+      "tool": "Read",
+      "input": {
+        "file_path": "/home/u/.branchyard/tools/skills/docx/SKILL.md"
+      }
+    },
+    "at_ms": 1401
+  },
+  {
+    "activity": "decision",
+    "tool": "Read",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 1402
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1500",
+      "name": "Read"
+    },
+    "at_ms": 1500
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k1501",
+      "tool": "Read",
+      "input": {
+        "file_path": "/home/u/.branchyard/tools/skills/pptx/SKILL.md"
+      }
+    },
+    "at_ms": 1501
+  },
+  {
+    "activity": "decision",
+    "tool": "Read",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 1502
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "usage_observed",
+      "turn": 1,
+      "cumulative": false,
+      "input_tokens": 2500,
+      "output_tokens": 400,
+      "cached_input_tokens": 900,
+      "cost_usd": null,
+      "cache_write_tokens": null,
+      "cache_write_1h_tokens": null,
+      "model": "m"
+    },
+    "at_ms": 3000
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c3100",
+      "name": "Write"
+    },
+    "at_ms": 3100
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "permission_requested",
+      "turn": 1,
+      "key": "k3101",
+      "tool": "Write",
+      "input": {
+        "file_path": "status.docx"
+      }
+    },
+    "at_ms": 3101
+  },
+  {
+    "activity": "decision",
+    "tool": "Write",
+    "allowed": true,
+    "message": null,
+    "source": "policy",
+    "at_ms": 3102
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "message_delta",
+      "turn": 1,
+      "text": "Wrote status.docx"
+    },
+    "at_ms": 3200
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_ended",
+      "turn": 1,
+      "outcome": {
+        "kind": "completed"
+      }
+    },
+    "at_ms": 6000
+  },
+  {
+    "activity": "status",
+    "status": "ready",
+    "at_ms": 6010
+  }
+]

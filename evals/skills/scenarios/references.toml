@@ -1,0 +1,53 @@
+# A skill's reference files: each prompt asks for what one paragraph of a reference says, so a search
+# should land on `SKILL/references/FILE.md` without the skill. A prompt never names the skill.
+
+[[scenario]]
+id = "reference-units-uncertainty"
+area = "references"
+prompt = "My estimate mixes kWh, litres and euros, and two inputs carry a stated plus or minus. How do I carry the units through the arithmetic, where do I convert, and what can I honestly say about the uncertainty of the result?"
+skills = ["calculate", "xlsx", "claim-verify", "data-clean"]
+expect_skills = ["calculate/references/units.md"]
+
+[[scenario]]
+id = "reference-chart-encoding"
+area = "references"
+prompt = "I am choosing between bars, lines and a scatter plot for paired measurements taken over time, and I want the raw data, the exclusions and the transformations kept visible. Which encoding preserves the meaning?"
+skills = ["chart-design", "visual-design", "xlsx", "diagram-design"]
+expect_skills = ["chart-design/references/charts.md"]
+
+[[scenario]]
+id = "reference-evidence-appraisal"
+area = "references"
+prompt = "A report says a programme caused a 12% drop in complaints. Help me appraise that: define the population, outcome and period, separate descriptive observations and predictions from causal conclusions, and find the independent unit behind the count."
+skills = ["claim-verify", "source-capture", "data-clean", "calculate"]
+expect_skills = ["claim-verify/references/evidence-review.md"]
+
+[[scenario]]
+id = "reference-data-quality"
+area = "references"
+prompt = "Before I transform orders.csv, what should I inspect first: identifiers, missing-value codes, units and row keys? I want identifier columns kept as strings and absence told apart from a literal 'NA'."
+files = { "orders.csv" = "id,qty,unit\n0001,3,NA\n0002,,kg\n" }
+skills = ["data-clean", "xlsx", "table-extract", "calculate"]
+expect_skills = ["data-clean/references/data-quality.md"]
+
+[[scenario]]
+id = "reference-mermaid-recipe"
+area = "references"
+prompt = "Write my build pipeline as Mermaid flowchart source, save it as pipeline.mmd, and if the Mermaid CLI is installed render it to SVG with mmdc; otherwise keep the source and tell me."
+skills = ["diagram-design", "visual-design", "chart-design", "pptx"]
+expect_skills = ["diagram-design/references/diagrams.md"]
+
+[[scenario]]
+id = "reference-pdf-render-review"
+area = "references"
+prompt = "Render every page of report.pdf to PNG with pdftoppm so I can check spacing and legibility, and when I later generate a fresh PDF of the summary, do it with reportlab and re-render to verify."
+skills = ["inspect-layout", "pdf", "docx", "visual-design"]
+fixtures = ["report.pdf"]
+expect_skills = ["inspect-layout/references/upstream-pdf.md"]
+
+[[scenario]]
+id = "reference-composition-system"
+area = "references"
+prompt = "Set up the visual system for this one-page brief: how should space, form, color and typography relate so a reader gets a clear entry point and a deliberate path through the page, with scale and grouping carrying the hierarchy?"
+skills = ["visual-design", "docx", "pdf", "chart-design"]
+expect_skills = ["visual-design/references/composition.md"]

@@ -774,6 +774,10 @@ pub struct Delegation {
         value_parser = delegate_depth
     )]
     delegate: Option<u32>,
+    /// The harnesses or profiles the delegating harness may start as children, such as
+    /// codex,gemini-cli; without it, only its own. Needs --delegate
+    #[arg(long, value_name = "ID,ID,...", value_parser = helper_list, requires = "delegate")]
+    helpers: Option<List>,
     /// Allow the harness's own by commands that act as its branch (spawn, inspect, send,
     /// wait, discard, artifact, ask, ...; see docs/delegation.md) without asking; nothing else
     #[arg(long)]
@@ -784,9 +788,33 @@ pub struct Delegation {
     no_wake: bool,
 }
 
+/// `--skill`: the id of a built-in skill; an unknown one is refused with the
+/// built-in skills listed.
+fn built_in_skill(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    branchyard::built_in::check(&[name.to_owned()])?;
+    Ok(name.to_owned())
+}
+
+/// `--helpers`: harness or profile IDs, each one Branchyard has a profile for.
+fn helper_list(list: &str) -> Result<List, String> {
+    let ids = harness_list(list)?;
+    for id in &ids.0 {
+        if branchyard_harness::profiles::by_id(id).is_none()
+            && branchyard_harness::profiles::default_for(id).is_none()
+        {
+            return Err(format!(
+                "{id} is not a harness or profile; `by harnesses` lists them"
+            ));
+        }
+    }
+    Ok(ids)
+}
+
 impl Delegation {
     fn apply(self, task: &mut TaskArgs) {
         task.delegate = self.delegate;
+        task.helpers = self.helpers.map(|list| list.0).unwrap_or_default();
         task.allow_delegation = self.allow_delegation;
         task.no_wake = self.no_wake;
     }
@@ -832,6 +860,11 @@ pub struct Provision {
     /// 'github:write:issues.*'; only into its private home (--isolated or a sandbox). Repeatable
     #[arg(long = "connector", value_name = "GRANT", value_parser = branchyard::connectors::GrantEntry::parse)]
     connectors: Vec<branchyard::connectors::GrantEntry>,
+    /// A built-in skill to stage, with the skills it needs; the others are left out of the
+    /// tool tree and the skill index (docs/knowledge-skills.md). Repeatable; unset, every
+    /// built-in skill is staged
+    #[arg(long = "skill", value_name = "NAME", value_parser = built_in_skill)]
+    skills: Vec<String>,
     /// The hosts the harness may reach (docs/egress.md): open, none, or rules
     /// '[METHOD|METHOD ]HOST[:PORT][/PATH]' separated by commas, such as
     /// 'github.com,*.npmjs.org:443' or 'GET|HEAD api.github.com/repos/*' (a rule naming a
@@ -893,6 +926,7 @@ impl Provision {
             effort: self.effort,
             telemetry: self.telemetry,
             connectors: self.connectors,
+            skills: (!self.skills.is_empty()).then_some(self.skills),
             network: self
                 .network
                 .map(|n| n.with_enforce(self.network_enforce.unwrap_or_default())),
@@ -1083,7 +1117,7 @@ pub struct RunFlags {
     /// Branch name (default: a slug of the prompt)
     #[arg(short, long)]
     name: Option<String>,
-    /// Base revision (default: HEAD)
+    /// Base revision (default: HEAD), or the name of a branch to stack on: its candidate is the base and by pr opens the pull request against its pull request
     #[arg(short, long, value_name = "REV")]
     base: Option<String>,
     #[command(flatten)]
@@ -1221,7 +1255,7 @@ pub struct FanFlags {
     /// Start from GitHub pull request N's head (fetched with gh and git); by pr then updates it
     #[arg(long, value_name = "N", conflicts_with_all = ["issue", "base"])]
     pr: Option<u64>,
-    /// Base revision (default: HEAD)
+    /// Base revision (default: HEAD), or the name of a branch to stack on: its candidate is the base and by pr opens the pull request against its pull request
     #[arg(short, long, value_name = "REV")]
     base: Option<String>,
     #[command(flatten)]
@@ -1910,7 +1944,7 @@ pub struct PrFlags {
     /// The branch to push to on the remote (default: the branch's git branch, by/<name>)
     #[arg(long, value_name = "BRANCH", value_parser = non_blank)]
     head: Option<String>,
-    /// The pull request's base branch (default: the repository's default branch)
+    /// The pull request's base branch (default: the repository's default branch; for a stacked branch, its parent's pull request head)
     #[arg(long, value_name = "BRANCH", value_parser = non_blank)]
     base: Option<String>,
     /// The pull request's title (default: the issue's title, or the prompt's first line); on

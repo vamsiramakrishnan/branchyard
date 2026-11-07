@@ -1,0 +1,33 @@
+# Helpers: the harnesses a turn may delegate to (helpers/INDEX.md, `tools search --kind helper`).
+# A turn with helpers is run with `--delegate`. Ids are catalog/harnesses.toml ids, or `own`: the harness the
+# run uses (a turn's default envelope allows only that one). `envelope` names the harnesses the turn's envelope
+# must allow besides it; `by run` has no flag for that, so the runner skips such a scenario unless told the
+# envelope was configured (`--assume-envelope`).
+
+[[scenario]]
+id = "helper-codex-review"
+area = "helpers"
+prompt = "While you write the tests for parser.py, get OpenAI's Codex to review parser.py for bugs in parallel and bring me both results."
+files = { "parser.py" = "def parse(s):\n    return s.split(',')\n" }
+helpers = true
+skills = ["find-tools"]
+expect_helpers = ["codex"]
+envelope = ["codex"]
+
+[[scenario]]
+id = "helper-gemini-second-opinion"
+area = "helpers"
+prompt = "I want a second opinion from Gemini on whether schema.sql needs an index on user_id. Don't decide it yourself."
+files = { "schema.sql" = "create table events (id int, user_id int, at text);\n" }
+helpers = true
+skills = ["find-tools"]
+expect_helpers = ["gemini-cli"]
+envelope = ["gemini-cli"]
+
+[[scenario]]
+id = "helper-which-available"
+area = "helpers"
+prompt = "Which other coding agents could you hand part of this job to, and what are the limits on how many at once?"
+helpers = true
+skills = ["find-tools"]
+expect_helpers = ["own"]

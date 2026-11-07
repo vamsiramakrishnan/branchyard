@@ -1,0 +1,71 @@
+[
+  {
+    "activity": "lifecycle",
+    "state": "started",
+    "reason": null,
+    "idle_since_ms": null,
+    "at_ms": 900
+  },
+  {
+    "activity": "prompt",
+    "text": "p",
+    "at_ms": 1000
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "ready"
+    },
+    "at_ms": 1010
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_accepted",
+      "turn": 1,
+      "native": null
+    },
+    "at_ms": 1020
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1100",
+      "name": "Bash"
+    },
+    "at_ms": 1100
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1200",
+      "name": "Read"
+    },
+    "at_ms": 1200
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "tool_started",
+      "turn": 1,
+      "call_id": "c1300",
+      "name": "Write"
+    },
+    "at_ms": 1300
+  },
+  {
+    "activity": "harness",
+    "event": {
+      "type": "turn_ended",
+      "turn": 1,
+      "outcome": {
+        "kind": "completed"
+      }
+    },
+    "at_ms": 2000
+  }
+]

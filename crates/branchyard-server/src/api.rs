@@ -669,6 +669,12 @@ impl App {
         Ok(())
     }
 
+    /// The `by` the server runs for itself (`by issue`): the operator's
+    /// `by_path`, else `by` on `PATH`.
+    pub(crate) fn by_exe(&self) -> std::path::PathBuf {
+        self.config.by_path.clone().unwrap_or_else(|| "by".into())
+    }
+
     /// The `by` a delegating harness is told about, for the delegation
     /// command rule.
     fn by_path(&self) -> std::path::PathBuf {
@@ -799,6 +805,7 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/operations", get(operation_by_key))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/repos/{repo}/tasks", axum::routing::post(post_task))
+        .route("/v1/repos/{repo}/issue", get(get_issue))
         .route("/v1/repos/{repo}/branches", get(branches))
         .route("/v1/repos/{repo}/operations", get(repo_operations))
         .route("/v1/repos/{repo}/wait", axum::routing::post(post_wait))
@@ -913,6 +920,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::turn_token::router())
         // Rewinding to a checkpoint: `checkpoint_routes`.
         .merge(crate::checkpoint_routes::router())
+        // A branch's diff file by file, and review comments on it: `review_routes`.
+        .merge(crate::review_routes::router())
         // Wide maps: `map_routes`.
         .merge(crate::map_routes::router())
         // Tasks and their attempts: `task_routes`.
@@ -1796,6 +1805,29 @@ pub(crate) fn required_labels(labels: &[String]) -> Result<Vec<String>, ApiError
     Ok(labels)
 }
 
+/// A request with `issue`, as `by run --issue` would make it: the prompt is
+/// the issue under a header with the request's own prompt added, the branch
+/// is named after the issue unless the request names it, and `issue` is
+/// spent (the prompt's header is what links the branch to it). A request
+/// without one is returned as it is.
+async fn start_from_issue(
+    app: &Shared,
+    repo: &RepoState,
+    mut request: TaskRequest,
+) -> Result<TaskRequest, ApiError> {
+    let Some(reference) = request.issue.take() else {
+        return Ok(request);
+    };
+    let found =
+        crate::issues::resolve(&app.by_exe(), repo.yard.root(), &reference, &request.prompt)
+            .await?;
+    request.prompt = found.prompt;
+    if request.name.is_none() {
+        request.name = Some(found.branch);
+    }
+    Ok(request)
+}
+
 /// The operation a request's idempotency key already names, if any.
 pub(crate) async fn replayed(
     app: &Shared,
@@ -1811,6 +1843,22 @@ pub(crate) async fn replayed(
     found
         .map(|op| operation_response(app, op, true))
         .transpose()
+}
+
+/// `GET /v1/repos/{repo}/issue?ref=REF`: the issue a task would start from
+/// (`TaskRequest::issue`), without starting anything: its link and the
+/// branch name it would get.
+async fn get_issue(
+    State(app): State<Shared>,
+    Path(repo): Path<String>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<branchyard_client::api::IssuePreview>, ApiError> {
+    let repo = app.authorized_repo(&caller, &repo, "run")?.clone();
+    let reference = crate::issues::reference_of(raw.as_deref())
+        .ok_or_else(|| ApiError::bad_request("give the issue as ?ref=URL, #N or KEY"))?;
+    let found = crate::issues::resolve(&app.by_exe(), repo.yard.root(), &reference, "").await?;
+    Ok(Json(issue_preview(found)?))
 }
 
 async fn post_task(
@@ -1854,6 +1902,7 @@ pub(crate) async fn admit_task(
     }
     let policy = app.tenant_policy(caller);
     app.check_admission_quotas(caller, &policy).await?;
+    let request = start_from_issue(app, repo, request).await?;
     let options = work::task_options(app, repo, &request)?;
     let mut requires = required_labels(&request.require_labels)?;
     // Steer a task that runs its harnesses by name, here, toward a worker
@@ -3233,6 +3282,17 @@ async fn stream_events(
     };
     let events = stream::once(async move { Ok(open) }).chain(stream::unfold(state, next_entry));
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+/// A resolved issue as `GET .../issue` answers it.
+pub(crate) fn issue_preview(
+    found: crate::issues::Resolved,
+) -> Result<branchyard_client::api::IssuePreview, ApiError> {
+    Ok(branchyard_client::api::IssuePreview {
+        issue: serde_json::from_value(found.issue)
+            .map_err(|e| ApiError::internal(format!("by issue named an issue badly: {e}")))?,
+        branch: found.branch,
+    })
 }
 
 #[cfg(test)]

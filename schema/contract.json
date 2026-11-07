@@ -181,7 +181,15 @@
       "additionalProperties": false,
       "properties": {
         "prompt": {
-          "type": "string"
+          "type": "string",
+          "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+        },
+        "issue": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
         },
         "harness": {
           "type": [
@@ -1919,6 +1927,65 @@
         }
       }
     },
+    "IssuePreview": {
+      "type": "object",
+      "properties": {
+        "issue": {
+          "$ref": "#/$defs/IssueLink",
+          "description": "The issue: number, URL and title, and for another tracker its name\nand key."
+        },
+        "branch": {
+          "type": "string",
+          "description": "The branch name `by run --issue` would give it."
+        }
+      },
+      "required": [
+        "issue",
+        "branch"
+      ],
+      "description": "`GET /v1/repos/{repo}/issue?ref=REF` and\n`GET /v1/workspaces/{id}/issue?ref=REF`: the issue a task or session\nwould start from (`TaskRequest::issue`), fetched with the server's own\n`gh` login and tracker credentials, without starting anything.",
+      "title": "IssuePreview",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "IssueLink": {
+          "type": "object",
+          "properties": {
+            "number": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The issue's number: GitHub's and GitLab's, or the number in a Linear\nor Jira key (`123` of `ENG-123`)."
+            },
+            "url": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "tracker": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker, when not GitHub: `linear`, `jira` or `gitlab`."
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The tracker's own reference when it is not `#number`: `ENG-123`,\n`PROJ-7`, `group/project#12`."
+            }
+          },
+          "required": [
+            "number",
+            "url",
+            "title"
+          ],
+          "description": "An issue a branch works on."
+        }
+      }
+    },
     "GoalRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -2039,7 +2106,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -7681,7 +7756,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -7759,6 +7834,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -7783,6 +7869,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         }
       }
     },
@@ -8609,7 +8710,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -8687,6 +8788,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -8711,6 +8823,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         }
       }
     },
@@ -15272,7 +15399,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -15350,6 +15477,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -15374,6 +15512,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         }
       }
     },
@@ -29905,7 +30058,14 @@
         },
         "prompt": {
           "type": "string",
-          "description": "Initial instruction."
+          "description": "Initial instruction. With `issue`, instructions added to the issue's\ntext, and may be empty (`\"\"`)."
+        },
+        "issue": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Start from this issue (a GitHub URL, `#N`, `linear:KEY`, a Linear,\nJira or GitLab URL, ...): the server fetches it with its own `gh`\nlogin and tracker credentials and the prompt becomes the issue under\na header. Refused with `issue_unavailable` and a `next` step when it\ncannot be fetched. See `GET /v1/workspaces/{id}/issue`."
         },
         "harness": {
           "type": "string",
@@ -39384,6 +39544,17 @@
                 "name": {
                   "type": "string"
                 },
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ToolTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "What the call acted on (a path, a command, an MCP tool), bounded\nand scrubbed as [`target`] documents; absent when the harness\ndoes not report the call's input. Logs written before the field\nexisted read as absent."
+                },
                 "type": {
                   "type": "string",
                   "const": "tool_started"
@@ -39760,6 +39931,49 @@
         },
         "NativeSession": {
           "type": "string"
+        },
+        "ToolTarget": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TargetKind",
+              "description": "What `value` names."
+            },
+            "value": {
+              "type": "string",
+              "description": "The path, command or tool name, bounded and scrubbed as the module\ndocuments."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "description": "What a tool call acted on."
+        },
+        "TargetKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "file",
+              "description": "A file the tool read or changed."
+            },
+            {
+              "type": "string",
+              "const": "command",
+              "description": "A shell command."
+            },
+            {
+              "type": "string",
+              "const": "mcp",
+              "description": "An MCP or dynamic tool, as `server.tool` (or the tool alone)."
+            },
+            {
+              "type": "string",
+              "const": "skill",
+              "description": "A skill the harness's own skill tool opened."
+            }
+          ],
+          "description": "What kind of thing a [`ToolTarget`] names."
         },
         "PermissionRequest": {
           "type": "object",
@@ -41581,6 +41795,65 @@
                 "kind"
               ],
               "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
+            },
+            {
+              "$ref": "#/$defs/StackLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "stacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch was started on top of another branch's candidate\n(`by run --base BRANCH`): a stack. Its pull request is opened\nagainst the parent's pull request head."
+            },
+            {
+              "$ref": "#/$defs/Restack",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "restacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The parent's pull request merged: the branch was rebased onto the\nbranch it merged into, and its pull request retargeted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "parent": {
+                  "type": "string",
+                  "description": "The parent whose pull request merged."
+                },
+                "onto": {
+                  "type": "string",
+                  "description": "The branch it would have been rebased onto."
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The paths that conflicted."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "restack_blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "parent",
+                "onto",
+                "files"
+              ],
+              "description": "The same rebase conflicted; the branch is unchanged."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -41859,6 +42132,64 @@
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
+        "StackLink": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent branch's name."
+            },
+            "base": {
+              "type": "string",
+              "description": "The parent's candidate commit this branch started from."
+            }
+          },
+          "required": [
+            "parent",
+            "base"
+          ],
+          "description": "The branch this one is stacked on."
+        },
+        "Restack": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent whose pull request merged."
+            },
+            "onto": {
+              "type": "string",
+              "description": "The branch it merged into, which this one now sits on and targets."
+            },
+            "onto_commit": {
+              "type": "string",
+              "description": "The commit of `onto` it was rebased onto."
+            },
+            "from": {
+              "type": "string",
+              "description": "Its candidate before the rebase."
+            },
+            "to": {
+              "type": "string",
+              "description": "Its candidate after the rebase."
+            },
+            "new_parent": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch it is stacked on now: the parent's own parent when the\nparent was itself stacked, none when it now targets `onto` directly."
+            }
+          },
+          "required": [
+            "parent",
+            "onto",
+            "onto_commit",
+            "from",
+            "to"
+          ],
+          "description": "A stacked branch rebased after its parent's pull request merged."
+        },
         "Feedback": {
           "type": "object",
           "properties": {
@@ -41871,7 +42202,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -41949,6 +42280,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -41973,6 +42315,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -45225,6 +45582,17 @@
                 "name": {
                   "type": "string"
                 },
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ToolTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "What the call acted on (a path, a command, an MCP tool), bounded\nand scrubbed as [`target`] documents; absent when the harness\ndoes not report the call's input. Logs written before the field\nexisted read as absent."
+                },
                 "type": {
                   "type": "string",
                   "const": "tool_started"
@@ -45601,6 +45969,49 @@
         },
         "NativeSession": {
           "type": "string"
+        },
+        "ToolTarget": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TargetKind",
+              "description": "What `value` names."
+            },
+            "value": {
+              "type": "string",
+              "description": "The path, command or tool name, bounded and scrubbed as the module\ndocuments."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "description": "What a tool call acted on."
+        },
+        "TargetKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "file",
+              "description": "A file the tool read or changed."
+            },
+            {
+              "type": "string",
+              "const": "command",
+              "description": "A shell command."
+            },
+            {
+              "type": "string",
+              "const": "mcp",
+              "description": "An MCP or dynamic tool, as `server.tool` (or the tool alone)."
+            },
+            {
+              "type": "string",
+              "const": "skill",
+              "description": "A skill the harness's own skill tool opened."
+            }
+          ],
+          "description": "What kind of thing a [`ToolTarget`] names."
         },
         "PermissionRequest": {
           "type": "object",
@@ -47422,6 +47833,65 @@
                 "kind"
               ],
               "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
+            },
+            {
+              "$ref": "#/$defs/StackLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "stacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch was started on top of another branch's candidate\n(`by run --base BRANCH`): a stack. Its pull request is opened\nagainst the parent's pull request head."
+            },
+            {
+              "$ref": "#/$defs/Restack",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "restacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The parent's pull request merged: the branch was rebased onto the\nbranch it merged into, and its pull request retargeted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "parent": {
+                  "type": "string",
+                  "description": "The parent whose pull request merged."
+                },
+                "onto": {
+                  "type": "string",
+                  "description": "The branch it would have been rebased onto."
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The paths that conflicted."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "restack_blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "parent",
+                "onto",
+                "files"
+              ],
+              "description": "The same rebase conflicted; the branch is unchanged."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -47700,6 +48170,64 @@
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
+        "StackLink": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent branch's name."
+            },
+            "base": {
+              "type": "string",
+              "description": "The parent's candidate commit this branch started from."
+            }
+          },
+          "required": [
+            "parent",
+            "base"
+          ],
+          "description": "The branch this one is stacked on."
+        },
+        "Restack": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent whose pull request merged."
+            },
+            "onto": {
+              "type": "string",
+              "description": "The branch it merged into, which this one now sits on and targets."
+            },
+            "onto_commit": {
+              "type": "string",
+              "description": "The commit of `onto` it was rebased onto."
+            },
+            "from": {
+              "type": "string",
+              "description": "Its candidate before the rebase."
+            },
+            "to": {
+              "type": "string",
+              "description": "Its candidate after the rebase."
+            },
+            "new_parent": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch it is stacked on now: the parent's own parent when the\nparent was itself stacked, none when it now targets `onto` directly."
+            }
+          },
+          "required": [
+            "parent",
+            "onto",
+            "onto_commit",
+            "from",
+            "to"
+          ],
+          "description": "A stacked branch rebased after its parent's pull request merged."
+        },
         "Feedback": {
           "type": "object",
           "properties": {
@@ -47712,7 +48240,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -47790,6 +48318,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -47814,6 +48353,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -52932,6 +53486,661 @@
       "title": "Diff",
       "$schema": "https://json-schema.org/draft/2020-12/schema"
     },
+    "Changes": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "string",
+          "description": "The base the candidate is compared with."
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The candidate's commit; none while the branch has no candidate."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChangedFile"
+          },
+          "description": "The changed files, in git's order, at most [`MAX_FILES`]."
+        },
+        "additions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Lines added across every changed file, including those not listed."
+        },
+        "deletions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Lines removed across every changed file, including those not listed."
+        },
+        "omitted_files": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Files beyond [`MAX_FILES`] that are counted in the totals only."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Whether any file or the whole answer was cut."
+        }
+      },
+      "required": [
+        "base",
+        "files",
+        "additions",
+        "deletions"
+      ],
+      "description": "A branch's candidate against its base, file by file.",
+      "title": "Changes",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ChangedFile": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The file's path in the branch (in the base, for a deleted file)."
+            },
+            "old_path": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where a renamed file was."
+            },
+            "status": {
+              "$ref": "#/$defs/FileStatus",
+              "description": "Added, deleted, modified or renamed."
+            },
+            "additions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Lines added, counted in full even when the hunks are cut."
+            },
+            "deletions": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "Lines removed, counted in full even when the hunks are cut."
+            },
+            "binary": {
+              "type": "boolean",
+              "description": "A binary file: named, with no hunks."
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "Some of its lines were left out to keep the answer bounded."
+            },
+            "hunks": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Hunk"
+              },
+              "description": "Its hunks."
+            }
+          },
+          "required": [
+            "path",
+            "status",
+            "additions",
+            "deletions",
+            "hunks"
+          ],
+          "description": "One file the candidate changes."
+        },
+        "FileStatus": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "added",
+              "description": "The file is new."
+            },
+            {
+              "type": "string",
+              "const": "deleted",
+              "description": "The file is gone."
+            },
+            {
+              "type": "string",
+              "const": "modified",
+              "description": "The file's content (or mode) changed."
+            },
+            {
+              "type": "string",
+              "const": "renamed",
+              "description": "The file moved, possibly with edits; see [`ChangedFile::old_path`]."
+            }
+          ],
+          "description": "What happened to a file. Serialized in snake case."
+        },
+        "Hunk": {
+          "type": "object",
+          "properties": {
+            "header": {
+              "type": "string",
+              "description": "The `@@ -a,b +c,d @@ section` line."
+            },
+            "old_start": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of the hunk in the base's file."
+            },
+            "old_lines": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many base lines it covers."
+            },
+            "new_start": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of the hunk in the branch's file."
+            },
+            "new_lines": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "How many branch lines it covers."
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/DiffLine"
+              },
+              "description": "Its lines, in order; fewer than the hunk holds when the file is\n[`ChangedFile::truncated`]."
+            }
+          },
+          "required": [
+            "header",
+            "old_start",
+            "old_lines",
+            "new_start",
+            "new_lines",
+            "lines"
+          ],
+          "description": "One `@@` hunk of a file."
+        },
+        "DiffLine": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/LineKind",
+              "description": "Context, added or removed."
+            },
+            "old": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The line's number in the base's file; none for an added line."
+            },
+            "new": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The line's number in the branch's file; none for a removed line."
+            },
+            "text": {
+              "type": "string",
+              "description": "The line without its `+`, `-` or space marker, cut at\n[`MAX_LINE_CHARS`]."
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "description": "One line of a hunk."
+        },
+        "LineKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "context",
+              "description": "Unchanged, shown for context: on both sides."
+            },
+            {
+              "type": "string",
+              "const": "add",
+              "description": "Added by the branch: on the new side only."
+            },
+            {
+              "type": "string",
+              "const": "del",
+              "description": "Removed by the branch: on the old side only."
+            },
+            {
+              "type": "string",
+              "const": "no_newline",
+              "description": "git's `\\ No newline at end of file`: on neither."
+            }
+          ],
+          "description": "What a diff line is. Serialized in snake case."
+        }
+      }
+    },
+    "Reviews": {
+      "type": "object",
+      "properties": {
+        "candidate": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The branch's candidate now."
+        },
+        "reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Review"
+          },
+          "description": "Every review."
+        }
+      },
+      "required": [
+        "reviews"
+      ],
+      "description": "The reviews sent to a branch, oldest first.",
+      "title": "Reviews",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "Review": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The number, from 1, of its event in the branch's log."
+            },
+            "at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "When it was sent, in milliseconds since the Unix epoch."
+            },
+            "commit": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate commit its line numbers refer to; none for a review\nsent by a client that did not record one."
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The reviewer's overall note."
+            },
+            "comments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SentComment"
+              },
+              "description": "Its comments, in the order sent."
+            }
+          },
+          "required": [
+            "id",
+            "at_ms",
+            "comments"
+          ],
+          "description": "One review that was sent to a branch."
+        },
+        "SentComment": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The file."
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line; 0 for a comment on the whole file (`by review`)."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range."
+            },
+            "side": {
+              "$ref": "#/$defs/DiffSide",
+              "description": "The side the lines are numbered on.",
+              "default": "new"
+            },
+            "body": {
+              "type": "string",
+              "description": "What the reviewer wrote."
+            },
+            "addressed_in": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The candidate commit that changed these lines after the comment was\nsent; none while they stand as they were (or for an old-side\ncomment, which is never marked)."
+            }
+          },
+          "required": [
+            "path",
+            "line",
+            "body"
+          ],
+          "description": "A comment as it was sent, and whether the branch has since changed its\nlines."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
+        }
+      }
+    },
+    "ReviewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewComment"
+          },
+          "description": "The comments, each on lines the diff shows; at most\n[`branchyard::MAX_REVIEW_COMMENTS`].",
+          "default": []
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An overall note, sent with the comments or alone."
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The candidate commit the line numbers were read from\n(`Changes::commit`). When it is not the branch's candidate any more\nthe review is refused with `409 stale_candidate`, so a comment\nnever lands on other code."
+        },
+        "delivery": {
+          "$ref": "#/$defs/ReviewDelivery",
+          "description": "Next turn (the default) or steer a running turn.",
+          "default": "next_turn"
+        }
+      },
+      "description": "`POST /v1/repos/{repo}/branches/{branch}/reviews`: comments written on\nthe branch's diff, delivered as one prompt like `by review`.",
+      "title": "ReviewRequest",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ReviewComment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The file's path in the branch, as [`ChangedFile::path`]."
+            },
+            "line": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The (last) line, numbered on `side`."
+            },
+            "start_line": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0,
+              "description": "The first line of a range, when it covers more than one."
+            },
+            "side": {
+              "$ref": "#/$defs/DiffSide",
+              "description": "The side the lines are numbered on.",
+              "default": "new"
+            },
+            "body": {
+              "type": "string",
+              "description": "What the reviewer wrote."
+            }
+          },
+          "required": [
+            "path",
+            "line",
+            "body"
+          ],
+          "description": "One comment written on the diff."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
+        },
+        "ReviewDelivery": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "next_turn",
+              "description": "As the branch's next turn: a send, which waits for a running turn\nto end."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Into the running turn without interrupting it, as a steer; refused\n(`409 not_running`) when no turn runs."
+            }
+          ],
+          "description": "How a review reaches the branch. Serialized in snake case."
+        }
+      }
+    },
+    "ReviewSent": {
+      "type": "object",
+      "properties": {
+        "delivery": {
+          "$ref": "#/$defs/ReviewDelivery",
+          "description": "How it was delivered."
+        },
+        "comments": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "How many comments it carried."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "The prompt the branch received."
+        },
+        "operation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The ID of the send operation, for `next_turn`\n(`GET /v1/operations/{id}`)."
+        },
+        "steer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Steer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The steer, for `steer`."
+        }
+      },
+      "required": [
+        "delivery",
+        "comments",
+        "prompt"
+      ],
+      "description": "What `POST .../reviews` did: the prompt it wrote and how it went.",
+      "title": "ReviewSent",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$defs": {
+        "ReviewDelivery": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "next_turn",
+              "description": "As the branch's next turn: a send, which waits for a running turn\nto end."
+            },
+            {
+              "type": "string",
+              "const": "steer",
+              "description": "Into the running turn without interrupting it, as a steer; refused\n(`409 not_running`) when no turn runs."
+            }
+          ],
+          "description": "How a review reaches the branch. Serialized in snake case."
+        },
+        "Steer": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Unique in the repository's store."
+            },
+            "branch": {
+              "type": "string"
+            },
+            "by": {
+              "type": "string",
+              "description": "Who sent it, as the branch's event log names them."
+            },
+            "text": {
+              "type": "string"
+            },
+            "requested_at_ms": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0,
+              "description": "Milliseconds since the Unix epoch."
+            },
+            "state": {
+              "$ref": "#/$defs/SteerState"
+            },
+            "boundary": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where the harness delivers steered input within the running turn,\nas `docs/harness-integration.md` \"Steering a running turn\" names\neach profile's boundary (`claude_next_model_call`,\n`codex_turn_steer`, ...). Set once the input is written."
+            }
+          },
+          "required": [
+            "id",
+            "branch",
+            "by",
+            "text",
+            "requested_at_ms",
+            "state"
+          ],
+          "description": "Input for a branch's running turn, and what became of it; see\n[`Branch::steer`]."
+        },
+        "SteerState": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "pending"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "Queued in Branchyard for the running turn; the engine running it\nwrites it to the harness within about 100 ms, in whichever process\nit runs."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "written"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "Written to the harness's input; the harness has not confirmed it\nyet. Stored as `delivered` before it had this name, which still\nreads as this state."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "accepted"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "description": "Joined the running turn: the harness queued it into the turn in\nflight, and the model reads it at the [`Steer::boundary`] the\nharness delivers steered input at (for Claude Code, before its next\nmodel call, still within this turn). Steered input never waits for\na later turn: one the turn does not take is refused."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string",
+                  "const": "refused"
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "description": "Never reached the model: the harness refused or dropped it, an\ninterrupt cancelled it, or the turn ended first."
+            }
+          ],
+          "description": "Where a [`Steer`] is. Serialized as an object tagged by `state`, such as\n`{\"state\": \"refused\", \"reason\": \"...\"}`."
+        }
+      }
+    },
     "Removed": {
       "type": "object",
       "properties": {
@@ -57264,6 +58473,17 @@
                 "name": {
                   "type": "string"
                 },
+                "target": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ToolTarget"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "What the call acted on (a path, a command, an MCP tool), bounded\nand scrubbed as [`target`] documents; absent when the harness\ndoes not report the call's input. Logs written before the field\nexisted read as absent."
+                },
                 "type": {
                   "type": "string",
                   "const": "tool_started"
@@ -57640,6 +58860,49 @@
         },
         "NativeSession": {
           "type": "string"
+        },
+        "ToolTarget": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/TargetKind",
+              "description": "What `value` names."
+            },
+            "value": {
+              "type": "string",
+              "description": "The path, command or tool name, bounded and scrubbed as the module\ndocuments."
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "description": "What a tool call acted on."
+        },
+        "TargetKind": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "file",
+              "description": "A file the tool read or changed."
+            },
+            {
+              "type": "string",
+              "const": "command",
+              "description": "A shell command."
+            },
+            {
+              "type": "string",
+              "const": "mcp",
+              "description": "An MCP or dynamic tool, as `server.tool` (or the tool alone)."
+            },
+            {
+              "type": "string",
+              "const": "skill",
+              "description": "A skill the harness's own skill tool opened."
+            }
+          ],
+          "description": "What kind of thing a [`ToolTarget`] names."
         },
         "PermissionRequest": {
           "type": "object",
@@ -59461,6 +60724,65 @@
                 "kind"
               ],
               "description": "The branch started from this pull request's head (`by run --pr`);\nits pull request is that one, so `by pr` pushes to its head and\nupdates it."
+            },
+            {
+              "$ref": "#/$defs/StackLink",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "stacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The branch was started on top of another branch's candidate\n(`by run --base BRANCH`): a stack. Its pull request is opened\nagainst the parent's pull request head."
+            },
+            {
+              "$ref": "#/$defs/Restack",
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "restacked"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "description": "The parent's pull request merged: the branch was rebased onto the\nbranch it merged into, and its pull request retargeted."
+            },
+            {
+              "type": "object",
+              "properties": {
+                "parent": {
+                  "type": "string",
+                  "description": "The parent whose pull request merged."
+                },
+                "onto": {
+                  "type": "string",
+                  "description": "The branch it would have been rebased onto."
+                },
+                "files": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The paths that conflicted."
+                },
+                "kind": {
+                  "type": "string",
+                  "const": "restack_blocked"
+                }
+              },
+              "required": [
+                "kind",
+                "parent",
+                "onto",
+                "files"
+              ],
+              "description": "The same rebase conflicted; the branch is unchanged."
             }
           ],
           "description": "One step on the way from a branch to a merged pull request. Serialized\nas an object tagged by `kind`, such as\n`{\"kind\": \"opened\", \"number\": 7, \"url\": \"...\", ...}`."
@@ -59739,6 +61061,64 @@
           ],
           "description": "One review thread `by pr --watch` answered and resolved, or tried to."
         },
+        "StackLink": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent branch's name."
+            },
+            "base": {
+              "type": "string",
+              "description": "The parent's candidate commit this branch started from."
+            }
+          },
+          "required": [
+            "parent",
+            "base"
+          ],
+          "description": "The branch this one is stacked on."
+        },
+        "Restack": {
+          "type": "object",
+          "properties": {
+            "parent": {
+              "type": "string",
+              "description": "The parent whose pull request merged."
+            },
+            "onto": {
+              "type": "string",
+              "description": "The branch it merged into, which this one now sits on and targets."
+            },
+            "onto_commit": {
+              "type": "string",
+              "description": "The commit of `onto` it was rebased onto."
+            },
+            "from": {
+              "type": "string",
+              "description": "Its candidate before the rebase."
+            },
+            "to": {
+              "type": "string",
+              "description": "Its candidate after the rebase."
+            },
+            "new_parent": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The branch it is stacked on now: the parent's own parent when the\nparent was itself stacked, none when it now targets `onto` directly."
+            }
+          },
+          "required": [
+            "parent",
+            "onto",
+            "onto_commit",
+            "from",
+            "to"
+          ],
+          "description": "A stacked branch rebased after its parent's pull request merged."
+        },
         "Feedback": {
           "type": "object",
           "properties": {
@@ -59751,7 +61131,7 @@
                 "string",
                 "null"
               ],
-              "description": "What it is about, such as the pull request's URL."
+              "description": "What it is about: the pull request's URL, or for a review of the\nconsole's Changes view the candidate commit its line numbers refer to."
             },
             "items": {
               "type": "array",
@@ -59829,6 +61209,17 @@
               ],
               "description": "Who wrote it, such as a GitHub login."
             },
+            "side": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DiffSide"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a review written on a diff: the side its line numbers are on.\nAbsent means the branch's file (`new`), as `by review` writes."
+            },
             "body": {
               "type": "string",
               "description": "Its text, as written: not quoted, escaped or numbered."
@@ -59853,6 +61244,21 @@
             }
           ],
           "description": "What one [`FeedbackItem`] is. Serialized in snake case."
+        },
+        "DiffSide": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "old",
+              "description": "The base's file: the lines the branch removed (and context)."
+            },
+            {
+              "type": "string",
+              "const": "new",
+              "description": "The branch's file: the lines it added (and context)."
+            }
+          ],
+          "description": "Which side of the diff a comment's lines are on. Serialized in snake\ncase; `new` when absent."
         },
         "SandboxEvent": {
           "oneOf": [
@@ -64027,7 +65433,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -66253,7 +67667,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -68498,7 +69920,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -70739,7 +72169,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -73322,7 +74760,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -75688,7 +77134,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -77912,7 +79366,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [
@@ -80149,7 +81611,15 @@
           "additionalProperties": false,
           "properties": {
             "prompt": {
-              "type": "string"
+              "type": "string",
+              "description": "The task. With `issue`, instructions added to the issue's text, and\nmay be empty (`\"\"`)."
+            },
+            "issue": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Start from this issue, as `by run --issue` does: a GitHub issue URL,\n`#N` or `N` (in the repository's own GitHub project), `linear:KEY`,\n`jira:KEY`, `gitlab:GROUP/PROJECT#N`, or a Linear, Jira or GitLab\nURL. The server fetches it with its own `gh` login and tracker\ncredentials, names the branch after it unless `name` is given, and\nthe pull request `by pr` opens closes it. Refused with\n`issue_unavailable` (and a `next` step) when it cannot be fetched."
             },
             "harness": {
               "type": [

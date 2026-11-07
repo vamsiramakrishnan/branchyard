@@ -395,6 +395,18 @@ mod tests {
         slash.sort();
         assert!(slash.len() >= 3, "{slash:?}");
         paths.extend(slash);
+        // The delegate skill's reference files are read by the same agents.
+        let references = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins/branchyard/skills/delegate/references");
+        let mut files: Vec<String> = std::fs::read_dir(references)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".md"))
+            .map(|name| format!("plugins/branchyard/skills/delegate/references/{name}"))
+            .collect();
+        files.sort();
+        assert!(files.len() >= 10, "{files:?}");
+        paths.extend(files);
         let mut problems = Vec::new();
         for path in &paths {
             problems.extend(check_commands(path, &read(path)));

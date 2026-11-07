@@ -428,7 +428,53 @@ pub struct Workspace {
     exclude: Vec<String>,
 }
 
+/// What [`Workspace::rebase_onto`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rebased {
+    /// The branch now sits on the new base; this is its head.
+    Done(Commit),
+    /// A commit did not apply; the rebase was aborted and the branch is
+    /// unchanged. The paths that conflicted.
+    Conflict(Vec<String>),
+}
+
 impl Workspace {
+    /// Replay the commits of the workspace's branch after its base onto
+    /// `onto` (the stacked-branch rebase, `rebase --onto <onto> <base>`),
+    /// without hooks, and record `onto` as the new base. The worktree must
+    /// be clean and on the branch. A conflict aborts the rebase, leaves the
+    /// branch as it was and names the conflicting paths.
+    pub fn rebase_onto(&self, onto: &Commit) -> Result<Rebased, GitError> {
+        let onto = resolve_in(&self.path, onto.as_str())?;
+        let identity = identity_args(&self.path)?;
+        let (out, args) = Git::new(&self.path)
+            .no_hooks()
+            .args(identity)
+            .args(["rebase", "--onto", onto.as_str(), self.base.as_str()])
+            .output()?;
+        if !out.status.success() {
+            let files: Vec<String> = Git::new(&self.path)
+                .args(["diff", "--name-only", "--diff-filter=U"])
+                .run()
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            Git::new(&self.path)
+                .args(["rebase", "--abort"])
+                .succeeds()?;
+            if files.is_empty() {
+                return Err(git::failed(args, &out));
+            }
+            return Ok(Rebased::Conflict(files));
+        }
+        let head = resolve_in(&self.path, "HEAD")?;
+        Git::new(&self.root)
+            .args(["config", &base_key(&self.name), onto.as_str()])
+            .run()?;
+        Ok(Rebased::Done(head))
+    }
+
     /// This workspace with `paths` (relative to the worktree, taken
     /// literally, not as patterns) left out of every snapshot and diff,
     /// even when no ignore rule covers them: files placed in the worktree

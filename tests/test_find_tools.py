@@ -44,6 +44,12 @@ def fixture(base: Path, *, links: bool = True) -> Path:
         capabilities / "repository/style-guide/SKILL.md",
         "---\nname: style-guide\ndescription: >\n  House style for release notes\n  and changelogs.\n---\n# Style\n",
     )
+    write(
+        capabilities / "docx/references/layouts.md",
+        "# Page layouts\n\nAdapted from an upstream guide.\n\n"
+        "Set mirrored margins and a gutter for duplex printing; a header repeats on every section.\n\n"
+        "```\nnot indexed: zebra\n```\n\nSource: https://example.invalid/zebra\n",
+    )
     write(capabilities / "topics/documents/INDEX.md", "# not a skill\n")
     write(connectors / "INDEX.md", "- github (read): github/SKILL.md\n- linear (write): linear/SKILL.md\n")
     write(
@@ -79,7 +85,11 @@ def fixture(base: Path, *, links: bool = True) -> Path:
         connectors / "_compose/compose.json", json.dumps({"operations": {"flow.plan": "Plan a flow across connectors"}})
     )
     write(tools / "helpers/INDEX.md", "- codex: strong at refactors; slow, costs more\n- haiku: cheap, quick edits\n")
-    write(tools / "INDEX.md", "# Your tools\n")
+    write(
+        tools / "INDEX.md",
+        "# Your tools\n\n## Skills (skills/NAME/SKILL.md)\n- docx: Word documents.\n- calculate: Arithmetic.\n"
+        "\n## Connectors (connectors/ID/SKILL.md)\n- github\n- linear\n",
+    )
     if links:
         os.symlink("../capabilities", tools / "skills")
         os.symlink("../connectors", tools / "connectors")
@@ -112,6 +122,33 @@ class Frontmatter(unittest.TestCase):
         )
         self.assertEqual(read("---\nname: a\ndescription: >\n  one\n  two\n---\n")["description"], "one two")
         self.assertEqual(read("no frontmatter"), {})
+
+    def test_keywords_as_a_flow_list_a_block_list_or_words(self):
+        read = find_tools.frontmatter
+        self.assertEqual(
+            read("---\nname: a\nkeywords: [deck, slideshow, slides]\n---\n")["keywords"], "deck slideshow slides"
+        )
+        self.assertEqual(
+            read("---\nname: a\nkeywords:\n  - deck\n  - slide-show\n---\n")["keywords"], "deck slide-show"
+        )
+        self.assertEqual(read("---\nname: a\nkeywords: deck, slides\n---\n")["keywords"], "deck slides")
+        self.assertNotIn("keywords", read("---\nname: a\n---\n"))
+
+    def test_title_summary_and_content_words_of_a_reference(self):
+        text = (
+            "---\nname: x\n---\n# Units\n\n- a list first\n\nFirst paragraph\nwraps.\n\nSecond.\n"
+            "```\ncode\n```\nSource: https://a.b/c\n"
+        )
+        self.assertEqual(find_tools.title_of(text, "units-and-more"), "Units")
+        self.assertEqual(find_tools.title_of("no heading", "units-and-more"), "units and more")
+        self.assertEqual(find_tools.summary_of(text), "First paragraph wraps.")
+        words = find_tools.content_words(text).split()
+        self.assertIn("paragraph", words)
+        self.assertIn("list", words)
+        for absent in ("code", "source", "https", "a", "first"):
+            self.assertNotIn(absent, words if absent != "first" else [])  # `first` is prose and stays
+        self.assertIn("first", words)
+        self.assertEqual(len(find_tools.summary_of("# T\n\n" + "word " * 200)), find_tools.SUMMARY_CAP)
 
 
 class Search(Tree):
@@ -170,6 +207,80 @@ class Search(Tree):
         ]
         ranked = find_tools.rank(docs, ["common", "rare"])
         self.assertEqual(ranked[0][1].id, "a")
+
+
+class References(Tree):
+    """Each `references/*.md` of a skill is a document of its own, below a tool of equal match."""
+
+    def test_a_reference_is_found_by_its_words_and_its_skill_is_not(self):
+        code, out, _ = run(self.tools, "search", "mirrored", "margins", "duplex")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("reference  docx/references/layouts.md: Page layouts. Adapted from"), out)
+        self.assertNotIn("skill      docx", out)
+
+    def test_a_code_fence_and_an_attribution_line_are_not_indexed(self):
+        code, out, _ = run(self.tools, "search", "zebra")
+        self.assertEqual((code, out), (1, ""))
+
+    def test_kind_reference_narrows_and_the_grammar_names_one(self):
+        _, out, _ = run(self.tools, "search", "docx", "margins", "--kind", "reference")
+        self.assertEqual([line.split()[0] for line in out.splitlines()], ["reference"])
+        for ident in (
+            "docx/references/layouts.md",
+            "skill:docx/references/layouts.md",
+            "reference:docx/references/layouts.md",
+        ):
+            code, out, _ = run(self.tools, "show", ident)
+            self.assertEqual(code, 0, ident)
+            self.assertIn("docx/references/layouts.md", out.splitlines()[0])
+            self.assertIn("# Page layouts", out)
+        code, _, err = run(self.tools, "show", "docx/references/missing.md")
+        self.assertEqual(code, 1)
+        self.assertIn("no tool", err)
+
+    def test_the_chosen_factor_puts_a_tool_above_a_reference_of_equal_match_and_plain_does_not(self):
+        docs = find_tools.documents(self.tools)
+        chosen = find_tools.chosen_tools(self.tools)
+        self.assertEqual(chosen, frozenset({"docx", "calculate", "github", "linear"}))
+        # The repository skill is in the tree but not in INDEX.md: it is mounted, not chosen.
+        self.assertFalse(find_tools.is_chosen(next(d for d in docs if d.id == "repository:style-guide"), chosen))
+        self.assertTrue(find_tools.is_chosen(next(d for d in docs if d.id == "github.issues.list"), chosen))
+        self.assertTrue(find_tools.is_chosen(next(d for d in docs if d.kind == "helper"), chosen))
+        self.assertFalse(find_tools.is_chosen(next(d for d in docs if d.kind == "reference"), chosen))
+        same = [
+            find_tools.Doc(
+                "skill", "a", "", None, "a duplex", fields=(("id", "a"), ("description", "duplex")), skill="a"
+            ),
+            find_tools.Doc("reference", "a/references/r.md", "", None, "", fields=(("id", "a r"), ("body", "duplex"))),
+        ]
+        plain = [d.kind for _, d in find_tools.rank(same, ["duplex"])]
+        weighted = [d.kind for _, d in find_tools.rank(same, ["duplex"], frozenset({"a"}))]
+        self.assertEqual(weighted[0], "skill")
+        scores = {d.kind: s for s, d in find_tools.rank(same, ["duplex"], frozenset({"a"}))}
+        plain_scores = {d.kind: s for s, d in find_tools.rank(same, ["duplex"])}
+        self.assertAlmostEqual(scores["skill"], plain_scores["skill"] * find_tools.CHOSEN)
+        self.assertEqual(scores["reference"], plain_scores["reference"])
+        self.assertEqual(len(plain), 2)
+        code, _, _ = run(self.tools, "search", "duplex", "--plain")
+        self.assertEqual(code, 0)
+
+    def test_an_overflow_line_means_every_tool_is_chosen(self):
+        write(
+            self.tools / "INDEX.md",
+            "# Your tools\n\n## Skills (skills/NAME/SKILL.md)\n- docx\n- ...3 more: `bin/tools search WORDS`\n",
+        )
+        self.assertEqual(find_tools.chosen_tools(self.tools), frozenset({"*"}))
+        write(self.tools / "INDEX.md", "# Your tools\n")
+        self.assertEqual(find_tools.chosen_tools(self.tools), frozenset())
+
+    def test_references_never_reorder_the_tools_among_themselves(self):
+        docs = find_tools.documents(self.tools)
+        tools_only = [d for d in docs if d.kind != "reference"]
+        self.assertTrue(any(d.kind == "reference" for d in docs))
+        for words in (["word", "document"], ["list", "issues"], ["margins", "header", "section"], ["arithmetic"]):
+            with_references = [d.id for _, d in find_tools.rank(docs, words) if d.kind != "reference"]
+            without = [d.id for _, d in find_tools.rank(tools_only, words)]
+            self.assertEqual(with_references, without, words)
 
 
 class Show(Tree):
@@ -438,8 +549,30 @@ class Shipped(unittest.TestCase):
         text = (SCRIPT.parent.parent / "SKILL.md").read_text(encoding="utf-8")
         body = text.split("\n---\n", 1)[1]
         self.assertLessEqual(len(body), 600)
-        for command in ("tools search", "tools show", "tools schema"):
+        for command in ("tools search", "tools show", "tools schema", "references/"):
             self.assertIn(command, body)
+
+    def test_every_shipped_reference_is_a_document_and_the_delegate_skill_is_not(self):
+        """The shipped skills, mounted as `by run` mounts them (capabilities.json), with their references."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "tools").mkdir()
+            (base / "capabilities").mkdir()
+            listed = json.loads((ROOT / "plugins/branchyard/capabilities.json").read_text(encoding="utf-8"))
+            for skill in listed["skills"]:
+                os.symlink(SCRIPT.parent.parent.parent / skill["id"], base / "capabilities" / skill["id"])
+            os.symlink("../capabilities", base / "tools/skills")
+            write(base / "tools/INDEX.md", "# Your tools\n")
+            docs = find_tools.documents(base / "tools")
+            references = {d.id for d in docs if d.kind == "reference"}
+            shipped = {
+                f"{p.parent.parent.name}/references/{p.name}"
+                for p in (SCRIPT.parent.parent.parent).glob("*/references/*.md")
+                if p.parent.parent.name in {s["id"] for s in listed["skills"]}
+            }
+            self.assertEqual(references, shipped)
+            self.assertTrue(references)
+            self.assertFalse({d.id for d in docs if d.skill == "delegate" or d.id.startswith("delegate")})
 
 
 if __name__ == "__main__":

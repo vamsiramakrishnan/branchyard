@@ -14,7 +14,7 @@ use branchyard_harness::conformance::{
 };
 use branchyard_harness::{
     Driver, Event, Instructions, McpServer, NativeSession, Open, Opened, PermissionDecision,
-    Rejected, RemoteMcpServer, RemoteTransport, SessionMode, TurnOutcome,
+    Rejected, RemoteMcpServer, RemoteTransport, SessionMode, ToolTarget, TurnOutcome,
 };
 use serde_json::{json, Value};
 
@@ -241,7 +241,8 @@ fn history_replayed_after_the_load_answer_is_not_the_next_turns_output() {
             Event::ToolStarted {
                 turn: submitted.turn,
                 call_id: "write_file-2".into(),
-                name: "WriteFile".into()
+                name: "WriteFile".into(),
+                target: None,
             }
         ]
     );
@@ -310,6 +311,53 @@ fn fork_and_model_selection_are_rejected_before_launch() {
     ));
 }
 
+/// What a tool call's input names, from `tool_call` updates shaped as the
+/// recorded agents send them: Antigravity's `rawInput.CommandLine` (recorded,
+/// `antigravity-cli-1.4.12-acp-turn.jsonl`), OpenCode's `rawInput.command`
+/// (recorded), a call that names only a location, and one that names nothing.
+#[test]
+fn a_tool_call_logs_what_it_acted_on_and_never_its_arguments() {
+    let mut driver = ready();
+    driver.submit("go").unwrap();
+    let updates = [
+        json!({"sessionUpdate": "tool_call", "toolCallId": "a", "name": "run_command", "title": "sleep 40 && echo finished", "kind": "execute", "status": "in_progress",
+               "rawInput": {"CommandLine": "sleep 40 && echo finished", "WaitMsBeforeAsync": 5000, "toolSummary": "Sleep and echo finished"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "b", "title": "bash", "kind": "other", "status": "in_progress",
+               "rawInput": {"command": "API_KEY=sk-abcdefghijklmnop curl https://example.com", "description": "Fetch", "timeoutMs": 60000}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "c", "title": "Read", "kind": "read", "status": "in_progress",
+               "locations": [{"path": "/workspace/docs/a.md"}]}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "d", "title": "Edit", "kind": "edit", "status": "in_progress",
+               "rawInput": {"filePath": "/etc/hosts", "content": "never logged"}}),
+        json!({"sessionUpdate": "tool_call", "toolCallId": "e", "title": "think", "kind": "think", "status": "in_progress"}),
+    ];
+    let targets: Vec<Option<ToolTarget>> = updates
+        .into_iter()
+        .flat_map(|update| {
+            feed(
+                &mut driver,
+                &json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": update}}),
+            )
+            .0
+        })
+        .map(|event| match event {
+            Event::ToolStarted { target, .. } => target,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ToolTarget::command("sleep 40 && echo finished"),
+            ToolTarget::command("API_KEY=[redacted] curl https://example.com"),
+            ToolTarget::file("docs/a.md", "/workspace"),
+            ToolTarget::file("hosts", "/workspace"),
+            None,
+        ]
+    );
+    let value = targets[1].as_ref().unwrap();
+    assert_eq!(value.value, "API_KEY=[redacted] curl https://example.com");
+}
+
 #[test]
 fn prompts_stream_updates_and_end_with_the_stop_reason() {
     let mut driver = ready();
@@ -342,7 +390,10 @@ fn prompts_stream_updates_and_end_with_the_stop_reason() {
             Event::ToolStarted {
                 turn: 1,
                 call_id: "call-1".into(),
-                name: "Run tests".into()
+                name: "Run tests".into(),
+                // The title is the agent's description, not a command; only
+                // the call's input names one.
+                target: None,
             },
         ]
     );

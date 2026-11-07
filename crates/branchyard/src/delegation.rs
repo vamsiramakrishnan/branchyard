@@ -5860,6 +5860,7 @@ Checks on the merged result: \
             turn: 1,
             call_id: "t".into(),
             name: "Bash".into(),
+            target: None,
         }));
         let events = vec![
             at(Activity::Prompt("earlier".into())),
