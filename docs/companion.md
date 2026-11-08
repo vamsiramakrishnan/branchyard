@@ -68,7 +68,7 @@ Scan the code (or open the link) on the phone. The page redeems the code, keeps 
 
 | Command | Does |
 |---|---|
-| `by serve token new --link [--name N] [--tenant T] [--scopes S,...] [--repo R,...] [--ttl 24h] [--code-ttl 10m] [--public-url URL] [--no-qr]` | Record a one-time pairing code in the server's store and print its link. `--ttl` is the token's lifetime (default 24h, at most 90d); `--code-ttl` how long the link may be opened (default 10m, at most 1h). Scopes default to all four, as `token new`'s do |
+| `by serve token new --link [--name N] [--tenant T] [--scopes S,...] [--repo R,...] [--ttl 24h] [--code-ttl 10m] [--public-url URL] [--no-qr]` | Record a one-time pairing code in the server's store and print its link. `--ttl` is the token's lifetime (default 24h, at most 90d); `--code-ttl` how long the link may be opened (default 10m, at most 1h). Scopes default to `read,run,merge`, as `token new`'s do |
 | `by serve token list` | Paired tokens (active, expired, revoked, with the device that redeemed them) and links not yet opened |
 | `by serve token revoke NAME [--tenant T]` | Revoke a paired token or an unopened link at once; its push subscriptions are dropped |
 

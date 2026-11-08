@@ -798,6 +798,8 @@ pub(crate) fn delegation_not_allowed(message: &str) -> ApiError {
 }
 
 pub fn router(app: Shared) -> Router {
+    // With its own listener, the admin console is not on this one.
+    let admin = app.config.admin_listen.is_none();
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
         .route("/v1/harnesses", get(harnesses))
@@ -932,8 +934,6 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::preview::router(app.preview.clone()))
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router())
-        // Compute targets and setup plans for operators: `admin_compute`.
-        .merge(crate::admin_compute::router())
         // What background work could not do: `problems`.
         .merge(crate::problems::router());
     let v1 = match (app.runtime.get(), app.pull_requests.get()) {
@@ -942,16 +942,39 @@ pub fn router(app: Shared) -> Router {
             .merge(crate::console_pr_gateway::router(pr.clone())),
         _ => v1,
     };
-    let log = app.config.log_requests;
-    Router::new()
+    let routes = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/.well-known/jwks.json", get(jwks))
         // What this server is and which services it has: `services_routes`.
         .merge(crate::services_routes::public())
-        // The admin compute console's page: `admin_compute`.
-        .merge(crate::admin_compute::public())
         .route("/metrics", get(metrics_route))
-        .merge(v1)
+        .merge(v1);
+    // The admin compute console, page and routes: `admin_compute`.
+    let routes = match admin {
+        true => routes.merge(crate::admin_compute::public().merge(crate::admin_compute::router())),
+        false => routes,
+    };
+    layered(app, routes)
+}
+
+/// The routes `--admin-listen`'s listener serves, and nothing else: the
+/// admin compute console's page and its `admin`-scoped routes, behind the
+/// same authentication, limits, request IDs and metrics as the main
+/// listener. See `docs/admin-console.md`.
+pub fn admin_router(app: Shared) -> Router {
+    let routes = Router::new()
+        .route("/healthz", get(|| async { "ok\n" }))
+        .merge(crate::admin_compute::public())
+        .merge(crate::admin_compute::router());
+    layered(app, routes)
+}
+
+/// Every listener's middleware around `routes`: the not-found and
+/// wrong-method answers, authentication, the concurrency limit, the
+/// request's span and ID, and the request metrics.
+fn layered(app: Shared, routes: Router<Shared>) -> Router {
+    let log = app.config.log_requests;
+    routes
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
             ApiError::new(

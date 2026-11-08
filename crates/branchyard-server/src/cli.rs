@@ -108,7 +108,7 @@ struct TokenNew {
     /// Its tenant
     #[arg(long, default_value = DEFAULT_TENANT)]
     tenant: String,
-    /// Its scopes: read, run, merge, admin (default: all four)
+    /// Its scopes: read, run, merge, admin (default: read,run,merge; ask for admin by name)
     #[arg(long, value_name = "S,...", value_parser = names)]
     scopes: Option<Names>,
     /// Its own repository allowlist, narrower than its tenant's (default: none, meaning
@@ -134,6 +134,17 @@ struct TokenNew {
     no_qr: bool,
     #[command(flatten)]
     place: ServerPlace,
+}
+
+/// The scopes a new token gets when `--scopes` names none: everything a
+/// developer does, not `admin`, which an operator asks for by name so a
+/// token handed to a developer cannot open the admin console.
+fn default_token_scopes() -> Vec<String> {
+    SCOPES
+        .iter()
+        .filter(|scope| **scope != "admin")
+        .map(|scope| scope.to_string())
+        .collect()
 }
 
 /// A comma-separated list, trimmed, without empty entries.
@@ -166,7 +177,7 @@ fn token_new(args: TokenNew, program: &str) -> ExitCode {
     }
     let scopes = match args.scopes {
         Some(Names(scopes)) => scopes,
-        None => SCOPES.iter().map(|s| s.to_string()).collect(),
+        None => default_token_scopes(),
     };
     for scope in &scopes {
         if let Err(error) = config::check_scope_name(scope) {
@@ -250,6 +261,10 @@ struct Flags {
     /// Address to listen on (default: 127.0.0.1:8421)
     #[arg(long, value_name = "ADDR")]
     listen: Option<String>,
+    /// Serve the admin compute console (/admin, /v1/admin/*) on this address only, with
+    /// --listen's TLS; --listen then answers 404 for it. See docs/admin-console.md
+    #[arg(long, value_name = "ADDR")]
+    admin_listen: Option<String>,
     /// Serve the repository at PATH as NAME; repeatable (default: the repository containing
     /// the current directory)
     #[arg(long = "repo", value_name = "NAME=PATH", value_parser = repo)]
@@ -727,6 +742,10 @@ fn build(flags: Flags) -> Result<(Config, Vec<String>), String> {
     if let Some(listen) = &flags.listen {
         config.listen = config::parse_listen(listen)?;
     }
+    config.admin_listen = match &flags.admin_listen {
+        Some(addr) => Some(config::parse_listen(addr)?),
+        None => partial.admin_listen,
+    };
     config.repos = repos;
     config.tokens = tokens;
     config.default_token_file = default_token_file;
@@ -1115,6 +1134,9 @@ pub fn main(args: &[String], program: &str) -> ExitCode {
                 url = %running.url(),
                 "serving; harnesses run as this user, with no isolation beyond it"
             );
+            if let Some(admin) = running.admin_url() {
+                tracing::info!(url = %admin, "serving the admin compute console only on its own listener");
+            }
             if let Some(path) = &token_file {
                 tracing::info!(
                     token_file = %path.display(),
@@ -1351,6 +1373,11 @@ mod tests {
             panic!("not token new")
         };
         assert_eq!((new.tenant.as_str(), new.scopes), (DEFAULT_TENANT, None));
+        assert_eq!(
+            default_token_scopes(),
+            ["read", "run", "merge"],
+            "admin is asked for by name"
+        );
         let help = parse_cli(&args("token new --help"), "by serve")
             .unwrap_err()
             .to_string();

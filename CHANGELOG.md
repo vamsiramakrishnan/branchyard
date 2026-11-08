@@ -9,7 +9,12 @@ labels can claim it, and `ready`, `no_worker` or `provider_not_allowed`) and
 `POST /v1/admin/compute/plan` (`admin`) returning, for a GCE VM (process, gVisor
 or Microsandbox) or a GKE Agent Sandbox pool (gVisor or Kata), the setup helper's
 plan and apply commands, the `compute:ID` worker label and the preset to add. The
-routes run no helper and contact no cloud. Hermetic. Not done: a plan applied
+routes run no helper and contact no cloud. `--admin-listen ADDR` (`admin_listen`)
+serves the console on its own listener and takes it off the main one. Each
+provider describes its own compute through the public `Provider::compute()`
+(`RunsOn`, `Isolation`, network, namespace). `branchyard-server token new` without
+`--scopes` now gives `read,run,merge`: ask for `admin` by name. Credentials
+already in a configuration are unchanged. Hermetic. Not done: a plan applied
 from the console's output, and choosing a native preset from `by run --remote`.
 
 Observability phase 2 (`docs/observability.md`). A turn is traced live: the

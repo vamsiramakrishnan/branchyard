@@ -284,8 +284,19 @@ fn plans_refuse_mismatched_runtimes_and_unpinned_or_malformed_values() {
 }
 
 fn app(directory: &tempfile::TempDir) -> Shared {
+    app_with(directory, |_| {})
+}
+
+const SECRET: &str = "an-admin-console-test-token";
+
+fn app_with(directory: &tempfile::TempDir, configure: impl FnOnce(&mut Config)) -> Shared {
     let mut config = configured();
     config.data_dir = PathBuf::from(directory.path()).join("data");
+    config.tokens.push(crate::config::Token {
+        name: "operator".into(),
+        secret: SECRET.into(),
+    });
+    configure(&mut config);
     Arc::new(App {
         preview: Arc::new(
             crate::preview::PreviewService::new(directory.path().join("previews")).unwrap(),
@@ -439,4 +450,97 @@ async fn the_page_is_public_and_its_data_is_not() {
         .unwrap();
     assert_eq!(response.status(), 401);
     assert!(!is_public("/admin/other.js"));
+}
+
+async fn status(router: &axum::Router, path: &str, token: Option<&str>) -> u16 {
+    let request = Request::builder().uri(path);
+    let request = match token {
+        Some(token) => request.header("authorization", format!("Bearer {token}")),
+        None => request,
+    };
+    router
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn with_its_own_listener_the_console_leaves_the_main_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let shared = app(&directory);
+    let main = crate::api::router(shared.clone());
+    assert_eq!(
+        status(&main, "/v1/admin/compute", Some(SECRET)).await,
+        200,
+        "same listener by default"
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let shared = app_with(&directory, |config| {
+        config.admin_listen = Some("127.0.0.1:0".parse().unwrap());
+    });
+    let main = crate::api::router(shared.clone());
+    let admin = crate::api::admin_router(shared);
+    for path in ["/admin", "/admin/admin.js", "/v1/admin/compute"] {
+        assert_eq!(status(&main, path, Some(SECRET)).await, 404, "main {path}");
+    }
+    assert_eq!(
+        status(&main, "/v1/repos", Some(SECRET)).await,
+        200,
+        "the main API stays"
+    );
+    assert_eq!(status(&admin, "/admin", None).await, 200);
+    assert_eq!(
+        status(&admin, "/v1/admin/compute", None).await,
+        401,
+        "authenticated as on main"
+    );
+    assert_eq!(status(&admin, "/v1/admin/compute", Some(SECRET)).await, 200);
+    for path in ["/v1/repos", "/metrics", "/.well-known/branchyard", "/app"] {
+        assert_eq!(
+            status(&admin, path, Some(SECRET)).await,
+            404,
+            "admin {path}"
+        );
+    }
+}
+
+#[test]
+fn an_admin_listener_is_refused_where_it_would_leak_or_collide() {
+    let check = |configure: &dyn Fn(&mut Config)| {
+        let mut config = Config::new(PathBuf::from("/nonexistent/data"));
+        config
+            .repos
+            .push(("app".into(), PathBuf::from("/nonexistent/app")));
+        config.tokens.push(crate::config::Token {
+            name: "operator".into(),
+            secret: SECRET.into(),
+        });
+        configure(&mut config);
+        config.validate().map(|_| ())
+    };
+    assert_eq!(
+        check(&|c| c.admin_listen = Some("127.0.0.1:9000".parse().unwrap())),
+        Ok(())
+    );
+    let same = check(&|c| c.admin_listen = Some(c.listen)).unwrap_err();
+    assert!(same.contains("own listen address"), "{same}");
+    let plain = check(&|c| c.admin_listen = Some("10.0.0.5:9000".parse().unwrap())).unwrap_err();
+    assert!(plain.contains("plain HTTP"), "{plain}");
+    assert_eq!(
+        check(&|c| {
+            c.admin_listen = Some("10.0.0.5:9000".parse().unwrap());
+            c.insecure_bind = true;
+        }),
+        Ok(())
+    );
+    let worker = check(&|c| {
+        c.admin_listen = Some("127.0.0.1:9000".parse().unwrap());
+        c.worker_only = true;
+    })
+    .unwrap_err();
+    assert!(worker.contains("worker"), "{worker}");
 }

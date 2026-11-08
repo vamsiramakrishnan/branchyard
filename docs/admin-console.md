@@ -28,7 +28,7 @@ an always-on server and a network path from developers to it.
 
 ## Open the console
 
-Serve the server as usual, then open `/admin` on its address and paste a token
+Serve the server as usual, then open `/admin` on its address (or on `--admin-listen`'s) and paste a token
 with the `admin` scope. The page has no data of its own. It keeps the token in
 the browser tab's session storage and sends it only to this server's API. The
 page and its script are public. Their data routes are not:
@@ -38,6 +38,28 @@ page and its script are public. Their data routes are not:
 | `GET /admin`, `GET /admin/admin.js` | none | the console's page and script, with a `script-src 'self'` content security policy |
 | `GET /v1/admin/compute` | `admin` | every execution preset read as a compute target, and every live worker with the targets it can claim |
 | `POST /v1/admin/compute/plan` | `admin` | the commands, worker label and preset for new GCE or GKE compute |
+
+## Keep it apart from developers
+
+Two settings keep developers out of the console:
+
+- **Admin tokens are asked for by name.** `branchyard-server token new` (and
+  `by serve token new`, `--link` included) gives `read,run,merge` unless
+  `--scopes` names others. An operator's token is
+  `token new --name ops --scopes read,admin`. Credentials already in a
+  configuration keep the scopes they list, and a `tokens` entry without
+  `scopes` still has all four, as before.
+- **Its own listener.** `--admin-listen ADDR` (or `admin_listen` in the
+  configuration) serves `/admin`, `/v1/admin/*` and `/healthz` on `ADDR` only, with
+  the main listener's TLS, authentication, limits and request metrics. The main
+  listener then answers `404` for the console and its routes, and the admin
+  listener answers `404` for everything else. Put `ADDR` on a private network,
+  or behind an identity-aware proxy. A non-loopback address needs TLS or
+  `--insecure-bind`, a worker takes none, and it may not equal `--listen`.
+
+```sh
+by serve --listen 0.0.0.0:8421 --tls-cert cert.pem --tls-key key.pem --admin-listen 10.0.0.5:8422
+```
 
 ## Compute targets
 
@@ -108,12 +130,16 @@ cannot choose a `container` or `agent_sandbox` preset yet (`403 preset_required`
 so a developer's `by --remote` turn reaches native GKE and GCE isolation only
 through a workspace session today.
 
-**Status, 8 November 2026.** Hermetic only: `cargo test -p branchyard-server --lib admin_compute`
-(9 tests, passed) covers preset-to-target reading, label matching against
-constructed live workers, the implicit local preset, every plan shape and its
-refusals, admin scope on both routes, and the public page with `401` on its
-data route through the real router. The page was driven in headless Chromium
-against a mocked API. Not done: a plan applied from the console's output to a
-real GCE project or GKE cluster; a server opened in a browser with live
-workers; applying the plan from the server; writing the preset into the
-configuration from the console; choosing a preset from `by run --remote`.
+**Status, 8 November 2026.** Hermetic only. `cargo test -p branchyard-server --lib admin_compute`
+(11 tests, passed) covers preset-to-target reading through `Provider::compute`,
+label matching against constructed live workers, the implicit local preset,
+every plan shape and its refusals, admin scope on both routes, the public page
+with `401` on its data route through the real router, the main and admin
+routers with and without `admin_listen` (each `404` for the other's routes), and
+the configuration checks on the admin listener. `cargo test -p branchyard --lib providers::`
+checks every provider's `compute()`, and `cargo test -p branchyard-server --lib cli`
+the `read,run,merge` token default. The page was driven in headless Chromium
+against a mocked API. Not done: a running server with `--admin-listen` bound
+and reached over TLS; a plan applied from the console's output to a real GCE
+project or GKE cluster; applying plans or writing presets from the server;
+choosing a preset from `by run --remote`.
