@@ -414,6 +414,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos` | Served repositories | `{"repos": [{"name", "root"}]}` |
 | `GET /v1/harnesses` | Harness profiles, as found on the server's `PATH` | `{"harnesses": [{"harness", "profile", "default", "available", "qualification"}]}` |
 | `GET /v1/inventory` | Live workers serving repositories the caller can see, this server first, with the harnesses each one's machine has ([worker inventory](#worker-inventory)); `read` scope | `{"workers": [{"id", "host", "labels", "repos", "seen_ms_ago", "this", "inventory"}]}` |
+| `GET /admin`, `GET /admin/admin.js`, `GET /v1/admin/compute`, `POST /v1/admin/compute/plan` | The [admin compute console](admin-console.md): its public page, every execution preset read as compute with the live workers that can claim it, and setup plans for GCE or GKE compute; `admin` scope for both routes | the page; `{"origin", "targets", "workers"}`; `{"steps", "label", "allow_provider", "preset", "notes"}` |
 | `GET /v1/problems` | What background work could not do that a person can act on, oldest first; empty when nothing needs a person ([problems](#problems)) | `{"problems": [{"kind", "key", "what", "since_ms", "failures"?, "error", "next"}]}` |
 | `POST /v1/repos/{repo}/tasks` | Run a task on one branch, or one branch per harness | `202` operation |
 | `GET /v1/repos/{repo}/branches` | Every branch, oldest first | `{"branches": [BranchInfo]}` |

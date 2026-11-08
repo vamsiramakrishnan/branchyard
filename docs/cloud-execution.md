@@ -75,6 +75,9 @@ For Kata, select `namespace: branchyard-microvm` and `runtime: microvm` in the
 operator's provider object. For GCE Microsandbox, use the existing `microsandbox`
 provider object with the patched runtime installed on its worker.
 
+The [admin compute console](admin-console.md) prints these preset entries, with
+the setup commands and worker label, and shows which live workers can claim each one.
+
 Preset harness choices, tenant grants, secrets and worker labels still apply.
 Label GCE presets for their GCE worker and GKE presets for workers with the
 intended kubeconfig. Discovery reports native runtime and image readiness as

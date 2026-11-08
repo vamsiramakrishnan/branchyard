@@ -932,6 +932,8 @@ pub fn router(app: Shared) -> Router {
         .merge(crate::preview::router(app.preview.clone()))
         // The fleet's service registry: `services_routes`.
         .merge(crate::services_routes::router())
+        // Compute targets and setup plans for operators: `admin_compute`.
+        .merge(crate::admin_compute::router())
         // What background work could not do: `problems`.
         .merge(crate::problems::router());
     let v1 = match (app.runtime.get(), app.pull_requests.get()) {
@@ -946,6 +948,8 @@ pub fn router(app: Shared) -> Router {
         .route("/.well-known/jwks.json", get(jwks))
         // What this server is and which services it has: `services_routes`.
         .merge(crate::services_routes::public())
+        // The admin compute console's page: `admin_compute`.
+        .merge(crate::admin_compute::public())
         .route("/metrics", get(metrics_route))
         .merge(v1)
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
@@ -1293,6 +1297,10 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         request.uri().path(),
         "/healthz" | "/.well-known/jwks.json" | "/.well-known/branchyard" | "/metrics"
     ) {
+        return next.run(request).await;
+    }
+    // The admin console's static page; its data routes need an admin token.
+    if request.method() == Method::GET && crate::admin_compute::is_public(request.uri().path()) {
         return next.run(request).await;
     }
     // A sandbox fetching its turn's token proves itself with its workload

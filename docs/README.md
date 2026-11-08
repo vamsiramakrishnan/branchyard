@@ -76,6 +76,7 @@ Detailed specifications, command references, and validation records.
 | [Compute on GCE](compute-gce.md) | Provision a dedicated GCE worker VM for Antigravity and connect over native SSH or IAP. |
 | [Agent Sandbox on GKE](agent-sandbox-gke.md) | Prepare private gVisor and Kata MicroVM pools with a pinned controller and runtime policies |
 | [Cloud execution](cloud-execution.md) | Select native GCE and GKE runtimes through CLI options and console presets |
+| [Admin compute console](admin-console.md) | See and plan the GCE and GKE compute a server places turns on; developers connect with `by --remote` |
 | [Container runtime](container-runtime.md) | Install and qualify the pinned gVisor Docker runtime |
 | [Container provider](container-sandbox.md) | Run an owned container with copied files and enforced resource limits |
 | [Agent Sandbox provider](agent-sandbox.md) | Run owned GKE gVisor and managed Kata allocations |

@@ -63,6 +63,7 @@
 //!   `--worker` processes serving the same repositories may share one
 //!   schema (`docs/server.md`, `docs/durability.md`).
 
+mod admin_compute;
 pub mod api;
 pub mod auth;
 mod checkpoint_routes;

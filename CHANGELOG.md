@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Admin compute console (`docs/admin-console.md`). The server serves `/admin`, a
+page for operators, with `GET /v1/admin/compute` (`admin`) reading each execution
+preset as compute (platform, isolation, network, image, the live workers whose
+labels can claim it, and `ready`, `no_worker` or `provider_not_allowed`) and
+`POST /v1/admin/compute/plan` (`admin`) returning, for a GCE VM (process, gVisor
+or Microsandbox) or a GKE Agent Sandbox pool (gVisor or Kata), the setup helper's
+plan and apply commands, the `compute:ID` worker label and the preset to add. The
+routes run no helper and contact no cloud. Hermetic. Not done: a plan applied
+from the console's output, and choosing a native preset from `by run --remote`.
+
 Observability phase 2 (`docs/observability.md`). A turn is traced live: the
 engine's recorder opens a `turn` span at the prompt and closes it at the turn's
 end, with the OpenTelemetry GenAI attributes (`gen_ai.operation.name`,

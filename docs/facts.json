@@ -73,10 +73,12 @@
     }
   },
   "http": {
-    "route_count": 158,
+    "route_count": 162,
     "routes": [
       "/.well-known/branchyard",
       "/.well-known/jwks.json",
+      "/admin",
+      "/admin/admin.js",
       "/app",
       "/app/",
       "/app/frame/{ticket}",
@@ -84,6 +86,8 @@
       "/app/{file}",
       "/healthz",
       "/metrics",
+      "/v1/admin/compute",
+      "/v1/admin/compute/plan",
       "/v1/admin/policies",
       "/v1/admin/policies/{key}",
       "/v1/app/me",
