@@ -117,6 +117,8 @@ pub(crate) enum Isolation {
     Substrate,
     /// A recipe's own environment.
     Recipe,
+    /// A provider this console does not describe yet.
+    Unknown,
 }
 
 /// One execution preset, read as compute.
@@ -173,24 +175,6 @@ pub(crate) struct Report {
     pub workers: Vec<Worker>,
 }
 
-fn kind_of(provider: &branchyard::Provider) -> &'static str {
-    match provider {
-        branchyard::Provider::Local => "local",
-        branchyard::Provider::Microsandbox(_) => "microsandbox",
-        branchyard::Provider::Substrate(_) => "substrate",
-        branchyard::Provider::Recipe(_) => "recipe",
-        branchyard::Provider::Container(_) => "container",
-        branchyard::Provider::AgentSandbox(_) => "agent_sandbox",
-    }
-}
-
-/// A unit enum's serde name, such as `deny`.
-fn name_of(value: impl Serialize) -> Option<String> {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-}
-
 struct Shape {
     platform: Platform,
     isolation: Isolation,
@@ -199,43 +183,80 @@ struct Shape {
     namespace: Option<String>,
 }
 
-fn shape(provider: &branchyard::Provider) -> Shape {
-    use branchyard::Provider as P;
-    let plain = |platform, isolation| Shape {
+fn plain(platform: Platform, isolation: Isolation) -> Shape {
+    Shape {
         platform,
         isolation,
         network: None,
         image: None,
         namespace: None,
-    };
-    match provider {
-        P::Local => plain(Platform::Worker, Isolation::Process),
-        P::Recipe(_) => plain(Platform::Worker, Isolation::Recipe),
-        P::Substrate(_) => plain(Platform::Substrate, Isolation::Substrate),
-        P::Microsandbox(options) => Shape {
-            image: Some(options.image.clone()),
+    }
+}
+
+/// Read from the provider's name and its serde form, the wire contract,
+/// so a new provider variant needs no change here
+/// (`crates/branchyard/tests/provider_seam.rs`).
+fn shape(provider: &branchyard::Provider) -> Shape {
+    let value = serde_json::to_value(provider).unwrap_or_default();
+    let field = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
+    let runtime = field("runtime");
+    match provider.name() {
+        "local" => plain(Platform::Worker, Isolation::Process),
+        "recipe" => plain(Platform::Worker, Isolation::Recipe),
+        "substrate" => plain(Platform::Substrate, Isolation::Substrate),
+        "microsandbox" => Shape {
+            image: provider.image(),
             ..plain(Platform::Worker, Isolation::Microsandbox)
         },
-        P::Container(options) => Shape {
-            platform: Platform::Worker,
-            isolation: match options.runtime {
-                branchyard::ContainerRuntime::Gvisor => Isolation::Gvisor,
-                branchyard::ContainerRuntime::Runc => Isolation::Runc,
-            },
-            network: name_of(options.network),
-            image: Some(options.image.clone()),
-            namespace: None,
+        "container" => Shape {
+            network: field("network"),
+            image: provider.image(),
+            ..plain(
+                Platform::Worker,
+                match runtime.as_deref() {
+                    Some("runc") => Isolation::Runc,
+                    _ => Isolation::Gvisor,
+                },
+            )
         },
-        P::AgentSandbox(options) => Shape {
-            platform: Platform::Gke,
-            isolation: match options.runtime {
-                branchyard::AgentSandboxRuntime::Gvisor => Isolation::Gvisor,
-                branchyard::AgentSandboxRuntime::Microvm => Isolation::Kata,
-            },
-            network: name_of(options.network),
-            image: Some(options.image.clone()),
-            namespace: Some(options.namespace.clone()),
+        "agent_sandbox" => Shape {
+            network: field("network"),
+            image: provider.image(),
+            namespace: field("namespace"),
+            ..plain(
+                Platform::Gke,
+                match runtime.as_deref() {
+                    Some("microvm") => Isolation::Kata,
+                    _ => Isolation::Gvisor,
+                },
+            )
         },
+        _ => plain(Platform::Worker, Isolation::Unknown),
+    }
+}
+
+/// What a target is read from: a configured preset, or the implicit local one.
+struct Source<'a> {
+    id: &'a str,
+    label: &'a str,
+    provider: &'static str,
+    shape: Shape,
+    harnesses: Vec<String>,
+    require_labels: &'a [String],
+    tenants: Option<Vec<String>>,
+}
+
+impl<'a> Source<'a> {
+    fn of(preset: &'a ExecutionPreset) -> Source<'a> {
+        Source {
+            id: &preset.id,
+            label: &preset.label,
+            provider: preset.provider.name(),
+            shape: shape(&preset.provider),
+            harnesses: preset.harnesses.iter().map(|h| h.harness.clone()).collect(),
+            require_labels: &preset.require_labels,
+            tenants: preset.tenants.clone(),
+        }
     }
 }
 
@@ -247,33 +268,32 @@ fn claims(labels: &[String], required: &[String]) -> bool {
 
 /// Read the configured presets (or the implicit local one) as compute.
 pub(crate) fn compute(config: &Config, workers: &[LiveWorker], this: &str) -> Report {
-    let implicit;
-    let (origin, presets): (&'static str, &[ExecutionPreset]) =
-        match config.execution_presets.is_empty() {
-            false => ("configured", &config.execution_presets),
-            true => {
-                implicit = [ExecutionPreset {
-                    id: "local".into(),
-                    label: "This server".into(),
-                    description: String::new(),
-                    provider: branchyard::Provider::Local,
-                    harnesses: Vec::new(),
-                    secrets: Vec::new(),
-                    tenants: None,
-                    require_labels: Vec::new(),
-                    written: None,
-                }];
-                ("default", &implicit)
-            }
-        };
-    let targets: Vec<Target> = presets
-        .iter()
-        .map(|preset| {
-            let provider = kind_of(&preset.provider);
+    let (origin, sources): (&'static str, Vec<Source>) = match config.execution_presets.is_empty() {
+        false => (
+            "configured",
+            config.execution_presets.iter().map(Source::of).collect(),
+        ),
+        true => (
+            "default",
+            vec![Source {
+                id: "local",
+                label: "This server",
+                provider: "local",
+                shape: plain(Platform::Worker, Isolation::Process),
+                harnesses: Vec::new(),
+                require_labels: &[],
+                tenants: None,
+            }],
+        ),
+    };
+    let targets: Vec<Target> = sources
+        .into_iter()
+        .map(|source| {
+            let provider = source.provider;
             let allowed = provider == "local" || config.allow_providers.contains(provider);
             let claimers: Vec<String> = workers
                 .iter()
-                .filter(|w| claims(&w.labels, &preset.require_labels))
+                .filter(|w| claims(&w.labels, source.require_labels))
                 .map(|w| w.id.clone())
                 .collect();
             let (state, next) = match (allowed, claimers.is_empty()) {
@@ -290,19 +310,19 @@ pub(crate) fn compute(config: &Config, workers: &[LiveWorker], this: &str) -> Re
                     "start a session on this preset; the runtime is checked when a turn starts",
                 ),
             };
-            let shape = shape(&preset.provider);
+            let shape = source.shape;
             Target {
-                preset: preset.id.clone(),
-                label: preset.label.clone(),
+                preset: source.id.to_owned(),
+                label: source.label.to_owned(),
                 provider,
                 platform: shape.platform,
                 isolation: shape.isolation,
                 network: shape.network,
                 image: shape.image,
                 namespace: shape.namespace,
-                harnesses: preset.harnesses.iter().map(|h| h.harness.clone()).collect(),
-                require_labels: preset.require_labels.clone(),
-                tenants: preset.tenants.clone(),
+                harnesses: source.harnesses,
+                require_labels: source.require_labels.to_vec(),
+                tenants: source.tenants,
                 allowed,
                 workers: claimers,
                 state,
