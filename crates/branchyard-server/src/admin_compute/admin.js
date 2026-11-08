@@ -21,7 +21,8 @@ async function call(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(value.message || value.error || `HTTP ${response.status}`);
+  // The API's errors are {"error": {"code", "message"}}.
+  if (!response.ok) throw new Error(value.error?.message || value.error?.code || `HTTP ${response.status}`);
   return value;
 }
 

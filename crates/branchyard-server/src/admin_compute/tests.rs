@@ -170,8 +170,19 @@ fn a_gke_kata_plan_runs_the_helper_then_applies_and_names_the_microvm_pool() {
     assert_eq!(plan.steps[2].on, "worker");
     assert_eq!(
         plan.steps[2].argv,
-        ["by", "serve", "--label", "compute:gke-pool"]
+        [
+            "by",
+            "serve",
+            "--config",
+            "SERVER_CONFIG",
+            "--allow-provider",
+            "agent_sandbox",
+            "--label",
+            "compute:gke-pool"
+        ],
+        "the dispatcher allows the provider itself and holds the preset"
     );
+    assert!(plan.notes.iter().any(|n| n.starts_with("SERVER_CONFIG is")));
     assert_eq!(
         plan.preset["provider"],
         json!({"kind": "agent_sandbox", "context": "gke_my-project_us-central1-a_by-sandbox",
@@ -226,11 +237,25 @@ fn gce_plans_choose_the_runtime_flag_and_the_provider() {
         json!([{"harness": "codex"}, {"harness": "claude-code"}])
     );
     assert_eq!(
-        gvisor.steps[2].argv.last().map(String::as_str),
-        Some("compute:gce-1")
+        gvisor.steps[2].argv,
+        [
+            "by",
+            "worker",
+            "--config",
+            "SERVER_CONFIG",
+            "--allow-provider",
+            "container",
+            "--label",
+            "compute:gce-1"
+        ],
+        "a worker checks native providers against its own allow_providers"
     );
 
     let micro = with("microsandbox");
+    assert!(micro.steps[2]
+        .argv
+        .windows(2)
+        .any(|w| w == ["--allow-provider", "microsandbox"]));
     assert!(micro.steps[0]
         .argv
         .contains(&"--backend=microsandbox".to_owned()));
@@ -243,6 +268,12 @@ fn gce_plans_choose_the_runtime_flag_and_the_provider() {
     let process = with("process");
     assert_eq!(process.allow_provider, "local");
     assert_eq!(process.preset["provider"], json!({"kind": "local"}));
+    assert!(
+        !process.steps[2]
+            .argv
+            .contains(&"--allow-provider".to_owned()),
+        "local is always allowed"
+    );
 }
 
 #[test]

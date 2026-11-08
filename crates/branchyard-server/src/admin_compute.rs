@@ -408,6 +408,28 @@ fn preset_id(value: &str) -> Result<(), String> {
     })
 }
 
+/// What the worker step's `SERVER_CONFIG` placeholder is.
+const SERVER_CONFIG_NOTE: &str = "SERVER_CONFIG is this server's configuration file with the preset and allow_providers added: the worker checks the provider against its own allow_providers and resolves the preset again from its own execution_presets.";
+
+/// The command that dispatches a target's turns: `by serve` or `by worker`
+/// with this server's configuration (so it holds the same database,
+/// repositories and preset), the provider allowed on that host as well (a
+/// worker checks native providers against its own `allow_providers`), and
+/// the target's label.
+fn dispatcher(command: &str, allow_provider: &str, label: &str) -> Vec<String> {
+    let mut argv = vec![
+        "by".to_owned(),
+        command.to_owned(),
+        "--config".to_owned(),
+        "SERVER_CONFIG".to_owned(),
+    ];
+    if allow_provider != "local" {
+        argv.extend(["--allow-provider".to_owned(), allow_provider.to_owned()]);
+    }
+    argv.extend(["--label".to_owned(), label.to_owned()]);
+    argv
+}
+
 /// The plan for `request`, or why it cannot be planned.
 pub(crate) fn plan(request: &PlanRequest) -> Result<Plan, String> {
     preset_id(&request.id)?;
@@ -463,10 +485,9 @@ pub(crate) fn plan(request: &PlanRequest) -> Result<Plan, String> {
                     Step { title: "Review the offline plan", on: "operator", argv: base },
                     Step { title: "Create the cluster, pools, controller and policies", on: "operator", argv: apply },
                     Step {
-                        title: "Run the dispatching server with the cluster's kubeconfig and the label",
+                        title: "Run the dispatching server with this configuration, the cluster's kubeconfig and the label",
                         on: "worker",
-                        argv: vec!["by".into(), "serve".into(), "--label".into(), label.clone()],
-                        // KUBECONFIG names the copied kubeconfig on that host.
+                        argv: dispatcher("serve", "agent_sandbox", &label),
                     },
                 ],
                 allow_provider: "agent_sandbox",
@@ -482,6 +503,7 @@ pub(crate) fn plan(request: &PlanRequest) -> Result<Plan, String> {
                 notes: vec![
                     "The cluster's API endpoint is private: apply from a host with a route to it.",
                     "Copy the kubeconfig the helper writes in its state directory to the dispatching worker.",
+                    SERVER_CONFIG_NOTE,
                     "Networking stays deny until you choose otherwise; model access needs an explicit choice.",
                     "Resources stay billable until you delete them. See docs/agent-sandbox-gke.md.",
                 ],
@@ -533,13 +555,9 @@ pub(crate) fn plan(request: &PlanRequest) -> Result<Plan, String> {
                     Step { title: "Review the offline plan", on: "operator", argv: base },
                     Step { title: "Create and bootstrap the VM", on: "operator", argv: apply },
                     Step {
-                        title: "Run a worker on the VM with the label",
+                        title: "Run a worker on the VM with this configuration and the label",
                         on: "worker",
-                        argv: ["by", "worker", "--database", "DATABASE_URL", "--repo", "REPO=PATH", "--label"]
-                            .into_iter()
-                            .map(str::to_owned)
-                            .chain([label.clone()])
-                            .collect(),
+                        argv: dispatcher("worker", allow_provider, &label),
                     },
                 ],
                 allow_provider,
@@ -552,6 +570,7 @@ pub(crate) fn plan(request: &PlanRequest) -> Result<Plan, String> {
                 }),
                 label,
                 notes: vec![
+                    SERVER_CONFIG_NOTE,
                     "A worker shares this server's --database and serves the same checkouts; see docs/server.md#several-servers-on-one-database.",
                     "Without a shared database, use the VM as its own server: by --remote with the URL deployment.json records.",
                     "Resources stay billable until you delete them. See docs/compute-gce.md.",

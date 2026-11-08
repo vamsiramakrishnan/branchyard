@@ -109,8 +109,13 @@ target's turns). It also returns the worker `label` (`compute:ID`), the
 fixed `notes`. Every preset network is `deny`.
 
 The route runs nothing. The operator reviews the helper's offline plan, applies
-it with their own credentials, starts the dispatching worker with the label, and
-adds the preset to the configuration. The server never holds project IAM. On
+it with their own credentials, adds the preset and the provider to the
+configuration, and starts the dispatching worker with that configuration:
+`by worker` (or `by serve` on GKE) `--config SERVER_CONFIG --allow-provider KIND --label compute:ID`.
+The worker needs both, because it checks a native provider against its own
+`allow_providers` and resolves a `--env` task's preset again from its own
+`execution_presets`; `--allow-provider` is left out for `local`, which is always
+allowed. The server never holds project IAM. On
 GKE, the worker that carries the label needs the kubeconfig the helper writes
 in its state directory. On GCE, a worker shares the server's `--database` and
 serves the same checkouts ([several servers on one database](server.md#several-servers-on-one-database)).
