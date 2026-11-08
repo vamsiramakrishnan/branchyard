@@ -125,10 +125,20 @@ export BRANCHYARD_TOKEN_FILE=~/.config/branchyard/token
 by run "Make the flaky parser test deterministic" --check "cargo test" --yes
 ```
 
-Workspace console sessions choose a preset by ID. Direct tasks from `by run`
-cannot choose a `container` or `agent_sandbox` preset yet (`403 preset_required`),
-so a developer's `by --remote` turn reaches native GKE and GCE isolation only
-through a workspace session today.
+A developer lists the environments their tenant is offered and runs on one by
+ID; the server supplies its provider, secrets, worker labels and model, and
+checks them again when the turn runs:
+
+```sh
+by run "Make the flaky parser test deterministic" --env gke-kata --yes
+by fan "Try three fixes" --harness claude-code,codex --env gce-gvisor --yes
+```
+
+`--env` needs `--remote`, starts a task or a fan only (a fork or reincarnation keeps its
+branch's environment), and is refused with `--provider`, `--command` or provisioning
+flags. See [direct tasks on a preset](server.md#direct-tasks-on-a-preset) for what the
+server checks and what is not done yet. Workspace console sessions choose a preset by ID
+as before.
 
 **Status, 8 November 2026.** Hermetic only. `cargo test -p branchyard-server --lib admin_compute`
 (11 tests, passed) covers preset-to-target reading through `Provider::compute`,
@@ -138,8 +148,14 @@ with `401` on its data route through the real router, the main and admin
 routers with and without `admin_listen` (each `404` for the other's routes), and
 the configuration checks on the admin listener. `cargo test -p branchyard --lib providers::`
 checks every provider's `compute()`, and `cargo test -p branchyard-server --lib cli`
-the `read,run,merge` token default. The page was driven in headless Chromium
+the `read,run,merge` token default. Direct tasks on a preset are covered by
+`cargo test -p branchyard-server --lib presets` (resolution per tenant, labels,
+secrets, model, every refusal, and a run on a labelled local preset with the fake
+agent) and `cargo test -p branchyard-cli --test remote run_env` (the built `by`
+against `by serve`: `--env` runs with the server's harness command, an unknown
+preset and a client `--command` are refused, and `fork --env` and a local `--env`
+exit 2). The page was driven in headless Chromium
 against a mocked API. Not done: a running server with `--admin-listen` bound
 and reached over TLS; a plan applied from the console's output to a real GCE
 project or GKE cluster; applying plans or writing presets from the server;
-choosing a preset from `by run --remote`.
+a direct preset task on a real GKE or GCE provider; follow-up turns on such a branch; error projection for direct preset tasks.

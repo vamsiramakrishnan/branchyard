@@ -55,8 +55,10 @@ Neither choice implements Branchyard's required proxy-egress policy.
 
 An operator writes an [execution preset](server.md#execution-presets) and adds
 its provider kind to `allow_providers`. Container uses kind `container`; Agent
-Sandbox uses `agent_sandbox`. Console callers choose the preset ID. Direct API
-requests cannot choose these providers, even when their kinds are allowed.
+Sandbox uses `agent_sandbox`. Console callers choose the preset ID; `by run --remote --env ID` and a task
+request's `preset` choose one too ([direct tasks on a preset](server.md#direct-tasks-on-a-preset)).
+A request that names these providers directly is refused, even when their kinds
+are allowed.
 
 For a GCE container preset, configure this provider object, with your complete
 image digest:

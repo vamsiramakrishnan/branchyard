@@ -14,7 +14,11 @@ serves the console on its own listener and takes it off the main one. Each
 provider describes its own compute through the public `Provider::compute()`
 (`RunsOn`, `Isolation`, network, namespace). `branchyard-server token new` without
 `--scopes` now gives `read,run,merge`: ask for `admin` by name. Credentials
-already in a configuration are unchanged. Hermetic. Not done: a plan applied
+already in a configuration are unchanged. `by run --remote --env ID` (and `by fan`)
+runs a task on an execution preset: a task request's new `preset` field, resolved
+for the caller at admission and again when the worker runs it, with the preset's
+provider, secrets, labels and model; `provider`, `provision` and `command` beside it
+are refused. Hermetic. Not done: a plan applied
 from the console's output, and choosing a native preset from `by run --remote`.
 
 Observability phase 2 (`docs/observability.md`). A turn is traced live: the

@@ -1936,15 +1936,18 @@ pub(crate) async fn admit_task(
     let policy = app.tenant_policy(caller);
     app.check_admission_quotas(caller, &policy).await?;
     let request = start_from_issue(app, repo, request).await?;
-    let options = work::task_options(app, repo, &request)?;
-    let mut requires = required_labels(&request.require_labels)?;
+    // The operation keeps the request as sent (its `preset` an ID); the
+    // worker resolves it again for the admitting principal.
+    let (resolved, options) =
+        work::preset_or_task_options(app, repo, &request, Some(caller.tenant()))?;
+    let mut requires = required_labels(&resolved.require_labels)?;
     // Steer a task that runs its harnesses by name, here, toward a worker
     // whose inventory says they can run (docs/harness-lifecycle.md).
     let by_name = options.command.is_none() && Provider::is_local(options.provider.as_ref());
     if by_name {
-        let named: Vec<String> = match request.harnesses.is_empty() {
-            true => request.harness.iter().cloned().collect(),
-            false => request.harnesses.clone(),
+        let named: Vec<String> = match resolved.harnesses.is_empty() {
+            true => resolved.harness.iter().cloned().collect(),
+            false => resolved.harnesses.clone(),
         };
         let ids: Vec<String> = named
             .iter()

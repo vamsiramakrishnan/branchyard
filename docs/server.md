@@ -1286,7 +1286,7 @@ read-only constraints; selecting a candidate grants no integration permission.
 
 ### Execution presets
 
-An execution preset is a named environment the operator writes into the configuration. A workspace session start names its ID; the server supplies the provider, its paths and secrets, and the worker labels. A preset grants nothing. It resolves to the start's existing `provider`, provisioned secrets and `require_labels`, which then pass the same checks as any start: `allow_providers`, `allow_unapproved_tools`, provisioning, membership and roles, quotas and scheduling. Direct tasks (`POST /v1/repos/{repo}/tasks`) and native delegation are unchanged.
+An execution preset is a named environment the operator writes into the configuration. A workspace session start names its ID; the server supplies the provider, its paths and secrets, and the worker labels. A preset grants nothing. It resolves to the start's existing `provider`, provisioned secrets and `require_labels`, which then pass the same checks as any start: `allow_providers`, `allow_unapproved_tools`, provisioning, membership and roles, quotas and scheduling. A direct task (`POST /v1/repos/{repo}/tasks`, `by run --remote --env ID`) may name one too: see [direct tasks on a preset](#direct-tasks-on-a-preset). Native delegation is unchanged.
 
 Native `container` and `agent_sandbox` targets require an operator preset even
 when their kinds are allowed. A direct provider request is refused with
@@ -1297,6 +1297,18 @@ native target. The worker's provider admission also applies before graph
 recovery or an automatic wake can claim a native turn. Default recovery options
 cannot stand in for a resolved preset.
 See [cloud execution](cloud-execution.md) for GCE and GKE provider examples.
+
+#### Direct tasks on a preset
+
+A task request may carry `preset`, an ID from `GET /v1/execution-presets` (`by run --remote --env ID`, `by fan --remote --env ID`):
+
+- The server resolves it for the caller's tenant at admission, and again for the admitting principal when a worker runs the operation, so a preset removed or narrowed while the task waits fails it rather than running it elsewhere. The operation records the ID, not what it resolved to.
+- The preset supplies the provider, its secrets (in a private home, as `isolated`), its worker labels (added to the request's `require_labels`, and so to the queue row) and, when one harness runs, its default model.
+- A request with `preset` may not carry `provider`, `provision` or `command` (`400 preset_conflict`). It runs only harnesses the preset offers (`422 preset_choice_unavailable`), its first when it names none. An ID the tenant is not offered is `404 unknown_preset`.
+- `allow_providers`, quotas, scheduling and the other admission checks apply as to any task.
+
+Not yet: a send, fork, reincarnation, spawn or plan decision on such a branch with a native provider is refused as before (`by fork`/`by reincarnate --env` are refused by the CLI); a map does not take a preset; and the error projection that hides a preset's configured paths and endpoints from a session's members does not apply to direct tasks, whose callers see the engine's errors as they are.
+
 
 ```json
 "require_workspace_execution_presets": true,

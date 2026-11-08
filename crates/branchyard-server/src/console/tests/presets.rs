@@ -1444,3 +1444,180 @@ async fn the_middleware_projects_a_preset_sessions_errors_and_gateway_reads() {
         assert_hidden(&conf, &path, &body.to_string());
     }
 }
+
+/// `POST /v1/repos/{repo}/tasks` with `preset` (`by run --env`): resolved
+/// for the caller at admission, its labels on the queue row, run on its
+/// provider, and refused as a session start is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_tasks_run_on_a_preset_and_are_refused_as_session_starts_are() {
+    let case = Case::build(
+        |config| {
+            config.execution_presets = presets(json!([
+                {"id":"pool","label":"Labelled pool","provider":{"kind":"local"},
+                 "harnesses":[{"harness":"gemini-cli","models":["flash"]}],"require_labels":["preset-pool"]},
+                {"id":"foreign-only","label":"Foreign","provider":{"kind":"local"},
+                 "harnesses":[{"harness":"gemini-cli"}],"tenants":["foreign"]}
+            ]));
+        },
+        true,
+        &["preset-pool"],
+    );
+    let task = |key: &'static str, fields: Value| {
+        let mut body = json!({"prompt":"WRITE preset.txt=ran"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        let fixture = &case.fixture;
+        async move {
+            fixture
+                .json(Method::POST, "/v1/repos/code/tasks", OWNER, Some(key), body)
+                .await
+        }
+    };
+    for (key, fields, status, code) in [
+        ("unknown", json!({"preset":"nope"}), 404, "unknown_preset"),
+        (
+            "other-tenant",
+            json!({"preset":"foreign-only"}),
+            404,
+            "unknown_preset",
+        ),
+        (
+            "with-provider",
+            json!({"preset":"pool","provider":{"kind":"local"}}),
+            400,
+            "preset_conflict",
+        ),
+        (
+            "with-provision",
+            json!({"preset":"pool","provision":{"model":"pro"}}),
+            400,
+            "preset_conflict",
+        ),
+        (
+            "with-command",
+            json!({"preset":"pool","command":["sh"]}),
+            400,
+            "preset_conflict",
+        ),
+        (
+            "other-harness",
+            json!({"preset":"pool","harness":"codex"}),
+            422,
+            "preset_choice_unavailable",
+        ),
+    ] {
+        let (got, refused) = task(key, fields).await;
+        assert_eq!(got.as_u16(), status, "{key}: {refused}");
+        assert_eq!(refused["error"]["code"], code, "{key}: {refused}");
+    }
+
+    // No harness named: the preset's first runs, on the worker that
+    // carries its label, with its default model.
+    let (status, admitted) = task("ok", json!({"preset":"pool"})).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{admitted}");
+    let done = case.fixture.finished(admitted["id"].as_str().unwrap());
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    let name = done.branches.first().cloned().unwrap();
+    let repo = case.fixture.app.repos["code"].yard.clone();
+    let branch = repo.branch(&name).unwrap();
+    assert_eq!(branch.info().harness, "gemini-cli");
+    assert!(branch.info().worktree.join("preset.txt").exists());
+    assert_eq!(
+        done.requires,
+        ["preset-pool"],
+        "the preset's label is on the queue row"
+    );
+    let row = case
+        .fixture
+        .app
+        .registry
+        .get(done.id.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, OperationState::Succeeded);
+}
+
+/// The resolution itself: the preset's provider, secrets, labels and
+/// model; another tenant cannot name it; and a request with a preset is
+/// refused by every path that does not resolve it for a tenant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_preset_resolves_per_tenant_and_nowhere_else() {
+    let image = format!("private-registry/worker@sha256:{}", "a".repeat(64));
+    let case = Case::build(
+        |config| {
+            config.allow_providers.insert("agent_sandbox".into());
+            config.secrets.insert(
+                "GEMINI_API_KEY".into(),
+                branchyard::SecretSource::parse("GEMINI_API_KEY=GEMINI_API_KEY").unwrap(),
+            );
+            config.execution_presets = presets(json!([
+                {"id":"gke-kata","label":"GKE Kata",
+                 "provider":{"kind":"agent_sandbox","context":"private-context","namespace":"branchyard-microvm",
+                     "runtime":"microvm","image":image},
+                 "harnesses":[{"harness":"gemini-cli","models":["flash","pro"]},{"harness":"codex"}],
+                 "secrets":["GEMINI_API_KEY"],"require_labels":["compute:gke-kata"],"tenants":["default"]}
+            ]));
+        },
+        true,
+        &[],
+    );
+    let app = &case.fixture.app;
+    let request = branchyard_client::api::TaskRequest {
+        prompt: "test".into(),
+        preset: Some("gke-kata".into()),
+        require_labels: vec!["linux".into()],
+        ..Default::default()
+    };
+    let (resolved, preset) = crate::console::for_task(app, "default", &request).unwrap();
+    assert_eq!(resolved.preset, None);
+    assert!(
+        resolved.isolated,
+        "a preset's secrets go into a private home"
+    );
+    assert_eq!(resolved.harness.as_deref(), Some("gemini-cli"));
+    assert_eq!(resolved.provider.as_ref().unwrap().name(), "agent_sandbox");
+    assert_eq!(resolved.require_labels, ["linux", "compute:gke-kata"]);
+    let provision = resolved.provision.as_ref().unwrap();
+    assert_eq!(provision.model.as_deref(), Some("flash"));
+    assert_eq!(provision.secrets[0].name, "GEMINI_API_KEY");
+    assert_eq!(
+        preset.provider.compute().isolation,
+        branchyard::Isolation::Kata
+    );
+
+    let fan = branchyard_client::api::TaskRequest {
+        harnesses: vec!["gemini-cli".into(), "codex".into()],
+        ..request.clone()
+    };
+    let (resolved, _) = crate::console::for_task(app, "default", &fan).unwrap();
+    assert_eq!(
+        resolved.provision.unwrap().model,
+        None,
+        "one provisioning, several harnesses"
+    );
+
+    let refused = crate::console::for_task(app, "foreign", &request)
+        .err()
+        .unwrap();
+    assert_eq!(
+        refused.body.code, "unknown_preset",
+        "the operator narrowed it"
+    );
+    let repo = &app.repos["code"];
+    let unresolved = crate::work::task_options(app, repo, &request)
+        .err()
+        .unwrap();
+    assert_eq!(
+        unresolved.body.code, "invalid_request",
+        "{:?}",
+        unresolved.body
+    );
+    let without_tenant = crate::work::preset_or_task_options(app, repo, &request, None)
+        .err()
+        .unwrap();
+    assert_eq!(without_tenant.body.code, "invalid_request");
+    let (_, options) =
+        crate::work::preset_or_task_options(app, repo, &request, Some("default")).unwrap();
+    assert_eq!(options.provider.unwrap().name(), "agent_sandbox");
+}

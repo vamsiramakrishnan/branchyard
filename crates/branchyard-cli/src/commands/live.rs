@@ -111,6 +111,13 @@ impl Live {
     }
 
     pub(crate) fn options(&self, task: &TaskArgs) -> Result<TaskOptions, Failure> {
+        if task.env.is_some() {
+            return Err(Report::usage(
+                "--env chooses a server's execution preset, and this command runs here",
+            )
+            .next("add --remote URL, or drop --env and choose --provider here")
+            .into());
+        }
         if !task.require_labels.is_empty() {
             return Err(Report::usage(
                 "--require-label chooses among a server's workers, and this command runs here",

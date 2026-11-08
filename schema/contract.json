@@ -307,6 +307,13 @@
           },
           "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
         },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
+        },
         "priority": {
           "type": [
             "integer",
@@ -2241,6 +2248,13 @@
                 "type": "string"
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
             },
             "priority": {
               "type": [
@@ -66895,6 +66909,13 @@
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
             },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
+            },
             "priority": {
               "type": [
                 "integer",
@@ -69138,6 +69159,13 @@
                 "type": "string"
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
             },
             "priority": {
               "type": [
@@ -71402,6 +71430,13 @@
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
             },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
+            },
             "priority": {
               "type": [
                 "integer",
@@ -73660,6 +73695,13 @@
                 "type": "string"
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
             },
             "priority": {
               "type": [
@@ -76262,6 +76304,13 @@
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
             },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
+            },
             "priority": {
               "type": [
                 "integer",
@@ -78646,6 +78695,13 @@
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
             },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
+            },
             "priority": {
               "type": [
                 "integer",
@@ -80887,6 +80943,13 @@
                 "type": "string"
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
             },
             "priority": {
               "type": [
@@ -83142,6 +83205,13 @@
                 "type": "string"
               },
               "description": "Worker labels the operation needs: only a worker started with every\none of them (`by worker --label gpu`) claims it. See\n`docs/server.md#worker-labels`."
+            },
+            "preset": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "An operator's execution preset to run on, by ID, as\n`GET /v1/execution-presets` lists them (`by run --env ID`): the\nserver supplies the provider, secrets, worker labels and model, and\nchecks them again when the turn runs, in a private home (as\n`isolated`). A task with `preset` may not\ncarry `provider`, `provision` or `command`, and runs only harnesses\nthe preset offers (its first when none is named). See\n`docs/admin-console.md#what-developers-run`."
             },
             "priority": {
               "type": [
