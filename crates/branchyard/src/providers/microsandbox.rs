@@ -39,6 +39,9 @@ impl ProviderKind for SandboxOptions {
     fn name(&self) -> &'static str {
         "microsandbox"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute::plain(super::RunsOn::Worker, super::Isolation::Microsandbox)
+    }
 
     fn image(&self) -> Option<String> {
         Some(self.image.clone()).filter(|image| !image.trim().is_empty())

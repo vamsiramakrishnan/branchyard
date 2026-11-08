@@ -47,12 +47,12 @@ function render(report) {
   $("origin").textContent = report.origin === "default"
     ? "No execution_presets are configured: the server offers its implicit local preset."
     : "From the server's execution_presets.";
-  const targets = header($("targets"), ["Environment", "Provider", "Platform", "Isolation", "Network", "Labels", "Workers", "State"]);
+  const targets = header($("targets"), ["Environment", "Provider", "Runs on", "Isolation", "Network", "Labels", "Workers", "State"]);
   for (const t of report.targets) {
     const row = targets.insertRow();
     cell(row, `${t.label} (${t.preset})`);
     cell(row, t.provider);
-    cell(row, t.platform);
+    cell(row, t.runs_on);
     cell(row, t.isolation);
     cell(row, t.network || "");
     cell(row, t.require_labels.join(", "));

@@ -306,6 +306,48 @@ fn public_option_validation_checks_native_specs_without_opening_a_runtime() {
 }
 
 #[test]
+fn every_variant_describes_its_compute() {
+    let fixture = fixture();
+    let expected = [
+        (RunsOn::Worker, Isolation::Process, None, None),
+        (RunsOn::Worker, Isolation::Microsandbox, None, None),
+        (RunsOn::Substrate, Isolation::Substrate, None, None),
+        (RunsOn::Worker, Isolation::Recipe, None, None),
+        (RunsOn::Worker, Isolation::Gvisor, Some("deny"), None),
+        (
+            RunsOn::Kubernetes,
+            Isolation::Gvisor,
+            Some("deny"),
+            Some("branchyard-gvisor"),
+        ),
+    ];
+    for (good, _) in samples(&fixture) {
+        let (runs_on, isolation, network, namespace) = expected[index(&good)];
+        let compute = good.compute();
+        assert_eq!(compute.runs_on, runs_on, "{}", good.name());
+        assert_eq!(compute.isolation, isolation, "{}", good.name());
+        assert_eq!(compute.network, network, "{}", good.name());
+        assert_eq!(compute.namespace.as_deref(), namespace, "{}", good.name());
+    }
+    let runc = Provider::container(ContainerOptions {
+        runtime: crate::ContainerRuntime::Runc,
+        network: crate::ContainerNetwork::Unrestricted,
+        ..ContainerOptions::default()
+    });
+    assert_eq!(runc.compute().isolation, Isolation::Runc);
+    assert_eq!(runc.compute().network, Some("unrestricted"));
+    let kata = Provider::agent_sandbox(AgentSandboxOptions {
+        runtime: crate::AgentSandboxRuntime::Microvm,
+        ..AgentSandboxOptions::default()
+    });
+    assert_eq!(kata.compute().isolation, Isolation::Kata);
+    assert_eq!(
+        serde_json::to_value(kata.compute()).unwrap(),
+        json!({"runs_on": "kubernetes", "isolation": "kata", "network": "deny", "namespace": ""})
+    );
+}
+
+#[test]
 fn names_keys_and_kinds() {
     let fixture = fixture();
     let expected = [

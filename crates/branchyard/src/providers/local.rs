@@ -45,6 +45,9 @@ impl ProviderKind for Local {
     fn name(&self) -> &'static str {
         "local"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute::plain(super::RunsOn::Worker, super::Isolation::Process)
+    }
 
     fn lifecycle(&self) -> Option<Lifecycle> {
         None

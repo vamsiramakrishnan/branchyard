@@ -214,6 +214,8 @@ Public callers use `Provider::name()` for the stable wire kind and `label()` for
 
 `Provider::harness_location()` returns the public borrowed `HarnessLocation` classification for readiness checks. It keeps recipe and Substrate target options borrowed from the selected provider, so callers can inspect the exact target without cloning it or matching the serialized provider enum. Every provider implementation must declare its harness location; native image providers also supply their pure validation and image capability through the same trait.
 
+`Provider::compute()` returns a public `ProviderCompute`: where the provider's turns run (`RunsOn`: the claiming worker, a Kubernetes allocation, or a Substrate actor), what isolates them (`Isolation`: process, gVisor, runc, Microsandbox, Kata, Substrate or a recipe), and the native providers' configured network and namespace. It describes configuration, not readiness. Every provider implementation declares it; the [admin compute console](admin-console.md) reads presets through it.
+
 The enum's serde shape is unchanged by the trait, so the wire format and `schema/` follow the enum alone. A new variant changes them; regenerate the schemas as [CONTRIBUTING](../CONTRIBUTING.md#adding-a-provider) says.
 
 Verification keeps it this way:

@@ -5,7 +5,7 @@
 //! - `GET /admin` and `GET /admin/admin.js`, public: the console's page. It
 //!   holds no data; it asks for an `admin` token and calls the routes below.
 //! - `GET /v1/admin/compute` (`admin`): every execution preset read as a
-//!   compute target (platform, isolation, network, image), whether its
+//!   compute target (where it runs, isolation, network, image), whether its
 //!   provider kind is allowed, and the live workers whose labels can claim
 //!   its turns.
 //! - `POST /v1/admin/compute/plan` (`admin`): for a GCE worker or a GKE
@@ -87,40 +87,6 @@ fn need_admin(caller: &Caller) -> Result<(), ApiError> {
     }
 }
 
-/// Where a target's turns run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Platform {
-    /// On the worker that claims the turn: this server or a `by worker`.
-    Worker,
-    /// In a Kubernetes Agent Sandbox the claiming worker creates on GKE.
-    Gke,
-    /// In a Substrate actor on its cluster.
-    Substrate,
-}
-
-/// What separates a turn from the worker's kernel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Isolation {
-    /// A process as the worker's user: none.
-    Process,
-    /// gVisor's user-space kernel (Docker `runsc`, or GKE Sandbox).
-    Gvisor,
-    /// Linux namespaces sharing the worker's kernel.
-    Runc,
-    /// A Microsandbox KVM microVM on the worker.
-    Microsandbox,
-    /// GKE's managed Kata Containers with Cloud Hypervisor.
-    Kata,
-    /// Whatever the Substrate template's actor runtime is.
-    Substrate,
-    /// A recipe's own environment.
-    Recipe,
-    /// A provider this console does not describe yet.
-    Unknown,
-}
-
 /// One execution preset, read as compute.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Target {
@@ -128,17 +94,13 @@ pub(crate) struct Target {
     pub label: String,
     /// The provider kind, as `allow_providers` names it.
     pub provider: &'static str,
-    pub platform: Platform,
-    pub isolation: Isolation,
-    /// `deny` or `unrestricted` for native providers; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub network: Option<String>,
+    /// Where its turns run and what isolates them, as the provider
+    /// describes itself ([`branchyard::Provider::compute`]).
+    #[serde(flatten)]
+    pub compute: branchyard::ProviderCompute,
     /// The image the allocation boots, for providers that take one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// The Kubernetes namespace of an Agent Sandbox target.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
     pub harnesses: Vec<String>,
     pub require_labels: Vec<String>,
     /// Absent: every tenant.
@@ -175,72 +137,13 @@ pub(crate) struct Report {
     pub workers: Vec<Worker>,
 }
 
-struct Shape {
-    platform: Platform,
-    isolation: Isolation,
-    network: Option<String>,
-    image: Option<String>,
-    namespace: Option<String>,
-}
-
-fn plain(platform: Platform, isolation: Isolation) -> Shape {
-    Shape {
-        platform,
-        isolation,
-        network: None,
-        image: None,
-        namespace: None,
-    }
-}
-
-/// Read from the provider's name and its serde form, the wire contract,
-/// so a new provider variant needs no change here
-/// (`crates/branchyard/tests/provider_seam.rs`).
-fn shape(provider: &branchyard::Provider) -> Shape {
-    let value = serde_json::to_value(provider).unwrap_or_default();
-    let field = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_owned);
-    let runtime = field("runtime");
-    match provider.name() {
-        "local" => plain(Platform::Worker, Isolation::Process),
-        "recipe" => plain(Platform::Worker, Isolation::Recipe),
-        "substrate" => plain(Platform::Substrate, Isolation::Substrate),
-        "microsandbox" => Shape {
-            image: provider.image(),
-            ..plain(Platform::Worker, Isolation::Microsandbox)
-        },
-        "container" => Shape {
-            network: field("network"),
-            image: provider.image(),
-            ..plain(
-                Platform::Worker,
-                match runtime.as_deref() {
-                    Some("runc") => Isolation::Runc,
-                    _ => Isolation::Gvisor,
-                },
-            )
-        },
-        "agent_sandbox" => Shape {
-            network: field("network"),
-            image: provider.image(),
-            namespace: field("namespace"),
-            ..plain(
-                Platform::Gke,
-                match runtime.as_deref() {
-                    Some("microvm") => Isolation::Kata,
-                    _ => Isolation::Gvisor,
-                },
-            )
-        },
-        _ => plain(Platform::Worker, Isolation::Unknown),
-    }
-}
-
 /// What a target is read from: a configured preset, or the implicit local one.
 struct Source<'a> {
     id: &'a str,
     label: &'a str,
     provider: &'static str,
-    shape: Shape,
+    compute: branchyard::ProviderCompute,
+    image: Option<String>,
     harnesses: Vec<String>,
     require_labels: &'a [String],
     tenants: Option<Vec<String>>,
@@ -252,7 +155,8 @@ impl<'a> Source<'a> {
             id: &preset.id,
             label: &preset.label,
             provider: preset.provider.name(),
-            shape: shape(&preset.provider),
+            compute: preset.provider.compute(),
+            image: preset.provider.image(),
             harnesses: preset.harnesses.iter().map(|h| h.harness.clone()).collect(),
             require_labels: &preset.require_labels,
             tenants: preset.tenants.clone(),
@@ -279,7 +183,13 @@ pub(crate) fn compute(config: &Config, workers: &[LiveWorker], this: &str) -> Re
                 id: "local",
                 label: "This server",
                 provider: "local",
-                shape: plain(Platform::Worker, Isolation::Process),
+                compute: branchyard::ProviderCompute {
+                    runs_on: branchyard::RunsOn::Worker,
+                    isolation: branchyard::Isolation::Process,
+                    network: None,
+                    namespace: None,
+                },
+                image: None,
                 harnesses: Vec::new(),
                 require_labels: &[],
                 tenants: None,
@@ -310,16 +220,12 @@ pub(crate) fn compute(config: &Config, workers: &[LiveWorker], this: &str) -> Re
                     "start a session on this preset; the runtime is checked when a turn starts",
                 ),
             };
-            let shape = source.shape;
             Target {
                 preset: source.id.to_owned(),
                 label: source.label.to_owned(),
                 provider,
-                platform: shape.platform,
-                isolation: shape.isolation,
-                network: shape.network,
-                image: shape.image,
-                namespace: shape.namespace,
+                compute: source.compute,
+                image: source.image,
                 harnesses: source.harnesses,
                 require_labels: source.require_labels.to_vec(),
                 tenants: source.tenants,

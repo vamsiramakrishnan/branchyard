@@ -63,6 +63,65 @@ pub enum HarnessLocation<'a> {
     Image,
 }
 
+/// Where a provider's turns run, as an operator plans compute for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunsOn {
+    /// On the worker that claims the turn: a server or a `by worker`.
+    Worker,
+    /// In a Kubernetes allocation the claiming worker creates.
+    Kubernetes,
+    /// In an actor on a Substrate cluster.
+    Substrate,
+}
+
+/// What separates a provider's turns from the worker's kernel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Isolation {
+    /// A process as the worker's user: none.
+    Process,
+    /// gVisor's user-space kernel (Docker `runsc`, or GKE Sandbox).
+    Gvisor,
+    /// Linux namespaces sharing the worker's kernel.
+    Runc,
+    /// A Microsandbox KVM microVM on the worker.
+    Microsandbox,
+    /// Kata Containers with Cloud Hypervisor (GKE's managed MicroVM runtime).
+    Kata,
+    /// Whatever the Substrate template's actor runtime is.
+    Substrate,
+    /// Whatever the selected recipe's environment is.
+    Recipe,
+}
+
+/// A provider's compute as an operator sees it: where its turns run, what
+/// isolates them, and the network and namespace it was configured with.
+/// It describes configuration; it is no evidence the runtime is ready.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ProviderCompute {
+    /// Where its turns run.
+    pub runs_on: RunsOn,
+    /// What isolates them.
+    pub isolation: Isolation,
+    /// `deny` or `unrestricted` for the native providers; `None` otherwise.
+    pub network: Option<&'static str>,
+    /// The Kubernetes namespace an Agent Sandbox allocation is created in.
+    pub namespace: Option<String>,
+}
+
+impl ProviderCompute {
+    /// Compute with no network choice and no namespace.
+    pub(crate) fn plain(runs_on: RunsOn, isolation: Isolation) -> ProviderCompute {
+        ProviderCompute {
+            runs_on,
+            isolation,
+            network: None,
+            namespace: None,
+        }
+    }
+}
+
 /// What the engine asks of a kind of provider. One implementation per
 /// [`Provider`] variant, on that variant's options (or, for a variant
 /// without any, on a unit type).
@@ -172,6 +231,9 @@ pub(crate) trait ProviderKind {
         false
     }
 
+    /// Where its turns run and what isolates them, for operators.
+    fn compute(&self) -> ProviderCompute;
+
     /// The registry kind of a turn's sandbox in the service registry.
     fn service_kind(&self) -> &'static str {
         crate::services::KIND_SANDBOX
@@ -278,6 +340,12 @@ impl Provider {
     /// its stable kind, with the recipe's name when one is selected.
     pub fn label(&self) -> String {
         self.kind().label()
+    }
+
+    /// Where this provider's turns run, what isolates them, and its
+    /// configured network and namespace; configuration, not readiness.
+    pub fn compute(&self) -> ProviderCompute {
+        self.kind().compute()
     }
 
     /// The image this provider's sandbox is made from, as it was given

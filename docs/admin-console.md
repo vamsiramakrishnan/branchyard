@@ -43,15 +43,17 @@ page and its script are public. Their data routes are not:
 
 `GET /v1/admin/compute` answers `{"origin", "targets", "workers"}`. `origin` is
 `configured`, or `default` when no `execution_presets` exist and the server offers
-its implicit local preset. Each target is one preset:
+its implicit local preset. Each target is one preset. `runs_on`, `isolation`, `network` and `namespace`
+are what the provider reports of itself (`Provider::compute`), so a new
+provider describes its own compute:
 
 | Field | Meaning |
 |---|---|
 | `preset`, `label` | the preset's ID and name |
 | `provider` | the provider kind, as `allow_providers` names it |
-| `platform` | `worker` (on the claiming worker's machine), `gke` (an Agent Sandbox the worker creates) or `substrate` |
-| `isolation` | `process`, `gvisor`, `runc`, `microsandbox`, `kata`, `substrate`, `recipe`, or `unknown` for a provider kind the console does not describe yet |
-| `network`, `image`, `namespace` | the native provider's network choice, image and Kubernetes namespace, when it has them |
+| `runs_on` | `worker` (on the claiming worker's machine), `kubernetes` (an Agent Sandbox the worker creates on GKE) or `substrate` |
+| `isolation` | `process`, `gvisor`, `runc`, `microsandbox`, `kata`, `substrate` or `recipe` |
+| `network`, `namespace`, `image` | the native provider's network choice (`deny` or `unrestricted`) and Kubernetes namespace, `null` for other providers; the image, when it takes one |
 | `harnesses`, `require_labels`, `tenants` | from the preset |
 | `allowed` | whether the provider kind is in `allow_providers` (`local` always is) |
 | `workers` | live workers whose labels include every required label, as the queue's claim decides |

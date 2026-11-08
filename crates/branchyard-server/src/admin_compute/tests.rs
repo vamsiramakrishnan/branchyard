@@ -10,6 +10,7 @@ use tower::ServiceExt as _;
 use super::*;
 use crate::api::{App, Caller};
 use crate::config::Principal;
+use branchyard::{Isolation, RunsOn};
 
 const IMAGE: &str =
     "ghcr.io/example/harnesses@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -61,8 +62,8 @@ fn each_preset_reads_as_compute_with_the_workers_that_can_claim_it() {
 
     let local = by_id("local");
     assert_eq!(
-        (local.platform, local.isolation),
-        (Platform::Worker, Isolation::Process)
+        (local.compute.runs_on, local.compute.isolation),
+        (RunsOn::Worker, Isolation::Process)
     );
     assert_eq!(local.state, "ready");
     assert_eq!(
@@ -73,12 +74,15 @@ fn each_preset_reads_as_compute_with_the_workers_that_can_claim_it() {
 
     let kata = by_id("gke-kata");
     assert_eq!(
-        (kata.platform, kata.isolation),
-        (Platform::Gke, Isolation::Kata)
+        (kata.compute.runs_on, kata.compute.isolation),
+        (RunsOn::Kubernetes, Isolation::Kata)
     );
     assert_eq!(kata.provider, "agent_sandbox");
-    assert_eq!(kata.namespace.as_deref(), Some("branchyard-microvm"));
-    assert_eq!(kata.network.as_deref(), Some("deny"));
+    assert_eq!(
+        kata.compute.namespace.as_deref(),
+        Some("branchyard-microvm")
+    );
+    assert_eq!(kata.compute.network, Some("deny"));
     assert_eq!(kata.image.as_deref(), Some(IMAGE));
     assert_eq!(kata.tenants, Some(vec!["research".to_owned()]));
     assert_eq!(
@@ -88,10 +92,10 @@ fn each_preset_reads_as_compute_with_the_workers_that_can_claim_it() {
 
     let gvisor = by_id("gce-gvisor");
     assert_eq!(
-        (gvisor.platform, gvisor.isolation),
-        (Platform::Worker, Isolation::Gvisor)
+        (gvisor.compute.runs_on, gvisor.compute.isolation),
+        (RunsOn::Worker, Isolation::Gvisor)
     );
-    assert_eq!(gvisor.network.as_deref(), Some("unrestricted"));
+    assert_eq!(gvisor.compute.network, Some("unrestricted"));
     assert_eq!(
         gvisor.state, "provider_not_allowed",
         "container is not in allow_providers"
@@ -376,6 +380,7 @@ async fn the_routes_need_admin_and_answer_it() {
     assert_eq!(body["origin"], "configured");
     assert_eq!(body["targets"].as_array().unwrap().len(), 3);
     assert_eq!(body["targets"][1]["isolation"], "kata");
+    assert_eq!(body["targets"][1]["runs_on"], "kubernetes");
 
     let (status, body) = send(
         &app,

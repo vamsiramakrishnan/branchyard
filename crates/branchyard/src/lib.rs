@@ -226,7 +226,7 @@ pub use pg::{
 };
 pub use placement::{HOME as SANDBOX_HOME, WORKSPACE as SANDBOX_WORKSPACE};
 pub use provider_admission::ProviderAdmission;
-pub use providers::HarnessLocation;
+pub use providers::{HarnessLocation, Isolation, ProviderCompute, RunsOn};
 pub use qualified::{qualified_pin, QualifiedPin};
 
 pub use access::{AccessActivity, Ceiling, DelegationScope, NetworkScope};

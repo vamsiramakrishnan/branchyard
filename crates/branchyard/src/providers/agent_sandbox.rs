@@ -93,6 +93,22 @@ impl ProviderKind for AgentSandboxOptions {
     fn name(&self) -> &'static str {
         "agent_sandbox"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute {
+            network: Some(match self.network {
+                crate::AgentSandboxNetwork::Deny => "deny",
+                crate::AgentSandboxNetwork::Unrestricted => "unrestricted",
+            }),
+            namespace: Some(self.namespace.clone()),
+            ..super::ProviderCompute::plain(
+                super::RunsOn::Kubernetes,
+                match self.runtime {
+                    AgentSandboxRuntime::Gvisor => super::Isolation::Gvisor,
+                    AgentSandboxRuntime::Microvm => super::Isolation::Kata,
+                },
+            )
+        }
+    }
     fn image(&self) -> Option<String> {
         Some(self.image.clone()).filter(|image| !image.trim().is_empty())
     }

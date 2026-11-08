@@ -21,6 +21,21 @@ impl ProviderKind for ContainerOptions {
     fn name(&self) -> &'static str {
         "container"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute {
+            network: Some(match self.network {
+                crate::ContainerNetwork::Deny => "deny",
+                crate::ContainerNetwork::Unrestricted => "unrestricted",
+            }),
+            ..super::ProviderCompute::plain(
+                super::RunsOn::Worker,
+                match self.runtime {
+                    ContainerRuntime::Gvisor => super::Isolation::Gvisor,
+                    ContainerRuntime::Runc => super::Isolation::Runc,
+                },
+            )
+        }
+    }
     fn image(&self) -> Option<String> {
         Some(self.image.clone()).filter(|image| !image.trim().is_empty())
     }
