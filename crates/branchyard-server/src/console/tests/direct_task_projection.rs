@@ -411,6 +411,13 @@ async fn queued_direct_tasks_recheck_the_admitting_principal_and_preset() {
         .unwrap();
         let work: Value = serde_json::from_slice(&serde_json::to_vec(&work).unwrap()).unwrap();
         let finished = crate::work::AppExecutor(fixture.app.clone()).execute(&stored, &work);
+        if matches!(change, "no-run-scope" | "other-repository") {
+            assert_eq!(
+                finished.end_cursor,
+                Some(stored.operation.cursor),
+                "{change}: a refusal before execution owns no feed entries"
+            );
+        }
         assert_eq!(finished.result.unwrap_err().code, expected, "{change}");
         assert!(
             fixture.app.repos["code"]
@@ -421,6 +428,189 @@ async fn queued_direct_tasks_recheck_the_admitting_principal_and_preset() {
             "{change}: denied work created a branch"
         );
     }
+}
+
+/// Read only through the feed head announced at connection time. A refused
+/// operation must not cause this body to end before unrelated entries arrive.
+async fn feed_through_head(
+    fixture: &Fixture,
+    last_event_id: Option<u64>,
+) -> (u64, Vec<branchyard_client::api::FeedEntry>) {
+    use axum::body::HttpBody as _;
+
+    let mut request = Request::builder()
+        .uri("/v1/repos/code/events/stream?cursor=0")
+        .header("authorization", format!("Bearer {OWNER}"));
+    if let Some(cursor) = last_event_id {
+        request = request.header("last-event-id", cursor.to_string());
+    }
+    let response = crate::api::router(fixture.app.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut text = String::new();
+    loop {
+        let data: Vec<Value> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(|data| serde_json::from_str(data.trim()).unwrap())
+            .collect();
+        let head = data.iter().find_map(|data| data["head"].as_u64());
+        let last = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("id:"))
+            .map(|id| id.trim().parse::<u64>().unwrap())
+            .max();
+        if let Some(head) = head.filter(|head| last.is_some_and(|last| last >= *head)) {
+            let entries = data
+                .into_iter()
+                .filter(|data| data.get("seq").is_some())
+                .map(|entry| serde_json::from_value(entry).unwrap())
+                .collect();
+            return (head, entries);
+        }
+        let frame = tokio::time::timeout(
+            Duration::from_secs(30),
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)),
+        )
+        .await
+        .expect("unrelated activity stalled before the announced feed head")
+        .expect("a refused task terminated unrelated activity delivery")
+        .unwrap();
+        if let Ok(bytes) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&bytes).unwrap());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_authorization_refusal_does_not_poison_unrelated_feed_reconnects() {
+    let (mut fixture, _repo, projection) = configured_fixture();
+    Arc::get_mut(&mut fixture.app)
+        .unwrap()
+        .config
+        .execution_presets[0]
+        .tenants = None;
+
+    // Seed real native activity so the task's empty interval must use its
+    // admitted cursor rather than assume a new repository starts at zero.
+    let seed = TaskRequest {
+        prompt: "WRITE seed.txt=ran".into(),
+        name: Some("before-refusal".into()),
+        harness: Some("gemini-cli".into()),
+        isolated: true,
+        ..Default::default()
+    };
+    let repo = &fixture.app.repos["code"];
+    let options = crate::work::task_options(&fixture.app, repo, &seed).unwrap();
+    repo.yard.task(seed.prompt).options(options).run().unwrap();
+    assert!(repo.feed.sync().unwrap() > 0);
+
+    let mut principal = Principal::default_for("developer");
+    principal.tenant = "revoked".into();
+    principal.scopes = ["read".into(), "run".into()].into_iter().collect();
+    let request = TaskRequest {
+        prompt: "WRITE must-not-run.txt=local fallback".into(),
+        name: Some("refused-before-execution".into()),
+        preset: Some("pool".into()),
+        ..Default::default()
+    };
+    let (operation, replayed) = crate::api::admit_task(
+        &fixture.app,
+        repo,
+        &Caller::new(principal),
+        None,
+        request,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!replayed);
+    assert!(operation.cursor > 0);
+
+    // The durable request was authorized when admitted. Its tenant loses
+    // repository access while queued; the default tenant can still run.
+    Arc::get_mut(&mut fixture.app)
+        .unwrap()
+        .config
+        .tenants
+        .insert(
+            "revoked".into(),
+            crate::config::TenantPolicy {
+                repos: Some(Default::default()),
+                ..Default::default()
+            },
+        );
+    fixture
+        .app
+        .registry
+        .start(Arc::new(crate::work::AppExecutor(fixture.app.clone())))
+        .unwrap();
+    let refused = fixture.finished(&operation.id);
+    assert_eq!(
+        refused.state,
+        branchyard_client::api::OperationState::Failed
+    );
+    assert_eq!(refused.error.unwrap().code, "repo_not_allowed");
+    assert_eq!(refused.end_cursor, Some(operation.cursor));
+    assert_eq!(
+        fixture
+            .app
+            .registry
+            .operation_projection(&operation.id, "code")
+            .unwrap(),
+        projection,
+        "the failed operation retains its private diagnostic snapshot"
+    );
+    assert!(fixture
+        .app
+        .registry
+        .feed_projection_candidates("code", operation.cursor + 1)
+        .unwrap()
+        .is_empty());
+    assert!(matches!(
+        fixture.app.repos["code"]
+            .yard
+            .branch("refused-before-execution"),
+        Err(branchyard::Error::UnknownBranch(_))
+    ));
+
+    let prompt = format!("WRITE raw.txt=ran\n{DIAGNOSTIC}");
+    let (status, admitted) = fixture
+        .json(
+            Method::POST,
+            "/v1/repos/code/tasks",
+            OWNER,
+            Some("unrelated-raw-after-refusal"),
+            json!({"prompt":prompt,"name":"unrelated-raw","harness":"gemini-cli","isolated":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{admitted}");
+    let raw = fixture.finished(admitted["id"].as_str().unwrap());
+    assert_eq!(
+        raw.state,
+        branchyard_client::api::OperationState::Succeeded,
+        "{raw:?}"
+    );
+
+    let (head, entries) = feed_through_head(&fixture, None).await;
+    assert!(head > operation.cursor);
+    assert!(entries.iter().any(|entry| entry.branch == "unrelated-raw"
+        && matches!(&entry.activity, branchyard::Activity::Prompt(text) if text.contains(DIAGNOSTIC))),
+        "a refused preset must not project an unrelated raw task's public diagnostics");
+    let (reconnected_head, resumed) = feed_through_head(&fixture, Some(operation.cursor)).await;
+    assert_eq!(reconnected_head, head);
+    assert_eq!(
+        resumed,
+        entries
+            .into_iter()
+            .filter(|entry| entry.seq > operation.cursor)
+            .collect::<Vec<_>>(),
+        "Last-Event-ID resumes every unrelated event after the refusal"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

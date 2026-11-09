@@ -503,12 +503,16 @@ impl Executor for AppExecutor {
     fn execute(&self, stored: &StoredOperation, work: &Value) -> Finished {
         let app = &self.0;
         let operation = &stored.operation;
+        // A refusal before SDK execution has no activity interval. Keep the
+        // admitting cursor as its end so an admission snapshot cannot claim
+        // unrelated future feed entries. Unknown ends remain reserved for
+        // execution whose effects or final feed position are uncertain.
         if let Err(refused) = admitted_principal_allowed(&app.config, stored)
             .and_then(|()| fresh_groups_allowed(&app.credentials, stored))
         {
             return Finished {
                 result: Err(*refused.body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
                 projection: Projection::default(),
                 projection_tasks: Default::default(),
             };
@@ -521,7 +525,7 @@ impl Executor for AppExecutor {
             let Some(principal) = stored.principal.clone() else {
                 return Finished {
                     result: Err(*ApiError::unauthorized().body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
                     projection: Projection::default(),
                     projection_tasks: Default::default(),
                 };
@@ -530,7 +534,7 @@ impl Executor for AppExecutor {
             if let Err(error) = app.check_caller(&caller) {
                 return Finished {
                     result: Err(*error.body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
                     projection: Projection::default(),
                     projection_tasks: Default::default(),
                 };
@@ -551,7 +555,7 @@ impl Executor for AppExecutor {
         ) {
             return Finished {
                 result: Err(*refused.body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
                 projection: Projection::default(),
                 projection_tasks: Default::default(),
             };
@@ -572,7 +576,7 @@ impl Executor for AppExecutor {
                 .collect();
             return Finished {
                 result: Err(*crate::api::unknown_repo("worker", &operation.repo, &served).body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
                 projection: Projection::default(),
                 projection_tasks: Default::default(),
             };
@@ -596,7 +600,7 @@ impl Executor for AppExecutor {
             Err(error) => {
                 return Finished {
                     result: Err(stored.projection.error(error)),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
                     projection: Projection::default(),
                     projection_tasks: Default::default(),
                 }
@@ -633,7 +637,7 @@ impl Executor for AppExecutor {
                 };
                 return Finished {
                     result: Err(*ApiError::new(status, code, message).body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
                     projection: Projection::default(),
                     projection_tasks: Default::default(),
                 };
