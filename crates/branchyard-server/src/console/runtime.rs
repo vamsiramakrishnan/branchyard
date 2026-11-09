@@ -303,10 +303,11 @@ pub(super) fn session_views(
 pub(crate) fn operation_value(app: &App, operation: &Operation) -> Result<Value, ApiError> {
     let mut value = owned_operation_value(app, operation)?;
     let projection = super::Projection::of_operation(app, operation)?;
-    for field in ["error", "result"] {
-        if let Some(value) = value.get_mut(field) {
-            projection.apply(value);
-        }
+    if let Some(error) = value.get_mut("error") {
+        projection.apply_error(error);
+    }
+    if let Some(result) = value.get_mut("result") {
+        projection.apply_result(result);
     }
     Ok(value)
 }

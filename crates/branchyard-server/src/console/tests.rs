@@ -2,6 +2,7 @@
 
 mod connections;
 mod decisions;
+mod direct_task_projection;
 mod discovery;
 mod harness_input;
 mod inputs;
@@ -106,6 +107,8 @@ impl crate::ops::Executor for ReservedFakeAgentPorts {
         {
             if let Err(error) = self.reserve(&workspace_id, &session_id) {
                 return crate::ops::Finished {
+                    projection: Default::default(),
+                    projection_tasks: Default::default(),
                     result: Err(*error.body),
                     end_cursor: None,
                 };
@@ -380,6 +383,8 @@ async fn shutdown_stops_managed_console_turns_through_their_tenant_binding() {
         })
     });
     let foreign = crate::store::StoredOperation {
+        projection: Default::default(),
+        projection_tasks: Default::default(),
         operation: fixture.app.registry.get(operation_id).unwrap().unwrap(),
         idempotency: None,
         locks: Vec::new(),

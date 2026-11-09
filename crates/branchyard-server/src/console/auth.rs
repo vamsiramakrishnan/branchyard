@@ -513,10 +513,14 @@ async fn redact(
     }
     if let Some((projection, part, _)) = &preset {
         match part {
-            Part::Whole => projection.apply(&mut value),
+            Part::Whole => projection.apply_record(&mut value),
             Part::ErrorField => {
                 if let Some(error) = value.get_mut("error") {
-                    projection.apply(error);
+                    if error.get("code").is_some() {
+                        projection.apply_error(error);
+                    } else {
+                        projection.apply(error);
+                    }
                 }
             }
         }

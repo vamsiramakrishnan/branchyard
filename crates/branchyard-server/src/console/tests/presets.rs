@@ -1617,7 +1617,184 @@ async fn a_task_preset_resolves_per_tenant_and_nowhere_else() {
         .err()
         .unwrap();
     assert_eq!(without_tenant.body.code, "invalid_request");
-    let (_, options) =
+    let (_, options, _) =
         crate::work::preset_or_task_options(app, repo, &request, Some("default")).unwrap();
     assert_eq!(options.provider.unwrap().name(), "agent_sandbox");
+}
+
+/// Direct tasks use the session projection at admission, during execution,
+/// and when a completed operation is fetched or retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_preset_task_failures_are_projected_at_admission_execution_and_replay() {
+    let mut conf = std::path::PathBuf::new();
+    let case = Case::build(|config| conf = unreachable_substrate(config), true, &[]);
+    let mut closed_operation = None;
+    for (preset, marker) in [
+        ("substrate-gke", "bridge key"),
+        ("substrate-closed", "control endpoint"),
+    ] {
+        let body = json!({"preset":preset,"name":format!("direct-{preset}"),
+            "prompt":"WRITE fallback.txt=ran locally"});
+        let (status, admitted) = case
+            .fixture
+            .json(
+                Method::POST,
+                "/v1/repos/code/tasks",
+                OWNER,
+                Some(preset),
+                body.clone(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{admitted}");
+        assert_hidden(&conf, "admission", &admitted.to_string());
+        let id = admitted["id"].as_str().unwrap();
+        let done = case.fixture.finished(id);
+        if preset == "substrate-closed" {
+            closed_operation = Some(done.clone());
+        }
+        let (status, shown) = case
+            .fixture
+            .json(
+                Method::GET,
+                &format!("/v1/operations/{id}"),
+                OWNER,
+                None,
+                Value::Null,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{shown}");
+        assert_hidden(&conf, "completed operation", &shown.to_string());
+        assert!(
+            shown
+                .to_string()
+                .contains(&format!("[preset {preset}: {marker}]")),
+            "{shown}"
+        );
+        if let Some(error) = &done.error {
+            assert_eq!(shown["error"]["code"], error.code);
+        }
+        let (status, replayed) = case
+            .fixture
+            .json(
+                Method::POST,
+                "/v1/repos/code/tasks",
+                OWNER,
+                Some(preset),
+                body,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replayed}");
+        assert_eq!(replayed["id"], id);
+        assert_eq!(replayed, shown);
+        for name in &done.branches {
+            if let Ok(branch) = case.fixture.app.repos["code"].yard.branch(name) {
+                assert!(matches!(
+                    branch.info().status,
+                    branchyard::BranchStatus::Failed { .. }
+                ));
+                assert!(!branch.info().worktree.join("fallback.txt").exists());
+                for suffix in ["", "/events", "/event-page", "/inspection"] {
+                    let path = format!("/v1/repos/code/branches/{name}{suffix}");
+                    let (status, value) = case.read(OWNER, &path).await;
+                    assert_eq!(status, StatusCode::OK, "{path}: {value}");
+                    assert_hidden(&conf, &path, &value);
+                }
+            }
+        }
+    }
+    for path in ["/v1/repos/code/branches", "/v1/repos/code/task-records"] {
+        let (status, value) = case.read(OWNER, path).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {value}");
+        assert_hidden(&conf, path, &value);
+    }
+    assert_hidden(&conf, "feed", &case.feed(OWNER).await);
+
+    // Worktree paths and names are reusable; a new raw task with the same
+    // name must not inherit the removed task's projection.
+    let name = "direct-substrate-closed";
+    let yard = &case.fixture.app.repos["code"].yard;
+    let native_task = branchyard::tasks::task_of(yard.root(), name)
+        .unwrap()
+        .unwrap();
+    let child = "historical-child";
+    let child_request = branchyard_client::api::TaskRequest {
+        prompt: "WRITE child.txt=ran".into(),
+        name: Some(child.into()),
+        harness: Some("gemini-cli".into()),
+        isolated: true,
+        ..Default::default()
+    };
+    let mut child_options = crate::work::task_options(
+        &case.fixture.app,
+        &case.fixture.app.repos["code"],
+        &child_request,
+    )
+    .unwrap();
+    child_options.join_task = Some(native_task.id);
+    yard.task("WRITE child.txt=ran")
+        .options(child_options)
+        .run()
+        .unwrap();
+    yard.remove(child).unwrap();
+    case.fixture.app.repos["code"].yard.remove(name).unwrap();
+    let old = closed_operation.unwrap();
+    let history =
+        Projection::of_feed_entry(&case.fixture.app, "code", child, old.end_cursor.unwrap())
+            .unwrap();
+    assert!(
+        !history.is_empty(),
+        "removed attempts retain their task's projection"
+    );
+    let (status, raw) = case
+        .fixture
+        .json(
+            Method::POST,
+            "/v1/repos/code/tasks",
+            OWNER,
+            Some("reuse-raw-name"),
+            json!({"prompt":"WRITE raw.txt=ran", "name":name,"harness":"gemini-cli","isolated":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{raw}");
+    let done = case.fixture.finished(raw["id"].as_str().unwrap());
+    assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
+    assert!(Projection::of_branch(&case.fixture.app, "code", name)
+        .unwrap()
+        .is_empty());
+    assert_hidden(
+        &conf,
+        "historical feed after branch name reuse",
+        &case.feed(OWNER).await,
+    );
+    // The public raw-task flow keeps its own diagnostics. Only a resolved
+    // tenant-offered preset establishes this projection boundary.
+    let (status, refused) = case
+        .fixture
+        .json(
+            Method::POST,
+            "/v1/repos/code/tasks",
+            OWNER,
+            Some("raw-marker"),
+            json!({"prompt":"unused", "name":"substrate/missing.key"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("substrate/missing.key"));
+
+    let (status, refused) = case
+        .fixture
+        .json(
+            Method::POST,
+            "/v1/repos/code/tasks",
+            OWNER,
+            Some("preset-invalid-name"),
+            json!({"prompt":"unused", "preset":"substrate-gke", "name":"substrate/missing.key"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["error"]["code"], "invalid_name");
+    assert_hidden(&conf, "planning error", &refused.to_string());
 }

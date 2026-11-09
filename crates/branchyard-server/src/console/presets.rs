@@ -1062,6 +1062,17 @@ pub(super) fn project_error(text: &str, hidden: &[Hidden]) -> String {
     let mut before = None;
     let mut rest = text;
     'scan: while let Some(next) = rest.chars().next() {
+        // A response can cross more than one established projection boundary
+        // (execution, replay and serialization). Keep public placeholders stable.
+        if let Some(placeholder) = hidden
+            .iter()
+            .find(|h| !h.placeholder.is_empty() && rest.starts_with(&h.placeholder))
+        {
+            projected.push_str(&placeholder.placeholder);
+            before = placeholder.placeholder.chars().next_back();
+            rest = &rest[placeholder.placeholder.len()..];
+            continue;
+        }
         if !before.is_some_and(continues_word) {
             for value in hidden.iter().filter(|h| !h.value.is_empty()) {
                 if let Some(after) = rest.strip_prefix(value.value.as_str()) {
@@ -1083,16 +1094,27 @@ pub(super) fn project_error(text: &str, hidden: &[Hidden]) -> String {
 
 /// Every string in `value`, object keys included, through [`project_error`].
 pub(super) fn project_value(value: &mut Value, hidden: &[Hidden]) {
+    project_fields(value, hidden, true);
+}
+
+/// The same projector for typed records keeps schema keys. Free-form JSON
+/// diagnostics also project their keys, which may themselves disclose paths.
+fn project_fields(value: &mut Value, hidden: &[Hidden], keys: bool) {
     match value {
         Value::String(text) => *text = project_error(text, hidden),
         Value::Array(values) => {
             for value in values {
-                project_value(value, hidden);
+                project_fields(value, hidden, keys);
+            }
+        }
+        Value::Object(fields) if !keys => {
+            for value in fields.values_mut() {
+                project_fields(value, hidden, keys);
             }
         }
         Value::Object(fields) => {
             for (key, mut value) in std::mem::take(fields) {
-                project_value(&mut value, hidden);
+                project_fields(&mut value, hidden, keys);
                 fields.insert(project_error(&key, hidden), value);
             }
         }
@@ -1114,10 +1136,42 @@ pub(super) fn stored(session: &Record) -> Result<Option<ResolvedPreset>, ApiErro
 
 /// The configured values a resource's text must not show: those of the
 /// preset session it belongs to; empty for anything else.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Projection(Vec<Hidden>);
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Projection(Vec<Hidden>);
 
 impl Projection {
+    /// Capture only the configuration actually resolved for this task's tenant.
+    pub(crate) fn of_preset(preset: &ResolvedPreset) -> Self {
+        Self(preset.hidden.clone())
+    }
+
+    /// Include another configuration used by the same operation, keeping
+    /// admission values when a worker resolves a changed preset.
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.0.extend(other.0);
+        longest_first(&mut self.0);
+    }
+
+    /// Keep the public code while projecting diagnostic text and arbitrary
+    /// nested detail. Never round-trip a typed operation result through JSON:
+    /// a configured name can equal a structural key or enum discriminant.
+    pub(crate) fn error(
+        &self,
+        mut error: branchyard_client::api::ErrorBody,
+    ) -> branchyard_client::api::ErrorBody {
+        error.message = project_error(&error.message, &self.0);
+        if let Some(detail) = &mut error.detail {
+            self.apply(detail);
+        }
+        error
+    }
+
+    /// The same diagnostic boundary before admission, preserving HTTP status.
+    pub(crate) fn api_error(&self, mut error: ApiError) -> ApiError {
+        error.body = Box::new(self.error(*error.body));
+        error
+    }
+
     fn of_row(session: &Record) -> Result<Projection, ApiError> {
         Ok(Projection(
             stored(session)?
@@ -1158,17 +1212,137 @@ impl Projection {
             if let Some(session) = session_on(app, repo, &name)? {
                 return Projection::of_row(&session);
             }
-            current = app
-                .repos
-                .get(repo)
-                .and_then(|state| state.yard.branch(&name).ok())
-                .and_then(|branch| branch.info().parent.clone());
+            let branch = match app.repos.get(repo).map(|state| state.yard.branch(&name)) {
+                Some(Ok(branch)) => Some(branch),
+                Some(Err(branchyard::Error::UnknownBranch(_))) | None => None,
+                Some(Err(_)) => {
+                    return Err(ApiError::internal(
+                        "could not read the branch for its preset projection",
+                    ))
+                }
+            };
+            if branch.is_none() {
+                let projection = app.registry.removed_branch_projection(repo, &name)?;
+                if !projection.is_empty() {
+                    return Ok(projection);
+                }
+            }
+            if let Some(branch) = &branch {
+                let task =
+                    branchyard::tasks::task_of(branch.yard().root(), &name).map_err(|_| {
+                        ApiError::internal("could not read the task for its preset projection")
+                    })?;
+                if let Some(task) = task {
+                    let projection = app.registry.branch_projection(repo, &name, &task.id)?;
+                    if !projection.is_empty() {
+                        return Ok(projection);
+                    }
+                }
+            }
+            current = branch.and_then(|branch| branch.info().parent.clone());
         }
         Ok(Projection::default())
     }
 
+    /// A feed event's projection follows the operation that produced its
+    /// sequence, never a later task reusing the same branch name. Current
+    /// ancestry is used only to find a durable session or an active parent's
+    /// operation covering that same sequence.
+    pub(crate) fn of_feed_entry(
+        app: &App,
+        repo: &str,
+        branch: &str,
+        seq: u64,
+    ) -> Result<Projection, ApiError> {
+        let projection = app.registry.feed_projection(repo, branch, seq)?;
+        if !projection.is_empty() {
+            return Ok(projection);
+        }
+        let mut seen = BTreeSet::new();
+        let mut current = Some(branch.to_owned());
+        while let Some(name) = current {
+            if !seen.insert(name.clone()) {
+                break;
+            }
+            if let Some(session) = session_on(app, repo, &name)? {
+                return Projection::of_row(&session);
+            }
+            if name != branch {
+                let projection = app.registry.feed_projection(repo, &name, seq)?;
+                if !projection.is_empty() {
+                    return Ok(projection);
+                }
+            }
+            current = match app.repos.get(repo).map(|state| state.yard.branch(&name)) {
+                Some(Ok(branch)) => branch.info().parent.clone(),
+                Some(Err(branchyard::Error::UnknownBranch(_))) | None => None,
+                Some(Err(_)) => {
+                    return Err(ApiError::internal(
+                        "could not read the branch for its feed projection",
+                    ))
+                }
+            };
+        }
+        // A removed descendant has no current ancestry. Native task attempt
+        // history still identifies it, even when the root operation failed
+        // without producing a result. If that history cannot establish the
+        // boundary, withhold the entry instead of guessing that it was raw.
+        let mut projection = Projection::default();
+        let Some(state) = app.repos.get(repo) else {
+            return Ok(projection);
+        };
+        for stored in app.registry.feed_projection_candidates(repo, seq)? {
+            let mut tasks: BTreeSet<String> = stored.projection_tasks.values().cloned().collect();
+            if tasks.is_empty() && !stored.operation.state.is_terminal() {
+                for name in &stored.creates {
+                    if let Some(task) = branchyard::tasks::task_of(state.yard.root(), name)
+                        .map_err(|_| {
+                            ApiError::internal("could not read the task for its feed projection")
+                        })?
+                    {
+                        tasks.insert(task.id);
+                    }
+                }
+                // A queued task with no native root has produced no child.
+                if tasks.is_empty() {
+                    continue;
+                }
+            }
+            if tasks.is_empty() {
+                return Err(ApiError::internal(
+                    "could not verify the event's preset projection",
+                ));
+            }
+            for task in tasks {
+                let history = branchyard::tasks::view(&state.yard, &task).map_err(|_| {
+                    ApiError::internal("could not read the task history for its feed projection")
+                })?;
+                if history
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.name == branch)
+                {
+                    if stored.operation.end_cursor.is_none() && stored.operation.state.is_terminal()
+                    {
+                        return Err(ApiError::internal(
+                            "could not verify the event's preset projection",
+                        ));
+                    }
+                    projection.extend(stored.projection.clone());
+                }
+            }
+        }
+        Ok(projection)
+    }
+
     /// The projections of every branch `operation` names, merged.
     pub(crate) fn of_operation(app: &App, operation: &Operation) -> Result<Projection, ApiError> {
+        let recorded = app
+            .registry
+            .operation_projection(&operation.id, &operation.repo)?;
+        if !recorded.is_empty() {
+            return Ok(recorded);
+        }
         let mut hidden = Vec::new();
         for branch in &operation.branches {
             hidden.extend(Projection::of_branch(app, &operation.repo, branch)?.0);
@@ -1190,6 +1364,71 @@ impl Projection {
         }
     }
 
+    /// Project the diagnostic fields of a serialized public error without
+    /// rewriting its stable envelope or code.
+    pub(crate) fn apply_error(&self, value: &mut Value) {
+        for field in ["message", "detail"] {
+            if let Some(value) = value.get_mut(field) {
+                self.apply(value);
+            }
+        }
+    }
+
+    /// Project a serialized public record without rewriting its schema
+    /// fields or enum tags. Free-form diagnostic payloads still project
+    /// their keys: a path may occur as a key as well as a value.
+    pub(crate) fn apply_record(&self, value: &mut Value) {
+        if !self.is_empty() {
+            self.apply_record_fields(value, "");
+        }
+    }
+
+    fn apply_record_fields(&self, value: &mut Value, parent: &str) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    self.apply_record_fields(value, parent);
+                }
+            }
+            Value::Object(fields) => {
+                // These are harness-owned words, unlike the tagged enums
+                // around them (Event::Unrecognized and HarnessTask).
+                let dynamic_kind = fields.get("type").and_then(Value::as_str)
+                    == Some("unrecognized")
+                    || fields.contains_key("task_id");
+                for (field, value) in fields {
+                    let tag = value.is_string()
+                        && (matches!(
+                            field.as_str(),
+                            "state" | "type" | "mode" | "decision" | "end"
+                        ) || field == "kind" && !dynamic_kind
+                            || parent == "stage" && matches!(field.as_str(), "lane" | "reason")
+                            || parent == "guard" && field == "preset"
+                            || field == "path"
+                                && matches!(value.as_str(), Some("turn_start" | "steer")));
+                    match field.as_str() {
+                        "error" if value.get("code").is_some() => self.apply_error(value),
+                        "detail" | "runtime" | "pull_request" | "input" | "value" | "schema" => {
+                            self.apply(value);
+                        }
+                        // Activity::Result has a typed `value` wrapper;
+                        // attempt/inspection results are arbitrary JSON.
+                        "result" if parent != "activity" => self.apply(value),
+                        _ if tag => {}
+                        _ => self.apply_record_fields(value, field),
+                    }
+                }
+            }
+            _ => project_fields(value, &self.0, false),
+        }
+    }
+
+    /// Results use the same schema boundary as standalone branch, event
+    /// and wait reads; nested diagnostic JSON remains free-form.
+    pub(crate) fn apply_result(&self, value: &mut Value) {
+        self.apply_record(value);
+    }
+
     /// `body` as the response a caller reads, with the value at each JSON
     /// pointer through the projection beside it. When every projection is
     /// empty the body is serialized as it always was, so what a resource
@@ -1205,7 +1444,13 @@ impl Projection {
             serde_json::to_value(body).map_err(|error| ApiError::internal(error.to_string()))?;
         for (pointer, projection) in at {
             if let Some(found) = value.pointer_mut(pointer) {
-                projection.apply(found);
+                if pointer.ends_with("/error") {
+                    projection.apply_error(found);
+                } else if pointer.ends_with("/result") {
+                    projection.apply_result(found);
+                } else {
+                    projection.apply_record(found);
+                }
             }
         }
         Ok(Json(value).into_response())

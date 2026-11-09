@@ -1938,7 +1938,7 @@ pub(crate) async fn admit_task(
     let request = start_from_issue(app, repo, request).await?;
     // The operation keeps the request as sent (its `preset` an ID); the
     // worker resolves it again for the admitting principal.
-    let (resolved, options) =
+    let (resolved, options, projection) =
         work::preset_or_task_options(app, repo, &request, Some(caller.tenant()))?;
     let mut requires = required_labels(&resolved.require_labels)?;
     // Steer a task that runs its harnesses by name, here, toward a worker
@@ -1972,13 +1972,14 @@ pub(crate) async fn admit_task(
             let ids: Vec<&str> = harnesses.iter().map(String::as_str).collect();
             yard.task(prompt).options(options).planned_names(&ids)
         })
-        .await?
+        .await
+        .map_err(|error| projection.api_error(error))?
         {
             Ok(planned) => planned,
             Err(e) => {
                 return match replayed_operation(app, caller, idem.as_ref()).await? {
                     Some(op) => Ok((op, true)),
-                    None => Err(error::sdk(&e)),
+                    None => Err(projection.api_error(error::sdk(&e))),
                 }
             }
         }
@@ -2001,7 +2002,7 @@ pub(crate) async fn admit_task(
     };
     let value = Work::Task { request, trigger }.to_value()?;
     let registry = app.registry.clone();
-    blocking(move || registry.submit(new, value)).await?
+    blocking(move || registry.submit_projected(new, value, projection)).await?
 }
 
 /// The operation a request's idempotency key already names, if any.
@@ -3209,9 +3210,9 @@ struct Streaming {
     feed: Arc<Feed>,
     cursor: u64,
     buffer: VecDeque<FeedEntry>,
-    /// Each streamed branch's projection, looked up once: a session's
-    /// preset and a branch's parent never change.
-    projections: BTreeMap<String, Projection>,
+    /// Each buffered event's projection, bound to its durable feed sequence.
+    /// A branch name may be removed and reused while this stream stays open.
+    projections: BTreeMap<u64, Projection>,
     head: watch::Receiver<u64>,
     shutdown: watch::Receiver<bool>,
 }
@@ -3219,10 +3220,10 @@ struct Streaming {
 async fn next_entry(mut s: Streaming) -> Option<(Result<SseEvent, Infallible>, Streaming)> {
     loop {
         if let Some(entry) = s.buffer.pop_front() {
-            let data = match s.projections.get(&entry.branch) {
+            let data = match s.projections.remove(&entry.seq) {
                 Some(projection) if !projection.is_empty() => {
                     let mut value = serde_json::to_value(&entry).ok()?;
-                    projection.apply(&mut value);
+                    projection.apply_record(&mut value);
                     value.to_string()
                 }
                 _ => serde_json::to_string(&entry).ok()?,
@@ -3240,16 +3241,15 @@ async fn next_entry(mut s: Streaming) -> Option<(Result<SseEvent, Infallible>, S
         if s.cursor < head {
             let (app, repo, feed, cursor) =
                 (s.app.clone(), s.repo.clone(), s.feed.clone(), s.cursor);
-            let mut projections = std::mem::take(&mut s.projections);
             let read = tokio::task::spawn_blocking(move || {
                 let entries = feed
                     .read_after(cursor, STREAM_BATCH)
                     .map_err(|e| error::sdk(&e))?;
+                let mut projections = BTreeMap::new();
                 for entry in &entries {
-                    if !projections.contains_key(&entry.branch) {
-                        let projection = Projection::of_branch(&app, &repo, &entry.branch)?;
-                        projections.insert(entry.branch.clone(), projection);
-                    }
+                    let projection =
+                        Projection::of_feed_entry(&app, &repo, &entry.branch, entry.seq)?;
+                    projections.insert(entry.seq, projection);
                 }
                 Ok::<_, ApiError>((entries, projections))
             })

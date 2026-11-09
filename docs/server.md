@@ -1302,12 +1302,16 @@ See [cloud execution](cloud-execution.md) for GCE and GKE provider examples.
 
 A task request may carry `preset`, an ID from `GET /v1/execution-presets` (`by run --remote --env ID`, `by fan --remote --env ID`):
 
-- The server resolves it for the caller's tenant at admission, and again for the admitting principal when a worker runs the operation, so a preset removed or narrowed while the task waits fails it rather than running it elsewhere. The operation records the ID, not what it resolved to.
+- The server resolves it for the caller's tenant at admission, and again for the admitting principal when a worker runs the operation, so a preset removed or narrowed while the task waits fails it rather than running it elsewhere. The queued request records the ID; it never supplies a stored resolution as execution authority.
 - The preset supplies the provider, its secrets (in a private home, as `isolated`), its worker labels (added to the request's `require_labels`, and so to the queue row) and, when one harness runs, its default model.
 - A request with `preset` may not carry `provider`, `provision` or `command` (`400 preset_conflict`). It runs only harnesses the preset offers (`422 preset_choice_unavailable`), its first when it names none. An ID the tenant is not offered is `404 unknown_preset`.
 - `allow_providers`, quotas, scheduling and the other admission checks apply as to any task.
 
-Not yet: a send, fork, reincarnation, spawn or plan decision on such a branch with a native provider is refused as before (`by fork`/`by reincarnate --env` are refused by the CLI); a map does not take a preset; and the error projection that hides a preset's configured paths and endpoints from a session's members does not apply to direct tasks, whose callers see the engine's errors as they are.
+Direct preset tasks use the same configured-value projection as preset sessions. It covers option-building and planning errors, execution errors, and the operation's serialized error and result, including failed branches and descendants inside a successful result. HTTP status and public error codes stay intact. The private operation record keeps the projection captured at admission and adds the executing worker's resolved values before execution, so queued responses, operation reads, lists and idempotent retries remain protected after configuration changes or removal. The snapshot grants no permission and contains no secret values.
+
+The worker also records each created branch's native task ID. Existing branch, event, inspection, task-record, wait and feed projections use that association, including when execution fails without an operation result. Reusing a branch name or worktree path does not attach the old task's projection to a new task. If an interrupted operation has no captured task identity, the server withholds a branch response it cannot safely associate. Existing tenant, repository and workspace authorization still runs before a caller can read an operation or branch.
+
+Not yet: a send, fork, reincarnation, spawn or plan decision on such a branch with a native provider is refused as before (`by fork`/`by reincarnate --env` are refused by the CLI); a map does not take a preset. The exclusions listed under [execution preset projection](#execution-presets) also apply to direct tasks.
 
 
 ```json
@@ -1372,7 +1376,7 @@ For a session started with a preset, the server projects the text callers read o
 - every JSON error on its console routes (`/v1/workspaces/{workspace}/sessions/{session}/...`) and on its legacy branch routes (`/v1/repos/{repo}/branches/{branch}/...`);
 - runtime inspection (`GET .../runtime`), the PR read (`GET .../pr`) and a terminal page's `error`. A terminal page's `data` is the terminal's own output and is never rewritten.
 
-A branch takes the projection of the nearest session among itself and its ancestors. A child or fork of a session's branch shows through that session's preset, and a session without a preset between them ends the walk. An operation merges the projections of every branch it names. Anything outside a preset session reads exactly as before.
+A branch takes the projection of the nearest preset task or session among itself and its ancestors. A child or fork of a session's branch shows through that session's preset, and a session without a preset between them ends the walk. An operation merges its private direct-task projection with the projections of every branch it names. Resources outside those associations read exactly as before.
 
 Not projected: the answers of a legacy branch's write routes that return no operation (cancel, steer, graph proposals, rewind and undo), the repository's effects, approvals and map records, content routes (diff, artifacts, scratch areas, inbox and plan), push notifications, trigger run details, operator-configured webhooks and OTLP export.
 
