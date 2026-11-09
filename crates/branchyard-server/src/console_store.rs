@@ -291,6 +291,8 @@ mod tests {
 
     fn operation(id: &str, key: &str) -> StoredOperation {
         StoredOperation {
+            projection: Default::default(),
+            projection_tasks: Default::default(),
             operation: Operation {
                 id: id.into(),
                 repo: "managed".into(),

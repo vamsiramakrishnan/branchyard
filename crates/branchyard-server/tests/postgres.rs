@@ -654,6 +654,8 @@ fn stored(id: &str, tenant: &str, lock: &str, creates: &[&str]) -> StoredOperati
     let mut principal = Principal::default_for("ci");
     principal.tenant = tenant.into();
     StoredOperation {
+        projection: Default::default(),
+        projection_tasks: Default::default(),
         operation: Operation {
             id: id.into(),
             repo: "app".into(),

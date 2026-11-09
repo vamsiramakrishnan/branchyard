@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::{App, RepoState};
+use crate::console::Projection;
 use crate::error::{self, ApiError};
 use crate::ops::{Executor, Finished};
 use crate::store::StoredOperation;
@@ -150,6 +151,7 @@ impl Work {
         principal: Option<&crate::config::Principal>,
         trace: Option<&str>,
         admitted_ms: u64,
+        projection: &mut Projection,
     ) -> Result<OperationResult, ErrorBody> {
         let trace_parent = trace.map(str::to_owned);
         let sdk = |e: branchyard::Error| *error::sdk(&e).body;
@@ -170,8 +172,9 @@ impl Work {
                 // A preset is checked again here, for the principal that
                 // admitted the task: the operator may have removed it.
                 let tenant = principal.map(|p| p.tenant.as_str());
-                let (request, options) =
+                let (request, options, preset_projection) =
                     preset_or_task_options(app, repo, &request, tenant).map_err(api)?;
+                projection.extend(preset_projection);
                 let options = TaskOptions {
                     actor: actor.clone(),
                     trigger,
@@ -187,7 +190,8 @@ impl Work {
                         builder.run_on(&ids)
                     }
                 };
-                ran.and_then(finished).map_err(sdk)
+                ran.and_then(finished)
+                    .map_err(|error| projection.error(sdk(error)))
             }
             Work::Send { branch, request } => {
                 let options = TaskOptions {
@@ -447,6 +451,32 @@ impl AppExecutor {
 }
 
 impl Executor for AppExecutor {
+    fn projection(&self, stored: &StoredOperation, work: &Value) -> Result<Projection, ApiError> {
+        let Some(principal) = &stored.principal else {
+            return Ok(Projection::default());
+        };
+        let parsed = serde_json::from_value::<Work>(work.clone());
+        if matches!(&parsed, Ok(Work::Console { .. })) {
+            // Console sessions retain their own durable preset binding and
+            // cursor lifecycle; this hook extends direct repository work.
+            return Ok(Projection::default());
+        }
+        let Ok(Work::Task { request, .. }) = parsed else {
+            return Projection::of_operation(&self.0, &stored.operation);
+        };
+        if request.preset.is_none() {
+            return Projection::of_operation(&self.0, &stored.operation);
+        }
+        // This only hides configuration. Execution still rechecks every
+        // permission and refuses unresolved presets before any effect.
+        // Capture before the running record so concurrent branch/feed reads
+        // see the worker's values even when they changed since admission.
+        match crate::console::for_task(&self.0, &principal.tenant, &request) {
+            Ok((_, preset)) => Ok(Projection::of_preset(&preset)),
+            Err(_) => Ok(Projection::default()),
+        }
+    }
+
     fn stop_for_shutdown(&self, stored: &StoredOperation) {
         let operation = &stored.operation;
         for branch in &operation.branches {
@@ -473,12 +503,18 @@ impl Executor for AppExecutor {
     fn execute(&self, stored: &StoredOperation, work: &Value) -> Finished {
         let app = &self.0;
         let operation = &stored.operation;
+        // A refusal before SDK execution has no activity interval. Keep the
+        // admitting cursor as its end so an admission snapshot cannot claim
+        // unrelated future feed entries. Unknown ends remain reserved for
+        // execution whose effects or final feed position are uncertain.
         if let Err(refused) = admitted_principal_allowed(&app.config, stored)
             .and_then(|()| fresh_groups_allowed(&app.credentials, stored))
         {
             return Finished {
                 result: Err(*refused.body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
+                projection: Projection::default(),
+                projection_tasks: Default::default(),
             };
         }
         if let Ok(Work::Console {
@@ -489,14 +525,18 @@ impl Executor for AppExecutor {
             let Some(principal) = stored.principal.clone() else {
                 return Finished {
                     result: Err(*ApiError::unauthorized().body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
+                    projection: Projection::default(),
+                    projection_tasks: Default::default(),
                 };
             };
             let caller = crate::api::Caller::authenticated(principal, credential);
             if let Err(error) = app.check_caller(&caller) {
                 return Finished {
                     result: Err(*error.body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
+                    projection: Projection::default(),
+                    projection_tasks: Default::default(),
                 };
             }
             return crate::console::execute(app, stored, command, caller);
@@ -515,7 +555,9 @@ impl Executor for AppExecutor {
         ) {
             return Finished {
                 result: Err(*refused.body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
+                projection: Projection::default(),
+                projection_tasks: Default::default(),
             };
         }
         let Some(repo) = app.repos.get(&operation.repo) else {
@@ -534,8 +576,35 @@ impl Executor for AppExecutor {
                 .collect();
             return Finished {
                 result: Err(*crate::api::unknown_repo("worker", &operation.repo, &served).body),
-                end_cursor: None,
+                end_cursor: Some(operation.cursor),
+                projection: Projection::default(),
+                projection_tasks: Default::default(),
             };
+        };
+        // A branch name and worktree path can be reused. Bind its projection
+        // to the native task identity created by this operation, including a
+        // failed run that returns no OperationResult.
+        let task_ids = || -> Result<std::collections::BTreeMap<String, String>, ErrorBody> {
+            let mut ids = std::collections::BTreeMap::new();
+            for name in &stored.creates {
+                if let Some(task) = branchyard::tasks::task_of(repo.yard.root(), name)
+                    .map_err(|error| *crate::error::sdk(&error).body)?
+                {
+                    ids.insert(name.clone(), task.id);
+                }
+            }
+            Ok(ids)
+        };
+        let before_tasks = match task_ids() {
+            Ok(ids) => ids,
+            Err(error) => {
+                return Finished {
+                    result: Err(stored.projection.error(error)),
+                    end_cursor: Some(operation.cursor),
+                    projection: Projection::default(),
+                    projection_tasks: Default::default(),
+                }
+            }
         };
         let observability = app.registry.observability();
         // What the branches had spent before, so the operation's cost is
@@ -568,12 +637,15 @@ impl Executor for AppExecutor {
                 };
                 return Finished {
                     result: Err(*ApiError::new(status, code, message).body),
-                    end_cursor: None,
+                    end_cursor: Some(operation.cursor),
+                    projection: Projection::default(),
+                    projection_tasks: Default::default(),
                 };
             }
             Some(Ok(leases)) => leases,
             None => Vec::new(),
         };
+        let mut projection = stored.projection.clone();
         let run = || {
             serde_json::from_value::<Work>(work.clone())
                 .map_err(|e| {
@@ -586,6 +658,7 @@ impl Executor for AppExecutor {
                         stored.principal.as_ref(),
                         stored.trace.as_deref(),
                         operation.created_at_ms,
+                        &mut projection,
                     )
                 })
         };
@@ -593,7 +666,7 @@ impl Executor for AppExecutor {
         // A run whose lease was lost is not accepted: another runner may be
         // running the same task, and what this one did after the loss is
         // not pushed (its task is fenced).
-        let result = match lost {
+        let mut result = match lost {
             Some(reason) => Err(*ApiError::new(
                 StatusCode::CONFLICT,
                 "sync_lease_lost",
@@ -622,8 +695,23 @@ impl Executor for AppExecutor {
                 None
             }
         };
+        let projection_tasks = match task_ids() {
+            Ok(mut ids) => {
+                ids.retain(|name, id| before_tasks.get(name) != Some(id));
+                ids
+            }
+            Err(error) => {
+                result = Err(error);
+                Default::default()
+            }
+        };
         observe_run(app, repo, stored, &before, &result, end_cursor);
-        Finished { result, end_cursor }
+        Finished {
+            result: result.map_err(|error| projection.error(error)),
+            end_cursor,
+            projection,
+            projection_tasks,
+        }
     }
 }
 
@@ -943,14 +1031,20 @@ pub(crate) fn preset_or_task_options(
     repo: &RepoState,
     request: &TaskRequest,
     tenant: Option<&str>,
-) -> Result<(TaskRequest, TaskOptions), ApiError> {
+) -> Result<(TaskRequest, TaskOptions, Projection), ApiError> {
     match (&request.preset, tenant) {
         (Some(_), Some(tenant)) => {
             let (resolved, preset) = crate::console::for_task(app, tenant, request)?;
-            let options = task_options_from(app, repo, &resolved, Some(&preset))?;
-            Ok((resolved, options))
+            let projection = Projection::of_preset(&preset);
+            let options = task_options_from(app, repo, &resolved, Some(&preset))
+                .map_err(|error| projection.api_error(error))?;
+            Ok((resolved, options, projection))
         }
-        _ => Ok((request.clone(), task_options(app, repo, request)?)),
+        _ => Ok((
+            request.clone(),
+            task_options(app, repo, request)?,
+            Projection::default(),
+        )),
     }
 }
 

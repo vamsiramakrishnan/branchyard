@@ -49,6 +49,8 @@ use branchyard::store_codec::{
 };
 
 use crate::config::{Principal, DEFAULT_TENANT};
+/// Configured-value projection kept privately with a stored operation.
+pub use crate::console::Projection;
 use crate::console_store::{self, Collection, Mutation, Record};
 
 /// An idempotency key as the server scopes it: per authenticated caller and
@@ -66,6 +68,14 @@ pub struct Idempotency {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredOperation {
     pub operation: Operation,
+    /// Configured values hidden from this operation's client-visible errors
+    /// and results. Kept with the durable private record, never the wire operation.
+    #[serde(default, skip_serializing_if = "Projection::is_empty")]
+    pub projection: Projection,
+    /// Native task identities whose branch diagnostics use this projection.
+    /// Captured by the worker so reusing a branch name never inherits an old preset.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub projection_tasks: BTreeMap<String, String>,
     #[serde(default)]
     pub idempotency: Option<Idempotency>,
     /// Branch names no other operation may change while this one runs.
@@ -568,6 +578,57 @@ pub enum Admission {
 pub trait OperationStore: Send + Sync {
     /// Every operation as last saved, oldest first.
     fn load(&self) -> io::Result<Vec<StoredOperation>>;
+    /// Direct task operations admitted to create `branch` on `repo`. The
+    /// caller checks the current native task identity before applying a
+    /// terminal operation's projection.
+    fn creating(&self, repo: &str, branch: &str) -> io::Result<Vec<StoredOperation>> {
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter(|stored| {
+                stored.operation.repo == repo
+                    && stored.operation.kind == branchyard_client::api::OperationKind::Task
+                    && stored.creates.iter().any(|created| created == branch)
+            })
+            .collect())
+    }
+
+    /// Preset operation snapshots owning an entry of the repository feed.
+    /// Feed sequence intervals keep removed and reused branch names separate.
+    fn feed_operations(
+        &self,
+        repo: &str,
+        branch: Option<&str>,
+        seq: u64,
+    ) -> io::Result<Vec<StoredOperation>> {
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter(|stored| {
+                let operation = &stored.operation;
+                operation.repo == repo
+                    && !stored.projection.is_empty()
+                    && operation.cursor < seq
+                    && match operation.end_cursor {
+                        Some(end) => seq <= end,
+                        None => true,
+                    }
+                    && branch.is_none_or(|branch| {
+                        operation.branches.iter().any(|name| name == branch)
+                            || stored.creates.iter().any(|name| name == branch)
+                            || stored.projection_tasks.contains_key(branch)
+                            || operation.result.as_ref().is_some_and(|result| {
+                                result
+                                    .branches
+                                    .iter()
+                                    .chain(&result.descendants)
+                                    .any(|recorded| recorded.name == branch)
+                            })
+                    })
+            })
+            .collect())
+    }
+
     /// One operation.
     fn get(&self, id: &str) -> io::Result<Option<StoredOperation>>;
     /// The operation `caller` created with `key`.
@@ -1354,6 +1415,67 @@ impl OperationStore for SqliteStore {
             ops.push(parse_op(&id, &body, &place)?);
         }
         Ok(ops)
+    }
+
+    fn creating(&self, repo: &str, branch: &str) -> io::Result<Vec<StoredOperation>> {
+        let conn = self.conn();
+        let mut statement = conn
+            .prepare(
+                "SELECT id, body FROM operations \
+             WHERE json_extract(body, '$.operation.repo') = ?1 \
+               AND json_extract(body, '$.operation.kind') = 'task' \
+               AND EXISTS (SELECT 1 FROM json_each(body, '$.creates') b WHERE b.value = ?2) \
+             ORDER BY seq",
+            )
+            .map_err(sql)?;
+        let rows = statement
+            .query_map([repo, branch], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        let place = format!("{} ", self.path.display());
+        rows.map(|row| {
+            let (id, body) = row.map_err(sql)?;
+            parse_op(&id, &body, &place)
+        })
+        .collect()
+    }
+
+    fn feed_operations(
+        &self,
+        repo: &str,
+        branch: Option<&str>,
+        seq: u64,
+    ) -> io::Result<Vec<StoredOperation>> {
+        let seq = to_db("feed sequence", seq)?;
+        let conn = self.conn();
+        let mut statement = conn.prepare(
+            "SELECT id, body FROM operations \
+             WHERE json_extract(body, '$.operation.repo') = ?1 \
+               AND COALESCE(json_array_length(body, '$.projection'), 0) > 0 \
+               AND json_extract(body, '$.operation.cursor') < ?3 \
+               AND (json_extract(body, '$.operation.end_cursor') >= ?3 \
+                    OR json_extract(body, '$.operation.end_cursor') IS NULL) \
+               AND (?2 IS NULL OR EXISTS (SELECT 1 FROM json_each(body, '$.operation.branches') b WHERE b.value = ?2) \
+                    OR EXISTS (SELECT 1 FROM json_each(body, '$.creates') b WHERE b.value = ?2) \
+                    OR EXISTS (SELECT 1 FROM json_each(body, '$.projection_tasks') t WHERE t.key = ?2) \
+                    OR EXISTS (SELECT 1 FROM json_each(body, '$.operation.result.branches') b \
+                        WHERE json_extract(b.value, '$.name') = ?2) \
+                    OR EXISTS (SELECT 1 FROM json_each(body, '$.operation.result.descendants') b \
+                        WHERE json_extract(b.value, '$.name') = ?2)) \
+             ORDER BY seq",
+        ).map_err(sql)?;
+        let rows = statement
+            .query_map(rusqlite::params![repo, branch, seq], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql)?;
+        let place = format!("{} ", self.path.display());
+        rows.map(|row| {
+            let (id, body) = row.map_err(sql)?;
+            parse_op(&id, &body, &place)
+        })
+        .collect()
     }
 
     fn get(&self, id: &str) -> io::Result<Option<StoredOperation>> {
@@ -2219,6 +2341,56 @@ impl OperationStore for PostgresStore {
             .collect()
     }
 
+    fn creating(&self, repo: &str, branch: &str) -> io::Result<Vec<StoredOperation>> {
+        let (repo, branch) = (repo.to_owned(), branch.to_owned());
+        let rows = self.with(move |client| {
+            client.query(
+                "SELECT id, body FROM by_operations \
+             WHERE (body::jsonb) #>> '{operation,repo}' = $1 \
+               AND (body::jsonb) #>> '{operation,kind}' = 'task' \
+               AND COALESCE((body::jsonb) -> 'creates', '[]'::jsonb) ? $2 \
+             ORDER BY seq",
+                &[&repo, &branch],
+            )
+        })?;
+        pg_ops(&rows)
+    }
+
+    fn feed_operations(
+        &self,
+        repo: &str,
+        branch: Option<&str>,
+        seq: u64,
+    ) -> io::Result<Vec<StoredOperation>> {
+        let (repo, branch, seq) = (
+            repo.to_owned(),
+            branch.map(str::to_owned),
+            to_db("feed sequence", seq)?,
+        );
+        let rows = self.with(move |client| {
+            client.query(
+                "SELECT id, body FROM by_operations \
+             WHERE (body::jsonb) #>> '{operation,repo}' = $1 \
+               AND jsonb_array_length(COALESCE((body::jsonb) -> 'projection', '[]'::jsonb)) > 0 \
+               AND ((body::jsonb) #>> '{operation,cursor}')::bigint < $3 \
+               AND (((body::jsonb) #>> '{operation,end_cursor}')::bigint >= $3 \
+                    OR (body::jsonb) #>> '{operation,end_cursor}' IS NULL) \
+               AND ($2::text IS NULL OR COALESCE((body::jsonb) #> '{operation,branches}', '[]'::jsonb) ? $2 \
+                    OR COALESCE((body::jsonb) -> 'creates', '[]'::jsonb) ? $2 \
+                    OR COALESCE((body::jsonb) -> 'projection_tasks', '{}'::jsonb) ? $2 \
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE( \
+                        (body::jsonb) #> '{operation,result,branches}', '[]'::jsonb)) b \
+                        WHERE b ->> 'name' = $2) \
+                    OR EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE( \
+                        (body::jsonb) #> '{operation,result,descendants}', '[]'::jsonb)) b \
+                        WHERE b ->> 'name' = $2)) \
+             ORDER BY seq",
+                &[&repo, &branch, &seq],
+            )
+        })?;
+        pg_ops(&rows)
+    }
+
     fn get(&self, id: &str) -> io::Result<Option<StoredOperation>> {
         let id = id.to_owned();
         let rows = self
@@ -2724,6 +2896,8 @@ pub fn check_labels(store: &dyn OperationStore, repo: &str) {
     use branchyard_client::api::{OperationKind, OperationState};
     const LEASE: Duration = Duration::from_secs(30);
     let stored = |id: &str, requires: &[&str]| StoredOperation {
+        projection: Default::default(),
+        projection_tasks: Default::default(),
         operation: Operation {
             id: id.into(),
             repo: repo.into(),
@@ -2970,6 +3144,8 @@ fn scheduled(
 ) -> StoredOperation {
     use branchyard_client::api::{OperationKind, OperationState};
     StoredOperation {
+        projection: Default::default(),
+        projection_tasks: Default::default(),
         operation: Operation {
             id: id.into(),
             repo: repo.into(),
@@ -3410,6 +3586,8 @@ impl OperationStore for MemoryStore {
         console_mutate(mutations: &[Mutation]) -> io::Result<()>;
         admit_console(operation: &StoredOperation, work: &Value, quota: &AdmissionQuota, mutations: &[Mutation]) -> io::Result<Admission>;
         load() -> io::Result<Vec<StoredOperation>>;
+        creating(repo: &str, branch: &str) -> io::Result<Vec<StoredOperation>>;
+        feed_operations(repo: &str, branch: Option<&str>, seq: u64) -> io::Result<Vec<StoredOperation>>;
         get(id: &str) -> io::Result<Option<StoredOperation>>;
         by_key(caller: &str, key: &str) -> io::Result<Option<StoredOperation>>;
         save(operation: &StoredOperation) -> io::Result<()>;
@@ -3617,6 +3795,8 @@ mod tests {
 
     fn op(id: &str, state: OperationState) -> StoredOperation {
         StoredOperation {
+            projection: Default::default(),
+            projection_tasks: Default::default(),
             operation: Operation {
                 id: id.into(),
                 repo: "r".into(),

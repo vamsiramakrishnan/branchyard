@@ -286,6 +286,8 @@ pub(crate) fn execute(
         }
     };
     Finished {
+        projection: Default::default(),
+        projection_tasks: Default::default(),
         result: run().map_err(|e| *e.body),
         end_cursor: None,
     }

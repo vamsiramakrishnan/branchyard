@@ -38,7 +38,7 @@
 
 use branchyard_support::time::now_ms;
 use branchyard_support::{CondvarExt as _, LockExt as _};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -56,12 +56,17 @@ use crate::metrics;
 use crate::observe::Observability;
 use crate::problems::{Found, Scope};
 use crate::store::{
-    Admission, AdmissionQuota, Claim, Idempotency, Lane, OperationStore, Scheduling,
+    Admission, AdmissionQuota, Claim, Idempotency, Lane, OperationStore, Projection, Scheduling,
     StoredOperation, Worker,
 };
 
 /// What a finished operation reports.
 pub struct Finished {
+    /// Additional configured values resolved by the executing worker, kept
+    /// with the operation before its outcome is recorded.
+    pub projection: Projection,
+    /// Native task identities observed for the operation's created branches.
+    pub projection_tasks: BTreeMap<String, String>,
     pub result: Result<OperationResult, ErrorBody>,
     /// The feed head once the operation's activity was ingested.
     pub end_cursor: Option<u64>,
@@ -70,6 +75,16 @@ pub struct Finished {
 /// Runs a claimed operation's work description, as the principal its
 /// record names (`StoredOperation::principal`), never as the worker.
 pub trait Executor: Send + Sync {
+    /// Resolve additional configured values this worker will use, without
+    /// execution effects. Recorded with the running operation before any
+    /// branch diagnostics can become visible. Empty by default.
+    fn projection(
+        &self,
+        _operation: &StoredOperation,
+        _work: &Value,
+    ) -> Result<Projection, ApiError> {
+        Ok(Projection::default())
+    }
     fn execute(&self, operation: &StoredOperation, work: &Value) -> Finished;
     /// Stop `operation`'s running turns for a shutdown, through the same
     /// durable cancel `by cancel` records, so they end with a known
@@ -462,6 +477,128 @@ impl Registry {
             .map_err(|e| ApiError::internal(format!("could not read the operation: {e}")))
     }
 
+    /// The private projection snapshot of an operation on `repo`. Callers
+    /// authorize the operation before asking for its projection; a missing
+    /// record or a record on another repository contributes no values.
+    pub(crate) fn operation_projection(
+        &self,
+        id: &str,
+        repo: &str,
+    ) -> Result<Projection, ApiError> {
+        self.store
+            .get(id)
+            .map(|found| match found {
+                Some(stored) if stored.operation.repo == repo => stored.projection,
+                _ => Projection::default(),
+            })
+            .map_err(|e| {
+                ApiError::internal(format!("could not read the operation projection: {e}"))
+            })
+    }
+
+    /// The direct task projection for the current branch incarnation. A
+    /// terminal operation must record the current native task identity; a
+    /// queued or running creation owns the branch name under its queue lock
+    /// until its worker captures that identity.
+    pub(crate) fn branch_projection(
+        &self,
+        repo: &str,
+        branch: &str,
+        task_id: &str,
+    ) -> Result<Projection, ApiError> {
+        let candidates = self.store.creating(repo, branch).map_err(|error| {
+            ApiError::internal(format!("could not read the branch projection: {error}"))
+        })?;
+        for stored in candidates.into_iter().rev() {
+            let matches = match stored.projection_tasks.get(branch) {
+                Some(recorded) => recorded == task_id,
+                None if stored.operation.state.is_terminal() && !stored.projection.is_empty() => {
+                    return Err(ApiError::internal(
+                        "could not verify the branch's preset projection",
+                    ));
+                }
+                None => !stored.operation.state.is_terminal(),
+            };
+            if matches {
+                return Ok(stored.projection);
+            }
+        }
+        Ok(Projection::default())
+    }
+
+    /// Preserve a removed branch's diagnostic boundary during a read/remove
+    /// race. Without a current native task identity, only hidden values are
+    /// combined; this grants no resource access.
+    pub(crate) fn removed_branch_projection(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Projection, ApiError> {
+        let operations = self.store.creating(repo, branch).map_err(|error| {
+            ApiError::internal(format!(
+                "could not read the removed branch projection: {error}"
+            ))
+        })?;
+        let mut projection = Projection::default();
+        for operation in operations {
+            projection.extend(operation.projection);
+        }
+        Ok(projection)
+    }
+
+    /// Preset snapshots whose recorded feed interval contains `seq`, scoped
+    /// to `repo`. The caller verifies branch ownership against these records
+    /// or the captured native tasks' durable attempt history before use.
+    pub(crate) fn feed_projection_candidates(
+        &self,
+        repo: &str,
+        seq: u64,
+    ) -> Result<Vec<StoredOperation>, ApiError> {
+        self.store
+            .feed_operations(repo, None, seq)
+            .map_err(|error| {
+                ApiError::internal(format!("could not read the feed projections: {error}"))
+            })
+    }
+
+    /// The durable projection for one historical feed entry, scoped to its
+    /// repository, branch and admitted-to-finished sequence interval.
+    pub(crate) fn feed_projection(
+        &self,
+        repo: &str,
+        branch: &str,
+        seq: u64,
+    ) -> Result<Projection, ApiError> {
+        let operations = self.feed_projection_candidates(repo, seq)?;
+        let mut projection = Projection::default();
+        for operation in operations {
+            let owned = operation
+                .operation
+                .branches
+                .iter()
+                .any(|name| name == branch)
+                || operation.creates.iter().any(|name| name == branch)
+                || operation.projection_tasks.contains_key(branch)
+                || operation.operation.result.as_ref().is_some_and(|result| {
+                    result
+                        .branches
+                        .iter()
+                        .chain(&result.descendants)
+                        .any(|recorded| recorded.name == branch)
+                });
+            if !owned {
+                continue;
+            }
+            if operation.operation.state.is_terminal() && operation.operation.end_cursor.is_none() {
+                return Err(ApiError::internal(
+                    "could not verify the feed's preset projection interval",
+                ));
+            }
+            projection.extend(operation.projection);
+        }
+        Ok(projection)
+    }
+
     /// `operation`, saying why it waits when it has waited longer than
     /// [`Options::unclaimable_after`] queued and no live worker serving its
     /// repository carries every label it requires.
@@ -644,13 +781,34 @@ impl Registry {
         self.submit_console(new, work, &[])
     }
 
+    /// Admit a direct task with its tenant-resolved projection kept in the
+    /// same transaction as its operation and queue row.
+    pub(crate) fn submit_projected(
+        &self,
+        new: NewOperation,
+        work: Value,
+        projection: Projection,
+    ) -> Result<(Operation, bool), ApiError> {
+        self.submit_with_projection(new, work, &[], projection)
+    }
+
     /// Admit console metadata and work atomically through the existing queue.
-    #[allow(clippy::expect_used)] // ratchet: branchyard-server
     pub fn submit_console(
         &self,
         new: NewOperation,
         work: Value,
         mutations: &[crate::console_store::Mutation],
+    ) -> Result<(Operation, bool), ApiError> {
+        self.submit_with_projection(new, work, mutations, Projection::default())
+    }
+
+    #[allow(clippy::expect_used)] // ratchet: branchyard-server
+    fn submit_with_projection(
+        &self,
+        new: NewOperation,
+        work: Value,
+        mutations: &[crate::console_store::Mutation],
+        projection: Projection,
     ) -> Result<(Operation, bool), ApiError> {
         if let Some(idem) = &new.idempotency {
             if let Some(existing) = self.replay(idem, &new.principal.tenant)? {
@@ -676,6 +834,8 @@ impl Registry {
         );
         let _admitting = admission_span.enter();
         let stored = StoredOperation {
+            projection,
+            projection_tasks: BTreeMap::new(),
             operation: Operation {
                 id: id.clone(),
                 repo: new.repo,
@@ -1004,6 +1164,25 @@ impl Registry {
             self.done(&id);
             return;
         }
+        let projection = catch_unwind(AssertUnwindSafe(|| executor.projection(&stored, &work)))
+            .unwrap_or_else(|_| {
+                Err(ApiError::internal(
+                    "the operation projection panicked; see the server log",
+                ))
+            });
+        match projection {
+            Ok(projection) => stored.projection.extend(projection),
+            Err(error) => {
+                stored.operation.state = OperationState::Failed;
+                stored.operation.error = Some(stored.projection.error(*error.body));
+                // Preparation performs no effects and produces no events.
+                stored.operation.end_cursor = Some(stored.operation.cursor);
+                stored.operation.finished_at_ms = Some(now_ms());
+                self.record(&stored, fence);
+                self.done(&id);
+                return;
+            }
+        }
         stored.operation.state = OperationState::Running;
         match self
             .store
@@ -1047,6 +1226,8 @@ impl Registry {
             let _running = span.enter();
             catch_unwind(AssertUnwindSafe(|| executor.execute(&admitted, &work))).unwrap_or_else(
                 |_| Finished {
+                    projection: Default::default(),
+                    projection_tasks: Default::default(),
                     result: Err(
                         *ApiError::internal("the operation panicked; see the server log").body,
                     ),
@@ -1059,6 +1240,8 @@ impl Registry {
             crate::telemetry::fail(&span, &error.message);
         }
         drop(span);
+        stored.projection.extend(finished.projection);
+        stored.projection_tasks.extend(finished.projection_tasks);
         let (outcome, result, error) = match finished.result {
             Ok(result) => (OperationState::Succeeded, Some(result), None),
             Err(error) if error.code == "pr_effect_uncertain" => {
@@ -1506,6 +1689,8 @@ mod tests {
             fn execute(&self, _: &StoredOperation, _: &Value) -> Finished {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Finished {
+                    projection: Default::default(),
+                    projection_tasks: Default::default(),
                     result: Err(ErrorBody {
                         code: "pr_effect_uncertain".into(),
                         message: "inspect forge state before another publication".into(),
@@ -1538,6 +1723,312 @@ mod tests {
         assert_eq!(replayed.id, operation.id);
         assert_eq!(replayed.state, OperationState::Interrupted);
         assert_eq!(executor.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        registry.close();
+    }
+
+    #[test]
+    fn projection_preflight_failures_never_execute_and_release_branch_locks() {
+        struct RefusingHook(bool);
+        impl Executor for RefusingHook {
+            fn projection(&self, _: &StoredOperation, _: &Value) -> Result<Projection, ApiError> {
+                if self.0 {
+                    panic!("preflight failure");
+                }
+                Err(ApiError::internal("cannot verify the execution preset"))
+            }
+            fn execute(&self, _: &StoredOperation, _: &Value) -> Finished {
+                panic!("execution must not start after projection failure");
+            }
+        }
+        for panics in [false, true] {
+            let registry = Registry::open(
+                Box::new(SqliteStore::memory()),
+                Options::new(vec!["r".into()]),
+            )
+            .unwrap();
+            registry.start(Arc::new(RefusingHook(panics))).unwrap();
+            let (operation, _) = registry
+                .submit(new(Some("preflight"), &["a"]), Value::Null)
+                .unwrap();
+            let done = registry
+                .wait_for_tenant(&operation.id, "default", Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!(done.state, OperationState::Failed);
+            assert_eq!(
+                done.error.unwrap().message,
+                if panics {
+                    "the operation projection panicked; see the server log"
+                } else {
+                    "cannot verify the execution preset"
+                }
+            );
+            assert!(registry
+                .submit(new(Some("after-preflight"), &["a"]), Value::Null)
+                .is_ok());
+            registry.close();
+        }
+    }
+
+    #[test]
+    fn task_projection_survives_restart_worker_changes_and_idempotent_replay() {
+        struct ChangedWorker;
+        impl Executor for ChangedWorker {
+            fn projection(&self, _: &StoredOperation, _: &Value) -> Result<Projection, ApiError> {
+                serde_json::from_value(serde_json::json!([{
+                    "value":"/worker/preflight.key",
+                    "placeholder":"[preset pool: bridge key]"
+                }]))
+                .map_err(|error| ApiError::internal(error.to_string()))
+            }
+            fn execute(&self, stored: &StoredOperation, _: &Value) -> Finished {
+                let mut text = serde_json::json!("/worker/preflight.key");
+                stored.projection.apply(&mut text);
+                assert_eq!(text, "[preset pool: bridge key]");
+                Finished {
+                    projection: serde_json::from_value(serde_json::json!([{
+                        "value":"http://worker.internal:7443",
+                        "placeholder":"[preset pool: control endpoint]"
+                    }]))
+                    .unwrap(),
+                    projection_tasks: BTreeMap::from([("a".into(), "native-task".into())]),
+                    result: Ok(OperationResult::default()),
+                    end_cursor: Some(0),
+                }
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("projection.sqlite");
+        let registry = Registry::open(
+            Box::new(SqliteStore::open(&path, None).unwrap()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        let projection: Projection = serde_json::from_value(serde_json::json!([{
+            "value":"/operator/admission.key",
+            "placeholder":"[preset pool: bridge key]"
+        }]))
+        .unwrap();
+        let task_admission = || {
+            let mut request = new(Some("projected-task"), &["a"]);
+            request.kind = OperationKind::Task;
+            request.creates = vec!["a".into()];
+            request
+        };
+        let (operation, replayed) = registry
+            .submit_projected(task_admission(), Value::Null, projection.clone())
+            .unwrap();
+        assert!(!replayed);
+        assert_eq!(
+            registry.operation_projection(&operation.id, "r").unwrap(),
+            projection
+        );
+        assert_eq!(
+            registry.branch_projection("r", "a", "native-task").unwrap(),
+            projection
+        );
+        assert!(registry
+            .branch_projection("other", "a", "native-task")
+            .unwrap()
+            .is_empty());
+        assert!(registry
+            .operation_projection(&operation.id, "other")
+            .unwrap()
+            .is_empty());
+        assert!(registry
+            .operation_projection("unknown", "r")
+            .unwrap()
+            .is_empty());
+        assert!(registry
+            .get_for_tenant(&operation.id, "foreign")
+            .unwrap()
+            .is_none());
+        assert!(serde_json::to_value(&operation)
+            .unwrap()
+            .get("projection")
+            .is_none());
+        let stored = registry.store.get(&operation.id).unwrap().unwrap();
+        let mut legacy = serde_json::to_value(&stored).unwrap();
+        legacy.as_object_mut().unwrap().remove("projection");
+        legacy.as_object_mut().unwrap().remove("projection_tasks");
+        let legacy: StoredOperation = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.projection.is_empty());
+        assert!(legacy.projection_tasks.is_empty());
+        registry.close();
+        drop(registry);
+
+        let registry = Registry::open(
+            Box::new(SqliteStore::open(&path, None).unwrap()),
+            Options::new(vec!["r".into()]),
+        )
+        .unwrap();
+        assert_eq!(
+            registry.operation_projection(&operation.id, "r").unwrap(),
+            projection
+        );
+        registry.start(Arc::new(ChangedWorker)).unwrap();
+        branchyard_testkit::wait::until("the projected task to finish", || {
+            registry
+                .get(&operation.id)
+                .unwrap()
+                .is_some_and(|op| op.state.is_terminal())
+        });
+        let snapshot = registry.operation_projection(&operation.id, "r").unwrap();
+        assert_eq!(
+            registry.branch_projection("r", "a", "native-task").unwrap(),
+            snapshot
+        );
+        assert!(registry
+            .branch_projection("r", "a", "recreated-raw-task")
+            .unwrap()
+            .is_empty());
+        let mut other = registry.store.get(&operation.id).unwrap().unwrap();
+        other.operation.id = "other-repository".into();
+        other.operation.repo = "other".into();
+        other.idempotency = None;
+        other
+            .projection_tasks
+            .insert("a".into(), "other-native-task".into());
+        registry.store.save(&other).unwrap();
+        assert!(registry
+            .branch_projection("other", "a", "native-task")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            registry
+                .branch_projection("other", "a", "other-native-task")
+                .unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            registry.branch_projection("r", "a", "native-task").unwrap(),
+            snapshot
+        );
+        let restored: StoredOperation = serde_json::from_slice(
+            &serde_json::to_vec(&registry.store.get(&operation.id).unwrap().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.projection_tasks["a"], "native-task");
+        // Historical feed projection is bound to the operation's sequence
+        // interval, independent of the branch's current existence or task ID.
+        let mut historical = restored.clone();
+        historical.operation.id = "historical-feed-interval".into();
+        historical.idempotency = None;
+        historical.operation.cursor = 10;
+        historical.operation.end_cursor = Some(20);
+        let child = serde_json::from_value(serde_json::json!({
+            "name":"removed-child", "git_branch":"by/removed-child", "worktree":"/public/work",
+            "prompt":"public task", "harness":"gemini-cli", "profile":"gemini-cli",
+            "session":null, "parent":"a", "base":"base", "candidate":null,
+            "status":{"state":"failed", "reason":"public failure"},
+            "turns":1, "cost_usd":null, "created_at":0
+        }))
+        .unwrap();
+        historical.operation.result = Some(OperationResult {
+            descendants: vec![child],
+            ..OperationResult::default()
+        });
+        registry.store.save(&historical).unwrap();
+        for seq in [11, 20] {
+            assert_eq!(registry.feed_projection("r", "a", seq).unwrap(), snapshot);
+            assert_eq!(
+                registry.feed_projection("r", "removed-child", seq).unwrap(),
+                snapshot
+            );
+        }
+        for (repo, branch, seq) in [
+            ("r", "a", 10),
+            ("r", "a", 21),
+            ("other", "a", 11),
+            ("r", "unrelated", 11),
+        ] {
+            assert!(registry
+                .feed_projection(repo, branch, seq)
+                .unwrap()
+                .is_empty());
+        }
+        let mut active = historical;
+        active.operation.id = "active-feed-interval".into();
+        active.operation.state = OperationState::Running;
+        active.operation.cursor = 30;
+        active.operation.end_cursor = None;
+        registry.store.save(&active).unwrap();
+        assert_eq!(registry.feed_projection("r", "a", 31).unwrap(), snapshot);
+        assert_eq!(
+            registry.removed_branch_projection("r", "a").unwrap(),
+            snapshot
+        );
+        assert!(registry
+            .removed_branch_projection("wrong-repo", "a")
+            .unwrap()
+            .is_empty());
+        let candidates = registry.feed_projection_candidates("r", 11).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].operation.id, "historical-feed-interval");
+        let mut send = restored.clone();
+        send.operation.id = "followup-send-feed".into();
+        send.operation.kind = OperationKind::Send;
+        send.operation.cursor = 40;
+        send.operation.end_cursor = Some(50);
+        send.operation.result = None;
+        send.idempotency = None;
+        send.creates.clear();
+        send.projection_tasks.clear();
+        registry.store.save(&send).unwrap();
+        assert_eq!(registry.feed_projection("r", "a", 45).unwrap(), snapshot);
+        send.operation.id = "missing-feed-end".into();
+        send.operation.cursor = 60;
+        send.operation.end_cursor = None;
+        registry.store.save(&send).unwrap();
+        let refused = registry.feed_projection("r", "a", 61).unwrap_err();
+        assert_eq!(
+            refused.body.message,
+            "could not verify the feed's preset projection interval"
+        );
+        assert!(registry
+            .feed_projection_candidates("r", 61)
+            .unwrap()
+            .iter()
+            .any(|op| op.operation.id == "missing-feed-end"));
+        let mut interrupted = restored.clone();
+        interrupted.operation.id = "interrupted-without-task-identity".into();
+        interrupted.operation.state = OperationState::Interrupted;
+        interrupted.idempotency = None;
+        interrupted.creates = vec!["lost-branch".into()];
+        interrupted.projection_tasks.clear();
+        registry.store.save(&interrupted).unwrap();
+        let refused = registry
+            .branch_projection("r", "lost-branch", "unverified-task")
+            .unwrap_err();
+        assert_eq!(
+            refused.body.message,
+            "could not verify the branch's preset projection"
+        );
+        let mut raw = interrupted;
+        raw.operation.id = "new-raw-incarnation".into();
+        raw.projection = Projection::default();
+        raw.projection_tasks
+            .insert("lost-branch".into(), "new-raw-task".into());
+        registry.store.save(&raw).unwrap();
+        assert!(registry
+            .branch_projection("r", "lost-branch", "new-raw-task")
+            .unwrap()
+            .is_empty());
+        let mut message = serde_json::json!("/operator/admission.key; http://worker.internal:7443");
+        snapshot.apply(&mut message);
+        assert_eq!(
+            message,
+            "[preset pool: bridge key]; [preset pool: control endpoint]"
+        );
+        let (replayed, was_replay) = registry
+            .submit_projected(task_admission(), Value::Null, Projection::default())
+            .unwrap();
+        assert!(was_replay);
+        assert_eq!(replayed.id, operation.id);
+        assert_eq!(
+            registry.operation_projection(&operation.id, "r").unwrap(),
+            snapshot
+        );
         registry.close();
     }
 
@@ -1579,6 +2070,8 @@ mod tests {
                 self.ran.lock().unwrap().push(n);
             }
             Finished {
+                projection: Default::default(),
+                projection_tasks: Default::default(),
                 result: Ok(OperationResult::default()),
                 end_cursor: Some(0),
             }
