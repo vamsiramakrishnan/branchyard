@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Branchyard compute</title>
+<style>
+:root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e0d8; --ok:#2f7d4f; --warn:#a35b00; --bad:#b3261e; --card:#fff; }
+@media (prefers-color-scheme: dark) { :root { --bg:#151514; --fg:#ecebe6; --muted:#a09e97; --line:#33322f; --ok:#6fcf97; --warn:#f2b45a; --bad:#f28b82; --card:#1d1d1b; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; }
+main { max-width:1080px; margin:0 auto; padding:24px 16px 64px; }
+h1 { font-size:22px; margin:0 0 4px; } h2 { font-size:17px; margin:32px 0 8px; }
+p.lede { color:var(--muted); margin:0 0 20px; }
+section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-top:12px; overflow-x:auto; }
+table { border-collapse:collapse; width:100%; font-size:14px; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:500; }
+code, pre { font:13px/1.45 ui-monospace, monospace; }
+pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; overflow-x:auto; white-space:pre-wrap; word-break:break-all; }
+.state-ready { color:var(--ok); } .state-no_worker { color:var(--warn); } .state-provider_not_allowed { color:var(--bad); }
+form.grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(220px, 1fr)); gap:10px 14px; }
+label { display:flex; flex-direction:column; font-size:13px; color:var(--muted); gap:3px; }
+input, select { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+button { font:inherit; padding:7px 14px; border-radius:6px; border:1px solid var(--fg); background:var(--fg); color:var(--bg); cursor:pointer; }
+.row { display:flex; gap:8px; align-items:end; flex-wrap:wrap; }
+.error { color:var(--bad); } .muted { color:var(--muted); }
+[hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Branchyard compute</h1>
+  <p class="lede">The compute this server places turns on, and plans for new GCE or GKE compute. Developers connect with <code>by --remote</code> and pick an environment.</p>
+
+  <section id="login">
+    <form id="token-form" class="row">
+      <label style="flex:1">Admin token<input id="token" type="password" autocomplete="off" required></label>
+      <button type="submit">Open</button>
+    </form>
+    <p class="muted">The token is kept in this tab only and sent to this server's API.</p>
+  </section>
+
+  <div id="console" hidden>
+    <h2>Compute targets</h2>
+    <section><p id="origin" class="muted"></p><table id="targets"></table></section>
+
+    <h2>Workers</h2>
+    <section><table id="workers"></table></section>
+
+    <h2>Plan new compute</h2>
+    <section>
+      <form id="plan-form" class="grid">
+        <label>Platform<select name="platform"><option value="gke">GKE (Agent Sandbox)</option><option value="gce">GCE VM</option></select></label>
+        <label>Runtime<select name="runtime"></select></label>
+        <label>Environment ID<input name="id" required placeholder="gke-kata"></label>
+        <label>Project<input name="project" required></label>
+        <label>Zone<input name="zone" required placeholder="us-central1-a"></label>
+        <label>VM or cluster name<input name="name" required></label>
+        <label>Branchyard release<input name="version" required placeholder="0.5.0"></label>
+        <label data-for="image">Image (@sha256: digest)<input name="image"></label>
+        <label data-for="gke">GKE version<input name="gke_version"></label>
+        <label data-for="gke">Node service account<input name="service_account"></label>
+        <label data-for="gke">Control plane /28<input name="master_cidr" placeholder="172.30.80.0/28"></label>
+        <label>Harnesses (comma-separated)<input name="harnesses" placeholder="claude-code"></label>
+        <label data-for="gce" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" name="tunnel_through_iap">SSH through IAP</label>
+        <div class="row"><button type="submit">Plan</button></div>
+      </form>
+      <p id="plan-error" class="error" hidden></p>
+      <div id="plan" hidden>
+        <h3>Steps</h3><ol id="steps"></ol>
+        <h3>Add to the server configuration</h3>
+        <p>Add <code id="allow"></code> to <code>allow_providers</code>, and this entry to <code>execution_presets</code>:</p>
+        <pre id="preset"></pre>
+        <ul id="notes" class="muted"></ul>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="/admin/admin.js"></script>
+</body>
+</html>

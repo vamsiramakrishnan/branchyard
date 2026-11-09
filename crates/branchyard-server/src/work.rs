@@ -167,12 +167,17 @@ impl Work {
             )
             .body),
             Work::Task { request, trigger } => {
+                // A preset is checked again here, for the principal that
+                // admitted the task: the operator may have removed it.
+                let tenant = principal.map(|p| p.tenant.as_str());
+                let (request, options) =
+                    preset_or_task_options(app, repo, &request, tenant).map_err(api)?;
                 let options = TaskOptions {
                     actor: actor.clone(),
                     trigger,
                     trace_parent: trace_parent.clone(),
                     admitted_ms: Some(admitted_ms),
-                    ..task_options(app, repo, &request).map_err(api)?
+                    ..options
                 };
                 let builder = yard.task(request.prompt.clone()).options(options);
                 let ran = match request.harnesses.is_empty() {
@@ -921,7 +926,32 @@ pub(crate) fn task_options(
     repo: &RepoState,
     request: &TaskRequest,
 ) -> Result<TaskOptions, ApiError> {
+    // A preset is resolved for a tenant: through `with_preset`, never here.
+    if request.preset.is_some() {
+        return Err(ApiError::bad_request(
+            "an execution preset runs a task or a fan (POST .../tasks); not here yet",
+        ));
+    }
     task_options_from(app, repo, request, None)
+}
+
+/// A task request as it runs, with its execution preset resolved for
+/// `tenant` (`None`: a request without a preset passes unchanged, and one
+/// with a preset is refused), and its options.
+pub(crate) fn preset_or_task_options(
+    app: &App,
+    repo: &RepoState,
+    request: &TaskRequest,
+    tenant: Option<&str>,
+) -> Result<(TaskRequest, TaskOptions), ApiError> {
+    match (&request.preset, tenant) {
+        (Some(_), Some(tenant)) => {
+            let (resolved, preset) = crate::console::for_task(app, tenant, request)?;
+            let options = task_options_from(app, repo, &resolved, Some(&preset))?;
+            Ok((resolved, options))
+        }
+        _ => Ok((request.clone(), task_options(app, repo, request)?)),
+    }
 }
 
 /// Build a console turn using only a server-resolved execution preset.

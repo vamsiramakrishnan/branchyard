@@ -806,6 +806,11 @@ fn valid_preset_id(id: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// `--admin-listen`: serve the admin compute console (`/admin` and
+    /// `/v1/admin/*`) on this address only, with the main listener's TLS;
+    /// the main listener then answers `404` for them. `None` (the
+    /// default): the main listener serves them. See docs/admin-console.md.
+    pub admin_listen: Option<SocketAddr>,
     pub data_dir: PathBuf,
     /// Name and path of each served repository.
     pub repos: Vec<(String, PathBuf)>,
@@ -1327,6 +1332,7 @@ impl Config {
     pub fn new(data_dir: PathBuf) -> Config {
         Config {
             listen: DEFAULT_LISTEN.parse().expect("valid default address"),
+            admin_listen: None,
             data_dir,
             repos: Vec::new(),
             managed_knowledge: ManagedKnowledge::default(),
@@ -1735,6 +1741,22 @@ impl Config {
                 }
             }
         }
+        if let Some(addr) = self.admin_listen {
+            if self.worker_only {
+                return Err("a worker serves no HTTP, so it takes no admin_listen".into());
+            }
+            if addr == self.listen && addr.port() != 0 {
+                return Err(format!(
+                    "the admin listener {addr} is the server's own listen address"
+                ));
+            }
+            if !addr.ip().is_loopback() && self.tls.is_none() && !self.insecure_bind {
+                return Err(format!(
+                    "refusing to serve the admin console over plain HTTP on {addr}, which is \
+                     not a loopback address; configure TLS or pass --insecure-bind"
+                ));
+            }
+        }
         if self.max_artifact_bytes < 1024 {
             return Err("max_artifact_bytes must be at least 1024".into());
         }
@@ -2039,6 +2061,10 @@ pub(crate) struct FileConfig {
     #[serde(rename = "$schema", default)]
     _schema: Option<String>,
     listen: Option<String>,
+    /// Serve the admin compute console (/admin and /v1/admin/*) on this
+    /// address (`IP:port`) only, with the main listener's TLS; the main
+    /// listener then answers 404 for them. See docs/admin-console.md.
+    admin_listen: Option<String>,
     data_dir: Option<PathBuf>,
     #[serde(default)]
     managed_knowledge: ManagedKnowledge,
@@ -2576,6 +2602,8 @@ pub mod schema {
 #[derive(Debug, Default)]
 pub struct Partial {
     pub listen: Option<SocketAddr>,
+    /// `admin_listen`, parsed.
+    pub admin_listen: Option<SocketAddr>,
     pub data_dir: Option<PathBuf>,
     /// Operator knowledge storage settings from the config file.
     pub managed_knowledge: ManagedKnowledge,
@@ -2861,6 +2889,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
         metrics,
         sync,
         listen,
+        admin_listen: file.admin_listen.as_deref().map(parse_listen).transpose()?,
         data_dir: file.data_dir.map(resolve),
         managed_knowledge: ManagedKnowledge {
             root: file.managed_knowledge.root.map(resolve),

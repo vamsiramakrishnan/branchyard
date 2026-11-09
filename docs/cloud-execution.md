@@ -55,8 +55,10 @@ Neither choice implements Branchyard's required proxy-egress policy.
 
 An operator writes an [execution preset](server.md#execution-presets) and adds
 its provider kind to `allow_providers`. Container uses kind `container`; Agent
-Sandbox uses `agent_sandbox`. Console callers choose the preset ID. Direct API
-requests cannot choose these providers, even when their kinds are allowed.
+Sandbox uses `agent_sandbox`. Console callers choose the preset ID; `by run --remote --env ID` and a task
+request's `preset` choose one too ([direct tasks on a preset](server.md#direct-tasks-on-a-preset)).
+A request that names these providers directly is refused, even when their kinds
+are allowed.
 
 For a GCE container preset, configure this provider object, with your complete
 image digest:
@@ -74,6 +76,9 @@ For a GKE gVisor preset:
 For Kata, select `namespace: branchyard-microvm` and `runtime: microvm` in the
 operator's provider object. For GCE Microsandbox, use the existing `microsandbox`
 provider object with the patched runtime installed on its worker.
+
+The [admin compute console](admin-console.md) prints these preset entries, with
+the setup commands and worker label, and shows which live workers can claim each one.
 
 Preset harness choices, tenant grants, secrets and worker labels still apply.
 Label GCE presets for their GCE worker and GKE presets for workers with the

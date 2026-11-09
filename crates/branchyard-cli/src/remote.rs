@@ -934,6 +934,7 @@ fn run_request(
         provision: provision(task)?,
         seats: None,
         require_labels: task.require_labels.clone(),
+        preset: task.env.clone(),
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
@@ -1121,6 +1122,7 @@ fn fan_request(
         provision: provision(task)?,
         seats: None,
         require_labels: task.require_labels.clone(),
+        preset: task.env.clone(),
         priority: task.priority,
         plan: task.plan,
         goal: goal_request(task),
@@ -1138,6 +1140,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
     if crate::fleet_cmd::is_routed(task) || task.kind.is_some() {
         return Err(crate::fleet_cmd::local_only());
     }
+    no_env(task, "a map")?;
     let cwd = std::env::current_dir()?;
     let items = crate::map_cmd::read_items(args, &cwd)?;
     let schema = crate::map_cmd::read_schema(args)?;
@@ -1173,6 +1176,7 @@ pub fn map(env: &Env, remote: &Remote, args: &crate::args::MapArgs, json: bool) 
             provision: provision(task)?,
             seats: None,
             require_labels: task.require_labels.clone(),
+            preset: None,
             priority: task.priority,
             plan: false,
             goal: None,
@@ -1254,6 +1258,19 @@ fn map_finish(
         )?;
     }
     crate::map_cmd::finish(env, &report, out.as_deref(), json)
+}
+
+/// `--env` starts a task or a fan on a preset: a fork or reincarnation
+/// keeps its branch's environment, and a map does not take one yet.
+fn no_env(task: &TaskArgs, what: &str) -> Result<(), Failure> {
+    match task.env {
+        Some(_) => Err(Report::usage(format!(
+            "--env chooses where a new task runs, and {what} does not start one on a preset"
+        ))
+        .next("run by run --env ID or by fan --env ID, or drop --env")
+        .into()),
+        None => Ok(()),
+    }
 }
 
 fn send_request(
@@ -1441,6 +1458,7 @@ fn fork_request(
     at: Option<u32>,
     task: &TaskArgs,
 ) -> Result<(ForkRequest, Option<&'static str>), Failure> {
+    no_env(task, "a fork or reincarnation")?;
     let (policy, notice) = permissions(task)?;
     let provider = provider(task)?;
     let request = ForkRequest {
@@ -1703,6 +1721,7 @@ pub fn rig(env: &Env, remote: &Remote, plan: &RigPlan, prompt: &str, args: &RigA
         provision: Some(root.provision.clone()),
         seats: plan.seats.clone(),
         require_labels: Vec::new(),
+        preset: None,
         priority: None,
         plan: false,
         goal: None,

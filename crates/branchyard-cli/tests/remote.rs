@@ -3326,3 +3326,92 @@ fn a_session_hook_reads_a_servers_postgres_store() {
         "by: 1 ready\n"
     );
 }
+
+/// `by run --remote --env ID` runs on the operator's execution preset: the
+/// server's harness command and the preset's worker label, not the
+/// client's; an unknown preset and a client `--command` are refused; and
+/// `--env` is refused where nothing starts on a preset.
+#[test]
+fn run_env_runs_on_the_servers_execution_preset() {
+    let dir = Dir::new();
+    let there = dir.repo("there");
+    let config = dir.0.join("presets.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({
+            "harness_commands": { "gemini-cli": [fake_agent!()] },
+            "execution_presets": [
+                {"id": "pool", "label": "Labelled pool", "provider": {"kind": "local"},
+                 "harnesses": [{"harness": "gemini-cli"}], "require_labels": ["preset-pool"]}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config = config.display().to_string();
+    let server = Served::start(
+        &dir.0,
+        &[("app", &there)],
+        &["--config", &config, "--label", "preset-pool"],
+    );
+    let by = |args: &[&str]| {
+        command(BY, &dir.0)
+            .arg("--remote")
+            .arg(&server.url)
+            .arg("--token-file")
+            .arg(&server.token_file)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let ran = by(&[
+        "run",
+        "WRITE env.txt=preset",
+        "--name",
+        "on-env",
+        "--env",
+        "pool",
+        "--yes",
+    ]);
+    assert!(ran.status.success(), "{}", text(&ran.stderr));
+    let shown: Value = serde_json::from_slice(&by(&["show", "on-env", "--json"]).stdout).unwrap();
+    assert_eq!(shown["harness"], "gemini-cli", "{shown}");
+    let changed = text(&by(&["diff", "on-env"]).stdout);
+    assert!(changed.contains("env.txt"), "{changed}");
+
+    let unknown = by(&["run", "x", "--env", "nope", "--yes"]);
+    assert!(!unknown.status.success());
+    assert!(
+        text(&unknown.stderr).contains("no execution preset nope"),
+        "{}",
+        text(&unknown.stderr)
+    );
+    let command_too = by(&with_agent(&["run", "x", "--env", "pool", "--yes"])
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>());
+    assert!(!command_too.status.success());
+    assert!(
+        text(&command_too.stderr).contains("preset supplies them"),
+        "{}",
+        text(&command_too.stderr)
+    );
+    let fork = by(&["fork", "on-env", "again", "--env", "pool", "--yes"]);
+    assert_eq!(fork.status.code(), Some(2), "{}", text(&fork.stderr));
+    assert!(
+        text(&fork.stderr).contains("by run --env ID"),
+        "{}",
+        text(&fork.stderr)
+    );
+
+    let local = command(BY, &there)
+        .args(with_agent(&["run", "x", "--env", "pool"]))
+        .output()
+        .unwrap();
+    assert_eq!(local.status.code(), Some(2));
+    assert!(
+        text(&local.stderr).contains("add --remote URL"),
+        "{}",
+        text(&local.stderr)
+    );
+}

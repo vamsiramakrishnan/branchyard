@@ -17,6 +17,13 @@
         "null"
       ]
     },
+    "admin_listen": {
+      "description": "Serve the admin compute console (/admin and /v1/admin/*) on this\naddress (`IP:port`) only, with the main listener's TLS; the main\nlistener then answers 404 for them. See docs/admin-console.md.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "data_dir": {
       "type": [
         "string",

@@ -36,6 +36,9 @@ impl ProviderKind for RecipeOptions {
     fn name(&self) -> &'static str {
         "recipe"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute::plain(super::RunsOn::Worker, super::Isolation::Recipe)
+    }
 
     fn copies_worktree(&self) -> bool {
         true

@@ -798,6 +798,8 @@ pub(crate) fn delegation_not_allowed(message: &str) -> ApiError {
 }
 
 pub fn router(app: Shared) -> Router {
+    // With its own listener, the admin console is not on this one.
+    let admin = app.config.admin_listen.is_none();
     let v1 = Router::new()
         .route("/v1/repos", get(repos))
         .route("/v1/harnesses", get(harnesses))
@@ -940,14 +942,39 @@ pub fn router(app: Shared) -> Router {
             .merge(crate::console_pr_gateway::router(pr.clone())),
         _ => v1,
     };
-    let log = app.config.log_requests;
-    Router::new()
+    let routes = Router::new()
         .route("/healthz", get(|| async { "ok\n" }))
         .route("/.well-known/jwks.json", get(jwks))
         // What this server is and which services it has: `services_routes`.
         .merge(crate::services_routes::public())
         .route("/metrics", get(metrics_route))
-        .merge(v1)
+        .merge(v1);
+    // The admin compute console, page and routes: `admin_compute`.
+    let routes = match admin {
+        true => routes.merge(crate::admin_compute::public().merge(crate::admin_compute::router())),
+        false => routes,
+    };
+    layered(app, routes)
+}
+
+/// The routes `--admin-listen`'s listener serves, and nothing else: the
+/// admin compute console's page and its `admin`-scoped routes, behind the
+/// same authentication, limits, request IDs and metrics as the main
+/// listener. See `docs/admin-console.md`.
+pub fn admin_router(app: Shared) -> Router {
+    let routes = Router::new()
+        .route("/healthz", get(|| async { "ok\n" }))
+        .merge(crate::admin_compute::public())
+        .merge(crate::admin_compute::router());
+    layered(app, routes)
+}
+
+/// Every listener's middleware around `routes`: the not-found and
+/// wrong-method answers, authentication, the concurrency limit, the
+/// request's span and ID, and the request metrics.
+fn layered(app: Shared, routes: Router<Shared>) -> Router {
+    let log = app.config.log_requests;
+    routes
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route") })
         .method_not_allowed_fallback(|| async {
             ApiError::new(
@@ -1293,6 +1320,10 @@ async fn authenticate(State(app): State<Shared>, mut request: Request, next: Nex
         request.uri().path(),
         "/healthz" | "/.well-known/jwks.json" | "/.well-known/branchyard" | "/metrics"
     ) {
+        return next.run(request).await;
+    }
+    // The admin console's static page; its data routes need an admin token.
+    if request.method() == Method::GET && crate::admin_compute::is_public(request.uri().path()) {
         return next.run(request).await;
     }
     // A sandbox fetching its turn's token proves itself with its workload
@@ -1905,15 +1936,18 @@ pub(crate) async fn admit_task(
     let policy = app.tenant_policy(caller);
     app.check_admission_quotas(caller, &policy).await?;
     let request = start_from_issue(app, repo, request).await?;
-    let options = work::task_options(app, repo, &request)?;
-    let mut requires = required_labels(&request.require_labels)?;
+    // The operation keeps the request as sent (its `preset` an ID); the
+    // worker resolves it again for the admitting principal.
+    let (resolved, options) =
+        work::preset_or_task_options(app, repo, &request, Some(caller.tenant()))?;
+    let mut requires = required_labels(&resolved.require_labels)?;
     // Steer a task that runs its harnesses by name, here, toward a worker
     // whose inventory says they can run (docs/harness-lifecycle.md).
     let by_name = options.command.is_none() && Provider::is_local(options.provider.as_ref());
     if by_name {
-        let named: Vec<String> = match request.harnesses.is_empty() {
-            true => request.harness.iter().cloned().collect(),
-            false => request.harnesses.clone(),
+        let named: Vec<String> = match resolved.harnesses.is_empty() {
+            true => resolved.harness.iter().cloned().collect(),
+            false => resolved.harnesses.clone(),
         };
         let ids: Vec<String> = named
             .iter()

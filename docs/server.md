@@ -62,6 +62,7 @@ Flags (`by serve --help`, `by help serve` or `branchyard-server --help`, grouped
 | `--shutdown-grace SECS` | At shutdown, how long running operations may finish. Default 60 |
 | `-q`, `--quiet` | Do not log requests; also lowers the default log level to `warn` (see [Logging](#deployment-notes)) unless `BRANCHYARD_LOG`/`RUST_LOG` is set |
 | `--log-format FORMAT` | `pretty` or `json` (one object per line) log lines on stderr; default `BRANCHYARD_LOG_FORMAT`, else `pretty` |
+| `--admin-listen ADDR` | Serve the [admin compute console](admin-console.md) (`/admin`, `/v1/admin/*`) on this address only, with `--listen`'s TLS; `--listen` then answers `404` for it. A non-loopback address needs TLS or `--insecure-bind`; not on a `by worker`. `admin_listen` in the configuration |
 | `--metrics` | Serve Prometheus metrics at `GET /metrics` to a principal with the `admin` scope or the metrics token ([observability](observability.md#metrics)); off by default |
 | `--metrics-addr ADDR` | Also serve `/metrics`, and nothing else, on a plain-HTTP listener of its own (a `by worker` too); implies `--metrics` |
 | `--metrics-token-file FILE` | A token (first line, at least 16 characters) that reads `/metrics` and nothing else; implies `--metrics` |
@@ -145,9 +146,9 @@ Every route except `GET /healthz`, `GET /.well-known/jwks.json` (public keys, [c
 **A request's identity comes only from its verified credential, never from anything the request itself says**: there is no `tenant_id` field anywhere in the wire protocol. Each configured credential names a **principal**: a `tenant` (1 to 128 characters, no `/`), a subject `name` (the caller's identity for idempotency scoping and audit), a set of **scopes**, and, optionally, its own repository allowlist narrower than its tenant's. Two ways to configure one:
 
 - **`tokens`** (unchanged from before tenants existed): `{"name", "token"|"token_file"}`, plus optional `tenant`, `scopes` and `repos`. A `tokens` entry that gives none of those three becomes a principal in the unconfigured `default` tenant with every scope and every repository (**exactly what a single-token server did before this existed**, so old configurations keep working unchanged).
-- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?, "groups"?}`, storing the token's SHA-256 directly so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token, prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API for these: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed. A third kind, **paired tokens**, exists only with the [companion](companion.md) on: `by serve token new --link` prints a one-time pairing link whose code becomes a token with the scopes, tenant and repositories the link was made with, stored hashed in the server's store, expiring, and revocable at once with `by serve token revoke NAME` (`token list` shows them).
+- **`credentials`**: `{"token_sha256", "tenant", "name"?, "scopes"?, "repos"?, "groups"?}`, storing the token's SHA-256 directly so the plaintext never has to enter the configuration at all. `branchyard-server token new [--tenant T] [--scopes S,...] [--repo R,...]` (also `by serve token new`) generates a fresh token (scopes `read,run,merge` unless `--scopes` names others; `admin` only when named), prints it once (give it to the client, never store it), and prints the `credentials` object to paste in. There is no hot rotation or revocation API for these: replacing or removing a hash and restarting is how a token is rotated or revoked, the same restart a `tokens` change already needed. A third kind, **paired tokens**, exists only with the [companion](companion.md) on: `by serve token new --link` prints a one-time pairing link whose code becomes a token with the scopes, tenant and repositories the link was made with, stored hashed in the server's store, expiring, and revocable at once with `by serve token revoke NAME` (`token list` shows them).
 
-Scopes: `read` (every `GET`, including the event stream), `run` (submitting a task, send, fork, reincarnate or spawn, and acting on a running turn: cancel, steer, ask, report, escalate, answer; and acting for a branch: check, report-status), `merge` (merge, integrate), `admin` (removing a branch). Every endpoint checks the caller's scope and returns `403 scope_required` (`detail.scope`) when it is missing; `read` is checked once for every `GET` and `HEAD` before any handler runs, so a credential with `run`, `merge` or `admin` but not `read` sees nothing. A secret may appear once across `tokens` and `credentials`: the same secret twice (two tokens, or a token and a hash) is refused at startup, naming the entries, since it could otherwise authenticate as either principal.
+Scopes: `read` (every `GET`, including the event stream), `run` (submitting a task, send, fork, reincarnate or spawn, and acting on a running turn: cancel, steer, ask, report, escalate, answer; and acting for a branch: check, report-status), `merge` (merge, integrate), `admin` (removing a branch, and the [admin compute console](admin-console.md)). Every endpoint checks the caller's scope and returns `403 scope_required` (`detail.scope`) when it is missing; `read` is checked once for every `GET` and `HEAD` before any handler runs, so a credential with `run`, `merge` or `admin` but not `read` sees nothing. A secret may appear once across `tokens` and `credentials`: the same secret twice (two tokens, or a token and a hash) is refused at startup, naming the entries, since it could otherwise authenticate as either principal.
 
 **Repositories belong to tenants.** A tenant's `repos` entry is its repository allowlist. A principal's own `repos`, when present, narrows that list further. `GET /v1/repos` lists the served repositories within both lists. Acting on another repository returns `403 repo_not_allowed` with `detail.repo`.
 
@@ -414,6 +415,7 @@ All bodies are JSON (`Content-Type: application/json` is required on `POST`, els
 | `GET /v1/repos` | Served repositories | `{"repos": [{"name", "root"}]}` |
 | `GET /v1/harnesses` | Harness profiles, as found on the server's `PATH` | `{"harnesses": [{"harness", "profile", "default", "available", "qualification"}]}` |
 | `GET /v1/inventory` | Live workers serving repositories the caller can see, this server first, with the harnesses each one's machine has ([worker inventory](#worker-inventory)); `read` scope | `{"workers": [{"id", "host", "labels", "repos", "seen_ms_ago", "this", "inventory"}]}` |
+| `GET /admin`, `GET /admin/admin.js`, `GET /v1/admin/compute`, `POST /v1/admin/compute/plan` | The [admin compute console](admin-console.md): its public page, every execution preset read as compute with the live workers that can claim it, and setup plans for GCE or GKE compute; `admin` scope for both routes | the page; `{"origin", "targets", "workers"}`; `{"steps", "label", "allow_provider", "preset", "notes"}` |
 | `GET /v1/problems` | What background work could not do that a person can act on, oldest first; empty when nothing needs a person ([problems](#problems)) | `{"problems": [{"kind", "key", "what", "since_ms", "failures"?, "error", "next"}]}` |
 | `POST /v1/repos/{repo}/tasks` | Run a task on one branch, or one branch per harness | `202` operation |
 | `GET /v1/repos/{repo}/branches` | Every branch, oldest first | `{"branches": [BranchInfo]}` |
@@ -1284,7 +1286,7 @@ read-only constraints; selecting a candidate grants no integration permission.
 
 ### Execution presets
 
-An execution preset is a named environment the operator writes into the configuration. A workspace session start names its ID; the server supplies the provider, its paths and secrets, and the worker labels. A preset grants nothing. It resolves to the start's existing `provider`, provisioned secrets and `require_labels`, which then pass the same checks as any start: `allow_providers`, `allow_unapproved_tools`, provisioning, membership and roles, quotas and scheduling. Direct tasks (`POST /v1/repos/{repo}/tasks`) and native delegation are unchanged.
+An execution preset is a named environment the operator writes into the configuration. A workspace session start names its ID; the server supplies the provider, its paths and secrets, and the worker labels. A preset grants nothing. It resolves to the start's existing `provider`, provisioned secrets and `require_labels`, which then pass the same checks as any start: `allow_providers`, `allow_unapproved_tools`, provisioning, membership and roles, quotas and scheduling. A direct task (`POST /v1/repos/{repo}/tasks`, `by run --remote --env ID`) may name one too: see [direct tasks on a preset](#direct-tasks-on-a-preset). Native delegation is unchanged.
 
 Native `container` and `agent_sandbox` targets require an operator preset even
 when their kinds are allowed. A direct provider request is refused with
@@ -1295,6 +1297,18 @@ native target. The worker's provider admission also applies before graph
 recovery or an automatic wake can claim a native turn. Default recovery options
 cannot stand in for a resolved preset.
 See [cloud execution](cloud-execution.md) for GCE and GKE provider examples.
+
+#### Direct tasks on a preset
+
+A task request may carry `preset`, an ID from `GET /v1/execution-presets` (`by run --remote --env ID`, `by fan --remote --env ID`):
+
+- The server resolves it for the caller's tenant at admission, and again for the admitting principal when a worker runs the operation, so a preset removed or narrowed while the task waits fails it rather than running it elsewhere. The operation records the ID, not what it resolved to.
+- The preset supplies the provider, its secrets (in a private home, as `isolated`), its worker labels (added to the request's `require_labels`, and so to the queue row) and, when one harness runs, its default model.
+- A request with `preset` may not carry `provider`, `provision` or `command` (`400 preset_conflict`). It runs only harnesses the preset offers (`422 preset_choice_unavailable`), its first when it names none. An ID the tenant is not offered is `404 unknown_preset`.
+- `allow_providers`, quotas, scheduling and the other admission checks apply as to any task.
+
+Not yet: a send, fork, reincarnation, spawn or plan decision on such a branch with a native provider is refused as before (`by fork`/`by reincarnate --env` are refused by the CLI); a map does not take a preset; and the error projection that hides a preset's configured paths and endpoints from a session's members does not apply to direct tasks, whose callers see the engine's errors as they are.
+
 
 ```json
 "require_workspace_execution_presets": true,

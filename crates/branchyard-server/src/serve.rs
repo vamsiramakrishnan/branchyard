@@ -73,6 +73,8 @@ pub struct Running {
     _gateway: Option<branchyard::connectors::gateway::Supervisor>,
     /// `--metrics-addr`'s listener: its address and its accept loop.
     metrics: Option<(SocketAddr, tokio::task::JoinHandle<()>)>,
+    /// `--admin-listen`'s listener: its address and its accept loop.
+    admin: Option<(SocketAddr, tokio::task::JoinHandle<()>)>,
     /// One keeper per repository whose workspace has a warm pool this
     /// process's labels keep; stopped when shutdown begins.
     pools: Vec<branchyard::PoolKeeper>,
@@ -175,6 +177,15 @@ impl Running {
             .map(|(addr, _)| format!("http://{addr}/metrics"))
     }
 
+    /// `http://` or `https://` and the admin listener's bound address,
+    /// when `--admin-listen` gave it one.
+    pub fn admin_url(&self) -> Option<String> {
+        let scheme = if self.tls { "https" } else { "http" };
+        self.admin
+            .as_ref()
+            .map(|(addr, _)| format!("{scheme}://{addr}"))
+    }
+
     /// `http://` or `https://` and the bound address, or `unix:` and the
     /// socket's path.
     pub fn url(&self) -> String {
@@ -232,6 +243,9 @@ impl Running {
         }
         if let Some((_, metrics)) = self.metrics {
             metrics.abort();
+        }
+        if let Some((_, admin)) = self.admin {
+            admin.abort();
         }
         let registry = self.registry.clone();
         let grace = self.grace;
@@ -447,6 +461,14 @@ pub async fn start(config: Config) -> Result<Running, String> {
         ),
         None => None,
     };
+    let admin_listener = match config.admin_listen {
+        Some(at) => Some(
+            TcpListener::bind(at)
+                .await
+                .map_err(|e| format!("cannot listen for the admin console on {at}: {e}"))?,
+        ),
+        None => None,
+    };
     let mut seen = crate::problems::Seen::default();
     let mut pollers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for repo in repos.values() {
@@ -584,6 +606,22 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
         None => None,
     };
+    let admin = match admin_listener {
+        Some(listener) => {
+            let at = listener.local_addr().map_err(|e| e.to_string())?;
+            let router = api::admin_router(app.clone());
+            Some((
+                at,
+                tokio::spawn(accept_loop(
+                    Listener::Tcp(listener),
+                    tls.clone(),
+                    router,
+                    shutdown_rx.clone(),
+                )),
+            ))
+        }
+        None => None,
+    };
     // The companion's push notifications follow every repository's feed.
     if app.companion.as_ref().is_some_and(|c| c.vapid.is_some()) {
         let (store, _) = operation_store(&app.config)?;
@@ -650,6 +688,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         worker,
         _gateway: gateway,
         metrics,
+        admin,
         pools,
         services,
         sync,

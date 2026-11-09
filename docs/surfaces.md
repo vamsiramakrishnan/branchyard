@@ -12,7 +12,7 @@ Surfaces:
 - **delegation**: a harness acting as its branch through `by` in its shell, the Python module, `Delegate` in Rust, or the MCP tools (`by mcp`). The four reach one set of operations and give the same answers ([delegation](delegation.md)); they work in local mode and on a server that allows delegation.
 - **workspace manager MCP**: an external operator agent starts `by mcp manager --url URL --token-file FILE`, with optional `--ca-file FILE`. Its separate HTTP credential reaches the same authorized project, workspace, session, artifact, lifecycle and operation actions as the console. It refuses managed harness turns and never adds account authority to the delegation tools. See [workspace management](workspace-management.md).
 
-The server registers <!-- fact:http.route_count -->158<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
+The server registers <!-- fact:http.route_count -->162<!-- /fact --> routes; each is documented in [the server reference](server.md) or on this page, and `tools/docs_facts.py --check` fails when one is not.
 
 The external manager bounds each tool's text and structured JSON payload to
 32 KiB. Larger responses return an explicit error with small identifiers and
@@ -445,6 +445,9 @@ See [scheduling](server.md#scheduling) and [observability](observability.md). He
 | `--priority N` on `by run`, `fan`, `send`, `fork`, `reincarnate`, `spawn` | none | with `--remote`; refused locally |
 | Claim order | oldest first | follow-ups (a request's send to an existing branch, a plan decision, a console session send), then highest effective priority (aged), then lowest tenant usage per weight, then oldest; one statement on PostgreSQL |
 | `tenants.<name>.weight`, `max_priority`; `aging_seconds`, `fair_share_window_seconds` in the configuration | none | the tenant's fair share and priority ceiling; aging step and usage decay |
+| `GET /admin`, `GET /v1/admin/compute`, `POST /v1/admin/compute/plan`; `--admin-listen`, `admin_listen` in the configuration | none | the [admin compute console](admin-console.md), `admin` scope for its data; on the main listener, or only on its own listener with `--admin-listen` |
+| `--env ID` on `by run` and `by fan` with `--remote`; `preset` on a task request (`TaskRequest::preset`) | refused locally | runs on the operator's execution preset: provider, secrets, labels and model from the server, checked at admission and execution |
+| `branchyard-server token new` without `--scopes` | all four scopes | `read,run,merge`; `admin` only when named |
 | `GET /metrics`; `--metrics`, `--metrics-addr`, `--metrics-token-file`; `metrics` in the configuration | none | Prometheus text, for `admin` or the metrics token; off by default |
 | `GET /v1/problems` (`ProblemList`, `Problem`, `ProblemKind`); `Client::problems`, Python `Client.problems` | none | what background work could not do that a person can act on (a trigger that paused itself, an operation no live worker can claim), oldest first, for the caller's tenant or, with `admin`, every tenant; in `schema/contract.json` ([problems](server.md#problems)) |
 | `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME` in the server's environment | ignored | OTLP traces of admission, claim, operation, turns, tool and connector calls, and OTLP metrics ([OpenTelemetry stack](#added-with-the-opentelemetry-stack)) |

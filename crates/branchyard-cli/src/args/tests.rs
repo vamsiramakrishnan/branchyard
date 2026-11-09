@@ -154,6 +154,7 @@ fn run_takes_every_task_option() {
             issue: None,
             pr: None,
             require_labels: Vec::new(),
+            env: None,
             priority: None,
             auto: false,
             implied_auto: false,
@@ -900,6 +901,13 @@ fn delegation_commands_parse_with_optional_branches() {
     ] {
         assert_eq!(task(line).require_labels, ["gpu", "linux"], "{line}");
     }
+    for line in [
+        "run go --env gke-kata",
+        "fan go --harness a,b --env gke-kata",
+    ] {
+        assert_eq!(task(line).env.as_deref(), Some("gke-kata"), "{line}");
+    }
+    assert_eq!(task("run go").env, None);
 }
 
 #[test]

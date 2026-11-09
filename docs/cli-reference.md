@@ -81,6 +81,7 @@ by run [OPTIONS] [PROMPT]
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--no-preflight` | Skip the check, before any branch is created, that the harness is installed and not verified logged out (it is not made for --command or a routed run) |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
@@ -181,6 +182,7 @@ by fan [OPTIONS] [PROMPT]
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--no-preflight` | Skip the check, before any branch is created, that the harness is installed and not verified logged out (it is not made for --command or a routed run) |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
@@ -290,6 +292,7 @@ by map [OPTIONS] <PROMPT>
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--secret <NAME[=VAR|=@FILE]>` | A credential for the harness, such as ANTHROPIC_API_KEY, from the variable of that name, VAR, or FILE; written only into its private home (--isolated or a sandbox). Repeatable |
 | `--auth <METHOD>` | The authentication method when the secrets allow several: api-key, auth-token, oauth-token, auth-file, vertex-ai |
@@ -479,6 +482,7 @@ by fork [OPTIONS] <BRANCH> <PROMPT>
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
 | `--helpers <ID,ID,...>` | The harnesses or profiles the delegating harness may start as children, such as codex,gemini-cli; without it, only its own. Needs --delegate |
@@ -556,6 +560,7 @@ by reincarnate [OPTIONS] <BRANCH>
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
 | `--helpers <ID,ID,...>` | The harnesses or profiles the delegating harness may start as children, such as codex,gemini-cli; without it, only its own. Needs --delegate |
@@ -702,6 +707,7 @@ by task new [OPTIONS] <PROMPT>
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--no-preflight` | Skip the check, before any branch is created, that the harness is installed and not verified logged out (it is not made for --command or a routed run) |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
@@ -844,6 +850,7 @@ by task fork [OPTIONS] <TASK> <PROMPT>
 | `--max-paused <N>` | Kept sandboxes of this provider in the repository before the least recently used is destroyed (default 4) |
 | `--max-kept-minutes <N>` | Minutes a kept sandbox may go unused before it is destroyed instead of resumed (default: never) |
 | `--require-label <LABEL>` | With --remote: only a worker carrying this label runs it (repeatable) |
+| `--env <ID>` | With --remote, on run and fan: run on the server's execution preset ID, which supplies the provider, secrets, worker labels and model (GET /v1/execution-presets) |
 | `--priority <N>` | With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's parent's); higher runs first |
 | `--delegate <DEPTH>` | Let the harness create child branches through Branchyard's MCP tools, DEPTH levels deep (default 1) |
 | `--helpers <ID,ID,...>` | The harnesses or profiles the delegating harness may start as children, such as codex,gemini-cli; without it, only its own. Needs --delegate |

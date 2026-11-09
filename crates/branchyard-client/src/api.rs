@@ -244,6 +244,16 @@ pub struct TaskRequest {
     /// `docs/server.md#worker-labels`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_labels: Vec<String>,
+    /// An operator's execution preset to run on, by ID, as
+    /// `GET /v1/execution-presets` lists them (`by run --env ID`): the
+    /// server supplies the provider, secrets, worker labels and model, and
+    /// checks them again when the turn runs, in a private home (as
+    /// `isolated`). A task with `preset` may not
+    /// carry `provider`, `provision` or `command`, and runs only harnesses
+    /// the preset offers (its first when none is named). See
+    /// `docs/admin-console.md#what-developers-run`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// The operation's priority, -10 to 10 (default 0): higher runs first,
     /// and the server caps it at the tenant's `max_priority`. See
     /// `docs/server.md#scheduling`.

@@ -39,6 +39,9 @@ impl ProviderKind for SubstrateOptions {
     fn name(&self) -> &'static str {
         "substrate"
     }
+    fn compute(&self) -> super::ProviderCompute {
+        super::ProviderCompute::plain(super::RunsOn::Substrate, super::Isolation::Substrate)
+    }
 
     fn copies_worktree(&self) -> bool {
         true

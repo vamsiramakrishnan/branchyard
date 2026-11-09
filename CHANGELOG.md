@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+Admin compute console (`docs/admin-console.md`). The server serves `/admin`, a
+page for operators, with `GET /v1/admin/compute` (`admin`) reading each execution
+preset as compute (platform, isolation, network, image, the live workers whose
+labels can claim it, and `ready`, `no_worker` or `provider_not_allowed`) and
+`POST /v1/admin/compute/plan` (`admin`) returning, for a GCE VM (process, gVisor
+or Microsandbox) or a GKE Agent Sandbox pool (gVisor or Kata), the setup helper's
+plan and apply commands, the `compute:ID` worker label and the preset to add. The
+routes run no helper and contact no cloud. `--admin-listen ADDR` (`admin_listen`)
+serves the console on its own listener and takes it off the main one. Each
+provider describes its own compute through the public `Provider::compute()`
+(`RunsOn`, `Isolation`, network, namespace). `branchyard-server token new` without
+`--scopes` now gives `read,run,merge`: ask for `admin` by name. Credentials
+already in a configuration are unchanged. `by run --remote --env ID` (and `by fan`)
+runs a task on an execution preset: a task request's new `preset` field, resolved
+for the caller at admission and again when the worker runs it, with the preset's
+provider, secrets, labels and model; `provider`, `provision` and `command` beside it
+are refused. Hermetic. Not done: a plan applied
+from the console's output, and choosing a native preset from `by run --remote`.
+
 Observability phase 2 (`docs/observability.md`). A turn is traced live: the
 engine's recorder opens a `turn` span at the prompt and closes it at the turn's
 end, with the OpenTelemetry GenAI attributes (`gen_ai.operation.name`,

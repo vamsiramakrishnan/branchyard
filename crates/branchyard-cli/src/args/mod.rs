@@ -165,6 +165,8 @@ pub struct TaskArgs {
     pub pr: Option<u64>,
     /// `--require-label`: worker labels the server's operation needs.
     pub require_labels: Vec<String>,
+    /// `--env`: the server's execution preset a task runs on.
+    pub env: Option<String>,
     /// `--priority`: the server's operation's priority, -10 to 10.
     pub priority: Option<i32>,
     /// `--auto`: route through the fleet table, failing over when a harness

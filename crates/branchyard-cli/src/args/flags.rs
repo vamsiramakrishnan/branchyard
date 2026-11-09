@@ -327,6 +327,10 @@ pub struct Launch {
     /// With --remote: only a worker carrying this label runs it (repeatable)
     #[arg(long = "require-label", value_name = "LABEL")]
     require_label: Vec<String>,
+    /// With --remote, on run and fan: run on the server's execution preset ID, which supplies
+    /// the provider, secrets, worker labels and model (GET /v1/execution-presets)
+    #[arg(long = "env", value_name = "ID")]
+    env: Option<String>,
     /// With --remote: the operation's priority, -10 to 10 (default 0, or a spawned child's
     /// parent's); higher runs first
     #[arg(
@@ -606,6 +610,7 @@ impl Launch {
         task.isolated = self.isolated == Some(true);
         task.isolation_off = self.isolated == Some(false);
         task.require_labels = self.require_label.clone();
+        task.env = self.env.clone();
         task.priority = self.priority;
         task.command = self.command.map(|argv| argv.0);
         let chosen = self.provider;

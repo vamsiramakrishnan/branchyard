@@ -4004,6 +4004,10 @@ NOT_A_CLIENT_ROUTE = "not a client route: neither SDK calls it"
 # The routes the Python client has no method for, and why.
 EXCUSED: dict[str, str] = {
     "/.well-known/jwks.json": f"{NOT_A_CLIENT_ROUTE}: the gateway's verification keys, read by Anvil",
+    "/admin": f"{NOT_A_CLIENT_ROUTE}: the admin compute console's page, for a browser",
+    "/admin/admin.js": f"{NOT_A_CLIENT_ROUTE}: the admin compute console's script, for a browser",
+    "/v1/admin/compute": f"{NOT_A_CLIENT_ROUTE}: the admin compute console's compute report, read by its page",
+    "/v1/admin/compute/plan": f"{NOT_A_CLIENT_ROUTE}: the admin compute console's setup plans, asked by its page",
     "/app": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages, for a browser",
     "/app/": f"{NOT_A_CLIENT_ROUTE}: the companion web app's pages, for a browser",
     "/app/pair": f"{NOT_A_CLIENT_ROUTE}: the companion's pairing, a phone redeeming a one-time code for "

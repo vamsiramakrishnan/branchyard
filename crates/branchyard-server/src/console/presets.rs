@@ -721,6 +721,115 @@ pub(super) fn resolve(
     }))
 }
 
+/// A direct task's `preset` (`POST /v1/repos/{repo}/tasks`, `by run
+/// --env`) resolved for `tenant`: the request as it runs, with the preset's
+/// provider, secrets, labels and model, and the preset it resolved to.
+/// Called at admission with the caller's tenant and again at execution
+/// with the operation's principal's, so a preset removed or narrowed in
+/// between stops the queued task. Refuses `unknown_preset`,
+/// `preset_conflict` and `preset_choice_unavailable` as a session start
+/// does.
+pub(crate) fn for_task(
+    app: &App,
+    tenant: &str,
+    request: &branchyard_client::api::TaskRequest,
+) -> Result<(branchyard_client::api::TaskRequest, ResolvedPreset), ApiError> {
+    let id = request.preset.as_deref().unwrap_or_default();
+    let preset = offered(app, tenant)?
+        .into_iter()
+        .map(|(preset, _)| preset)
+        .find(|preset| preset.id == id)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "unknown_preset",
+                format!(
+                    "no execution preset {id} is offered to this tenant; list them with GET \
+                     /v1/execution-presets"
+                ),
+            )
+            .detail(json!({ "preset": id }))
+        })?;
+    if request.provider.is_some() || request.provision.is_some() || request.command.is_some() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "preset_conflict",
+            "a task run on an execution preset may not carry provider, provision or command: \
+             the preset supplies them",
+        ));
+    }
+    let offers: Vec<String> = preset.harnesses.iter().map(|h| h.harness.clone()).collect();
+    let mut resolved = request.clone();
+    if resolved.harness.is_none() && resolved.harnesses.is_empty() {
+        resolved.harness = offers.first().cloned();
+    }
+    let named: Vec<&String> = resolved.harness.iter().chain(&resolved.harnesses).collect();
+    if named.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "preset_choice_unavailable",
+            format!("execution preset {} offers no harness", preset.id),
+        )
+        .detail(json!({ "field": "harness", "allowed": offers })));
+    }
+    if let Some(missing) = named.iter().find(|h| !offers.contains(h)) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "preset_choice_unavailable",
+            format!(
+                "execution preset {} does not offer harness {missing}; detail.allowed lists \
+                 what it offers",
+                preset.id
+            ),
+        )
+        .detail(json!({ "field": "harness", "allowed": offers })));
+    }
+    // One task has one provisioning: a model only when one harness runs.
+    let model = match named.as_slice() {
+        [one] => preset
+            .harnesses
+            .iter()
+            .find(|h| &&h.harness == one)
+            .and_then(|h| h.default_model())
+            .map(str::to_owned),
+        _ => None,
+    };
+    resolved.preset = None;
+    // The preset's secrets and settings go into a home Branchyard
+    // prepares, never the server user's own, as a session's do.
+    resolved.isolated = true;
+    resolved.provider = Some(preset.provider.clone());
+    resolved.provision = Some(branchyard::Provisioning {
+        secrets: preset
+            .secrets
+            .iter()
+            .map(|name| branchyard::SecretSource {
+                name: name.clone(),
+                from: None,
+            })
+            .collect(),
+        model: model.clone(),
+        ..branchyard::Provisioning::default()
+    });
+    for label in &preset.require_labels {
+        if !resolved.require_labels.contains(label) {
+            resolved.require_labels.push(label.clone());
+        }
+    }
+    let hidden = hidden(&preset, &app.config.secrets);
+    Ok((
+        resolved,
+        ResolvedPreset {
+            id: preset.id,
+            provider: preset.provider,
+            secrets: preset.secrets,
+            require_labels: preset.require_labels,
+            model,
+            hidden,
+        },
+    ))
+}
+
 /// What `request` may choose within `preset`, enforced whether or not
 /// presets are required, and the model the start runs.
 fn choose(
