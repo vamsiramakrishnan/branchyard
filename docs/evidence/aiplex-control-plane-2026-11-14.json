@@ -1,0 +1,662 @@
+{
+  "date": "2026-11-14",
+  "scope": "real `by` and real `aiplex dev` on one machine over loopback, AIPlex's built-in mock providers, a stand-in direct provider served by the script, Branchyard's fake agent running a Python harness; no model, no real coding agent, no cloud call",
+  "scenario": "1: a stored AIPlex token (contract sections 1 to 6 and 8)",
+  "outcome": "passed",
+  "command": [
+    "qualify_aiplex.py",
+    "--aiplex",
+    "aiplex",
+    "--by",
+    "by",
+    "--fake-agent",
+    "fake-acp-agent",
+    "--aiplex-commit",
+    "f4e3991",
+    "--branchyard-commit",
+    "408700d",
+    "--out",
+    "docs/evidence/aiplex-control-plane-2026-11-14.json"
+  ],
+  "versions": {
+    "by": "by 0.5.0",
+    "aiplex": "aiplex version f4e3991",
+    "aiplex_version_output": [
+      "aiplex version f4e3991",
+      "  commit:   f4e3991",
+      "  console:  embedded",
+      "  api:      <aiplex-bin>/aiplex-api",
+      "  go:       go1.25.0",
+      "  os/arch:  linux/amd64"
+    ],
+    "aiplex_commit": {
+      "value": "f4e3991",
+      "verified": true,
+      "from": "`aiplex version`"
+    },
+    "branchyard_commit": {
+      "value": "408700d",
+      "verified": false,
+      "note": "stated on the command line; `by --version` prints no commit"
+    },
+    "binary_sha256": {
+      "by": "d2483f30800d520472c659821a654b3ffc968c0bee9c3205a500fa2dd183ebb4",
+      "fake-acp-agent": "36e719789e6791dfd97376e3bc52f8050c33e5e4506afc21fe00fed4f207c506",
+      "aiplex": "8cf5752b9baf0ff49a1ce3bd4b38414e75ec1c0954e15dbd2cd243a7822a1e0d",
+      "aiplex-api": "31eb87e696883b0dff09cf9b25f8289bbe974ec4800451ccc279a034a8f21017"
+    },
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v470-x86_64-with-glibc2.39"
+  },
+  "checks": [
+    {
+      "id": "config-connect-validate",
+      "claim": "`aiplex connect local --client branchyard --write` writes a file that `by config validate` accepts (its `ok <path>/branchyard.toml` line and exit 0), keeping the comment already in it; the file still validates with a second AIPlex backend and a plain backend added",
+      "result": "pass",
+      "observed": {
+        "connect_exit": 0,
+        "validate_as_written": [
+          0,
+          "ok       <scratch>/repo/branchyard.toml",
+          ""
+        ],
+        "validate_as_extended": [
+          0,
+          "ok       <scratch>/repo/branchyard.toml",
+          ""
+        ]
+      }
+    },
+    {
+      "id": "harness-ran",
+      "claim": "the harness made 7 calls through the turn's gateway and each got an answer; the streamed answer ran to its end",
+      "result": "pass",
+      "observed": {
+        "statuses": [
+          200,
+          200,
+          200,
+          404,
+          200,
+          200,
+          200
+        ],
+        "streamed_complete": [
+          true
+        ]
+      }
+    },
+    {
+      "id": "branch-record",
+      "claim": "`by show` names the branch `qualify` and the harness `gemini-cli` that `by run` was given",
+      "result": "pass",
+      "observed": {
+        "name": "qualify",
+        "harness": "gemini-cli"
+      }
+    },
+    {
+      "id": "harness-sees-gateway-only",
+      "claim": "the harness's base URLs are the turn's gateway on loopback, and no variable of its environment names AIPlex's loopback address and port (127.0.0.1, localhost, [::1], 0.0.0.0)",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "base_urls": [
+          "http://127.0.0.1:37657/anthropic",
+          "http://127.0.0.1:37657/openai/v1"
+        ]
+      }
+    },
+    {
+      "id": "harness-holds-no-token",
+      "claim": "no variable of the harness's environment holds the AIPlex token (the whole token or its signature segment, as a substring of any value), and `AIPLEX_TOKEN` is not set; the harness was given the digests it needs to look",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "aiplex_token_variable_set": false,
+        "variables_holding_the_token": [],
+        "helpers_received": {
+          "token_digests": 2,
+          "aiplex_port": true
+        },
+        "cannot_see": [
+          "an encoded or otherwise transformed copy of the token (base64, percent-encoding, reversed, split)",
+          "a copy held somewhere other than a variable of the harness's environment (a file, a socket, a child's memory)"
+        ]
+      }
+    },
+    {
+      "id": "harness-response-headers",
+      "claim": "every response header the harness received on an answer that came from AIPlex is on the gateway's allow-list (content-type, content-encoding, cache-control, retry-after, retry-after-ms, x-should-retry, request-id, x-request-id; prefixes anthropic-ratelimit-, x-ratelimit-, x-codex-) or is the server's own framing (date, content-length, transfer-encoding, connection, keep-alive); in particular none of www-authenticate, set-cookie, location, link, content-location, via, server and no X-Aiplex-* header reached it",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "header_names_by_call": {
+          "a": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "b": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "c": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "d": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "e": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "f": [
+            "connection",
+            "content-type",
+            "date",
+            "server",
+            "transfer-encoding"
+          ],
+          "g": [
+            "connection",
+            "content-type",
+            "date",
+            "server",
+            "transfer-encoding"
+          ]
+        },
+        "framing_headers_exempt": "added by Branchyard's own HTTP server to every answer, not relayed from AIPlex"
+      }
+    },
+    {
+      "id": "branchyard-events",
+      "claim": "`by log --json` has one `model` event per call: for the calls to AIPlex, AIPlex's request id and Branchyard's call id; exactly call d refused, as refused by aiplex with MODEL_NOT_FOUND; for the calls to the stand-in provider, no AIPlex control plane",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "events": [
+          {
+            "label": "a",
+            "model": "mock-claude",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "aiplex-local-anthropic",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "r4nLd6Am4N3tEXGPYa4GVQ",
+              "request_id": "req-bc94a702806301fe-19"
+            },
+            "reason": null,
+            "failed_over": null
+          },
+          {
+            "label": "b",
+            "model": "mock-gpt",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "aiplex-local-openai",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "lj1yWCTlGxyHWLNmtd97Hg",
+              "request_id": "req-bc94a702806301fe-20"
+            },
+            "reason": null,
+            "failed_over": null
+          },
+          {
+            "label": "c",
+            "model": "mock-claude",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "aiplex-local-anthropic",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "DG-ydTB25Abf6TnFv6XtSw",
+              "request_id": "req-bc94a702806301fe-21"
+            },
+            "reason": null,
+            "failed_over": null
+          },
+          {
+            "label": "d",
+            "model": "mock-absent",
+            "decision": "refused",
+            "status": 404,
+            "backend": "aiplex-local-anthropic",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "4l3dL0PfiepQPC8HnguH0A",
+              "request_id": "req-bc94a702806301fe-22",
+              "error_code": "MODEL_NOT_FOUND"
+            },
+            "reason": "refused by aiplex (MODEL_NOT_FOUND)",
+            "failed_over": null
+          },
+          {
+            "label": "e",
+            "model": "mock-gpt",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "aiplex-local-openai",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "HQwQCvySSg7QZEN7NcYvVA",
+              "request_id": "req-bc94a702806301fe-23"
+            },
+            "reason": null,
+            "failed_over": null
+          },
+          {
+            "label": "f",
+            "model": "direct-claude",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "direct-anthropic",
+            "control_plane": null,
+            "reason": null,
+            "failed_over": null
+          },
+          {
+            "label": "g",
+            "model": "unrouted-claude",
+            "decision": "allowed",
+            "status": 200,
+            "backend": "direct-anthropic",
+            "control_plane": null,
+            "reason": null,
+            "failed_over": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "record-join-a",
+      "claim": "call a (anthropic mock-claude): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bc94a702806301fe-19",
+        "call_id": "r4nLd6Am4N3tEXGPYa4GVQ",
+        "client_request_id": "r4nLd6Am4N3tEXGPYa4GVQ",
+        "operation": "anthropic.messages",
+        "http_status": 200,
+        "status": "ok",
+        "error_class": null
+      }
+    },
+    {
+      "id": "record-tags-a",
+      "claim": "call a: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-b",
+      "claim": "call b (openai mock-gpt): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bc94a702806301fe-20",
+        "call_id": "lj1yWCTlGxyHWLNmtd97Hg",
+        "client_request_id": "lj1yWCTlGxyHWLNmtd97Hg",
+        "operation": "compat.chat-completions",
+        "http_status": 200,
+        "status": "ok",
+        "error_class": null
+      }
+    },
+    {
+      "id": "record-tags-b",
+      "claim": "call b: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-c",
+      "claim": "call c (anthropic mock-claude): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bc94a702806301fe-21",
+        "call_id": "DG-ydTB25Abf6TnFv6XtSw",
+        "client_request_id": "DG-ydTB25Abf6TnFv6XtSw",
+        "operation": "anthropic.messages",
+        "http_status": 200,
+        "status": "ok",
+        "error_class": null
+      }
+    },
+    {
+      "id": "record-tags-c",
+      "claim": "call c: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-d",
+      "claim": "call d (anthropic mock-absent): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bc94a702806301fe-22",
+        "call_id": "4l3dL0PfiepQPC8HnguH0A",
+        "client_request_id": "4l3dL0PfiepQPC8HnguH0A",
+        "operation": "unknown-model",
+        "http_status": 404,
+        "status": "error",
+        "error_class": "model_not_found"
+      }
+    },
+    {
+      "id": "record-tags-d",
+      "claim": "call d: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "refusal-final",
+      "claim": "AIPlex's refusal is final: the refused model's route names two AIPlex backends, the event names one and lists none tried before it, and AIPlex holds exactly one record for the call's id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "backend": "aiplex-local-anthropic",
+        "records_for_the_call_id": 1
+      }
+    },
+    {
+      "id": "record-join-e",
+      "claim": "call e (openai mock-gpt): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bc94a702806301fe-23",
+        "call_id": "HQwQCvySSg7QZEN7NcYvVA",
+        "client_request_id": "HQwQCvySSg7QZEN7NcYvVA",
+        "operation": "compat.chat-completions",
+        "http_status": 200,
+        "status": "ok",
+        "error_class": null
+      }
+    },
+    {
+      "id": "record-tags-e",
+      "claim": "call e: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "forged-headers-dropped",
+      "claim": "the harness sent a forged X-Client-Request-Id and X-AIPlex-Tags (shown in the headers it sent) and they reached AIPlex as neither an id nor a tag",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "forged_headers_sent": {
+          "x-aiplex-tags": "by_branch=forged",
+          "x-client-request-id": "forged-id"
+        },
+        "records_for_the_forged_id": 0
+      }
+    },
+    {
+      "id": "direct-provider-beside-aiplex",
+      "claim": "a call for `direct-claude` (a route to the plain stand-in backend) and a call for `unrouted-claude` (no route; the API has a plain backend, so it goes to plain backends only) are answered by the stand-in, which never receives the AIPlex token, while AIPlex holds records only for the calls routed to it",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "stand_in_requests": [
+          {
+            "path": "/v1/messages",
+            "model": "direct-claude",
+            "header_names": [
+              "accept-encoding",
+              "anthropic-version",
+              "connection",
+              "content-length",
+              "content-type",
+              "host",
+              "user-agent",
+              "x-api-key"
+            ]
+          },
+          {
+            "path": "/v1/messages",
+            "model": "unrouted-claude",
+            "header_names": [
+              "accept-encoding",
+              "anthropic-version",
+              "connection",
+              "content-length",
+              "content-type",
+              "host",
+              "user-agent",
+              "x-api-key"
+            ]
+          }
+        ],
+        "aiplex_records": 5,
+        "aiplex_bound_calls": 5
+      }
+    },
+    {
+      "id": "outage-fails-closed",
+      "claim": "with AIPlex stopped a call for an AIPlex-routed model fails with Branchyard's own 502 and no AIPlex header, the event names only the AIPlex backend, and the stand-in direct provider receives no request",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "harness_status": 502,
+        "harness_body_head": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Branchyard's model gateway: no backend answered: aiplex-local-anthropic: could not connect (Connection refused (os error 111))\"}}",
+        "event_decision": "failed",
+        "event_status": 502,
+        "stand_in_requests_before_and_after": [
+          2,
+          2
+        ],
+        "event_text": [
+          "2026-11-14T06:33:29.829Z  model: mock-claude failed (502, aiplex-local-anthropic: could not connect (Connection refused (os error 111)), 1 ms)"
+        ]
+      }
+    },
+    {
+      "id": "secret-hygiene-files",
+      "claim": "the token's value (whole, or its signature segment) is in no file under the run's scratch directory (repository, .branchyard, private HOME, logs), as plain text",
+      "result": "pass",
+      "observed": {
+        "files_with_the_token": []
+      }
+    },
+    {
+      "id": "secret-hygiene-output",
+      "claim": "the token's value is in no output the script captured from `aiplex`, `by`, git or the harness",
+      "result": "pass",
+      "observed": {
+        "captured_outputs_holding_it": 0
+      }
+    },
+    {
+      "id": "cleanup",
+      "claim": "`aiplex dev stop` ran and exited 0, and no process of the run (found by its HOME, by descent from the script and by process group) was left for the sweep to kill",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "aiplex_dev_stop_exits": [
+          0
+        ],
+        "killed_by_the_sweep": [],
+        "processes_left": 0
+      }
+    }
+  ],
+  "observations": {
+    "connect_output": [
+      "Note: every model the access point lists gets a route here. A call for any other model is offered to the plain backends of its API when your file has any, and to AIPlex backends only when it has none (Branchyard's rule for calls no route matches)",
+      "Note: branchyard.toml is edited as text: tables AIPlex does not write keep their comments and order; entries are added or replaced in place and never removed, so remove a stale route by hand",
+      "",
+      "Still to do by hand:",
+      "  - export AIPLEX_TOKEN=\"$(aiplex auth print-token)\"   # in the shell that runs `by`; Branchyard reads the variable named in [secrets]. The token expires: run it again to refresh (Branchyard reads the key when each turn's gateway starts)",
+      "  - put branches on the model gateway: `by run --model-gateway ...`, or set `[models] allow = [\"*\"]` in branchyard.toml (not written: it decides which branches use it)"
+    ],
+    "configuration_written": [
+      "version = 1",
+      "",
+      "# qualification project: keep this comment",
+      "[models]",
+      "allow = [\"*\"]",
+      "",
+      "[secrets]",
+      "aiplex = \"AIPLEX_TOKEN\"",
+      "",
+      "[models.backends.aiplex-local-anthropic]",
+      "api = \"anthropic\"",
+      "url = \"http://127.0.0.1:43681/ap/local\"",
+      "key = \"aiplex\"",
+      "control_plane = \"aiplex\"",
+      "",
+      "[models.backends.aiplex-local-openai]",
+      "api = \"openai\"",
+      "url = \"http://127.0.0.1:43681/ap/local\"",
+      "key = \"aiplex\"",
+      "control_plane = \"aiplex\"",
+      "",
+      "[[models.routes]]",
+      "model = \"mock-gpt\"",
+      "backends = [\"aiplex-local-openai\"]",
+      "",
+      "[[models.routes]]",
+      "model = \"mock-claude\"",
+      "backends = [\"aiplex-local-anthropic\"]",
+      "",
+      "[[models.routes]]",
+      "model = \"mock-responses\"",
+      "backends = [\"aiplex-local-openai\"]"
+    ],
+    "validate_output": [
+      "ok       <scratch>/repo/branchyard.toml",
+      "ok       <scratch>/repo/branchyard.toml"
+    ],
+    "turn_exit": 0,
+    "turn_output_tail": [
+      "checkpoint 1 at 5de9695723 (0 file(s), +0 -0)",
+      "",
+      "branch     qualify (by/qualify)",
+      "status     no changes",
+      "candidate  none",
+      "cost       $0.00 over 1 turn",
+      "next       by send qualify \"<prompt>\"",
+      "           by rm qualify"
+    ],
+    "by_log_text": [
+      "2026-11-14T06:33:29.024Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 5 ms, aiplex request req-bc94a702806301fe-19)",
+      "2026-11-14T06:33:29.028Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-bc94a702806301fe-20)",
+      "2026-11-14T06:33:29.033Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 3 ms, aiplex request req-bc94a702806301fe-21)",
+      "2026-11-14T06:33:29.036Z  model: mock-absent refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-bc94a702806301fe-22)",
+      "2026-11-14T06:33:29.040Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 4 ms, aiplex request req-bc94a702806301fe-23)",
+      "2026-11-14T06:33:29.043Z  model: direct-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 2 ms)",
+      "2026-11-14T06:33:29.046Z  model: unrouted-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)"
+    ],
+    "expected_tags": {
+      "by_branch": "qualify",
+      "by_harness": "gemini-cli",
+      "by_turn": "1"
+    },
+    "harness_env": {
+      "helpers_received": {
+        "token_digests": 2,
+        "aiplex_port": true
+      },
+      "aiplex_token_variable_set": false,
+      "variables_holding_the_token": [],
+      "variables_naming_aiplex": [],
+      "anthropic_base_url": "http://127.0.0.1:37657/anthropic",
+      "openai_base_url": "http://127.0.0.1:37657/openai/v1"
+    },
+    "trace_ids_distinct": true,
+    "caller_kind_and_access_point": [
+      [
+        "user",
+        "local"
+      ]
+    ],
+    "stop_output": "Stopped aiplex dev (pid 20724)."
+  },
+  "not_done": [
+    "scenario 2, a Branchyard-signed token (`auth = \"turn-token\"`, contract section 7, `--federated`): the Branchyard side of the signed token does not exist yet",
+    "a real model or a real coding agent: the providers are AIPlex's mock providers and the harness is a script",
+    "`traceparent`: a local turn has no trace context, so none was sent and AIPlex made its own trace ids",
+    "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, a person's token, an agent's token)",
+    "a Branchyard server (`by serve`): only a local yard ran",
+    "a run on another operating system",
+    "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified"
+  ]
+}
