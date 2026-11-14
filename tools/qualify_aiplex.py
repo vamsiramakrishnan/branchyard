@@ -220,8 +220,10 @@ HIDDEN_PROBES: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "pass-through",
-        "what": "the pass-through path to the stand-in's backend name",
+        "what": "the pass-through path to the stand-in's backend name, at the gateway's root "
+        "($BRANCHYARD_MODEL_GATEWAY/backends/NAME/..., not under the Anthropic API prefix)",
         "path": f"/backends/{BACKEND_DIRECT}/v1/messages",
+        "base": "gateway-root",
         "content_type": "application/json",
         "body": _messages_body(MODEL_DIRECT),
         "status": 404,
@@ -250,6 +252,7 @@ PROBE_SPECS = json.dumps(
         {
             "id": p["id"],
             "path": p["path"],
+            "base": p.get("base", "api"),
             "content_type": p["content_type"],
             "body_hex": p["body"].hex(),
         }
@@ -340,10 +343,18 @@ def probe(probe_id):
         "anthropic-version": "2023-06-01",
         "content-type": spec["content_type"],
     }
-    url = os.environ["ANTHROPIC_BASE_URL"] + path
-    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    result = {"id": probe_id, "method": "POST", "path": path, "content_type": spec["content_type"]}
+    base = spec["base"]
+    result = {"id": probe_id, "method": "POST", "path": path, "base": base, "content_type": spec["content_type"]}
     result["body_bytes"] = len(data)
+    if base == "gateway-root":
+        root = os.environ.get("BRANCHYARD_MODEL_GATEWAY")
+        if not root:
+            # no root to send to: nothing is sent, and the probe is never a pass
+            result.update(status=None, transport_error="BRANCHYARD_MODEL_GATEWAY is not set in the harness")
+            return result
+    else:
+        root = os.environ["ANTHROPIC_BASE_URL"]
+    request = urllib.request.Request(root.rstrip("/") + path, data=data, headers=headers, method="POST")
     body, status, got = fetch(request, result)
     result.update(
         status=status,
@@ -819,13 +830,15 @@ def unrouted_problems(
     stand_in: Sequence[Mapping[str, Any]],
     records_for_the_call_id: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    """Why the call no route names cannot be said to have gone to AIPlex and been refused there for good: AIPlex's
-    own refusal (404 MODEL_NOT_FOUND, its header on the answer, not the stand-in's body), final (one backend named,
-    none tried before it, one record for the call's id), and not one request for that model at the stand-in."""
+    """Why the call no route names cannot be said to have gone to AIPlex and been refused there for good: the
+    harness got a 404 that is not the stand-in's body, the event carries AIPlex's MODEL_NOT_FOUND (the gateway strips
+    AIPlex's headers before the harness, so the code is read from the event), the refusal is final (one backend
+    named, none tried before it, one record for the call's id), and not one request for that model reached the
+    stand-in."""
     problems = []
     plane = event.get("control_plane") or {}
-    if call.get("status") != 404 or call.get("aiplex_error_code") != "MODEL_NOT_FOUND":
-        problems.append(f"the harness got {call.get('status')} {call.get('aiplex_error_code')!r}, not AIPlex's 404")
+    if call.get("status") != 404:
+        problems.append(f"the harness got {call.get('status')}, not AIPlex's 404")
     if "stand-in" in str(call.get("body_head")):
         problems.append("the answer is the stand-in's")
     if plane.get("plane") != "aiplex" or plane.get("error_code") != "MODEL_NOT_FOUND":
@@ -845,6 +858,8 @@ def probe_sent_problems(spec: Mapping[str, Any], seen: Mapping[str, Any] | None)
     problems = []
     if seen.get("id") != spec["id"] or seen.get("path") != spec["path"] or seen.get("method") != "POST":
         problems.append(f"the harness sent {seen.get('method')} {seen.get('path')!r}, not POST {spec['path']!r}")
+    if seen.get("base") != spec.get("base", "api"):
+        problems.append(f"the harness sent it under {seen.get('base')!r}, not {spec.get('base', 'api')!r}")
     if seen.get("content_type") != spec["content_type"] or seen.get("body_bytes") != len(spec["body"]):
         problems.append("the harness sent another body or content type than the probe's")
     if seen.get("transport_error") or not isinstance(seen.get("status"), int):
@@ -1740,10 +1755,11 @@ class Run:
                 self.check(
                     "unrouted-call-refused-by-aiplex",
                     f"the call for `{MODEL_UNROUTED}`, which no route names, went to the AIPlex backends of its API "
-                    "and not to the plain stand-in backend: AIPlex refused it (404, MODEL_NOT_FOUND, its header on "
-                    "the answer), the refusal is final (the event names one AIPlex backend and lists none tried "
-                    "before it, and AIPlex holds exactly one record for the call's id), and the stand-in "
-                    "received no request for it",
+                    "and not to the plain stand-in backend: AIPlex refused it (the harness got 404 with a body that is "
+                    "not the stand-in's; the event's control_plane.error_code is MODEL_NOT_FOUND, since the gateway "
+                    "strips AIPlex's headers before the harness), the refusal is final (the event names one AIPlex "
+                    "backend and lists none tried before it, and AIPlex holds exactly one record for the call's "
+                    "id), and the stand-in received no request for it",
                     not final,
                     problems=final,
                     backend=event.get("backend"),
@@ -1843,6 +1859,10 @@ class Run:
                 problems=problems,
                 method="POST",
                 path=spec["path"],
+                url_form=(
+                    "{BRANCHYARD_MODEL_GATEWAY}" if spec.get("base") == "gateway-root" else "{ANTHROPIC_BASE_URL}"
+                )
+                + spec["path"],
                 content_type=spec["content_type"],
                 body_bytes=len(spec["body"]),
                 harness_status=(seen or {}).get("status"),

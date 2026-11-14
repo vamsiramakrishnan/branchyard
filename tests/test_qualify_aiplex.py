@@ -501,7 +501,8 @@ class Mutations(unittest.TestCase):
         self.assertTrue(any("5 records, 6 calls went to it" in p for p in problems))
 
     def test_item_6_the_unrouted_call_conditions(self):
-        call = {"status": 404, "aiplex_error_code": "MODEL_NOT_FOUND", "body_head": "{}"}
+        # the harness sees no AIPlex header (the gateway strips them): the code is read from the event
+        call = {"status": 404, "aiplex_error_code": None, "body_head": "{}"}
         plane = {"plane": "aiplex", "call_id": "g" * 22, "request_id": "req-1-g", "error_code": "MODEL_NOT_FOUND"}
         good = {"decision": "refused", "backend": q.BACKEND_ANTHROPIC, "control_plane": plane}
         stand_in = [{"model": q.MODEL_DIRECT}]
@@ -517,11 +518,18 @@ class Mutations(unittest.TestCase):
         old_event = {"decision": "allowed", "backend": q.BACKEND_DIRECT}
         problems = q.unrouted_problems(answered, old_event, reached, [])
         self.assertEqual(len(problems), 7)
+        # the wrong code on the event
+        wrong = good | {"control_plane": plane | {"error_code": "ACTION_DENIED"}}
+        self.assertEqual(len(q.unrouted_problems(call, wrong, stand_in, one)), 1)
+        # the stand-in's body with a 404
+        self.assertEqual(
+            q.unrouted_problems(call | {"body_head": "stand-in"}, good, stand_in, one), ["the answer is the stand-in's"]
+        )
         # AIPlex tried twice (a second record under one call id), or the event lists a backend tried before
         self.assertTrue(q.unrouted_problems(call, good, stand_in, [*one, {"id": "ul_2"}]))
         self.assertTrue(q.unrouted_problems(call, good | {"failed_over": ["x: 404"]}, stand_in, one))
         # a refusal for another reason
-        other = {"status": 403, "aiplex_error_code": "ACTION_DENIED", "body_head": "{}"}
+        other = {"status": 403, "aiplex_error_code": None, "body_head": "{}"}
         self.assertTrue(q.unrouted_problems(other, good, stand_in, one))
         self.assertTrue(q.unrouted_problems(call, good | {"backend": q.BACKEND_DIRECT}, stand_in, one))
 
@@ -772,6 +780,7 @@ def probe_seen(spec, **changes):
         "id": spec["id"],
         "method": "POST",
         "path": spec["path"],
+        "base": spec.get("base", "api"),
         "content_type": spec["content_type"],
         "body_bytes": len(spec["body"]),
         "status": spec.get("status", 200),
@@ -797,6 +806,8 @@ class Probes(unittest.TestCase):
         self.assertEqual(by_id["other-endpoint"]["path"], "/v1/messages/batches")
         self.assertEqual(json.loads(by_id["other-endpoint"]["body"])["model"], q.MODEL_DIRECT)
         self.assertEqual(by_id["pass-through"]["path"], f"/backends/{q.BACKEND_DIRECT}/v1/messages")
+        self.assertEqual(by_id["pass-through"]["base"], "gateway-root")
+        self.assertTrue(all(p.get("base", "api") == "api" for p in q.PROBES if p["id"] != "pass-through"))
         self.assertEqual(by_id["unreadable-body"]["path"], "/v1/messages")
         self.assertEqual(by_id["unreadable-body"]["content_type"], "text/plain")
         self.assertEqual(by_id["unreadable-body"]["body"], b"\xff")
@@ -813,7 +824,10 @@ class Probes(unittest.TestCase):
         for g, p in zip(given, q.PROBES, strict=True):
             self.assertEqual(bytes.fromhex(g["body_hex"]), p["body"])
             self.assertEqual((g["path"], g["content_type"]), (p["path"], p["content_type"]))
+        self.assertEqual([g["base"] for g in given], [p.get("base", "api") for p in q.PROBES])
         self.assertIn("PROBE_SPECS = ", q.HARNESS)
+        # the root probe is sent to the variable's value and, when it is missing, is not sent and never passes
+        self.assertIn('os.environ.get("BRANCHYARD_MODEL_GATEWAY")', q.HARNESS)
         self.assertNotIn(q.MODEL_UNROUTED, q.HARNESS)
 
     def test_a_good_refusal_of_each_hidden_probe_has_no_problem(self):
@@ -869,6 +883,12 @@ class Probes(unittest.TestCase):
         self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, content_type="text/plain"), [], 3, 3, 7, 7))
         self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, body_bytes=1), [], 3, 3, 7, 7))
         self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, id="other"), [], 3, 3, 7, 7))
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, base="gateway-root"), [], 3, 3, 7, 7))
+        root = q.HIDDEN_PROBES[2]
+        self.assertEqual(q.hidden_probe_problems(root, probe_seen(root), [], 3, 3, 7, 7), [])
+        self.assertTrue(q.hidden_probe_problems(root, probe_seen(root, base="api"), [], 3, 3, 7, 7))
+        unsent = probe_seen(root, status=None, transport_error="BRANCHYARD_MODEL_GATEWAY is not set in the harness")
+        self.assertTrue(q.hidden_probe_problems(root, unsent, [], 3, 3, 7, 7))
 
     def test_the_letter_case_probe_must_go_to_aiplex_and_not_to_the_stand_in(self):
         spec = q.CASE_PROBE
