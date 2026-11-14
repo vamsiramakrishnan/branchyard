@@ -439,6 +439,142 @@ fn a_source_without_a_key_is_one_line_and_is_not_asked() {
 }
 
 #[test]
+fn a_control_planes_key_in_a_providers_variable_is_sent_to_no_provider() {
+    const KEY: &str = "aiplex-key-0123456789abcdef";
+    const OTHER: &str = "sk-another-key-0123456789";
+    let access = MockHttp::start(|_| {
+        Response::json(
+            200,
+            &json!({"data": [{"id": "claude-sonnet-4-6"}], "has_more": false}),
+        )
+    });
+    let config = |variable: &str| {
+        format!(
+            "version = 1\n\n[secrets]\naiplex = \"{variable}\"\n\n\
+             [models.backends.aiplex-anthropic]\napi = \"anthropic\"\nurl = \"{}/ap/ide\"\n\
+             key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n",
+            access.url()
+        )
+    };
+    let held = |variable: &str| {
+        format!(
+            "no credential: its key ${variable} holds the token of the control-plane backend \
+             aiplex-anthropic, which is sent only to that backend"
+        )
+    };
+    // `by models list --refresh` with `variables` set: what it printed, its
+    // JSON, and what each provider's stand-in heard.
+    let listed = |toml: &str, variables: &[(&str, &str)]| {
+        let (gemini, openai, anthropic) = (silent(), silent(), silent());
+        let mut repo = Repo::new(toml);
+        repo.0.remove_env("ZAI_API_KEY");
+        repo.0.remove_env("AIPLEX_TOKEN");
+        for (name, value) in variables {
+            repo.0.set_env(name, value);
+        }
+        let urls = Urls {
+            gemini: &gemini.url(),
+            openai: &openai.url(),
+            anthropic: &anthropic.url(),
+        };
+        let out = repo.list(&urls, &["--refresh"]);
+        let said = shown(&out);
+        assert!(!said.contains(KEY), "the key was printed: {said}");
+        let listing = repo.list_json(&urls, &["--refresh"]);
+        let heard: Vec<(&str, usize)> = [
+            ("gemini", gemini.requests().len()),
+            ("openai", openai.requests().len()),
+            ("anthropic", anthropic.requests().len()),
+        ]
+        .to_vec();
+        for server in [gemini, openai, anthropic] {
+            for request in server.requests() {
+                for (_, value) in &request.sent_headers {
+                    assert!(!value.contains(KEY), "{} was sent the key", request.path);
+                }
+                assert!(!request.path.contains(KEY), "{}", request.path);
+            }
+            server.finish();
+        }
+        (text(&out), listing, heard)
+    };
+    // The key in one provider's variable, which the backend's secret names:
+    // that provider is not asked, and the line says why.
+    let mut asked_of_aiplex = 0;
+    for (variable, provider) in [
+        ("ANTHROPIC_API_KEY", "anthropic"),
+        ("OPENAI_API_KEY", "openai"),
+        ("CODEX_API_KEY", "openai"),
+        ("GEMINI_API_KEY", "gemini"),
+        ("GOOGLE_API_KEY", "gemini"),
+    ] {
+        let (table, listing, heard) = listed(&config(variable), &[(variable, KEY)]);
+        assert_eq!(
+            heard,
+            [("gemini", 0), ("openai", 0), ("anthropic", 0)],
+            "{variable}"
+        );
+        let line = table
+            .lines()
+            .find(|l| l.starts_with(provider))
+            .unwrap_or_else(|| panic!("{provider} in:\n{table}"));
+        assert!(
+            line.contains(&format!("skipped: {}", held(variable))),
+            "{line}"
+        );
+        // (Then what the source's other variable said, when it has one.)
+        let reason = source(&listing, provider)["reason"].as_str().unwrap();
+        assert!(reason.starts_with(&held(variable)), "{reason}");
+        // The access point is still asked, with the key as its bearer.
+        assert_eq!(
+            names(source(&listing, "backend:aiplex-anthropic")),
+            ["claude-sonnet-4-6"],
+            "{variable}"
+        );
+        asked_of_aiplex += 2;
+        assert_eq!(access.requests().len(), asked_of_aiplex, "{variable}");
+    }
+    let bearer = format!("Bearer {KEY}");
+    for request in access.requests() {
+        assert_eq!(request.header_values("authorization"), [bearer.as_str()]);
+    }
+    // As `eval "$(aiplex dev env)"` leaves a shell: the documented
+    // configuration, and the token under the SDKs' names too.
+    let (_, listing, heard) = listed(
+        &config("AIPLEX_TOKEN"),
+        &[
+            ("AIPLEX_TOKEN", KEY),
+            ("OPENAI_API_KEY", KEY),
+            ("ANTHROPIC_API_KEY", KEY),
+            ("GEMINI_API_KEY", KEY),
+        ],
+    );
+    assert_eq!(heard, [("gemini", 0), ("openai", 0), ("anthropic", 0)]);
+    for (variable, provider) in [
+        ("OPENAI_API_KEY", "openai"),
+        ("ANTHROPIC_API_KEY", "anthropic"),
+        ("GEMINI_API_KEY", "gemini"),
+    ] {
+        let reason = source(&listing, provider)["reason"].as_str().unwrap();
+        assert!(reason.starts_with(&held(variable)), "{reason}");
+    }
+    // Another value in a provider's variable is that provider's key, and
+    // is sent to it as before (the stand-in answers 500 to every request).
+    let (table, _, heard) = listed(
+        &config("AIPLEX_TOKEN"),
+        &[("AIPLEX_TOKEN", KEY), ("OPENAI_API_KEY", OTHER)],
+    );
+    assert_eq!(heard, [("gemini", 0), ("openai", 2), ("anthropic", 0)]);
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("openai") && l.contains("failed: answered 500")),
+        "{table}"
+    );
+    access.finish();
+}
+
+#[test]
 fn a_harness_shows_its_static_list_beside_what_its_keys_provider_lists() {
     let (gemini, openai, anthropic) = (silent(), openai(), silent());
     let mut repo = Repo::new("version = 1\n");

@@ -306,7 +306,7 @@ mod platform {
                 "source and target are on different volumes",
             ));
         }
-        let status = Command::new("/bin/cp")
+        let status = branchyard_support::child::command("/bin/cp")
             .arg("-c")
             .arg(source)
             .arg(target)

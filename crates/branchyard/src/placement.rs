@@ -204,6 +204,10 @@ pub(crate) struct Placement {
     /// turn holds it: what a reaper recovers and destroys if this process
     /// stops. Deregistered once the sandbox is released or discarded.
     service: Option<crate::services::Registration>,
+    /// The variables that were not set because their value holds a guarded
+    /// token, each with the backend whose token it is
+    /// ([`Placement::set_env`]): for the branch's log.
+    withheld: Vec<(String, String)>,
 }
 
 /// Register the turn's sandbox `name` in the repository's service
@@ -579,6 +583,7 @@ impl Placement {
             kind: Kind::Local(harness::environment(record.home.as_deref())),
             started: None,
             egress: None,
+            withheld: Vec::new(),
             writable: None,
             service: None,
         }
@@ -592,7 +597,10 @@ impl Placement {
         options: &SandboxOptions,
         plan: &SandboxPlan,
     ) -> Result<Placement, String> {
-        let (spec, env) = microsandbox::spec(yard, record, options)?;
+        let (spec, mut env) = microsandbox::spec(yard, record, options)?;
+        // A passed variable that holds a control plane's token is not the
+        // sandbox's, on any turn.
+        let withheld = take_guarded(&mut env);
         let provider =
             branchyard_sandbox::traced("microsandbox", microsandbox::microsandbox(yard, options)?);
         let key = options.key();
@@ -670,6 +678,7 @@ impl Placement {
                 placed: None,
             }),
             egress: None,
+            withheld,
             writable: None,
             service,
             kind: Kind::Sandbox {
@@ -802,6 +811,7 @@ impl Placement {
             .clone()
             .ok_or("a sandboxed branch has no private home")?;
         let mut env = sandbox_env(&how.home, how.pass_env)?;
+        let withheld = take_guarded(&mut env);
         if let Some(root) = how.tools {
             env.insert(crate::tooltree::ENV_TOOLS.into(), root.into());
         }
@@ -1034,6 +1044,7 @@ impl Placement {
                 }),
             }),
             egress: None,
+            withheld,
             writable: None,
             service: native_registration
                 .as_mut()
@@ -1081,9 +1092,18 @@ impl Placement {
         }
     }
 
-    /// Add a variable to the harness's environment.
+    /// Add a variable to the harness's environment. A value that holds a
+    /// control plane's token is not set, whoever the writer is (the
+    /// workspace's table, a secret, a snippet's export): it is noted for
+    /// the branch's log ([`Placement::take_withheld`]) and the turn runs.
     pub fn set_env(&mut self, name: &str, value: &str) {
         if name.eq_ignore_ascii_case(branchyard_support::MANAGER_TOKEN_ENV) {
+            return;
+        }
+        if let Some(backend) = branchyard_support::child::guarded(value) {
+            if !self.withheld.iter().any(|(held, _)| held == name) {
+                self.withheld.push((name.to_owned(), backend));
+            }
             return;
         }
         match &mut self.kind {
@@ -1095,6 +1115,13 @@ impl Placement {
                 actor.env.insert(name.into(), value.into());
             }
         }
+    }
+
+    /// The variables [`Placement::set_env`] and the sandbox's passed
+    /// variables left out since the last call, each with the backend whose
+    /// token its value holds.
+    pub fn take_withheld(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.withheld)
     }
 
     /// Take a variable out of the harness's environment; a later
@@ -1172,13 +1199,20 @@ impl Placement {
                 name,
                 env,
                 ..
-            } => Session::start_in(driver, open, provider.as_ref(), name, env.clone(), None),
+            } => Session::start_in(
+                driver,
+                open,
+                provider.as_ref(),
+                name,
+                without_guarded(env),
+                None,
+            ),
             Kind::Substrate(actor) => Session::start_in(
                 driver,
                 open,
                 actor.provider.provider(),
                 &actor.name,
-                actor.env.clone(),
+                without_guarded(&actor.env),
                 None,
             ),
         }
@@ -1320,6 +1354,31 @@ pub(crate) fn sandbox_env(
     Ok(env)
 }
 
+/// Take out of `env` the variables whose value holds a control plane's
+/// token (`branchyard_support::child::guard`), and name them, each with the
+/// backend whose token it is.
+fn take_guarded(env: &mut BTreeMap<OsString, OsString>) -> Vec<(String, String)> {
+    let mut withheld = Vec::new();
+    env.retain(
+        |name, value| match branchyard_support::child::guarded(&value.to_string_lossy()) {
+            Some(backend) => {
+                withheld.push((name.to_string_lossy().into_owned(), backend));
+                false
+            }
+            None => true,
+        },
+    );
+    withheld
+}
+
+/// `env` as a sandbox is started with it: without a variable whose value
+/// holds a control plane's token, whoever set it.
+fn without_guarded(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsString> {
+    let mut env = env.clone();
+    take_guarded(&mut env);
+    env
+}
+
 /// `by-<branch>-<ulid>`, unique across repositories and concurrent allocations,
 /// within the runtime's 128-byte limit. Branch names are already `[a-z0-9._-]`.
 pub(crate) fn sandbox_name(branch: &str) -> Result<String, String> {
@@ -1438,6 +1497,66 @@ pub(crate) fn private_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_variable_that_holds_a_guarded_token_is_not_a_sandboxes() {
+        // What `--pass-env` copied in, whatever it is named: taken out and
+        // named, with the backend, before the sandbox is given anything.
+        const TOKEN: &str = "placement-test-token-0123456789";
+        branchyard_support::child::guard("ap", TOKEN);
+        let mut env: BTreeMap<OsString, OsString> = [
+            ("HOME", "/home/agent".to_owned()),
+            ("GEMINI_API_KEY", TOKEN.to_owned()),
+            ("AUTH_HEADER", format!("Bearer {TOKEN}")),
+            ("OTHER_KEY", "another-value-0123456789".to_owned()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect();
+        let started_with = without_guarded(&env);
+        assert_eq!(
+            take_guarded(&mut env),
+            [
+                ("AUTH_HEADER".to_owned(), "ap".to_owned()),
+                ("GEMINI_API_KEY".to_owned(), "ap".to_owned())
+            ]
+        );
+        let names: Vec<&OsString> = env.keys().collect();
+        assert_eq!(names, ["HOME", "OTHER_KEY"]);
+        assert_eq!(started_with, env);
+        // And a local harness's environment, the same, whoever set it.
+        let mut placement = Placement {
+            cwd: "/".into(),
+            kind: Kind::Local(harness::environment(None)),
+            started: None,
+            egress: None,
+            withheld: Vec::new(),
+            writable: None,
+            service: None,
+        };
+        placement.set_env("MY_TOKEN", TOKEN);
+        placement.set_env("MY_HEADER", &format!("Bearer {TOKEN}"));
+        placement.set_env("MY_OTHER", "another-value-0123456789");
+        assert_eq!(
+            placement.take_withheld(),
+            [
+                ("MY_TOKEN".to_owned(), "ap".to_owned()),
+                ("MY_HEADER".to_owned(), "ap".to_owned())
+            ]
+        );
+        assert!(placement.take_withheld().is_empty());
+        let Kind::Local(env) = &placement.kind else {
+            unreachable!("a local placement")
+        };
+        let resolved = env.resolve();
+        assert_eq!(
+            resolved.get(std::ffi::OsStr::new("MY_OTHER")),
+            Some(&OsString::from("another-value-0123456789"))
+        );
+        assert!(resolved
+            .values()
+            .all(|value| !value.to_string_lossy().contains(TOKEN)));
+    }
 
     #[test]
     fn sandbox_pass_through_refuses_operator_manager_credentials_before_reading_them() {

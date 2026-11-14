@@ -85,10 +85,7 @@ async fn well_known(State(app): State<Shared>) -> Result<Json<WellKnown>, ApiErr
         service: "branchyard".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         api: "/v1".into(),
-        jwks_uri: app
-            .config
-            .connectors
-            .is_some()
+        jwks_uri: (app.config.connectors.is_some() || crate::models::signs_for_aiplex(&app.config))
             .then(|| "/.well-known/jwks.json".to_owned()),
         services_uri: "/v1/services".into(),
         repos: app.repos.keys().cloned().collect(),

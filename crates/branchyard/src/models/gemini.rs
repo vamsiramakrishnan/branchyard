@@ -817,7 +817,7 @@ mod tests {
             .prefix("by-gemini-")
             .tempdir()
             .unwrap();
-        let status = std::process::Command::new("git")
+        let status = branchyard_support::child::command("git")
             .args(["init", "-q"])
             .arg(dir.path())
             .status()
@@ -864,6 +864,13 @@ mod tests {
             by_branch: "gem".into(),
             turn: 1,
             subject: PERSON.into(),
+            harness: "deepseek-harness".into(),
+            trace_parent: None,
+            signer: keys.clone(),
+            issuer: gateway.signer.issuer.clone(),
+            tenant: "local".into(),
+            deadline_ms: None,
+            signed: crate::models::gateway::SignedTokens::default(),
             max_usd: None,
             cost_before: 0.0,
             held: 0.0,

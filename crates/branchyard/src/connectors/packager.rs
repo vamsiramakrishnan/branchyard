@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A bundle a gateway serves: a directory with a canonical `air.yaml` or
 /// `air.json`, named by its path under the bundle root (the connector id).
@@ -66,7 +66,7 @@ impl AnvilPackager {
             .command
             .split_first()
             .ok_or("no anvil command is configured")?;
-        let output = Command::new(program)
+        let output = branchyard_support::child::command(program)
             .args(lead)
             .args(args)
             .stdin(Stdio::null())

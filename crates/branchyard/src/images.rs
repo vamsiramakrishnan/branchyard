@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use branchyard_support::LockExt as _;
@@ -639,7 +639,7 @@ pub fn prepare_anvil(anvil: &[String], prefix: &Path) -> AnvilInstall {
     let Some((program, fixed)) = anvil.split_first() else {
         return AnvilInstall::Skipped("[connectors] anvil is empty".into());
     };
-    let guard = Command::new(program)
+    let guard = branchyard_support::child::command(program)
         .args(fixed)
         .args(["install", "--help"])
         .stdin(Stdio::null())
@@ -658,7 +658,7 @@ pub fn prepare_anvil(anvil: &[String], prefix: &Path) -> AnvilInstall {
     if let Err(e) = std::fs::create_dir_all(prefix) {
         return AnvilInstall::Skipped(format!("{}: {e}", prefix.display()));
     }
-    let out = Command::new(program)
+    let out = branchyard_support::child::command(program)
         .args(fixed)
         .args(["install", "--prefix"])
         .arg(prefix)
@@ -733,7 +733,7 @@ pub fn inspect(reference: &str) -> Result<Option<Inspected>, String> {
     if docker_on_path().is_none() {
         return Ok(None);
     }
-    let out = Command::new("docker")
+    let out = branchyard_support::child::command("docker")
         .args(["image", "inspect", reference])
         .stdin(Stdio::null())
         .output()
@@ -789,7 +789,7 @@ pub struct Built {
 pub fn build(tag: &str, context: &Path, push: bool) -> Result<Built, String> {
     let metadata = context.join(".metadata.json");
     let argv = build_command(tag, context, push, &metadata);
-    let out = Command::new(&argv[0])
+    let out = branchyard_support::child::command(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .output()

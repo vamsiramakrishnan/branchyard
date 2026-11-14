@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -335,7 +335,7 @@ pub fn run(
     stdin: Option<&[u8]>,
 ) -> std::io::Result<Ran> {
     use std::os::unix::process::CommandExt;
-    let mut child = Command::new("sh")
+    let mut child = branchyard_support::child::command("sh")
         .arg("-c")
         .arg(command)
         .current_dir(&recipe.root)

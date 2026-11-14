@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -235,7 +234,7 @@ pub struct Hit {
 /// is BM25 alone. Nothing found is an empty list; the script refusing to
 /// run is an error naming what it said.
 pub fn search(tree: &Path, words: &[String], limit: usize, plain: bool) -> Result<Vec<Hit>, Error> {
-    let mut command = Command::new("python3");
+    let mut command = branchyard_support::child::command("python3");
     command
         .arg(tree.join("bin/tools"))
         .arg("search")

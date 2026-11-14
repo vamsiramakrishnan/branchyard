@@ -12,8 +12,10 @@
 //! For each request the gateway checks the token (signature, expiry, the
 //! turn it was minted for) and its `by_models` scope, picks a backend by
 //! the yard's routes (weighted, then in order, then the route's fallbacks;
-//! the next on a refused connection, a 5xx or a 429), holds per-route rate
-//! limits, the branch's budget and the yard's daily and monthly budgets,
+//! the next on a refused connection, a 5xx or a 429, unless a control
+//! plane such as an AIPlex access point refused it itself, which is final;
+//! one call never goes to both a control plane and a plain backend), holds
+//! per-route rate limits, the branch's budget and the yard's daily and monthly budgets,
 //! forwards the request with the backend's key, streams the response back
 //! as it arrives, and records one [`UsageRecord`] (tokens from the
 //! provider's own usage fields, streamed or not; cost from
@@ -49,6 +51,7 @@ mod usage;
 
 use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::PathBuf;
@@ -94,7 +97,9 @@ impl Api {
         self == Api::Anthropic && backend == Api::Openai
     }
 
-    /// The provider's public API, for a backend that names no URL.
+    /// The provider's public API, for a plain backend that names no URL
+    /// ([`backend_url`], the one caller: a control-plane backend has no
+    /// default).
     fn default_url(&self) -> Option<&'static str> {
         match self {
             Api::Anthropic => Some("https://api.anthropic.com"),
@@ -216,7 +221,9 @@ impl fmt::Display for Audit {
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     pub api: Api,
-    /// Its base URL (default: the provider's public API).
+    /// Its base URL, where its calls and its credential go. Default: the
+    /// provider's public API, for a plain `anthropic` or `openai` backend
+    /// only; a generic backend and a control-plane backend must name one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The secret holding its key, by name (`[secrets]`, else a variable
@@ -234,6 +241,312 @@ pub struct BackendConfig {
     /// whose host is `api.z.ai`, else [`Compat::Off`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
+    /// The control plane this backend is an access point of
+    /// ([`ControlPlane`]); absent, a plain backend. A control plane's
+    /// refusal is final, and a route that names one names only control
+    /// planes (`docs/model-gateway.md`, "AIPlex as the backend").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<ControlPlane>,
+    /// How an AIPlex backend is called when not with a `key`
+    /// ([`BackendAuth`]); absent, with its `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<BackendAuth>,
+    /// The `aud` of the token [`BackendAuth::TurnToken`] presents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
+/// How a control-plane backend is called instead of with a stored key
+/// (`[models.backends.NAME] auth`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BackendAuth {
+    /// A token the yard signs for each turn (`turn-token`), which AIPlex
+    /// verifies against the yard's published keys
+    /// (`docs/model-gateway.md`, "A token Branchyard signs").
+    #[serde(rename = "turn-token")]
+    TurnToken,
+}
+
+/// The `by_purpose` of the token a turn's gateway presents to an AIPlex
+/// backend with [`BackendAuth::TurnToken`]: the model gateway and the
+/// connector gateway refuse a token that carries one.
+pub const AIPLEX_PURPOSE: &str = "aiplex";
+
+/// Why `issuer` cannot sign tokens AIPlex verifies, if it cannot. AIPlex
+/// fetches `{issuer}/.well-known/jwks.json` and compares the issuer byte
+/// for byte with the one it was bound to, so it must be `https://host[:port]`,
+/// or `http://` on a loopback host (`127.0.0.1`, `[::1]`, `localhost`), with
+/// nothing after and no user information; an address something can be
+/// reached at (not `0.0.0.0` or `[::]`, no IPv6 zone, and not a number in a
+/// form only some resolvers read as an address, such as `0` or `127.1`);
+/// and in the one spelling Branchyard takes
+/// ([`canonical_issuer`]), so the two sides cannot differ by a dot. Each
+/// refusal says what is wrong, and what to write where Branchyard can tell.
+pub fn federable_issuer(issuer: &str) -> Result<(), String> {
+    if issuer.starts_with("branchyard:local:") {
+        return Err(format!(
+            "this is a local yard (its tokens' issuer is {issuer}), which AIPlex cannot fetch keys \
+             from, so it cannot be federated; use key = \"...\" (an AIPlex token) instead"
+        ));
+    }
+    // User information is never shown, and never taken: checked before any
+    // message quotes the issuer.
+    let shown = branchyard_wire::without_userinfo(issuer);
+    if shown != issuer {
+        return Err(format!(
+            "the issuer {shown:?} has user information (user:password@), which is not taken \
+             and is left out of this message; write scheme://host[:port]"
+        ));
+    }
+    // An IPv6 address with a zone, before the URL parser, which reads only
+    // some zones.
+    let zone = issuer
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .is_some_and(|(address, _)| address.contains('%'));
+    if zone {
+        return Err(format!(
+            "the issuer {issuer:?} names an IPv6 address with a zone (%), which is one \
+             machine's interface and nothing AIPlex can reach; write the address without it"
+        ));
+    }
+    let written = WrittenIssuer::read(issuer)?;
+    let host = written.host();
+    if host.is_empty() {
+        return Err(format!(
+            "the issuer {issuer:?} names no host: its host is only a dot"
+        ));
+    }
+    // A host that is a number in a form only some resolvers read as an
+    // address (`0`, `127.1`, `0x7f.1`, `010.0.0.1`): to others it is a name.
+    if numeric_host(&host) && host.parse::<Ipv4Addr>().is_err() {
+        return Err(format!(
+            "the issuer {issuer:?} names its host as a number that is not four decimal parts \
+             ({host}), which some resolvers read as an IP address (0 as 0.0.0.0, 127.1 as \
+             127.0.0.1) and others as a name; write the address as a.b.c.d"
+        ));
+    }
+    let address = host.parse::<IpAddr>().ok().map(|ip| ip.to_canonical());
+    if address.is_some_and(|ip| ip.is_unspecified()) {
+        return Err(format!(
+            "the issuer {issuer:?} names an unspecified address, which a server listens on and \
+             nothing can be reached at, so AIPlex cannot fetch keys from it"
+        ));
+    }
+    let taken = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    if !written.tls && !taken {
+        return Err(match address.is_some_and(|ip| ip.is_loopback()) {
+            true => format!(
+                "the issuer {issuer:?} is plain http on a loopback address in a spelling that \
+                 is not taken; plain http is for a development AIPlex on this machine, written \
+                 127.0.0.1, [::1] or localhost"
+            ),
+            false => format!(
+                "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex \
+                 fetches keys over https (http only from this machine, written 127.0.0.1, \
+                 [::1] or localhost, for a development AIPlex)"
+            ),
+        });
+    }
+    let canonical = written.canonical();
+    match canonical == issuer {
+        true => Ok(()),
+        false => Err(format!(
+            "the issuer {issuer:?} {}; the issuer must be spelled the same in Branchyard and in \
+             AIPlex, so Branchyard takes one spelling (a lower-case host, no trailing dot, no \
+             default port): write {canonical:?}",
+            written.misspelled()
+        )),
+    }
+}
+
+/// Whether `host`'s last label is a number as `inet_aton` reads one: decimal
+/// digits, or `0x` and hexadecimal digits. Such a host is an address to the
+/// resolvers that take that form, in one to four parts, with octal and
+/// hexadecimal ones.
+fn numeric_host(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let hex = last
+        .strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_hexdigit()));
+    !host.contains(':') && !last.is_empty() && (last.bytes().all(|b| b.is_ascii_digit()) || hex)
+}
+
+/// The one spelling Branchyard takes of the issuer `issuer`: its scheme, its
+/// host in lower case without a trailing dot (an IPv6 address in brackets),
+/// and its port unless it is the scheme's default. `None` when `issuer` is
+/// not `scheme://host[:port]` at all. An issuer is spelled the same in
+/// Branchyard and in AIPlex, which compares byte for byte, so one spelling
+/// leaves nothing to differ.
+pub fn canonical_issuer(issuer: &str) -> Option<String> {
+    WrittenIssuer::read(issuer).ok().map(|w| w.canonical())
+}
+
+/// An issuer of the form `scheme://host[:port]`, as it was written.
+struct WrittenIssuer {
+    tls: bool,
+    /// The host as written, without an IPv6 literal's brackets.
+    host: String,
+    port: u16,
+    /// The port as written, when one was.
+    port_written: Option<String>,
+}
+
+impl WrittenIssuer {
+    /// Take `issuer` apart, or say what an operator wrote that is not
+    /// `scheme://host[:port]`: the mistakes one makes by hand are named,
+    /// and the rest is the URL parser's to say.
+    fn read(issuer: &str) -> Result<WrittenIssuer, String> {
+        let rest = issuer
+            .strip_prefix("https://")
+            .or_else(|| issuer.strip_prefix("http://"))
+            .ok_or_else(|| {
+                format!(
+                    "the issuer {issuer:?} is not an http:// or https:// URL, so AIPlex cannot \
+                     fetch keys from it"
+                )
+            })?;
+        let nothing_after = "AIPlex wants scheme://host[:port] and nothing after";
+        if rest.contains('/') {
+            return Err(format!("the issuer {issuer:?} has a path; {nothing_after}"));
+        }
+        if rest.contains(['?', '#']) {
+            return Err(format!(
+                "the issuer {issuer:?} has a query or a fragment; {nothing_after}"
+            ));
+        }
+        // What is left is the authority. An IPv6 address is hex digits and
+        // more than one colon; outside brackets its last group would be
+        // read as a port.
+        let bare_v6 = !rest.starts_with('[')
+            && rest.matches(':').count() > 1
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b":.%".contains(&b));
+        if bare_v6 {
+            return Err(format!(
+                "the issuer {issuer:?} names an IPv6 address without brackets; write the address \
+                 in brackets, scheme://[address]:port"
+            ));
+        }
+        let port_written = match rest.strip_prefix('[') {
+            Some(v6) => v6
+                .split_once(']')
+                .and_then(|(_, after)| after.strip_prefix(':')),
+            None => rest.split_once(':').map(|(_, port)| port),
+        };
+        if port_written == Some("") {
+            return Err(format!(
+                "the issuer {issuer:?} has an empty port; write the port after the colon, or \
+                 leave the colon out"
+            ));
+        }
+        let target = upstream::Target::parse(issuer).map_err(|e| {
+            format!("the issuer {issuer:?} is not a URL AIPlex can fetch keys from: {e}")
+        })?;
+        Ok(WrittenIssuer {
+            tls: target.tls,
+            host: target.host,
+            port: target.port,
+            port_written: port_written.map(str::to_owned),
+        })
+    }
+
+    /// The host in the one spelling: lower case, no trailing dot.
+    fn host(&self) -> String {
+        self.host.trim_end_matches('.').to_ascii_lowercase()
+    }
+
+    fn scheme(&self) -> &'static str {
+        match self.tls {
+            true => "https",
+            false => "http",
+        }
+    }
+
+    fn default_port(&self) -> u16 {
+        match self.tls {
+            true => 443,
+            false => 80,
+        }
+    }
+
+    /// The issuer in the one spelling ([`canonical_issuer`]).
+    fn canonical(&self) -> String {
+        let host = self.host();
+        let host = match host.contains(':') {
+            true => format!("[{host}]"),
+            false => host,
+        };
+        match self.port == self.default_port() {
+            true => format!("{}://{host}", self.scheme()),
+            false => format!("{}://{host}:{}", self.scheme(), self.port),
+        }
+    }
+
+    /// How the issuer as written differs from the one spelling.
+    fn misspelled(&self) -> String {
+        let mut how = Vec::new();
+        if self.host.ends_with('.') {
+            how.push("ends its host with a dot".to_owned());
+        }
+        if self.host.bytes().any(|b| b.is_ascii_uppercase()) {
+            how.push("has an upper-case letter in its host".to_owned());
+        }
+        match &self.port_written {
+            Some(_) if self.port == self.default_port() => {
+                how.push(format!("writes out the default port of {}", self.scheme()))
+            }
+            Some(port) if *port != self.port.to_string() => {
+                how.push("writes its port with a leading zero".to_owned())
+            }
+            _ => {}
+        }
+        match how.is_empty() {
+            true => "is not in the one spelling Branchyard takes".to_owned(),
+            false => how.join(" and "),
+        }
+    }
+}
+
+/// Whether `tenant` can be named in `sub = branchyard:<tenant>`: 1 to 128
+/// of `A-Z a-z 0-9 . _ @ + -`, which AIPlex's `branchyard` preset takes.
+pub fn federable_tenant(tenant: &str) -> bool {
+    (1..=128).contains(&tenant.len())
+        && tenant
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._@+-".contains(&b))
+}
+
+/// What a backend is an access point of (`[models.backends.NAME]
+/// control_plane`): a service that decides, for each call, whether it may
+/// reach the provider, and records it. The gateway sends it the credential
+/// as a bearer token and says which branch, turn and harness is calling;
+/// its refusal reaches the harness as it is, and no call a route sends to
+/// it goes to a plain backend instead.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlPlane {
+    /// An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's
+    /// and OpenAI's APIs under that base.
+    Aiplex,
+}
+
+impl ControlPlane {
+    /// Its name in `control_plane = "..."`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlPlane::Aiplex => "aiplex",
+        }
+    }
+}
+
+impl fmt::Display for ControlPlane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A backend's compatibility layer (`[models.backends.NAME] compat`): what
@@ -349,6 +662,12 @@ pub struct Backend {
     pub header: Option<String>,
     /// Its compatibility layer: as configured, else by its URL's host.
     pub compat: Compat,
+    /// The control plane it is an access point of; `None` for a plain
+    /// backend.
+    pub control_plane: Option<ControlPlane>,
+    /// With [`BackendAuth::TurnToken`], the audience of the token the
+    /// gateway signs for each turn and presents instead of a key.
+    pub audience: Option<String>,
 }
 
 /// A route, resolved.
@@ -478,15 +797,7 @@ impl Gateway {
         let mut backends = Vec::new();
         for (name, b) in &config.backends {
             check_name(name).map_err(|e| format!("models.backends: {e}"))?;
-            let url = match (&b.url, b.api.default_url()) {
-                (Some(url), _) => url.trim_end_matches('/').to_owned(),
-                (None, Some(url)) => url.to_owned(),
-                (None, None) => {
-                    return Err(format!(
-                        "models.backends.{name}: a generic backend needs a url"
-                    ))
-                }
-            };
+            let url = backend_url(name, b)?;
             let target = upstream::Target::parse(&url)
                 .map_err(|e| format!("models.backends.{name}.url: {e}"))?;
             if b.header.is_some() && b.api != Api::Generic {
@@ -508,13 +819,40 @@ impl Gateway {
                     b.api
                 ));
             }
+            if let Some(plane) = b.control_plane {
+                check_control_plane(
+                    name,
+                    plane,
+                    b.api,
+                    b.key.is_some() || b.auth.is_some(),
+                    compat,
+                )?;
+            }
+            let source = b.key.as_deref().map(&key);
+            // A control plane's token in a variable of this process: no
+            // child this process starts inherits it (`branchyard_support::child`).
+            // So it may not be a variable children need, or Branchyard reads.
+            if let (Some(_), Some(KeySource::Env(var))) = (b.control_plane, &source) {
+                if shared_variable(var) {
+                    return Err(format!(
+                        "models.backends.{name}.key: the token would be read from {var}, a \
+                         variable that child processes need or Branchyard reads itself, and it \
+                         is hidden from every child; give the token a variable of its own, such \
+                         as AIPLEX_TOKEN"
+                    ));
+                }
+                branchyard_support::child::hide(var);
+            }
+            let audience = check_auth(name, b, &signer)?;
             backends.push(Backend {
                 name: name.clone(),
                 api: b.api,
                 url,
-                key: b.key.as_deref().map(&key),
+                audience,
+                key: source,
                 header: b.header.clone(),
                 compat,
+                control_plane: b.control_plane,
             });
         }
         let known = |name: &str, at: &str| -> Result<(), String> {
@@ -540,6 +878,20 @@ impl Gateway {
             for name in r.backends.iter().chain(&r.fallbacks) {
                 known(name, &at)?;
             }
+            let plane_of = |name: &String| {
+                config
+                    .backends
+                    .get(name)
+                    .and_then(|b| b.control_plane)
+                    .is_some()
+            };
+            let named = || r.backends.iter().chain(&r.fallbacks);
+            if let (Some(plane), Some(plain)) = (
+                named().find(|n| plane_of(n)),
+                named().find(|n| !plane_of(n)),
+            ) {
+                return Err(mixed_route(&at, &r.model, plane, plain));
+            }
             if r.requests_per_minute == Some(0) {
                 return Err(format!("{at}.requests_per_minute: must be at least 1"));
             }
@@ -556,6 +908,8 @@ impl Gateway {
                 backend_model: r.backend_model.clone(),
             });
         }
+        check_unrouted(&backends, &routes)?;
+        check_shared_keys(&backends)?;
         let budget = config.budget.clone().unwrap_or_default();
         if budget.alert_at.is_some_and(|a| !(a > 0.0 && a <= 1.0)) {
             return Err("models.budget.alert_at: give a share above 0 and at most 1".into());
@@ -581,7 +935,7 @@ impl Gateway {
         let seed = config
             .seed
             .unwrap_or_else(branchyard_support::rng::fresh_seed);
-        Ok(Gateway {
+        let gateway = Gateway {
             backends,
             routes,
             budget,
@@ -598,11 +952,141 @@ impl Gateway {
             }),
             signatures: gemini::Signatures::default(),
             transport: upstream::Transport::from_env(upstream::QUIET),
-        })
+        };
+        // A control plane's token under another variable's name is hidden
+        // as the named one was above, from the children still to start.
+        gateway.hide_copies()?;
+        Ok(gateway)
+    }
+
+    /// Whether any backend is a control plane's access point.
+    pub(crate) fn has_control_plane(&self) -> bool {
+        self.backends.iter().any(|b| b.control_plane.is_some())
+    }
+
+    /// The first route whose pattern matches `model`, whatever API a
+    /// request speaks, when it names control-plane backends: its pattern and
+    /// those backends. A model the gateway read that such a route takes
+    /// goes to one of them or nowhere, so the order of the routes decides:
+    /// a wider pattern before a narrower one takes the narrower one's
+    /// models. `None` when no route's pattern matches `model`, or the first
+    /// that does names plain backends.
+    pub(crate) fn governed_by(&self, model: &str) -> Option<(&str, Vec<&str>)> {
+        let route = self
+            .routes
+            .iter()
+            .find(|r| branchyard_provision::connectors::glob_match(&r.model, model))?;
+        let planes: Vec<&str> = route
+            .backends
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&route.fallbacks)
+            .filter(|name| {
+                self.backend(name)
+                    .is_some_and(|b| b.control_plane.is_some())
+            })
+            .map(String::as_str)
+            .collect();
+        (!planes.is_empty()).then_some((route.model.as_str(), planes))
+    }
+
+    /// The tokens of the control-plane backends that are called with a
+    /// stored key, each with the name of a backend it is the key of: what
+    /// is sent to that backend's `url` and to nothing else. Read now, each
+    /// source once. A key that cannot be read now, or is too short to be
+    /// used (`MIN_CONTROL_PLANE_KEY`), is not one.
+    pub(crate) fn control_plane_tokens(&self) -> Vec<(String, String)> {
+        let mut read: Vec<&KeySource> = Vec::new();
+        let mut tokens = Vec::new();
+        for backend in self.backends.iter().filter(|b| b.control_plane.is_some()) {
+            let Some(source) = &backend.key else {
+                continue;
+            };
+            if read.contains(&source) {
+                continue;
+            }
+            read.push(source);
+            if let Ok(token) = source.read() {
+                if token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY {
+                    // From here on no child of this process is given it,
+                    // and no harness's environment holds it, whoever
+                    // would have put it there (`branchyard_support::child`).
+                    branchyard_support::child::guard(&backend.name, &token);
+                    tokens.push((backend.name.clone(), token));
+                }
+            }
+        }
+        tokens
+    }
+
+    /// The control-plane backend whose token `key` holds, when it holds
+    /// one: a plain backend's key that does is never sent, since it would
+    /// take the control plane's credential to a provider.
+    pub(crate) fn token_held_by(&self, key: &str) -> Option<String> {
+        self.control_plane_tokens()
+            .into_iter()
+            .find(|(_, token)| holds(key, token))
+            .map(|(backend, _)| backend)
+    }
+
+    /// Hide every variable of this process that holds a control-plane
+    /// backend's token under another name ([`copies`]) from every child the
+    /// process starts from now on (`branchyard_support::child`), and name
+    /// them, for a turn to take them out of its harness's environment. The
+    /// variable a backend names is hidden when the gateway is built; this
+    /// goes by the value, which is known once the key can be read, so it
+    /// runs when the gateway is built and again when each turn's gateway
+    /// starts (a key file may not have been there before). The process's
+    /// environment does not change, and what is hidden stays hidden.
+    ///
+    /// # Errors
+    ///
+    /// When a variable that holds the token cannot be hidden ([`copies`]):
+    /// nothing is hidden by this call then.
+    pub(crate) fn hide_copies(&self) -> Result<Vec<String>, String> {
+        let tokens = self.control_plane_tokens();
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names = copies(std::env::vars_os(), &tokens)?;
+        for name in &names {
+            branchyard_support::child::hide(name);
+        }
+        Ok(names)
+    }
+
+    /// The same gateway, giving up on a backend whose answer goes quiet
+    /// for `quiet` (by default ten minutes, as long as a model may think
+    /// before it answers). A call whose backend went quiet after it was
+    /// sent fails `502` and is not sent to another backend: it may have
+    /// been billed.
+    pub fn quiet_after(mut self, quiet: std::time::Duration) -> Gateway {
+        self.transport = upstream::Transport::from_env(quiet);
+        self
     }
 
     fn backend(&self, name: &str) -> Option<&Backend> {
         self.backends.iter().find(|b| b.name == name)
+    }
+
+    /// The backends of `order` a call may be sent to: never both kinds,
+    /// so a refusal or an outage of one kind never moves the call to the
+    /// other. A route that names a control-plane backend names only
+    /// control-plane backends ([`Gateway::new`]), and this holds at run time
+    /// whatever the routes say: its plain backends are dropped. A call no
+    /// route takes (`routed` false) goes to the plain backends of its API
+    /// when there are any, as before control planes existed, and to its
+    /// control-plane backends only when it has no plain one.
+    pub(crate) fn confine<'a>(&self, routed: bool, order: Vec<&'a Backend>) -> Vec<&'a Backend> {
+        let planes = order.iter().any(|b| b.control_plane.is_some());
+        let plain = order.iter().any(|b| b.control_plane.is_none());
+        match planes && plain {
+            true => order
+                .into_iter()
+                .filter(|b| b.control_plane.is_some() == routed)
+                .collect(),
+            false => order,
+        }
     }
 
     /// Whether some backend speaks `api`.
@@ -637,8 +1121,14 @@ impl Gateway {
     /// order), then its fallbacks. Without a route, every backend of
     /// `api` in order. Also the route's index, for its rate limit. A
     /// route naming a `backend_model` also offers its backends of an API
-    /// the request translates to.
+    /// the request translates to. Either way [`Gateway::confine`] has the
+    /// last word: one call's backends are never of both kinds.
     pub(crate) fn plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
+        let (index, order) = self.unconfined_plan(api, model);
+        (index, self.confine(index.is_some(), order))
+    }
+
+    fn unconfined_plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
         let usable = |r: &Route, b: &Backend| {
             b.api == api || (r.backend_model.is_some() && api.translates_to(b.api))
         };
@@ -747,6 +1237,263 @@ impl Gateway {
         }
         pricing::cost(api, model, tokens)
     }
+}
+
+/// Where backend `name`'s calls go, and with them its credential: its `url`
+/// as written (a trailing `/` dropped), else, for a plain backend, its API's
+/// public address. The one place a backend's address is decided, for the
+/// gateway ([`Gateway::new`]) and for listing models
+/// ([`discover::sources`]).
+///
+/// A control-plane backend has no default: without a `url` its calls would
+/// go to the provider's public API carrying the control plane's credential
+/// (a stored token, or a token the yard signs that is good at the control
+/// plane for up to an hour), so it must name its access point. A `url`
+/// written out is the operator's choice, whatever it names.
+pub(crate) fn backend_url(name: &str, b: &BackendConfig) -> Result<String, String> {
+    match (&b.url, b.control_plane, b.api.default_url()) {
+        (Some(url), _, _) => Ok(url.trim_end_matches('/').to_owned()),
+        (None, Some(plane), _) => Err(format!(
+            "models.backends.{name}.url: a control-plane backend ({plane}) has no default \
+             address: without a url its calls, and the credential they carry, would go to the \
+             provider's public API; write its access point, \
+             url = \"https://<aiplex>/ap/<access point>\""
+        )),
+        (None, None, Some(url)) => Ok(url.to_owned()),
+        (None, None, None) => Err(format!(
+            "models.backends.{name}: a generic backend needs a url"
+        )),
+    }
+}
+
+/// Whether variable `name` is one child processes need or Branchyard reads
+/// itself, so it cannot hold a control plane's token, which is hidden from
+/// every child: the shell's (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+/// `PWD`, `TMPDIR`, `TMP`, `TEMP`, `TERM`, `LANG`, `LANGUAGE`, `LC_*`),
+/// `SSH_AUTH_SOCK`, git's (`GIT_*`), the proxies' (`*_PROXY`, `NO_PROXY`),
+/// the trust bundles' (`SSL_CERT_*`, `CURL_CA_BUNDLE`,
+/// `REQUESTS_CA_BUNDLE`) and Branchyard's (`BRANCHYARD_*`), in any case.
+pub fn shared_variable(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "LOGNAME"
+            | "SHELL"
+            | "PWD"
+            | "TMPDIR"
+            | "TMP"
+            | "TEMP"
+            | "TERM"
+            | "LANG"
+            | "LANGUAGE"
+            | "SSH_AUTH_SOCK"
+            | "NO_PROXY"
+            | "CURL_CA_BUNDLE"
+            | "REQUESTS_CA_BUNDLE"
+    ) || ["LC_", "GIT_", "SSL_CERT_", "BRANCHYARD_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_PROXY")
+}
+
+/// Refuse what a control-plane backend cannot be: one of a generic API
+/// (an access point serves Anthropic's and OpenAI's), one without a key
+/// (its credential, sent as a bearer token), or one with a compatibility
+/// layer (an access point serves each API as the provider does).
+fn check_control_plane(
+    name: &str,
+    plane: ControlPlane,
+    api: Api,
+    has_key: bool,
+    compat: Compat,
+) -> Result<(), String> {
+    let at = format!("models.backends.{name}");
+    if api == Api::Generic {
+        return Err(format!(
+            "{at}.control_plane: {plane} is for an anthropic or openai backend (an access \
+             point serves those APIs), not generic"
+        ));
+    }
+    if !has_key {
+        return Err(format!(
+            "{at}.key: a control-plane backend ({plane}) needs a key (the token it is called \
+             with), or auth = \"turn-token\" with an audience on a server"
+        ));
+    }
+    if compat != Compat::Off {
+        return Err(format!(
+            "{at}.compat: a control-plane backend ({plane}) takes no compatibility layer, \
+             not {}",
+            compat.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// The audience of backend `name`'s signed token, when it is called with
+/// one, or why its `auth` and `audience` are refused: a signed token goes
+/// only to an AIPlex backend, needs an audience and no `key`, and a yard
+/// whose tokens' issuer AIPlex cannot fetch keys from, or whose tenant it
+/// cannot name, cannot sign one.
+fn check_auth(name: &str, b: &BackendConfig, signer: &Signer) -> Result<Option<String>, String> {
+    let at = format!("models.backends.{name}");
+    match (b.auth, &b.audience) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(format!(
+            "{at}.audience: is only for auth = \"turn-token\"; add it, or remove audience"
+        )),
+        (Some(BackendAuth::TurnToken), _) if b.control_plane.is_none() => Err(format!(
+            "{at}.auth: a token Branchyard signs goes only to an AIPlex backend: add \
+             control_plane = \"aiplex\", or use key"
+        )),
+        (Some(BackendAuth::TurnToken), None) => Err(format!(
+            "{at}.audience: auth = \"turn-token\" needs audience = \"...\": the audience the \
+             AIPlex binding expects"
+        )),
+        (Some(BackendAuth::TurnToken), Some(audience)) if audience.trim().is_empty() => Err(
+            format!("{at}.audience: is empty; write the audience the AIPlex binding expects"),
+        ),
+        (Some(BackendAuth::TurnToken), Some(_)) if b.key.is_some() => Err(format!(
+            "{at}: names both key and auth = \"turn-token\": one credential, not two; remove one"
+        )),
+        (Some(BackendAuth::TurnToken), Some(audience)) => {
+            federable_issuer(&signer.issuer).map_err(|why| format!("{at}.auth: {why}"))?;
+            if !federable_tenant(&signer.tenant) {
+                return Err(format!(
+                    "{at}.auth: the tenant {:?} cannot be named in the token's subject \
+                     (branchyard:<tenant>, 1 to 128 of A-Z a-z 0-9 . _ @ + -); use key instead",
+                    signer.tenant
+                ));
+            }
+            Ok(Some(audience.clone()))
+        }
+    }
+}
+
+/// Refuse a control-plane backend that no route names when a plain
+/// backend speaks its API: a call no route takes goes to the plain one
+/// ([`Gateway::confine`]), so it would never be used.
+/// Whether `value` holds the control plane's token `token`: it is the token,
+/// or has it inside, as `Bearer <token>` has. A token too short to be used
+/// (`MIN_CONTROL_PLANE_KEY`) is looked for only as the whole value, since
+/// a few characters are inside many values that do not hold them.
+pub(crate) fn holds(value: &str, token: &str) -> bool {
+    value == token
+        || (token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY && value.contains(token))
+}
+
+/// Of `environment` (a process's variables), the names of those whose value
+/// holds one of `tokens` (a control plane's token, with a backend it is the
+/// key of): equal to it, or with it inside, as `Bearer <token>` has. They
+/// are hidden from every child, as the variable the backend names is.
+///
+/// Refused, naming the variable and never the value, when one of them
+/// cannot be hidden: a variable child processes need or Branchyard reads
+/// itself ([`shared_variable`]), or one whose name is not UTF-8, which no
+/// rule can name.
+fn copies(
+    environment: impl Iterator<Item = (OsString, OsString)>,
+    tokens: &[(String, String)],
+) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for (name, value) in environment {
+        let value = value.to_string_lossy();
+        let Some((backend, _)) = tokens.iter().find(|(_, token)| holds(&value, token)) else {
+            continue;
+        };
+        let Some(name) = name.to_str() else {
+            return Err(format!(
+                "models.backends.{backend}.key: a variable whose name is not UTF-8 holds the \
+                 token too, and it cannot be hidden from child processes; take the token out \
+                 of it"
+            ));
+        };
+        if shared_variable(name) {
+            return Err(format!(
+                "models.backends.{backend}.key: the variable {name} holds the token too, and \
+                 it cannot be hidden from child processes, which need {name} (or Branchyard \
+                 reads it itself); take the token out of {name}"
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Why the control-plane backend `backend`, whose key is at `source`, is
+/// refused in this process: a variable that child processes need, or
+/// Branchyard reads itself, holds the same value, and cannot be hidden from
+/// them. What [`Gateway::new`] and every turn say of it, for `by doctor` to
+/// say too. `None` when the key cannot be read, is too short to be a token,
+/// or no such variable holds it.
+pub fn unhidable_copy(backend: &str, source: &KeySource) -> Option<String> {
+    let token = source
+        .read()
+        .ok()
+        .filter(|token| token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY)?;
+    copies(std::env::vars_os(), &[(backend.to_owned(), token)]).err()
+}
+
+/// Refuse a plain backend whose key is read from where a control-plane
+/// backend's token is read: every call to it would carry the control
+/// plane's credential to a provider.
+fn check_shared_keys(backends: &[Backend]) -> Result<(), String> {
+    for plain in backends.iter().filter(|b| b.control_plane.is_none()) {
+        let Some(source) = &plain.key else {
+            continue;
+        };
+        let plane = backends
+            .iter()
+            .find(|b| b.control_plane.is_some() && b.key.as_ref() == Some(source));
+        if let Some(plane) = plane {
+            return Err(format!(
+                "models.backends.{plain}.key: it is read from {source}, where the token of the \
+                 control-plane backend {plane} is read from, and a control plane's token is \
+                 sent only to its own url; give {plain} a key of its own",
+                plain = plain.name,
+                plane = plane.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_unrouted(backends: &[Backend], routes: &[Route]) -> Result<(), String> {
+    for backend in backends.iter().filter(|b| b.control_plane.is_some()) {
+        let named = routes.iter().any(|r| {
+            r.backends.iter().any(|(n, _)| *n == backend.name)
+                || r.fallbacks.contains(&backend.name)
+        });
+        let plain = backends
+            .iter()
+            .find(|b| b.api == backend.api && b.control_plane.is_none());
+        if let (false, Some(plain)) = (named, plain) {
+            return Err(format!(
+                "models.backends.{name}: no route names this control-plane backend, and a call \
+                 no route takes goes to the plain {api} backend {plain}, so it would never be \
+                 used; add a route that names it ([[models.routes]] with backends = [\"{name}\"])",
+                name = backend.name,
+                api = backend.api,
+                plain = plain.name,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why route `at` (for `model`), which names the control-plane backend
+/// `plane` and the plain backend `plain`, is refused.
+fn mixed_route(at: &str, model: &str, plane: &str, plain: &str) -> String {
+    format!(
+        "{at} ({model}): names the control-plane backend {plane} and the plain backend \
+         {plain}; a route that names a control-plane backend names only control-plane \
+         backends, or a refusal or an outage of the control plane would send its call to \
+         {plain} directly"
+    )
 }
 
 /// A backend name: `[A-Za-z0-9_-]`, 1 to 64 characters.
@@ -870,7 +1617,9 @@ pub struct ModelCall {
     pub model: String,
     pub api: Api,
     /// `allowed`, `denied` (the token's scope), `rate_limited`, `budget`,
-    /// `unauthorized` or `failed` (no backend answered).
+    /// `unauthorized`, `refused` (a control-plane backend refused it: its
+    /// answer carried an error code of the control plane's own) or
+    /// `failed` (no backend answered).
     pub decision: String,
     /// The backend that answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -905,6 +1654,34 @@ pub struct ModelCall {
     /// request and response, relative to the repository root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_file: Option<String>,
+    /// For a call sent to a control-plane backend, its id and what the
+    /// control plane answered about it; `None` for any other call.
+    // Boxed, as `interception` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<Box<ControlPlaneCall>>,
+}
+
+/// A call sent to a control-plane backend, as its `model` event records it
+/// (`docs/model-gateway.md`, "What is recorded").
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneCall {
+    /// The control plane.
+    pub plane: ControlPlane,
+    /// The call's own id: the `X-Client-Request-Id` it was sent (the same
+    /// on every control-plane backend tried) and the id of its usage
+    /// record, when it has one.
+    pub call_id: String,
+    /// The control plane's own id of the call (`X-Aiplex-Request-Id`): the
+    /// `request_id` of its record. Kept only when it is 1 to 128 of
+    /// `A-Z a-z 0-9 - _ . :`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The control plane's code for a refusal it made itself
+    /// (`X-Aiplex-Error-Code`), such as `QUOTA_BUDGET_EXHAUSTED`. Kept
+    /// only when it is 1 to 64 of `A-Z 0-9 _`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// The record of one call that reached a backend, for an audit: who asked
@@ -1002,6 +1779,13 @@ impl ModelCall {
             }
         }
         detail.push(format!("{} ms", self.latency_ms));
+        if let Some(plane) = &self.control_plane {
+            if let Some(id) = &plane.request_id {
+                detail.push(format!("{} request {id}", plane.plane));
+            }
+            // The id AIPlex's ledger holds as `client_request_id`.
+            detail.push(format!("call {}", plane.call_id));
+        }
         out.push_str(&format!(" ({})", detail.join(", ")));
         out
     }
@@ -1014,8 +1798,8 @@ pub(crate) enum Prepared {
         gateway: Box<TurnGateway>,
         env: Vec<(String, String)>,
         /// Variables taken out of the harness's environment: provider
-        /// credentials it must not hold.
-        scrub: Vec<&'static str>,
+        /// credentials it must not hold ([`scrub`]).
+        scrub: Vec<String>,
         /// The URL the harness is given, which a restricted network
         /// policy allows.
         url: String,
@@ -1037,6 +1821,38 @@ const SCRUB: &[&str] = &[
     "OPENAI_ORG_ID",
     "AZURE_OPENAI_API_KEY",
 ];
+
+/// The variables taken out of a turn's harness's environment on the
+/// gateway: [`SCRUB`], the variable each control-plane backend's key is
+/// read from, and every variable that holds such a key under another name
+/// ([`Gateway::hide_copies`]), so a harness never holds a control plane's
+/// credential. A plain backend's key variable is left as it was, unless it
+/// holds that credential: a harness may read its provider's own variable
+/// itself. This is a scrub of the environment, not a
+/// boundary: a local harness runs as the same user, and can read a key file
+/// or its parent's environment (`docs/model-gateway.md`, "The credential").
+pub(crate) fn scrub(gateway: &Gateway) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = SCRUB.iter().map(|n| (*n).to_owned()).collect();
+    for backend in gateway
+        .backends
+        .iter()
+        .filter(|b| b.control_plane.is_some())
+    {
+        if let Some(KeySource::Env(var)) = &backend.key {
+            if !names.contains(var) {
+                names.push(var.clone());
+            }
+        }
+    }
+    // And every variable that holds such a token under another name, by
+    // its value as it is now.
+    for name in gateway.hide_copies()? {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
 
 /// The secrets that log `harness` in by subscription, which the gateway
 /// cannot stand in for: Claude Code's OAuth token, Codex's login file. Only
@@ -1118,19 +1934,37 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
     }
 }
 
+/// What the engine knows of a turn that its gateway needs beyond the
+/// branch's record.
+pub(crate) struct TurnInputs<'a> {
+    /// The connector token, when the turn has one: it carries the model
+    /// scope too. Otherwise the gateway's own is minted.
+    pub token: Option<&'a str>,
+    pub deadline_ms: Option<u64>,
+    pub scopes: &'a TokenScopes,
+    pub budget: crate::Budget,
+    /// What the branch's children hold of its limit.
+    pub reserved: f64,
+    /// The turn's W3C trace context ([`crate::TaskOptions::trace_parent`]),
+    /// which a control-plane backend is sent as `traceparent`.
+    pub trace_parent: Option<&'a str>,
+}
+
 /// Prepare the turn's model access: `None` when the branch is not on the
-/// gateway. `token` is the connector token when the turn has one (it
-/// carries the model scope too); otherwise the gateway's own is minted. A
-/// failure is the turn's, by name.
+/// gateway. A failure is the turn's, by name.
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
-    token: Option<&str>,
-    deadline_ms: Option<u64>,
-    scopes: &TokenScopes,
-    budget: crate::Budget,
-    reserved: f64,
+    inputs: TurnInputs<'_>,
 ) -> Result<Option<Prepared>, String> {
+    let TurnInputs {
+        token,
+        deadline_ms,
+        scopes,
+        budget,
+        reserved,
+        trace_parent,
+    } = inputs;
     let Some(access) = record.provision.as_ref().and_then(|p| p.models.clone()) else {
         return Ok(None);
     };
@@ -1162,6 +1996,8 @@ pub(crate) fn prepare(
             hosts,
         }));
     }
+    // What the harness starts without, before anything is started for it.
+    let scrub = scrub(&gateway)?;
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     let host = match (sandboxed, &gateway.sandbox_host) {
         (false, _) => match gateway.listen {
@@ -1235,6 +2071,16 @@ pub(crate) fn prepare(
         by_branch: gateway.by_branch(&record.info.name),
         turn: record.info.turns + 1,
         subject,
+        harness: record.info.harness.clone(),
+        trace_parent: trace_parent.map(str::to_owned),
+        signer: Arc::clone(&keys),
+        issuer: gateway.signer.issuer.clone(),
+        tenant: record
+            .actor
+            .as_ref()
+            .map_or_else(|| gateway.signer.tenant.clone(), |a| a.tenant.clone()),
+        deadline_ms,
+        signed: gateway::SignedTokens::default(),
         max_usd: budget.max_usd,
         cost_before: record.info.cost_usd.unwrap_or(0.0),
         held: reserved,
@@ -1275,7 +2121,7 @@ pub(crate) fn prepare(
     Ok(Some(Prepared::Gateway {
         gateway: Box::new(running),
         env,
-        scrub: SCRUB.to_vec(),
+        scrub,
         activity: ModelActivity::Gateway {
             url: url.clone(),
             models: access.allow.clone(),
@@ -1335,6 +2181,7 @@ pub fn summarize(rows: &[UsageRecord]) -> (UsageTotals, BTreeMap<String, UsageTo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     #[test]
     fn periods_start_at_utc_midnight_and_the_first_of_the_month() {
@@ -1611,6 +2458,7 @@ mod tests {
             failed_over: Vec::new(),
             interception: None,
             audit_file: None,
+            control_plane: None,
         };
         assert_eq!(
             call.describe(),
@@ -1646,6 +2494,7 @@ mod tests {
                 stop_reason: Some("tool_use".into()),
             })),
             audit_file: None,
+            control_plane: None,
         }
     }
 
@@ -1739,6 +2588,966 @@ mod tests {
                 "{bad:?}: {error}"
             );
         }
+    }
+
+    fn built(config: Value) -> Result<Gateway, String> {
+        let config: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
+        Gateway::new(&config, signer(), |n| KeySource::Env(n.into()))
+    }
+
+    fn names(order: &[&Backend]) -> Vec<String> {
+        order.iter().map(|b| b.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_variable_that_holds_a_control_planes_token_is_named_or_refused() {
+        const TOKEN: &str = "aiplex-token-0123456789";
+        let tokens = [("ap".to_owned(), TOKEN.to_owned())];
+        let environment = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        // As `aiplex dev env` leaves a shell: the token under the SDKs'
+        // names too. Equal to it or with it inside; in name order.
+        let bearer = format!("Bearer {TOKEN}");
+        let shell = [
+            ("GEMINI_API_KEY", TOKEN),
+            ("AIPLEX_TOKEN", TOKEN),
+            ("OPENAI_API_KEY", TOKEN),
+            ("CUSTOM_HEADERS", bearer.as_str()),
+            ("GOOGLE_GEMINI_BASE_URL", "http://127.0.0.1:7400/ap/ide"),
+            ("GOOGLE_API_KEY", "another-key-0123456789"),
+            ("ALMOST", "aiplex-token-012345678"),
+            ("EMPTY", ""),
+            ("PATH", "/usr/bin:/bin"),
+        ];
+        assert_eq!(
+            copies(environment(&shell), &tokens).unwrap(),
+            [
+                "AIPLEX_TOKEN",
+                "CUSTOM_HEADERS",
+                "GEMINI_API_KEY",
+                "OPENAI_API_KEY"
+            ]
+        );
+        // Nothing to look for: nothing is named, whatever the variables.
+        assert_eq!(
+            copies(environment(&shell), &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        // A value that is not UTF-8 is still read.
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = vec![0xff];
+        bytes.extend_from_slice(TOKEN.as_bytes());
+        let odd = vec![(OsString::from("ODD_VALUE"), OsString::from_vec(bytes))];
+        assert_eq!(copies(odd.into_iter(), &tokens).unwrap(), ["ODD_VALUE"]);
+        // A variable every child needs cannot be hidden: refused, hiding
+        // none, naming the variable and the backend and never the value.
+        let proxy = format!("http://user:{TOKEN}@proxy.example:3128");
+        for (name, value) in [
+            ("PATH", TOKEN),
+            ("HOME", TOKEN),
+            ("LC_ALL", TOKEN),
+            ("GIT_DIR", TOKEN),
+            ("HTTPS_PROXY", proxy.as_str()),
+            ("https_proxy", proxy.as_str()),
+            ("BRANCHYARD_ROOT", TOKEN),
+        ] {
+            let error = copies(
+                environment(&[("GEMINI_API_KEY", TOKEN), (name, value)]),
+                &tokens,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "models.backends.ap.key: the variable {name} holds the token too, and it \
+                     cannot be hidden from child processes, which need {name} (or Branchyard \
+                     reads it itself); take the token out of {name}"
+                )
+            );
+            assert!(!error.contains(TOKEN), "{error}");
+        }
+        // Nor can one whose name no rule can spell.
+        let unnamed = vec![(OsString::from_vec(vec![0xff, b'K']), OsString::from(TOKEN))];
+        let error = copies(unnamed.into_iter(), &tokens).unwrap_err();
+        assert_eq!(
+            error,
+            "models.backends.ap.key: a variable whose name is not UTF-8 holds the token too, \
+             and it cannot be hidden from child processes; take the token out of it"
+        );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_read_its_key_where_a_control_plane_reads_its_token() {
+        let config = |plain_key: &str| {
+            json!({
+                "backends": {
+                    "ap": {"api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+                        "key": "AIPLEX_TOKEN_OF_THE_TEST", "control_plane": "aiplex"},
+                    "ap-openai": {"api": "openai", "url": "https://aiplex.example.com/ap/ide",
+                        "key": "AIPLEX_TOKEN_OF_THE_TEST", "control_plane": "aiplex"},
+                    "plain": {"api": "anthropic", "key": plain_key}
+                },
+                "routes": [
+                    {"model": "claude-*", "backends": ["ap"]},
+                    {"model": "direct-*", "backends": ["plain"]}
+                ]
+            })
+        };
+        // Two control-plane backends share a token; a plain backend has
+        // its own key.
+        built(config("ANTHROPIC_KEY_OF_THE_TEST")).unwrap();
+        assert_eq!(
+            built(config("AIPLEX_TOKEN_OF_THE_TEST")).unwrap_err(),
+            "models.backends.plain.key: it is read from $AIPLEX_TOKEN_OF_THE_TEST, where the \
+             token of the control-plane backend ap is read from, and a control plane's token \
+             is sent only to its own url; give plain a key of its own"
+        );
+    }
+
+    #[test]
+    fn the_tokens_a_gateway_guards_are_its_control_planes_stored_keys() {
+        const TOKEN: &str = "aiplex-token-9876543210";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("aiplex"), format!("{TOKEN}\n")).unwrap();
+        std::fs::write(dir.path().join("short"), "fifteen-chars-x").unwrap();
+        std::fs::write(dir.path().join("provider"), "sk-provider-0123456789").unwrap();
+        let at = "https://aiplex.example.com/ap/ide";
+        let config: Config = serde_json::from_value(json!({
+            "backends": {
+                "ap-a": {"api": "anthropic", "url": at, "key": "aiplex", "control_plane": "aiplex"},
+                "ap-b": {"api": "openai", "url": at, "key": "aiplex", "control_plane": "aiplex"},
+                "ap-gone": {"api": "anthropic", "url": at, "key": "gone", "control_plane": "aiplex"},
+                "ap-short": {"api": "anthropic", "url": at, "key": "short", "control_plane": "aiplex"},
+                "plain": {"api": "anthropic", "key": "provider"}
+            },
+            "routes": [
+                {"model": "claude-*", "backends": ["ap-a", "ap-gone", "ap-short"]},
+                {"model": "gpt-*", "backends": ["ap-b"]},
+                {"model": "direct-*", "backends": ["plain"]}
+            ]
+        }))
+        .unwrap();
+        let root = dir.path().to_path_buf();
+        let gateway =
+            Gateway::new(&config, signer(), |name| KeySource::File(root.join(name))).unwrap();
+        // One source read once; a key that is missing, too short to be
+        // used, or a plain backend's is not a control plane's token.
+        assert_eq!(
+            gateway.control_plane_tokens(),
+            [("ap-a".to_owned(), TOKEN.to_owned())]
+        );
+        assert_eq!(gateway.token_held_by(TOKEN).as_deref(), Some("ap-a"));
+        assert_eq!(
+            gateway.token_held_by(&format!("Bearer {TOKEN}")).as_deref(),
+            Some("ap-a")
+        );
+        for key in [
+            "sk-provider-0123456789",
+            "fifteen-chars-x",
+            "",
+            "aiplex-token-987654321",
+        ] {
+            assert_eq!(gateway.token_held_by(key), None, "{key}");
+        }
+        // A gateway without a control plane reads nothing and guards nothing.
+        let plain: Config = serde_json::from_value(json!({
+            "backends": {"plain": {"api": "anthropic", "key": "aiplex"}}
+        }))
+        .unwrap();
+        let root = dir.path().to_path_buf();
+        let gateway =
+            Gateway::new(&plain, signer(), |name| KeySource::File(root.join(name))).unwrap();
+        assert!(gateway.control_plane_tokens().is_empty());
+        assert_eq!(gateway.token_held_by(TOKEN), None);
+    }
+
+    /// [`built`], as a yard whose tokens' issuer is `issuer`.
+    fn built_as(issuer: &str, config: Value) -> Result<Gateway, String> {
+        let config: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
+        let signer = Signer {
+            issuer: issuer.into(),
+            tenant: "local".into(),
+            ..signer()
+        };
+        Gateway::new(&config, signer, |n| KeySource::Env(n.into()))
+    }
+
+    #[test]
+    fn a_control_plane_backend_has_no_default_address() {
+        let credentials = [
+            json!({"key": "AIPLEX_TOKEN"}),
+            json!({"auth": "turn-token", "audience": "https://aiplex.example.com"}),
+        ];
+        let backend = |api: &str, credential: &Value, url: Option<&str>| {
+            let mut backend = json!({"api": api, "control_plane": "aiplex"});
+            for (key, value) in credential.as_object().unwrap() {
+                backend[key] = value.clone();
+            }
+            if let Some(url) = url {
+                backend["url"] = json!(url);
+            }
+            json!({"backends": {"ap": backend}})
+        };
+        for api in ["anthropic", "openai"] {
+            for credential in &credentials {
+                // Without a url the provider's public API would be sent the
+                // credential: refused, saying what a url looks like.
+                let error =
+                    built_as("https://by.example.com", backend(api, credential, None)).unwrap_err();
+                assert_eq!(
+                    error,
+                    "models.backends.ap.url: a control-plane backend (aiplex) has no default \
+                     address: without a url its calls, and the credential they carry, would go \
+                     to the provider's public API; write its access point, \
+                     url = \"https://<aiplex>/ap/<access point>\"",
+                    "{api} {credential}"
+                );
+                // A url that is empty, blank or names no host is no address
+                // either.
+                for url in [
+                    "",
+                    " ",
+                    "/",
+                    "https://",
+                    "https:///ap/ide",
+                    "https://:8443/ap/ide",
+                    "aiplex.example.com/ap/ide",
+                    "https://aiplex.example.com/ap/ide ",
+                    "https://token@aiplex.example.com/ap/ide",
+                ] {
+                    let error = built_as(
+                        "https://by.example.com",
+                        backend(api, credential, Some(url)),
+                    )
+                    .unwrap_err();
+                    assert!(
+                        error.starts_with("models.backends.ap.url: "),
+                        "{url:?}: {error}"
+                    );
+                }
+                // Written out, the url is the operator's choice, and it is
+                // where the credential goes.
+                for url in [
+                    "https://aiplex.example.com/ap/ide",
+                    "https://api.anthropic.com",
+                ] {
+                    let gateway = built_as(
+                        "https://by.example.com",
+                        backend(api, credential, Some(url)),
+                    )
+                    .unwrap();
+                    assert_eq!(gateway.backends[0].url, url, "{api} {credential}");
+                }
+            }
+        }
+        // A plain backend keeps its API's public address.
+        for (api, url) in [
+            ("anthropic", "https://api.anthropic.com"),
+            ("openai", "https://api.openai.com"),
+        ] {
+            let gateway = built(json!({"backends": {"p": {"api": api, "key": "K"}}})).unwrap();
+            assert_eq!(gateway.backends[0].url, url);
+        }
+    }
+
+    #[test]
+    fn a_control_plane_backend_is_refused_where_it_could_be_bypassed() {
+        let plane = |api: &str| {
+            json!({"api": api, "url": "https://aiplex.test/ap/ide",
+            "key": "aiplex", "control_plane": "aiplex"})
+        };
+        let plain = |api: &str| json!({"api": api, "url": "http://127.0.0.1:1", "key": "k"});
+        for (config, needles) in [
+            // A route that mixes the two, in its backends or its fallbacks,
+            // is refused naming the route and both backends.
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["ap", "direct"]}]}),
+                vec![
+                    "models.routes[0] (claude-*)",
+                    "control-plane backend ap",
+                    "plain backend direct",
+                ],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "gpt-*", "backends": ["direct"]},
+                        {"model": "claude-*", "backends": ["ap"], "fallbacks": ["direct"]}]}),
+                vec!["models.routes[1] (claude-*)", "ap", "direct"],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["direct"], "fallbacks": ["ap"]}]}),
+                vec!["models.routes[0] (claude-*)", "ap", "direct"],
+            ),
+            // A generic backend cannot be one.
+            (
+                json!({"backends": {"g": {"api": "generic", "url": "https://aiplex.test/ap/x",
+                    "key": "aiplex", "control_plane": "aiplex"}}}),
+                vec!["models.backends.g.control_plane", "not generic"],
+            ),
+            // One that no route names, beside a plain backend of its API,
+            // would never be used: refused, saying what to add.
+            (
+                json!({"backends": {"ap": plane("openai"), "direct": plain("openai")}}),
+                vec![
+                    "models.backends.ap",
+                    "no route names",
+                    "plain openai backend direct",
+                    "add a route that names it",
+                    "backends = [\"ap\"]",
+                ],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["direct"]}]}),
+                vec!["models.backends.ap", "no route names"],
+            ),
+            // It needs its token, and takes no compatibility layer.
+            (
+                json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                    "control_plane": "aiplex"}}}),
+                vec!["models.backends.ap.key", "needs a key"],
+            ),
+            (
+                json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                    "key": "aiplex", "control_plane": "aiplex", "compat": "versioned"}}}),
+                vec!["models.backends.ap.compat", "versioned"],
+            ),
+            // The one value there is.
+            (
+                json!({"backends": {"ap": {"api": "openai", "key": "k",
+                    "control_plane": "anvil"}}}),
+                vec!["`anvil`", "`aiplex`"],
+            ),
+        ] {
+            let error = built(config.clone()).unwrap_err();
+            for needle in needles {
+                assert!(
+                    error.contains(needle),
+                    "{needle:?} not in {error} ({config})"
+                );
+            }
+        }
+        // What the contract shows is accepted: one backend per API, both
+        // control planes, a route each, and a plain route beside them.
+        let gateway = built(json!({
+            "backends": {"aiplex-anthropic": plane("anthropic"), "aiplex-openai": plane("openai"),
+                "spare": plane("anthropic"), "direct": plain("openai")},
+            "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"],
+                    "fallbacks": ["spare"]},
+                {"model": "gpt-*", "backends": ["aiplex-openai"]},
+                {"model": "o3*", "backends": ["direct"]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            gateway.backend("aiplex-openai").unwrap().control_plane,
+            Some(ControlPlane::Aiplex)
+        );
+        assert_eq!(gateway.backend("direct").unwrap().control_plane, None);
+        // Alone on its API, or beside a plain backend of another API, one
+        // that no route names is used by calls no route takes.
+        for config in [
+            json!({"backends": {"ap": plane("openai")}}),
+            json!({"backends": {"ap": plane("openai"), "direct": plain("anthropic")}}),
+        ] {
+            assert!(built(config.clone()).is_ok(), "{config}");
+        }
+        // Written back as it was read.
+        let config: Config =
+            serde_json::from_value(json!({"backends": {"ap": plane("openai")}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["backends"]["ap"]["control_plane"],
+            "aiplex"
+        );
+        let config: Config =
+            serde_json::from_value(json!({"backends": {"p": plain("openai")}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["backends"]["p"].get("control_plane"),
+            None
+        );
+    }
+
+    #[test]
+    fn one_calls_backends_are_never_of_both_kinds() {
+        let plane = |api: &str| {
+            json!({"api": api, "url": "https://aiplex.test/ap/ide",
+            "key": "aiplex", "control_plane": "aiplex"})
+        };
+        let plain = |api: &str| json!({"api": api, "url": "http://127.0.0.1:1", "key": "k"});
+        let mut gateway = built(json!({
+            "backends": {
+                "ap1": plane("anthropic"), "ap2": plane("anthropic"), "ap3": plane("anthropic"),
+                "apo": plane("openai"), "direct-a": plain("anthropic"), "direct-b": plain("anthropic")
+            },
+            "routes": [
+                {"model": "claude-haiku-*", "backends": ["apo"], "backend_model": "gpt-5-mini"},
+                {"model": "claude-*", "backends": ["ap1", "ap2"], "weights": [3, 1],
+                    "fallbacks": ["ap3"]},
+                {"model": "local-*", "backends": ["direct-b"]}
+            ],
+            "seed": 7
+        }))
+        .unwrap();
+        // The weighted choice, the route's other backends and its fallbacks:
+        // control planes only, every time.
+        for _ in 0..200 {
+            let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+            assert_eq!(route, Some(1));
+            let order = names(&order);
+            assert!(
+                order == ["ap1", "ap2", "ap3"] || order == ["ap2", "ap1", "ap3"],
+                "{order:?}"
+            );
+        }
+        // A translated route to a control plane offers only it.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-haiku-4-5"));
+        assert_eq!((route, names(&order)), (Some(0), vec!["apo".to_owned()]));
+        // A route the operator sends to a plain backend stays as it is.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("local-7b"));
+        assert_eq!(
+            (route, names(&order)),
+            (Some(2), vec!["direct-b".to_owned()])
+        );
+        // No route, on an API with plain backends: only those, in name
+        // order, as before control planes existed; a model or none.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("llama-3"));
+        assert_eq!(
+            (route, names(&order)),
+            (None, vec!["direct-a".into(), "direct-b".into()])
+        );
+        assert_eq!(
+            names(&gateway.plan(Api::Anthropic, None).1),
+            ["direct-a", "direct-b"]
+        );
+        // No route, on an API with only control planes: those.
+        let (route, order) = gateway.plan(Api::Openai, Some("o3"));
+        assert_eq!((route, names(&order)), (None, vec!["apo".to_owned()]));
+        assert_eq!(names(&gateway.plan(Api::Openai, None).1), ["apo"]);
+        // An order of both kinds is cut to one at run time: to the control
+        // planes for a route (a route changed after the configuration was
+        // checked still sends nothing to a plain backend), to the plain
+        // backends for a call no route takes.
+        let both: Vec<&Backend> = ["ap1", "direct-a", "ap2"]
+            .iter()
+            .map(|n| gateway.backend(n).unwrap())
+            .collect();
+        assert_eq!(names(&gateway.confine(true, both.clone())), ["ap1", "ap2"]);
+        assert_eq!(names(&gateway.confine(false, both)), ["direct-a"]);
+        gateway.routes[1].fallbacks.push("direct-a".into());
+        gateway.routes[1].backends.push(("direct-a".into(), 5));
+        for _ in 0..50 {
+            let (_, order) = gateway.plan(Api::Anthropic, Some("claude-opus-4"));
+            assert!(
+                order.iter().all(|b| b.control_plane.is_some()),
+                "{:?}",
+                names(&order)
+            );
+            assert_eq!(order.len(), 3);
+        }
+        // Without a control plane, nothing changes: every backend of the
+        // API, in name order.
+        let gateway = built(json!({
+            "backends": {"b": plain("anthropic"), "a": plain("anthropic")}
+        }))
+        .unwrap();
+        assert_eq!(
+            names(&gateway.plan(Api::Anthropic, Some("x")).1),
+            ["a", "b"]
+        );
+        let a = gateway.backend("a").unwrap();
+        assert_eq!(names(&gateway.confine(false, vec![a])), ["a"]);
+    }
+
+    #[test]
+    fn a_control_planes_refusal_and_its_id_read_in_by_log() {
+        let call = ModelCall {
+            model: "claude-sonnet-4-6".into(),
+            api: Api::Anthropic,
+            decision: "refused".into(),
+            backend: Some("aiplex-anthropic".into()),
+            reason: Some("refused by aiplex (QUOTA_BUDGET_EXHAUSTED)".into()),
+            status: 429,
+            translated: None,
+            tokens: None,
+            cost_usd: None,
+            latency_ms: 4,
+            streamed: false,
+            failed_over: Vec::new(),
+            interception: None,
+            audit_file: None,
+            control_plane: Some(Box::new(ControlPlaneCall {
+                plane: ControlPlane::Aiplex,
+                call_id: "AAECAwQFBgcICQoLDA0ODw".into(),
+                request_id: Some("req-17".into()),
+                error_code: Some("QUOTA_BUDGET_EXHAUSTED".into()),
+            })),
+        };
+        assert_eq!(
+            call.describe(),
+            "claude-sonnet-4-6 refused via aiplex-anthropic \
+             (429, refused by aiplex (QUOTA_BUDGET_EXHAUSTED), 4 ms, aiplex request req-17, \
+             call AAECAwQFBgcICQoLDA0ODw)"
+        );
+        let value = serde_json::to_value(&call).unwrap();
+        assert_eq!(
+            value["control_plane"],
+            json!({"plane": "aiplex", "call_id": "AAECAwQFBgcICQoLDA0ODw",
+                "request_id": "req-17", "error_code": "QUOTA_BUDGET_EXHAUSTED"})
+        );
+        assert_eq!(serde_json::from_value::<ModelCall>(value).unwrap(), call);
+        // A call of a plain backend writes neither, and reads back without.
+        let value = serde_json::to_value(answered()).unwrap();
+        assert_eq!(value.get("control_plane"), None);
+    }
+
+    #[test]
+    fn a_control_planes_token_may_not_be_a_variable_children_need() {
+        let plane = |var: &str| {
+            json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                "key": var, "control_plane": "aiplex"}}})
+        };
+        for var in [
+            "PATH",
+            "path",
+            "HOME",
+            "LC_ALL",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "NO_PROXY",
+            "GIT_DIR",
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "SSH_AUTH_SOCK",
+            "BRANCHYARD_TOKEN",
+        ] {
+            let error = built(plane(var)).unwrap_err();
+            assert!(
+                error.contains("models.backends.ap.key")
+                    && error.contains(var)
+                    && error.contains("a variable of its own"),
+                "{var}: {error}"
+            );
+            assert!(shared_variable(var), "{var}");
+        }
+        // An ordinary name works, and is hidden from children from then on.
+        assert!(built(plane("BY_TEST_UNIT_AIPLEX_TOKEN")).is_ok());
+        assert!(
+            branchyard_support::child::hidden().contains(&"BY_TEST_UNIT_AIPLEX_TOKEN".to_owned())
+        );
+        for var in ["AIPLEX_TOKEN", "MY_PATH_TOKEN", "PROXY_TOKEN"] {
+            assert!(!shared_variable(var), "{var}");
+        }
+        // A plain backend's key is not hidden, whatever its name.
+        assert!(built(json!({"backends": {"p": {"api": "openai", "key": "HOME"}}})).is_ok());
+    }
+
+    #[test]
+    fn a_signed_token_needs_an_aiplex_backend_an_audience_and_an_issuer_aiplex_can_reach() {
+        let signed = |issuer: &str, tenant: &str, backend: Value| {
+            let config: Config = serde_json::from_value(json!({"backends": {"ap": backend}}))
+                .map_err(|e| e.to_string())?;
+            let signer = Signer {
+                issuer: issuer.into(),
+                tenant: tenant.into(),
+                ..signer()
+            };
+            Gateway::new(&config, signer, |n| KeySource::Env(n.into()))
+        };
+        let plane = json!({"api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+            "control_plane": "aiplex", "auth": "turn-token",
+            "audience": "https://aiplex.example.com"});
+        // A public https issuer, and plain http on loopback only.
+        for issuer in [
+            "https://by.example.com",
+            "https://by.example.com:8443",
+            "http://127.0.0.1:7400",
+            "http://[::1]:7400",
+            "http://localhost:7400",
+        ] {
+            let gateway = signed(issuer, "local", plane.clone()).unwrap();
+            assert_eq!(
+                gateway.backends[0].audience.as_deref(),
+                Some("https://aiplex.example.com")
+            );
+            assert_eq!(gateway.backends[0].key, None);
+        }
+        for (issuer, needle) in [
+            ("branchyard:local:abc", "a local yard"),
+            ("http://10.0.0.5:7400", "not loopback"),
+            ("https://by.example.com/", "has a path"),
+            ("https://by.example.com/branchyard", "has a path"),
+            ("by.example.com", "not an http:// or https:// URL"),
+            ("https://by.example.com.", "dot"),
+            ("https://By.example.com", "upper-case"),
+            ("https://by.example.com:443", "default port"),
+            ("http://127.0.0.1:80", "default port"),
+            ("https://by.example.com:", "empty port"),
+            ("https://0.0.0.0:8443", "unspecified address"),
+        ] {
+            let error = signed(issuer, "local", plane.clone()).unwrap_err();
+            assert!(
+                error.contains("models.backends.ap.auth") && error.contains(needle),
+                "{issuer}: {error}"
+            );
+        }
+        let error = signed(issuer_ok(), "acme corp", plane.clone()).unwrap_err();
+        assert!(
+            error.contains("tenant") && error.contains("use key"),
+            "{error}"
+        );
+        let local = signed("branchyard:local:abc", "local", plane.clone()).unwrap_err();
+        assert!(local.contains("use key"), "{local}");
+        // The shape of the backend, by name.
+        let with = |extra: Value| {
+            let mut backend = json!({"api": "anthropic", "url": "https://aiplex.example.com/ap/x"});
+            for (k, v) in extra.as_object().unwrap() {
+                backend[k] = v.clone();
+            }
+            signed(issuer_ok(), "local", backend)
+        };
+        for (extra, needles) in [
+            (
+                json!({"auth": "turn-token", "audience": "a", "key": "k"}),
+                vec!["models.backends.ap.auth", "control_plane"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token"}),
+                vec!["models.backends.ap.audience", "needs audience"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token", "audience": ""}),
+                vec!["models.backends.ap.audience", "is empty"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token", "audience": "a",
+                    "key": "AIPLEX_TOKEN"}),
+                vec!["one credential, not two"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "key": "AIPLEX_TOKEN", "audience": "a"}),
+                vec!["models.backends.ap.audience", "only for auth"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "oidc"}),
+                vec!["`oidc`", "`turn-token`"],
+            ),
+        ] {
+            let error = with(extra.clone()).unwrap_err();
+            for needle in needles {
+                assert!(
+                    error.contains(needle),
+                    "{needle:?} not in {error} ({extra})"
+                );
+            }
+        }
+        assert!(federable_tenant("acme.eu_1@x+y-z"));
+        assert!(!federable_tenant(""));
+        assert!(!federable_tenant(&"a".repeat(129)));
+        assert!(!federable_tenant("a/b"));
+    }
+
+    #[test]
+    fn an_issuer_is_refused_for_what_is_wrong_with_it_saying_what_to_write() {
+        for issuer in [
+            "https://by.example.com",
+            "https://by.example.com:8443",
+            "https://127.0.0.1",
+            "http://127.0.0.1",
+            "http://127.0.0.1:7400",
+            "http://[::1]:7400",
+            "http://[::1]",
+            "http://localhost:7400",
+            "https://[2001:db8::1]:8443",
+        ] {
+            assert_eq!(federable_issuer(issuer), Ok(()), "{issuer}");
+        }
+        let spelled = |issuer: &str, how: &str, write: &str| {
+            (
+                issuer.to_owned(),
+                format!(
+                    "the issuer {issuer:?} {how}; the issuer must be spelled the same in \
+                     Branchyard and in AIPlex, so Branchyard takes one spelling (a lower-case \
+                     host, no trailing dot, no default port): write {write:?}"
+                ),
+            )
+        };
+        let refused = [
+            (
+                "branchyard:local:abc".to_owned(),
+                "this is a local yard (its tokens' issuer is branchyard:local:abc), which AIPlex \
+                 cannot fetch keys from, so it cannot be federated; use key = \"...\" (an AIPlex \
+                 token) instead"
+                    .to_owned(),
+            ),
+            (
+                "by.example.com".to_owned(),
+                "the issuer \"by.example.com\" is not an http:// or https:// URL, so AIPlex \
+                 cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "HTTPS://by.example.com".to_owned(),
+                "the issuer \"HTTPS://by.example.com\" is not an http:// or https:// URL, so \
+                 AIPlex cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com/".to_owned(),
+                "the issuer \"https://by.example.com/\" has a path; AIPlex wants \
+                 scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com/branchyard".to_owned(),
+                "the issuer \"https://by.example.com/branchyard\" has a path; AIPlex wants \
+                 scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com?x=1".to_owned(),
+                "the issuer \"https://by.example.com?x=1\" has a query or a fragment; AIPlex \
+                 wants scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            // The two an operator may type: named, not left to the URL
+            // parser's "has an invalid port".
+            (
+                "http://::1:7400".to_owned(),
+                "the issuer \"http://::1:7400\" names an IPv6 address without brackets; write \
+                 the address in brackets, scheme://[address]:port"
+                    .to_owned(),
+            ),
+            (
+                "https://2001:db8::1".to_owned(),
+                "the issuer \"https://2001:db8::1\" names an IPv6 address without brackets; \
+                 write the address in brackets, scheme://[address]:port"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com:".to_owned(),
+                "the issuer \"https://by.example.com:\" has an empty port; write the port \
+                 after the colon, or leave the colon out"
+                    .to_owned(),
+            ),
+            (
+                "http://[::1]:".to_owned(),
+                "the issuer \"http://[::1]:\" has an empty port; write the port after the \
+                 colon, or leave the colon out"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com:port".to_owned(),
+                "the issuer \"https://by.example.com:port\" is not a URL AIPlex can fetch keys \
+                 from: \"https://by.example.com:port\" has an invalid port"
+                    .to_owned(),
+            ),
+            // User information is refused first and never shown, whatever
+            // else is wrong with the issuer.
+            (
+                "https://user@by.example.com".to_owned(),
+                "the issuer \"https://by.example.com\" has user information (user:password@), \
+                 which is not taken and is left out of this message; write scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "https://ann:secret-pw@by.example.com/path".to_owned(),
+                "the issuer \"https://by.example.com/path\" has user information \
+                 (user:password@), which is not taken and is left out of this message; write \
+                 scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "ftp://ann:secret-pw@by.example.com".to_owned(),
+                "the issuer \"ftp://by.example.com\" has user information (user:password@), \
+                 which is not taken and is left out of this message; write scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "https://[fe80::1%eth0]:8443".to_owned(),
+                "the issuer \"https://[fe80::1%eth0]:8443\" names an IPv6 address with a zone \
+                 (%), which is one machine's interface and nothing AIPlex can reach; write the \
+                 address without it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::%1]:8443".to_owned(),
+                "the issuer \"https://[::%1]:8443\" names an IPv6 address with a zone (%), \
+                 which is one machine's interface and nothing AIPlex can reach; write the \
+                 address without it"
+                    .to_owned(),
+            ),
+            // An address a server listens on, which nothing reaches.
+            (
+                "https://0.0.0.0:8443".to_owned(),
+                "the issuer \"https://0.0.0.0:8443\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::]:8443".to_owned(),
+                "the issuer \"https://[::]:8443\" names an unspecified address, which a server \
+                 listens on and nothing can be reached at, so AIPlex cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "http://0.0.0.0:7400".to_owned(),
+                "the issuer \"http://0.0.0.0:7400\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::ffff:0.0.0.0]".to_owned(),
+                "the issuer \"https://[::ffff:0.0.0.0]\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "http://10.0.0.5:7400".to_owned(),
+                "the issuer \"http://10.0.0.5:7400\" is plain http on a host that is not \
+                 loopback; AIPlex fetches keys over https (http only from this machine, written \
+                 127.0.0.1, [::1] or localhost, for a development AIPlex)"
+                    .to_owned(),
+            ),
+            // One spelling, so the two sides cannot differ by a dot.
+            spelled(
+                "https://by.example.com.",
+                "ends its host with a dot",
+                "https://by.example.com",
+            ),
+            spelled(
+                "https://By.Example.com:8443",
+                "has an upper-case letter in its host",
+                "https://by.example.com:8443",
+            ),
+            spelled(
+                "https://by.example.com:443",
+                "writes out the default port of https",
+                "https://by.example.com",
+            ),
+            spelled(
+                "http://127.0.0.1:80",
+                "writes out the default port of http",
+                "http://127.0.0.1",
+            ),
+            spelled(
+                "http://LOCALHOST:7400",
+                "has an upper-case letter in its host",
+                "http://localhost:7400",
+            ),
+            spelled(
+                "https://by.example.com:08443",
+                "writes its port with a leading zero",
+                "https://by.example.com:8443",
+            ),
+            spelled(
+                "https://BY.example.com.:443",
+                "ends its host with a dot and has an upper-case letter in its host and writes \
+                 out the default port of https",
+                "https://by.example.com",
+            ),
+            spelled(
+                "https://[2001:DB8::1]",
+                "has an upper-case letter in its host",
+                "https://[2001:db8::1]",
+            ),
+        ];
+        for (issuer, message) in &refused {
+            assert_eq!(federable_issuer(issuer).as_ref(), Err(message), "{issuer}");
+            assert!(!message.contains("secret-pw") && !message.contains("ann:"));
+        }
+        // A host that is only a dot names nothing.
+        for issuer in ["https://.", "https://.:8443", "http://..."] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} names no host: its host is only a dot"
+                )),
+                "{issuer}"
+            );
+        }
+        // A host that is a number in a form only some resolvers read as an
+        // address: each of these is 0.0.0.0 or loopback to `inet_aton`.
+        for (issuer, host) in [
+            ("https://0", "0"),
+            ("https://0:8443", "0"),
+            ("https://0.0", "0.0"),
+            ("https://0x0.0", "0x0.0"),
+            ("https://000.000.000.000", "000.000.000.000"),
+            ("https://0x7f.1:8443", "0x7f.1"),
+            ("http://127.1:8421", "127.1"),
+            ("http://2130706433:8421", "2130706433"),
+            ("https://010.0.0.1", "010.0.0.1"),
+            ("https://by.example.0x10", "by.example.0x10"),
+        ] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} names its host as a number that is not four decimal \
+                     parts ({host}), which some resolvers read as an IP address (0 as 0.0.0.0, \
+                     127.1 as 127.0.0.1) and others as a name; write the address as a.b.c.d"
+                )),
+                "{issuer}"
+            );
+        }
+        // Loopback, in a spelling that is not one of the three taken.
+        for issuer in [
+            "http://127.0.0.2:8421",
+            "http://127.255.255.254",
+            "http://[::ffff:127.0.0.1]:8421",
+        ] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} is plain http on a loopback address in a spelling \
+                     that is not taken; plain http is for a development AIPlex on this machine, \
+                     written 127.0.0.1, [::1] or localhost"
+                )),
+                "{issuer}"
+            );
+        }
+        // A name, and an address in four decimal parts, are neither.
+        for host in ["by.example.com", "x0.example", "0x.example.com", "a.b.c0"] {
+            assert!(!numeric_host(host), "{host}");
+        }
+        assert!(numeric_host("10.0.0.5") && "10.0.0.5".parse::<Ipv4Addr>().is_ok());
+        // The one spelling, for whoever has to say what to write: the
+        // spelling alone, whatever else is wrong with the issuer.
+        for (issuer, canonical) in [
+            ("https://by.example.com", Some("https://by.example.com")),
+            (
+                "https://BY.example.com.:443",
+                Some("https://by.example.com"),
+            ),
+            ("http://127.0.0.1:80", Some("http://127.0.0.1")),
+            ("http://127.0.0.1:7400", Some("http://127.0.0.1:7400")),
+            ("https://[2001:DB8::1]:443", Some("https://[2001:db8::1]")),
+            ("https://0.0.0.0:8443", Some("https://0.0.0.0:8443")),
+            ("https://by.example.com/", None),
+            ("https://by.example.com:", None),
+            ("http://::1:7400", None),
+            ("branchyard:local:abc", None),
+            ("", None),
+        ] {
+            assert_eq!(canonical_issuer(issuer).as_deref(), canonical, "{issuer}");
+        }
+        // What is written the one way and is refused is refused for
+        // something else, and what is accepted is its own spelling.
+        for issuer in ["https://by.example.com", "http://[::1]:7400"] {
+            assert_eq!(canonical_issuer(issuer).as_deref(), Some(issuer));
+        }
+    }
+
+    fn issuer_ok() -> &'static str {
+        "https://by.example.com"
     }
 
     #[test]

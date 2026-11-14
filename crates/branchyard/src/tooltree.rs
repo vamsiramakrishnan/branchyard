@@ -673,7 +673,7 @@ mod tests {
         let host = tempfile::tempdir().unwrap();
         let skills = staged(host.path());
         mount(host.path(), Path::new("/g"), &skills, &[], &[], None, None).unwrap();
-        let output = std::process::Command::new("python3")
+        let output = branchyard_support::child::command("python3")
             .arg(host.path().join(DIRECTORY).join("bin/tools"))
             .args(["search", "arithmetic", "units"])
             .output()
@@ -849,7 +849,7 @@ mod tests {
         let index = std::fs::read_to_string(tree.join("INDEX.md")).unwrap();
         assert!(index.contains("## Helpers"), "{index}");
         assert!(index.len() <= INDEX_BUDGET);
-        let output = std::process::Command::new("python3")
+        let output = branchyard_support::child::command("python3")
             .arg(tree.join("bin/tools"))
             .args(["search", "--kind", "helper", "codex"])
             .output()
@@ -1006,7 +1006,7 @@ mod tests {
         );
         // Mounted skills are in the tree, so the script finds them, below a chosen one of equal match.
         assert!(tree.join("skills/pptx/SKILL.md").is_file());
-        let output = std::process::Command::new("python3")
+        let output = branchyard_support::child::command("python3")
             .arg(tree.join("bin/tools"))
             .args(["search", "pptx", "slides"])
             .output()

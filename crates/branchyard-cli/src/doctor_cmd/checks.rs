@@ -1537,10 +1537,91 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
                 api: backend.api.clone(),
                 source: source.as_ref().map(ToString::to_string),
                 present: source.as_ref().map(|s| key_present(s, &|v| ctx.var_set(v))),
+                signed: backend.auth.as_deref() == Some("turn-token"),
+                plane: backend.control_plane.is_some(),
+                // What `by run`, `by models` and `by ls` say of it, when a
+                // variable children need holds the token too.
+                refused: source
+                    .as_ref()
+                    .filter(|_| backend.control_plane.is_some())
+                    .and_then(|source| branchyard::models::unhidable_copy(name, source)),
             }
         })
         .collect();
-    vec![keys_row(&rows)]
+    let mut checks = vec![keys_row(&rows)];
+    checks.extend(transport_row(&config.models));
+    checks.extend(audience_row(&config.models));
+    checks
+}
+
+/// `models.url`: whether a control-plane backend's `url` is plain `http://`
+/// on a host that is not loopback ([`ModelsConfig::transport_notes`]), where
+/// its credential travels unencrypted unless the network encrypts it. One
+/// row for every control-plane backend, and none without one.
+///
+/// [`ModelsConfig::transport_notes`]: branchyard_setup::config::ModelsConfig::transport_notes
+fn transport_row(models: &branchyard_setup::config::ModelsConfig) -> Option<Check> {
+    const NAME: &str = "models.url";
+    let planes: Vec<&str> = models
+        .backends
+        .iter()
+        .filter(|(_, backend)| backend.control_plane.is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if planes.is_empty() {
+        return None;
+    }
+    let notes = models.transport_notes();
+    Some(match notes.is_empty() {
+        true => Check::ok(
+            NAME,
+            format!(
+                "every control-plane backend's url is https, or http on this machine ({})",
+                planes.join(", ")
+            ),
+        ),
+        false => Check::warn(
+            NAME,
+            notes.join("; "),
+            "use an https:// url, or make sure the network between Branchyard and AIPlex \
+             encrypts what it carries (docs/model-gateway.md#configuring-it)",
+        ),
+    })
+}
+
+/// `models.audience`: whether a signed token's audience names another host
+/// than its backend's `url` ([`ModelsConfig::audience_notes`]), where the
+/// token is sent. One row for every backend called with a token the yard
+/// signs (`auth = "turn-token"`), and none without such a backend.
+///
+/// [`ModelsConfig::audience_notes`]: branchyard_setup::config::ModelsConfig::audience_notes
+fn audience_row(models: &branchyard_setup::config::ModelsConfig) -> Option<Check> {
+    const NAME: &str = "models.audience";
+    let signed: Vec<&str> = models
+        .backends
+        .iter()
+        .filter(|(_, backend)| backend.auth.as_deref() == Some("turn-token"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if signed.is_empty() {
+        return None;
+    }
+    let notes = models.audience_notes();
+    Some(match notes.is_empty() {
+        true => Check::ok(
+            NAME,
+            format!(
+                "no signed token's audience names another host than its backend's url ({})",
+                signed.join(", ")
+            ),
+        ),
+        false => Check::warn(
+            NAME,
+            notes.join("; "),
+            "make url the audience's AIPlex access point, or the audience the AIPlex the url \
+             names (docs/model-gateway.md#a-token-branchyard-signs)",
+        ),
+    })
 }
 
 /// One backend and where its key is.
@@ -1551,6 +1632,32 @@ struct KeyRow {
     source: Option<String>,
     /// Whether that source holds a key here; `None` without a source.
     present: Option<bool>,
+    /// Whether it is called with a token the server signs for each turn
+    /// (`auth = "turn-token"`), which needs no key.
+    signed: bool,
+    /// Whether it is a control plane's access point (`control_plane`).
+    plane: bool,
+    /// Why the configuration is refused wherever the gateway is built: a
+    /// variable that child processes need holds this backend's token too
+    /// (`models::unhidable_copy`).
+    refused: Option<String>,
+}
+
+/// Whether `source` (`$VAR`) is a variable a provider's own key is read
+/// from (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...): `by models list`
+/// reads those for the providers' sources.
+fn provider_variable(source: &str) -> bool {
+    use branchyard::models::discover::{ANTHROPIC_KEYS, GEMINI_KEYS, OPENAI_KEYS, ZAI_KEYS};
+    source.strip_prefix('$').is_some_and(|name| {
+        [
+            &GEMINI_KEYS[..],
+            &OPENAI_KEYS[..],
+            &ANTHROPIC_KEYS[..],
+            &ZAI_KEYS[..],
+        ]
+        .concat()
+        .contains(&name)
+    })
 }
 
 fn key_present(source: &branchyard::models::KeySource, var_set: &dyn Fn(&str) -> bool) -> bool {
@@ -1566,6 +1673,32 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     let mut status = Status::Ok;
     for row in rows {
         let (text, worst) = match (&row.source, row.present) {
+            (_, _) if row.refused.is_some() => {
+                (row.refused.clone().unwrap_or_default(), Status::Fail)
+            }
+            // This is a repository's own configuration, for a local yard,
+            // and a local yard cannot sign what AIPlex verifies: every turn
+            // on the gateway says so, and so does this row.
+            _ if row.signed => (
+                format!(
+                    "{} is called with a token a server signs for each turn (auth = turn-token), \
+                     which a local yard cannot be: AIPlex cannot fetch a local yard's keys, so \
+                     every turn on the gateway here is refused",
+                    row.backend
+                ),
+                Status::Fail,
+            ),
+            // A control plane's token under a provider's variable name:
+            // accepted, and said, since the name suggests another reader.
+            (Some(source), Some(true)) if row.plane && provider_variable(source) => (
+                format!(
+                    "{} key {source} is set ({source} is a provider's variable name: its value \
+                     is sent to this AIPlex backend and to nothing else, and it is hidden from \
+                     every harness)",
+                    row.backend
+                ),
+                Status::Ok,
+            ),
             (Some(source), Some(true)) => {
                 (format!("{} key {source} is set", row.backend), Status::Ok)
             }
@@ -1592,6 +1725,18 @@ fn keys_row(rows: &[KeyRow]) -> Check {
             NAME,
             detail,
             "name the secret holding its key under key in [models.backends.NAME]",
+        ),
+        Status::Fail if rows.iter().any(|row| row.refused.is_some()) => Check::fail(
+            NAME,
+            detail,
+            "take the token out of the variable named: by run, by models and by ls refuse this \
+             configuration until then (docs/model-gateway.md#the-credential)",
+        ),
+        Status::Fail if rows.iter().any(|row| row.signed) => Check::fail(
+            NAME,
+            detail,
+            "give the backend a key here (key = \"...\", an AIPlex token); auth = \"turn-token\" \
+             belongs in a server's configuration (docs/model-gateway.md#a-token-branchyard-signs)",
         ),
         Status::Fail => Check::fail(
             NAME,
@@ -2155,6 +2300,9 @@ mod tests {
             api: api.into(),
             source: source.map(str::to_owned),
             present,
+            signed: false,
+            plane: false,
+            refused: None,
         };
         let all_set = keys_row(&[
             row("a", "anthropic", Some("$A_KEY"), Some(true)),
@@ -2172,6 +2320,207 @@ mod tests {
         let keyless = keys_row(&[row("a", "anthropic", None, None)]);
         assert_eq!(keyless.status, Status::Warn);
         assert!(keyless.detail.contains("a (anthropic) names no key"));
+        // A backend called with a signed token, in a repository's own file.
+        let signed = keys_row(&[KeyRow {
+            signed: true,
+            ..row("aiplex", "anthropic", None, None)
+        }]);
+        // A local yard cannot use it: the row says what every turn says.
+        assert_eq!(signed.status, Status::Fail);
+        assert_eq!(
+            signed.detail,
+            "aiplex is called with a token a server signs for each turn (auth = turn-token), \
+             which a local yard cannot be: AIPlex cannot fetch a local yard's keys, so every \
+             turn on the gateway here is refused"
+        );
+        assert_eq!(
+            signed.fix.as_deref(),
+            Some(
+                "give the backend a key here (key = \"...\", an AIPlex token); auth = \
+                 \"turn-token\" belongs in a server's configuration \
+                 (docs/model-gateway.md#a-token-branchyard-signs)"
+            )
+        );
+        // A control plane's token read from a provider's variable name is
+        // accepted, and the row says who is sent it; a plain backend's
+        // provider variable, and a control plane's own variable, say nothing.
+        let named = keys_row(&[
+            KeyRow {
+                plane: true,
+                ..row("ap", "anthropic", Some("$ANTHROPIC_API_KEY"), Some(true))
+            },
+            KeyRow {
+                plane: true,
+                ..row("ap-own", "openai", Some("$AIPLEX_TOKEN"), Some(true))
+            },
+            row("plain", "openai", Some("$OPENAI_API_KEY"), Some(true)),
+        ]);
+        assert_eq!(named.status, Status::Ok);
+        assert_eq!(
+            named.detail,
+            "ap key $ANTHROPIC_API_KEY is set ($ANTHROPIC_API_KEY is a provider's variable \
+             name: its value is sent to this AIPlex backend and to nothing else, and it is \
+             hidden from every harness); ap-own key $AIPLEX_TOKEN is set; plain key \
+             $OPENAI_API_KEY is set"
+        );
+        // A variable children need that holds the token: the row says what
+        // every command that builds the gateway says.
+        let refusal = "models.backends.ap.key: the variable PATH holds the token too, and it \
+                       cannot be hidden from child processes, which need PATH (or Branchyard \
+                       reads it itself); take the token out of PATH";
+        let refused = keys_row(&[KeyRow {
+            plane: true,
+            refused: Some(refusal.to_owned()),
+            ..row("ap", "anthropic", Some("$AIPLEX_TOKEN"), Some(true))
+        }]);
+        assert_eq!(refused.status, Status::Fail);
+        assert_eq!(refused.detail, refusal);
+        assert!(refused
+            .fix
+            .as_deref()
+            .unwrap()
+            .starts_with("take the token out of the variable named"));
+        for variable in [
+            "$GEMINI_API_KEY",
+            "$GOOGLE_API_KEY",
+            "$OPENAI_API_KEY",
+            "$CODEX_API_KEY",
+            "$ANTHROPIC_API_KEY",
+            "$ZAI_API_KEY",
+        ] {
+            assert!(provider_variable(variable), "{variable}");
+        }
+        for other in [
+            "$AIPLEX_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "@/run/ANTHROPIC_API_KEY",
+            "",
+        ] {
+            assert!(!provider_variable(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_url_row_is_one_row_and_only_for_control_plane_backends() {
+        let models = |backends: serde_json::Value| -> branchyard_setup::config::ModelsConfig {
+            serde_json::from_value(serde_json::json!({ "backends": backends })).unwrap()
+        };
+        let plane = |url: &str| {
+            serde_json::json!({
+                "api": "anthropic", "url": url, "control_plane": "aiplex", "key": "aiplex",
+            })
+        };
+        // No control-plane backend: no row, whatever a plain backend's url.
+        assert_eq!(transport_row(&models(serde_json::json!({}))), None);
+        assert_eq!(
+            transport_row(&models(serde_json::json!({
+                "plain": {"api": "generic", "url": "http://10.0.0.5:7400"}
+            }))),
+            None
+        );
+        // https, or http on this machine: ok, naming the backends.
+        let ok = transport_row(&models(serde_json::json!({
+            "a": plane("https://aiplex.example.com/ap/ide"),
+            "b": plane("http://127.0.0.1:7400/ap/ide"),
+            "c": plane("http://localhost:7400/ap/ide"),
+        })))
+        .unwrap();
+        assert_eq!((ok.name.as_str(), ok.status), ("models.url", Status::Ok));
+        assert_eq!(
+            ok.detail,
+            "every control-plane backend's url is https, or http on this machine (a, b, c)"
+        );
+        assert_eq!(ok.fix, None);
+        // Plain http anywhere else: one warning for all of them.
+        let warn = transport_row(&models(serde_json::json!({
+            "a": plane("http://aiplex.internal:8080/ap/ide"),
+            "b": plane("https://aiplex.example.com/ap/ide"),
+            "c": plane("http://10.0.0.5/ap/ide"),
+        })))
+        .unwrap();
+        assert_eq!(
+            (warn.name.as_str(), warn.status),
+            ("models.url", Status::Warn)
+        );
+        assert_eq!(
+            warn.detail,
+            "models.backends.a: its url is plain http on aiplex.internal, which is not loopback, \
+             so the credential it is sent travels unencrypted unless the network between \
+             Branchyard and AIPlex encrypts it; use https:// if it does not; models.backends.c: \
+             its url is plain http on 10.0.0.5, which is not loopback, so the credential it is \
+             sent travels unencrypted unless the network between Branchyard and AIPlex encrypts \
+             it; use https:// if it does not"
+        );
+        assert_eq!(
+            warn.fix.as_deref(),
+            Some(
+                "use an https:// url, or make sure the network between Branchyard and AIPlex \
+                 encrypts what it carries (docs/model-gateway.md#configuring-it)"
+            )
+        );
+    }
+
+    #[test]
+    fn the_audience_row_is_one_row_and_only_for_backends_called_with_a_signed_token() {
+        let models = |backends: serde_json::Value| -> branchyard_setup::config::ModelsConfig {
+            serde_json::from_value(serde_json::json!({ "backends": backends })).unwrap()
+        };
+        let signed = |url: &str, audience: &str| {
+            serde_json::json!({
+                "api": "anthropic", "url": url, "control_plane": "aiplex",
+                "auth": "turn-token", "audience": audience,
+            })
+        };
+        // No backend is called with a signed token: no row.
+        let stored = serde_json::json!({
+            "api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+            "control_plane": "aiplex", "key": "aiplex",
+        });
+        assert_eq!(audience_row(&models(serde_json::json!({}))), None);
+        assert_eq!(
+            audience_row(&models(serde_json::json!({ "stored": stored }))),
+            None
+        );
+        // The audience on the url's host, in any letter case and with any
+        // port, or one that is not a URL at all: ok, naming the backends.
+        let ok = audience_row(&models(serde_json::json!({
+            "a": signed("https://aiplex.example.com/ap/ide", "https://AIPLEX.example.com:8443"),
+            "b": signed("https://aiplex.example.com/ap/ide", "aiplex-production"),
+            "stored": stored,
+        })))
+        .unwrap();
+        assert_eq!(ok.name, "models.audience");
+        assert_eq!(ok.status, Status::Ok);
+        assert_eq!(
+            ok.detail,
+            "no signed token's audience names another host than its backend's url (a, b)"
+        );
+        assert_eq!(ok.fix, None);
+        // Another host: one warning for all of them, with what to do.
+        let warn = audience_row(&models(serde_json::json!({
+            "a": signed("https://gateway.example.net/ap/ide", "https://aiplex.example.com"),
+            "b": signed("https://aiplex.example.com/ap/ide", "https://aiplex.example.com"),
+            "c": signed("https://other.example.net/ap/ide", "https://aiplex.example.com"),
+        })))
+        .unwrap();
+        assert_eq!(warn.name, "models.audience");
+        assert_eq!(warn.status, Status::Warn);
+        assert_eq!(
+            warn.detail,
+            "models.backends.a: its audience names the host aiplex.example.com and its url the \
+             host gateway.example.net; the token it is sent is good at the audience for up to an \
+             hour, so check the url is the audience's AIPlex; models.backends.c: its audience \
+             names the host aiplex.example.com and its url the host other.example.net; the token \
+             it is sent is good at the audience for up to an hour, so check the url is the \
+             audience's AIPlex"
+        );
+        assert_eq!(
+            warn.fix.as_deref(),
+            Some(
+                "make url the audience's AIPlex access point, or the audience the AIPlex the url \
+                 names (docs/model-gateway.md#a-token-branchyard-signs)"
+            )
+        );
     }
 
     #[test]

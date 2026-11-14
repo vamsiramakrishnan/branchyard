@@ -84,6 +84,8 @@ Detailed specifications, command references, and validation records.
 | [GCE validation, 2 November 2026](remote-validation-2026-11-02-gce.md) | Read the patched MicroVM runtime and adapter evidence |
 | [GCE container evidence, 2 November 2026](evidence/gce-container-2026-11-02/README.md) | Read the actual gVisor isolation and resource-limit observations |
 | [GKE native evidence, 2 November 2026](evidence/gke-native-2026-11-02/README.md) | Read the real gVisor and Kata provider checks and qualification limits |
+| [AIPlex run, 14 November 2026](evidence/aiplex-control-plane-2026-11-14.json) | Read the record of the real `by` run against a real `aiplex dev` (mock providers, a stand-in agent): each check and what was observed |
+| [AIPlex signed-token run, 14 November 2026](evidence/aiplex-signed-token-2026-11-14.json) | Read the record of the real `by serve` run against a real `aiplex dev` with a token the server signs (mock providers, a stand-in agent): each check and what was observed |
 | [Substrate setup](substrate-setup.md) | Save an Agent Substrate connection, prepare an actor template, and verify bridge execution with a disposable actor. |
 | [Remote validation, 28 October 2026](remote-validation-2026-10-28.md) | Validation record for remote compute backends and developer setup workflows. |
 | [Console validation, 29 October 2026](console-validation-2026-10-29.md) | Validation record for web console and remote execution checks. |

@@ -45,7 +45,7 @@ use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -487,15 +487,23 @@ pub(crate) fn shell_env(
     cancel: &dyn Fn() -> Option<String>,
 ) -> Result<Vec<(String, String)>, String> {
     use std::os::unix::process::CommandExt;
+    // Captured from this process and replayed onto a cleared environment:
+    // what the process hides from its children is left out here too.
+    let hidden = branchyard_support::child::hidden();
     let mut start: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| {
-            !harness::is_branchyard_variable(name) && !harness::is_parent_session_variable(name)
+            !harness::is_branchyard_variable(name)
+                && !harness::is_parent_session_variable(name)
+                && !hidden.contains(name)
         })
         .collect();
     for (name, value) in env {
         start.insert(name.clone(), value.clone());
     }
+    // Nor does the snippet start with a control plane's token, under a name
+    // this process has it or one the table gave it.
+    start.retain(|_, value| branchyard_support::child::guarded(value).is_none());
     let fail = |how: String, stderr: &[u8]| {
         let text = String::from_utf8_lossy(stderr);
         let text = text.trim();
@@ -509,7 +517,7 @@ pub(crate) fn shell_env(
             tail => format!("shell_setup `{snippet}` {how}: {tail}"),
         }
     };
-    let mut child = Command::new("/bin/sh")
+    let mut child = branchyard_support::child::command("/bin/sh")
         .arg("-c")
         .arg(SHELL_CAPTURE)
         .arg("by-shell-setup")
@@ -624,7 +632,10 @@ pub(crate) fn shell_env(
         let ours = harness::is_branchyard_variable(name)
             || harness::is_parent_session_variable(name)
             || SHELL_IGNORED.contains(&name);
-        if !ours && start.get(name).map(String::as_str) != Some(value) {
+        // What the snippet exported with the token in it (read from a
+        // file, say) is passed on to nothing.
+        let guarded = branchyard_support::child::guarded(value).is_some();
+        if !ours && !guarded && start.get(name).map(String::as_str) != Some(value) {
             changed.push((name.to_owned(), value.to_owned()));
         }
     }
@@ -1167,7 +1178,7 @@ fn prepared(
 /// Every path in `worktree` git does not track, ignored or not, a wholly
 /// untracked directory once (with a trailing `/` removed).
 pub(crate) fn untracked(worktree: &Path) -> BTreeSet<String> {
-    let output = Command::new("git")
+    let output = branchyard_support::child::command("git")
         .arg("-C")
         .arg(worktree)
         .args(["ls-files", "-z", "--others", "--directory"])
@@ -1261,7 +1272,7 @@ pub(crate) fn replicate(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let status = Command::new("cp")
+        let status = branchyard_support::child::command("cp")
             .arg("-a")
             .arg(&source)
             .arg(&target)
@@ -1575,7 +1586,7 @@ fn tracked(root: &Path, paths: &BTreeSet<String>) -> BTreeSet<String> {
     let mut tracked = BTreeSet::new();
     let paths: Vec<&String> = paths.iter().collect();
     for chunk in paths.chunks(500) {
-        let out = Command::new("git")
+        let out = branchyard_support::child::command("git")
             .args(["ls-files", "-z", "--cached", "--"])
             .args(chunk.iter().map(|p| format!(":(literal){p}")))
             .current_dir(root)
@@ -1593,7 +1604,7 @@ fn tracked(root: &Path, paths: &BTreeSet<String>) -> BTreeSet<String> {
 
 /// Whether the worktree's branch tracks no file under `dir`.
 fn tracks_nothing(worktree: &Path, dir: &str) -> bool {
-    Command::new("git")
+    branchyard_support::child::command("git")
         .args(["ls-files", "-z", "--cached", "--"])
         .arg(format!(":(literal){dir}"))
         .current_dir(worktree)
@@ -1653,7 +1664,7 @@ pub(crate) fn run_commands(
             }
         };
         let spawned = {
-            let mut sh = Command::new("sh");
+            let mut sh = branchyard_support::child::command("sh");
             sh.arg("-c")
                 .arg(command)
                 .current_dir(cwd)
@@ -1668,8 +1679,12 @@ pub(crate) fn run_commands(
                     }
                 }
             }
+            // A value that holds a control plane's token is not given to a
+            // script, whoever put it in the table or exported it.
             for (name, value) in env {
-                sh.env(name, value);
+                if branchyard_support::child::guarded(value).is_none() {
+                    sh.env(name, value);
+                }
             }
             if let Some(marker) = marker {
                 sh.env(proc::ENV_SPAWN, marker);
@@ -1794,7 +1809,15 @@ pub(crate) fn run_in_sandbox(report: &mut WorkspaceReport, commands: &[String], 
         let spec = branchyard_sandbox::ExecSpec {
             argv: vec!["sh".into(), "-c".into(), command.clone()],
             cwd: PathBuf::from(cwd),
-            env: env.iter().map(|(n, v)| (n.into(), v.into())).collect(),
+            // As for a script on this host (`run_commands`): a value that
+            // holds a control plane's token is not given to it, whoever put
+            // it in the table. The provider's exec inherits nothing here,
+            // so this is the whole of what the script is handed.
+            env: env
+                .iter()
+                .filter(|(_, value)| branchyard_support::child::guarded(value).is_none())
+                .map(|(n, v)| (n.into(), v.into()))
+                .collect(),
             writable: None,
         };
         let mut process = match provider.exec(sandbox, &spec) {
@@ -1889,6 +1912,98 @@ impl Tail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs nothing: every exec is refused after its environment is kept.
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<Vec<(String, String)>>>);
+
+    impl branchyard_sandbox::SandboxProvider for Recording {
+        fn capabilities(&self) -> branchyard_sandbox::Capabilities {
+            branchyard_sandbox::Capabilities::default()
+        }
+        fn ensure(
+            &self,
+            spec: &branchyard_sandbox::SandboxSpec,
+        ) -> Result<branchyard_sandbox::SandboxInfo, branchyard_sandbox::ProviderError> {
+            Ok(branchyard_sandbox::SandboxInfo {
+                name: spec.name.clone(),
+                state: branchyard_sandbox::SandboxState::Running,
+            })
+        }
+        fn inspect(
+            &self,
+            _: &str,
+        ) -> Result<Option<branchyard_sandbox::SandboxInfo>, branchyard_sandbox::ProviderError>
+        {
+            Ok(None)
+        }
+        fn exec(
+            &self,
+            _: &str,
+            spec: &branchyard_sandbox::ExecSpec,
+        ) -> Result<Box<dyn branchyard_sandbox::Process>, branchyard_sandbox::ProviderError>
+        {
+            let env = spec
+                .env
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
+            self.0.lock_recovering("recorded").push(env);
+            Err(branchyard_sandbox::ProviderError::Runtime(
+                "recorded, not run".into(),
+            ))
+        }
+        fn stop(&self, _: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            Ok(())
+        }
+        fn destroy(&self, _: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_script_in_a_sandbox_is_given_no_entry_that_holds_a_guarded_token() {
+        // What `[workspace.env]` expanded from this process, as
+        // `with_spec_env` hands it over for setup and for teardown.
+        const TOKEN: &str = "sandbox-script-token-0123456789";
+        branchyard_support::child::guard("ap", TOKEN);
+        let env: Vec<(String, String)> = [
+            ("GOOGLE_GENERATIVE_AI_API_KEY", TOKEN.to_owned()),
+            ("MY_TOKEN", TOKEN.to_owned()),
+            ("MY_BEARER", format!("Bearer {TOKEN}")),
+            ("MY_OTHER", "harmless".to_owned()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect();
+        let provider = Recording::default();
+        for phase in [WorkspacePhase::Setup, WorkspacePhase::Teardown] {
+            let mut report = WorkspaceReport::new(phase, None);
+            run_in_sandbox(
+                &mut report,
+                &["env".to_owned()],
+                InSandbox {
+                    provider: &provider,
+                    sandbox: "box",
+                    cwd: "/workspace",
+                    env: &env,
+                    timeout: Duration::from_secs(5),
+                    cancel: &|| None,
+                },
+            );
+            // (The stand-in runs nothing, so the phase reports that.)
+            assert!(!report.ok);
+            assert!(!format!("{report:?}").contains(TOKEN));
+        }
+        let given = provider.0.lock_recovering("recorded").clone();
+        let harmless = vec![("MY_OTHER".to_owned(), "harmless".to_owned())];
+        assert_eq!(given, [harmless.clone(), harmless]);
+    }
 
     #[test]
     fn env_values_expand_from_the_branch_then_the_process() {

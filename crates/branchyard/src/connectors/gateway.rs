@@ -114,7 +114,7 @@ impl GatewayCommand {
         let err = out
             .try_clone()
             .map_err(|e| Error::State(format!("open {}: {e}", log.display())))?;
-        let mut command = Command::new(program);
+        let mut command = branchyard_support::child::command(program);
         command
             .args(self.args())
             .envs(self.env())

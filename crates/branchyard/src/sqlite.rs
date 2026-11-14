@@ -4841,7 +4841,7 @@ mod tests {
     #[test]
     fn a_reservation_is_reclaimed_only_from_a_gone_engine_or_once_expired() {
         let (_temp, store) = open("reservations");
-        let mut exited = std::process::Command::new("true").spawn().unwrap();
+        let mut exited = branchyard_support::child::command("true").spawn().unwrap();
         let dead = Owner {
             id: "dead".into(),
             pid: exited.id(),
