@@ -661,6 +661,16 @@ impl Gateway {
         })
     }
 
+    /// The same gateway, giving up on a backend whose answer goes quiet
+    /// for `quiet` (by default ten minutes, as long as a model may think
+    /// before it answers). A call whose backend went quiet after it was
+    /// sent fails `502` and is not sent to another backend: it may have
+    /// been billed.
+    pub fn quiet_after(mut self, quiet: std::time::Duration) -> Gateway {
+        self.transport = upstream::Transport::from_env(quiet);
+        self
+    }
+
     fn backend(&self, name: &str) -> Option<&Backend> {
         self.backends.iter().find(|b| b.name == name)
     }
@@ -1205,8 +1215,8 @@ pub(crate) enum Prepared {
         gateway: Box<TurnGateway>,
         env: Vec<(String, String)>,
         /// Variables taken out of the harness's environment: provider
-        /// credentials it must not hold.
-        scrub: Vec<&'static str>,
+        /// credentials it must not hold ([`scrub`]).
+        scrub: Vec<String>,
         /// The URL the harness is given, which a restricted network
         /// policy allows.
         url: String,
@@ -1228,6 +1238,29 @@ const SCRUB: &[&str] = &[
     "OPENAI_ORG_ID",
     "AZURE_OPENAI_API_KEY",
 ];
+
+/// The variables taken out of a turn's harness's environment on the
+/// gateway: [`SCRUB`], and the variable each control-plane backend's key is
+/// read from, so a harness never holds a control plane's credential. A plain
+/// backend's key variable is left as it was: a harness may read its
+/// provider's own variable itself. This is a scrub of the environment, not a
+/// boundary: a local harness runs as the same user, and can read a key file
+/// or its parent's environment (`docs/model-gateway.md`, "The credential").
+pub(crate) fn scrub(gateway: &Gateway) -> Vec<String> {
+    let mut names: Vec<String> = SCRUB.iter().map(|n| (*n).to_owned()).collect();
+    for backend in gateway
+        .backends
+        .iter()
+        .filter(|b| b.control_plane.is_some())
+    {
+        if let Some(KeySource::Env(var)) = &backend.key {
+            if !names.contains(var) {
+                names.push(var.clone());
+            }
+        }
+    }
+    names
+}
 
 /// The secrets that log `harness` in by subscription, which the gateway
 /// cannot stand in for: Claude Code's OAuth token, Codex's login file. Only
@@ -1486,7 +1519,7 @@ pub(crate) fn prepare(
     Ok(Some(Prepared::Gateway {
         gateway: Box::new(running),
         env,
-        scrub: SCRUB.to_vec(),
+        scrub: scrub(&gateway),
         activity: ModelActivity::Gateway {
             url: url.clone(),
             models: access.allow.clone(),

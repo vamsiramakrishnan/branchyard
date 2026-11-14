@@ -1182,7 +1182,7 @@ fn run(
                     Ok(changed) => {
                         for (name, value) in changed {
                             let scrubbed = provisioned.scrub.contains(&name)
-                                || model_scrub.contains(&name.as_str())
+                                || model_scrub.contains(&name)
                                 || !placement.admits(&name);
                             if !scrubbed {
                                 placement.set_env(&name, &value);

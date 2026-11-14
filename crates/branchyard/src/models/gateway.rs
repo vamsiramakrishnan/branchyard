@@ -389,18 +389,60 @@ fn dropped(name: &str) -> bool {
         || name.starts_with("x-branchyard-")
 }
 
-/// Request headers that say who is calling or tie a call to a record, which
-/// a control plane reads as the gateway's word: dropped from what the
-/// harness sent to a control-plane backend, whatever their letter case and
-/// however often it sent them (`docs/model-gateway.md`, "AIPlex as the
-/// backend"). `tracestate` goes with the `traceparent` it belongs to, and
-/// `X-Request-Id` would set the control plane's own id of the call.
-fn attribution(name: &str) -> bool {
+/// Of what the harness sent, the request headers a control-plane backend
+/// is sent: the body's content headers, `Accept`, the user agent, the
+/// APIs' own version, beta and idempotency headers. Nothing else of the
+/// harness's reaches a control plane, which reads some headers as who is
+/// calling (an IAP assertion, `X-Forwarded-For`, a cookie, its own
+/// attribution headers): the gateway speaks for the call
+/// (`docs/model-gateway.md`, "What is sent").
+pub(crate) const CONTROL_PLANE_REQUEST_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "accept",
+    "user-agent",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-beta",
+    "idempotency-key",
+];
+
+/// Whether a control-plane backend is sent the harness's header `name`.
+fn to_control_plane(name: &str) -> bool {
+    CONTROL_PLANE_REQUEST_HEADERS
+        .iter()
+        .any(|allowed| name.eq_ignore_ascii_case(allowed))
+}
+
+/// Of a control-plane backend's answer, the response headers the harness
+/// gets: what its SDK reads from an answer (the body's content headers,
+/// cache control, when and whether to retry, the provider's request id
+/// and rate-limit headers). Nothing else is relayed: no cookie, location,
+/// link, server or the control plane's own headers.
+pub(crate) const CONTROL_PLANE_RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "cache-control",
+    "retry-after",
+    "retry-after-ms",
+    "x-should-retry",
+    "request-id",
+    "x-request-id",
+];
+
+/// Prefixes of the provider rate-limit headers a control-plane backend's
+/// answer may relay.
+pub(crate) const CONTROL_PLANE_RESPONSE_PREFIXES: &[&str] =
+    &["anthropic-ratelimit-", "x-ratelimit-", "x-codex-"];
+
+/// Whether the harness gets a control-plane backend's response header
+/// `name`.
+fn from_control_plane(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "x-client-request-id" | "traceparent" | "tracestate" | "x-request-id"
-    ) || name.starts_with("x-aiplex-")
+    CONTROL_PLANE_RESPONSE_HEADERS.contains(&name.as_str())
+        || CONTROL_PLANE_RESPONSE_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 /// What the gateway tells a control-plane backend about a call: the id of
@@ -530,8 +572,9 @@ pub(crate) fn traceparent_ok(value: &str) -> bool {
 /// The headers `backend` is sent: what the harness sent, without its
 /// credentials, hop-by-hop headers and `Accept-Encoding`, then
 /// `Accept-Encoding: identity` and the backend's key. A control-plane
-/// backend also loses the harness's [`attribution`] headers, takes its key
-/// as a bearer token whatever its API, and is sent `attribution`.
+/// backend is sent only the harness's headers that
+/// [`CONTROL_PLANE_REQUEST_HEADERS`] names, takes its key as a bearer token
+/// whatever its API, and is sent `attribution`.
 fn upstream_headers(
     request: &Request,
     backend: &Backend,
@@ -542,7 +585,10 @@ fn upstream_headers(
     let mut headers: Vec<(String, String)> = request
         .headers
         .iter()
-        .filter(|(n, _)| !(dropped(n) || (governed && self::attribution(n))))
+        .filter(|(n, _)| match governed {
+            true => to_control_plane(n),
+            false => !dropped(n),
+        })
         .cloned()
         .collect();
     // Plain bytes, so usage can be read from them.
@@ -571,18 +617,27 @@ fn upstream_headers(
 }
 
 /// The last backend that failed a call: its answer, the body kept of it,
-/// its name, the model it was asked for when translated, and its verdict.
-type Failed = (upstream::Response, Vec<u8>, String, Option<String>, Verdict);
+/// the backend, the model it was asked for when translated, its verdict,
+/// and the key it was sent.
+type Failed<'a> = (
+    upstream::Response,
+    Vec<u8>,
+    &'a Backend,
+    Option<String>,
+    Verdict,
+    String,
+);
 
 /// The backend that answered a call: its answer, the backend, the model it
 /// was asked for when translated, whether Gemini's signatures are kept from
-/// it, and its verdict.
+/// it, its verdict, and the key it was sent.
 type Answered<'a> = (
     upstream::Response,
     &'a Backend,
     Option<String>,
     bool,
     Verdict,
+    String,
 );
 
 /// What a control-plane backend's answer says of itself.
@@ -799,13 +854,24 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // Backends, and the route's rate limit.
     let gateway = &state.gateway;
     let model = (!call.model.is_empty()).then_some(call.model.as_str());
-    // The pass-through path names one backend: never both kinds.
+    // The pass-through path names one backend, never a control plane's:
+    // it would carry whatever the harness sent, under no route.
     let (index, order): (Option<usize>, Vec<&Backend>) = match &named {
-        Some(name) => (None, gateway.backend(name).into_iter().collect()),
+        Some(name) => (
+            None,
+            gateway
+                .backend(name)
+                .filter(|b| b.control_plane.is_none())
+                .into_iter()
+                .collect(),
+        ),
         None => gateway.plan(api, model),
     };
     if order.is_empty() {
         let why = match &named {
+            Some(name) if gateway.backend(name).is_some() => format!(
+                "{name} is a control-plane backend, which the pass-through path never reaches"
+            ),
             Some(name) => format!("no backend {name}"),
             None => format!(
                 "no backend serves the {api} API for {}",
@@ -877,7 +943,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
     let mut for_gemini: Option<Vec<u8>> = None;
     // Forward: the next backend on a refused connection, a 5xx or a 429,
     // unless a control plane decided: its refusal is the answer.
-    let mut last: Option<Failed> = None;
+    let mut last: Option<Failed<'_>> = None;
     let mut answered: Option<Answered<'_>> = None;
     for backend in order {
         let key = match &backend.key {
@@ -976,6 +1042,11 @@ fn handle(stream: TcpStream, state: &TurnState) {
         if as_model.is_some() {
             headers.retain(|(n, _)| !n.to_ascii_lowercase().starts_with("anthropic-"));
         }
+        // From the first control-plane backend tried, the call's event
+        // names the id it was sent under, whatever comes back.
+        if let (Some(plane), None) = (backend.control_plane, &call.control_plane) {
+            call.control_plane = Some(Verdict::default().record(plane, &attribution));
+        }
         let sent =
             gateway
                 .transport
@@ -1002,10 +1073,18 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 );
                 return;
             }
+            // A control plane's redirect is neither followed (it would carry
+            // the credential elsewhere) nor relayed: that backend failed.
+            Ok(response) if backend.control_plane.is_some() && redirect(response.status) => {
+                call.failed_over.push(format!(
+                    "{}: the control plane answered with a redirect ({}), not followed",
+                    backend.name, response.status
+                ));
+            }
             // A control plane's own refusal is its decision, whatever the
             // status: no other backend is tried.
             Ok(response) if verdict.decided => {
-                answered = Some((response, backend, as_model, recording, verdict));
+                answered = Some((response, backend, as_model, recording, verdict, key));
                 break;
             }
             Ok(mut response) if response.status >= 500 || response.status == 429 => {
@@ -1025,30 +1104,47 @@ fn handle(stream: TcpStream, state: &TurnState) {
                         .take(MAX_ERROR_BODY as u64)
                         .read_to_end(&mut kept),
                 );
-                last = Some((response, kept, backend.name.clone(), as_model, verdict));
+                last = Some((response, kept, backend, as_model, verdict, key));
             }
             Ok(response) => {
-                answered = Some((response, backend, as_model, recording, verdict));
+                answered = Some((response, backend, as_model, recording, verdict, key));
                 break;
             }
         }
     }
-    let Some((mut response, chosen, as_model, recording, verdict)) = answered else {
+    let Some((mut response, chosen, as_model, recording, verdict, key)) = answered else {
         match last {
             // Every backend failed: the harness gets the last one's
             // answer, as it would have from the provider, in its own API.
-            Some((mut response, kept, backend, as_model, verdict)) => {
+            Some((mut response, kept, backend, as_model, verdict, key)) => {
                 call.failed_over.pop();
-                call.backend = Some(backend);
+                call.backend = Some(backend.name.clone());
                 call.translated = as_model.clone();
-                if let Some(plane) = gateway
-                    .backend(call.backend.as_deref().unwrap_or(""))
-                    .and_then(|b| b.control_plane)
-                {
+                let mut withheld = None;
+                if let Some(plane) = backend.control_plane {
                     call.control_plane = Some(verdict.record(plane, &attribution));
                     hide_control_plane(&mut response.headers);
+                    withheld = withhold(&kept, &key, kept.len() >= MAX_ERROR_BODY);
                 }
                 let status = response.status;
+                if let Some(why) = withheld {
+                    // Neither shown nor kept: the harness gets Branchyard's
+                    // own error, with the status.
+                    let reason = with_note(
+                        (!call.failed_over.is_empty()).then(|| call.failed_over.join("; ")),
+                        Some(why.to_owned()),
+                    );
+                    done(&mut call, "failed", status, reason);
+                    refuse(
+                        &mut out,
+                        api,
+                        status,
+                        "failed",
+                        &format!("Branchyard's model gateway: {why}"),
+                        &retry_after(&response.headers),
+                    );
+                    return;
+                }
                 // What the backend sent, before it is put in the harness's
                 // API.
                 let sse = is_sse(&response);
@@ -1105,23 +1201,68 @@ fn handle(stream: TcpStream, state: &TurnState) {
     }
     let sse = is_sse(&response);
     call.streamed = sse;
+    let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
+    // A control plane's answer that is not a success is read whole, up to
+    // MAX_ERROR_BODY, and checked for the credential the gateway sent before
+    // the harness sees a byte of it; withheld, it is neither shown nor kept.
+    let mut prefetched: Option<std::io::Cursor<Vec<u8>>> = None;
+    let mut withheld: Option<String> = None;
+    if chosen.control_plane.is_some() && !response_ok(response.status) && !no_body {
+        let mut whole = Vec::new();
+        withheld = match (&mut response.body)
+            .take(MAX_ERROR_BODY as u64 + 1)
+            .read_to_end(&mut whole)
+        {
+            Ok(_) => withhold(&whole, &key, whole.len() > MAX_ERROR_BODY).map(str::to_owned),
+            Err(e) => Some(format!(
+                "the control plane's answer broke off before it could be checked: {e}"
+            )),
+        };
+        prefetched = Some(std::io::Cursor::new(whole));
+    }
     // Usage and tool calls are read in the backend's shape: the harness's
     // own, unless the request was translated.
     let backend_api = chosen.api;
-    let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents))
-        .recording(
-            recording.then(|| gemini::Recorder::new(&gateway.signatures, &state.subject, sse)),
-        );
-    let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
+    let keep = matches!(gateway.audit, Audit::Contents) && withheld.is_none();
+    let mut reading = Reading::new(backend_api, sse, keep).recording(
+        recording.then(|| gemini::Recorder::new(&gateway.signatures, &state.subject, sse)),
+    );
     let mut buf = vec![0u8; 16 * 1024];
     let mut broken: Option<String> = None;
     let mut client_gone = false;
-    match (&as_model, sse && response_ok(response.status)) {
-        (None, _) => {
-            client_gone = write_head(&mut out, &response, no_body).is_err();
+    let status = response.status;
+    let source: &mut dyn Read = match prefetched.as_mut() {
+        Some(bytes) => bytes,
+        None => &mut response.body,
+    };
+    match (&as_model, sse && response_ok(status), &withheld) {
+        // Branchyard's own error in the harness's API, with the status.
+        (_, _, Some(why)) => {
+            let label = match verdict.decided {
+                true => "refused",
+                false => "failed",
+            };
+            refuse(
+                &mut out,
+                api,
+                status,
+                label,
+                &format!("Branchyard's model gateway: {why}"),
+                &retry_after(&response.headers),
+            );
+        }
+        (None, _, None) => {
+            client_gone = write_head_parts(
+                &mut out,
+                status,
+                &response.reason,
+                &response.headers,
+                no_body,
+            )
+            .is_err();
             if !no_body {
                 loop {
-                    match response.body.read(&mut buf) {
+                    match source.read(&mut buf) {
                         Ok(0) => break,
                         Ok(n) => {
                             reading.feed(&buf[..n]);
@@ -1142,11 +1283,13 @@ fn handle(stream: TcpStream, state: &TurnState) {
         }
         // A translated stream: the backend's events become the harness's
         // as they pass.
-        (Some(_), true) => {
-            client_gone = write_head(&mut out, &response, false).is_err();
+        (Some(_), true, None) => {
+            client_gone =
+                write_head_parts(&mut out, status, &response.reason, &response.headers, false)
+                    .is_err();
             let mut translator = translate::StreamTranslator::new(&call.model);
             loop {
-                match response.body.read(&mut buf) {
+                match source.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         reading.feed(&buf[..n]);
@@ -1175,12 +1318,9 @@ fn handle(stream: TcpStream, state: &TurnState) {
             }
         }
         // A translated answer, or error: whole, then in the harness's API.
-        (Some(_), false) => {
+        (Some(_), false, None) => {
             let mut whole = Vec::new();
-            match (&mut response.body)
-                .take(MAX_BODY as u64 + 1)
-                .read_to_end(&mut whole)
-            {
+            match source.take(MAX_BODY as u64 + 1).read_to_end(&mut whole) {
                 Err(e) => broken = Some(format!("the backend's response broke off: {e}")),
                 Ok(_) if whole.len() > MAX_BODY => {
                     broken = Some("the backend's response is too large to translate".into())
@@ -1188,11 +1328,9 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 Ok(_) => {}
             }
             reading.feed(&whole);
-            let translated = match (&broken, response_ok(response.status)) {
+            let translated = match (&broken, response_ok(status)) {
                 (Some(_), _) => None,
-                (None, false) => {
-                    Some(translate::error_to_anthropic(response.status, &whole).to_string())
-                }
+                (None, false) => Some(translate::error_to_anthropic(status, &whole).to_string()),
                 (None, true) => match serde_json::from_slice::<Value>(&whole)
                     .map_err(|e| e.to_string())
                     .and_then(|v| translate::response_to_message(&v, &call.model))
@@ -1215,15 +1353,10 @@ fn handle(stream: TcpStream, state: &TurnState) {
                         .cloned()
                         .collect();
                     headers.push(("Content-Type".into(), "application/json".into()));
-                    client_gone = write_head_parts(
-                        &mut out,
-                        response.status,
-                        &response.reason,
-                        &headers,
-                        false,
-                    )
-                    .is_err()
-                        || wire::write_chunk(&mut out, text.as_bytes()).is_err();
+                    client_gone =
+                        write_head_parts(&mut out, status, &response.reason, &headers, false)
+                            .is_err()
+                            || wire::write_chunk(&mut out, text.as_bytes()).is_err();
                 }
                 None => {
                     call.status = 502;
@@ -1270,7 +1403,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         }
         _ => None,
     };
-    let reason = with_note(reason, note);
+    let reason = with_note(with_note(reason, note), withheld.clone());
     let status = call.status;
     let (decision, reason) = match (response_ok(status), verdict.decided) {
         (true, _) => ("allowed", reason),
@@ -1302,7 +1435,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
     );
     done(&mut call, decision, status, reason);
     alert(state);
-    if !no_body && !client_gone && broken.is_none() {
+    if !no_body && !client_gone && broken.is_none() && withheld.is_none() {
         best_effort("end the streamed response", out.write_all(wire::LAST_CHUNK));
     }
     best_effort("flush the streamed response", out.flush());
@@ -1324,12 +1457,45 @@ fn for_gemini_backend(state: &TurnState, backend: &Backend, model: &str, body: V
     }
 }
 
-/// Take out of a control-plane backend's answer what would point the
-/// harness at the control plane: a challenge for a credential the harness
-/// does not hold (`WWW-Authenticate`, which names the control plane's own
-/// URL). Status, body and `Retry-After` reach the harness as they are.
+/// Keep of a control-plane backend's answer only the headers a harness's
+/// SDK reads ([`CONTROL_PLANE_RESPONSE_HEADERS`]): nothing that would point
+/// the harness at the control plane (a `WWW-Authenticate` challenge naming
+/// its URL, a `Location`, a `Link`, a cookie) reaches it. Status, body and
+/// `Retry-After` reach the harness as they are.
 fn hide_control_plane(headers: &mut Vec<(String, String)>) {
-    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("www-authenticate"));
+    headers.retain(|(name, _)| from_control_plane(name));
+}
+
+/// The `Retry-After` of an answer, for an error the gateway writes itself.
+fn retry_after(headers: &[(String, String)]) -> Vec<(&'static str, String)> {
+    headers
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, v)| ("Retry-After", v.clone()))
+        .into_iter()
+        .collect()
+}
+
+/// Whether `status` is a redirect, which the gateway neither follows nor
+/// relays from a control-plane backend.
+fn redirect(status: u16) -> bool {
+    (300..400).contains(&status) && status != 304
+}
+
+/// Why a control-plane backend's answer that is not a success is withheld
+/// from the harness, if it is: it holds `key`, the credential the gateway
+/// sent (a control plane that echoes its request), or it is longer than
+/// [`MAX_ERROR_BODY`] (`cut`), so it could not be checked whole.
+fn withhold(body: &[u8], key: &str, cut: bool) -> Option<&'static str> {
+    let key = key.as_bytes();
+    if !key.is_empty() && body.windows(key.len()).any(|w| w == key) {
+        return Some(
+            "the control plane's answer was withheld: it held the credential the gateway sent",
+        );
+    }
+    cut.then_some(
+        "the control plane's answer was withheld: it was too large to check for the credential",
+    )
 }
 
 fn response_ok(status: u16) -> bool {
@@ -1986,7 +2152,6 @@ mod tests {
             ("anthropic-version", "2023-06-01"),
             ("anthropic-beta", "tools-1"),
             ("User-Agent", "harness/1"),
-            ("X-Stainless-Lang", "python"),
             ("Accept-Encoding", "identity"),
             ("Authorization", "Bearer aiplex-token"),
             ("X-Client-Request-Id", "0123456789abcdefABCDEF"),
@@ -2027,7 +2192,126 @@ mod tests {
     }
 
     #[test]
+    fn a_control_plane_is_sent_only_the_harness_headers_its_api_needs() {
+        let mut request = harness_request();
+        for (name, value) in [
+            ("X-Goog-Iap-Jwt-Assertion", "forged"),
+            ("x-goog-api-key", "forged"),
+            ("Cookie", "a=b"),
+            ("Forwarded", "for=x"),
+            ("X-Forwarded-For", "203.0.113.9"),
+            ("X-REAL-IP", "203.0.113.9"),
+            ("X-Tenant", "t"),
+            ("x-user", "u"),
+            ("OpenAI-Beta", "assistants=v2"),
+            ("Idempotency-Key", "idem-1"),
+            ("Accept", "application/json"),
+            ("Content-Encoding", "identity"),
+        ] {
+            request.headers.push((name.to_owned(), value.to_owned()));
+        }
+        let sent = upstream_headers(&request, &governed(Api::Openai), "k", &attribution());
+        let names: Vec<String> = sent.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+        assert_eq!(
+            names,
+            [
+                "content-type",
+                "anthropic-version",
+                "anthropic-beta",
+                "user-agent",
+                "openai-beta",
+                "idempotency-key",
+                "accept",
+                "content-encoding",
+                "accept-encoding",
+                "authorization",
+                "x-client-request-id",
+                "x-aiplex-tags",
+                "traceparent",
+            ]
+        );
+        // Values as the harness sent them.
+        let value = |name: &str| {
+            sent.iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(value("anthropic-beta"), Some("tools-1"));
+        assert_eq!(value("openai-beta"), Some("assistants=v2"));
+        for name in CONTROL_PLANE_REQUEST_HEADERS {
+            assert!(to_control_plane(&name.to_ascii_uppercase()), "{name}");
+        }
+        assert!(!to_control_plane("x-forwarded-for"));
+    }
+
+    #[test]
+    fn only_what_an_sdk_reads_of_a_control_planes_answer_reaches_the_harness() {
+        for name in [
+            "Content-Type",
+            "content-encoding",
+            "Cache-Control",
+            "Retry-After",
+            "retry-after-ms",
+            "x-should-retry",
+            "request-id",
+            "X-Request-Id",
+            "anthropic-ratelimit-tokens-remaining",
+            "x-ratelimit-limit-requests",
+            "x-codex-primary-used-percent",
+        ] {
+            assert!(from_control_plane(name), "{name}");
+        }
+        for name in [
+            "Set-Cookie",
+            "Link",
+            "Content-Location",
+            "Location",
+            "Via",
+            "Server",
+            "WWW-Authenticate",
+            "X-Aiplex-Request-Id",
+            "X-Aiplex-Error-Code",
+            "Alt-Svc",
+            "Strict-Transport-Security",
+        ] {
+            assert!(!from_control_plane(name), "{name}");
+        }
+        for status in [300, 301, 302, 303, 307, 308] {
+            assert!(redirect(status), "{status}");
+        }
+        for status in [200, 204, 304, 400, 429, 503] {
+            assert!(!redirect(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn an_answer_holding_the_credential_is_withheld_wherever_it_is() {
+        let key = "aiplex-token-123";
+        assert_eq!(withhold(b"{\"error\": \"no\"}", key, false), None);
+        for body in [
+            &b"Bearer aiplex-token-123"[..],
+            b"{\"message\": \"you sent aiplex-token-123\"}",
+            b"aiplex-token-123",
+        ] {
+            let why = withhold(body, key, false).unwrap();
+            assert!(why.contains("held the credential"), "{why}");
+        }
+        // A prefix of it is not it; a body too large to check is withheld.
+        assert_eq!(withhold(b"aiplex-token-12", key, false), None);
+        let why = withhold(b"fine", key, true).unwrap();
+        assert!(why.contains("too large"), "{why}");
+        // What the codec makes of a byte that is not UTF-8 is not an id.
+        let odd = vec![("X-Aiplex-Request-Id".to_owned(), "req\u{fffd}1".to_owned())];
+        assert_eq!(Verdict::of(&governed(Api::Openai), &odd).request_id, None);
+    }
+
+    #[test]
     fn tags_name_the_branch_turn_and_harness_and_leave_out_what_does_not_fit() {
+        // A turn past 2^31 is a number like any other.
+        assert_eq!(
+            tags("b", u32::MAX, "h").as_deref(),
+            Some("by_branch=b,by_turn=4294967295,by_harness=h")
+        );
         assert_eq!(
             tags("app/fix-login", 3, "claude-code").as_deref(),
             Some("by_branch=app/fix-login,by_turn=3,by_harness=claude-code")
@@ -2175,8 +2459,8 @@ mod tests {
         let verdict = Verdict::of(&governed(Api::Openai), &relayed);
         assert!(!verdict.decided);
         assert_eq!(verdict.request_id.as_deref(), Some("req-18"));
-        // What would point the harness at the control plane is taken out;
-        // the rest is kept.
+        // Only what an SDK reads is kept: not what would point the harness
+        // at the control plane, nor the control plane's own headers.
         let mut answer = headers(&[
             ("Retry-After", "30"),
             (
@@ -2186,10 +2470,7 @@ mod tests {
             ("X-Aiplex-Request-Id", "req-19"),
         ]);
         hide_control_plane(&mut answer);
-        assert_eq!(
-            pairs(&answer),
-            [("Retry-After", "30"), ("X-Aiplex-Request-Id", "req-19")]
-        );
+        assert_eq!(pairs(&answer), [("Retry-After", "30")]);
     }
 
     #[test]

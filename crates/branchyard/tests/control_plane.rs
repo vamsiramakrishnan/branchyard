@@ -9,330 +9,16 @@
 //! this host, and no real AIPlex runs.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
+mod aiplex_kit;
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
-use branchyard::models::{self, KeySource, ModelActivity, ModelCall};
-use branchyard::{Activity, Budget, Policy, Provisioning, RecordedEvent, TaskOptions};
-use branchyard_testkit::{MockHttp, Request, Response};
+use aiplex_kit::*;
+use branchyard_testkit::{Banner, MockHttp, Request};
 use common::{text, Fixture};
 use serde_json::{json, Value};
-
-/// The token the gateway calls AIPlex with, and a provider's key.
-const AIPLEX_TOKEN: &str = "aiplex-real-token-1";
-const PROVIDER_KEY: &str = "sk-real-anthropic-9";
-/// The turn's trace context, as a server would set it.
-const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-
-/// The fake harness: `harness.py PLAN OUT`. `PLAN` is a JSON list of
-/// calls, each `{label, api, path, model, stream, headers, fold, method}`
-/// (`method` `GET` sends no body), sent
-/// with `http.client` so a header can be repeated, in any case, or folded
-/// (`fold`: a name and the values put on continuation lines); `OUT` gets,
-/// by label, the status, `Retry-After`, `X-Aiplex-Error-Code`,
-/// `WWW-Authenticate` and body the harness read.
-const HARNESS: &str = r#"import http.client, json, os, sys, urllib.parse
-plan = json.load(open(sys.argv[1]))
-real = sorted(k for k, v in os.environ.items() if "real" in v and ("sk-" in v or "aiplex" in v))
-print("real keys in env:", ",".join(real) or "none")
-out = {}
-for call in plan:
-    if call["api"] == "anthropic":
-        base, token = os.environ["ANTHROPIC_BASE_URL"], os.environ["ANTHROPIC_API_KEY"]
-        headers = [("x-api-key", token), ("anthropic-version", "2023-06-01")]
-        body = {"model": call["model"], "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
-    else:
-        base, token = os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_API_KEY"]
-        headers = [("Authorization", "Bearer " + token)]
-        if call["path"].endswith("/responses"):
-            body = {"model": call["model"], "input": "hi"}
-        else:
-            body = {"model": call["model"], "messages": [{"role": "user", "content": "hi"}]}
-    if call.get("stream"):
-        body["stream"] = True
-    method = call.get("method", "POST")
-    payload = json.dumps(body).encode() if method == "POST" else b""
-    url = urllib.parse.urlsplit(base + call["path"])
-    conn = http.client.HTTPConnection(url.hostname, url.port, timeout=60)
-    conn.putrequest(method, url.path, skip_accept_encoding=True)
-    for name, value in headers + [tuple(h) for h in call.get("headers", [])]:
-        conn.putheader(name, value)
-    if call.get("fold"):
-        conn.putheader(*call["fold"])
-    if payload:
-        conn.putheader("Content-Type", "application/json")
-        conn.putheader("Content-Length", str(len(payload)))
-    conn.endheaders(payload or None)
-    response = conn.getresponse()
-    data = response.read().decode()
-    out[call["label"]] = {"status": response.status, "body": data,
-        "retry_after": response.getheader("Retry-After"),
-        "error_code": response.getheader("X-Aiplex-Error-Code"),
-        "www_authenticate": response.getheader("WWW-Authenticate")}
-    print(f"call {call['label']}: {response.status}")
-json.dump(out, open(sys.argv[2], "w"))
-"#;
-
-/// The refusals an AIPlex access point makes itself, by status.
-fn code(status: u16) -> &'static str {
-    match status {
-        401 => "UNAUTHENTICATED",
-        403 => "CALLER_NOT_ALLOWED",
-        404 => "MODEL_NOT_FOUND",
-        429 => "QUOTA_BUDGET_EXHAUSTED",
-        _ => "QUOTA_UNAVAILABLE",
-    }
-}
-
-/// An error body in the wire's own shape, which AIPlex keeps.
-fn error_body(path: &str, status: u16, message: &str) -> Value {
-    match path.ends_with("/v1/messages") {
-        true => json!({"type": "error", "error": {"type": "rate_limit_error", "message": message}}),
-        false => json!({"error": {"message": message, "type": "requests", "code": status}}),
-    }
-}
-
-/// An AIPlex access point at `{url}/ap/ide`, named `name` in the request ids
-/// it answers with. A model `refuse-NNN...` is refused by AIPlex itself with
-/// status NNN and its code; `...relay-NNN` is the provider's own NNN,
-/// relayed (no code); anything else is answered as the provider would, with
-/// usage, streamed when asked.
-fn aiplex(name: &'static str) -> MockHttp {
-    let n = AtomicUsize::new(0);
-    MockHttp::start(move |request| {
-        let id = format!("{name}-req-{}", n.fetch_add(1, Ordering::SeqCst) + 1);
-        if request.method == "GET" {
-            return Response::json(200, &json!({"object": "list", "data": [{"id": "m"}]}))
-                .header("X-Aiplex-Request-Id", &id);
-        }
-        let model = model_of(request);
-        let status = |rest: &str| rest.get(..3).and_then(|s| s.parse::<u16>().ok());
-        if let Some(status) = model.strip_prefix("refuse-").and_then(status) {
-            let mut answer = Response::json(
-                status,
-                &error_body(&request.path, status, &format!("{}: refused", code(status))),
-            )
-            .header("X-Aiplex-Request-Id", &id)
-            .header("X-Aiplex-Error-Code", code(status));
-            if matches!(status, 429 | 503) {
-                answer = answer.header("Retry-After", "7");
-            }
-            if status == 401 {
-                answer = answer.header(
-                    "WWW-Authenticate",
-                    "Bearer resource_metadata=\"http://aiplex.test/.well-known/oauth\"",
-                );
-            }
-            return answer;
-        }
-        if let Some(status) = model.split_once("relay-").and_then(|(_, s)| status(s)) {
-            return Response::json(status, &error_body(&request.path, status, "provider"))
-                .header("X-Aiplex-Request-Id", &id);
-        }
-        answer(request, &model).header("X-Aiplex-Request-Id", &id)
-    })
-}
-
-/// The model a request's body names; empty for one without a body.
-fn model_of(request: &Request) -> String {
-    serde_json::from_slice::<Value>(&request.body)
-        .ok()
-        .and_then(|b| b["model"].as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
-/// A provider's answer to `request`, with usage.
-fn answer(request: &Request, model: &str) -> Response {
-    let stream = request.json()["stream"] == json!(true);
-    let sse = |events: Vec<Value>| {
-        let text: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
-        Response::new(200, text).header("Content-Type", "text/event-stream")
-    };
-    match (request.path.rsplit('/').next().unwrap_or(""), stream) {
-        ("messages", false) => Response::json(
-            200,
-            &json!({"type": "message", "model": model,
-                "content": [{"type": "text", "text": "hello"}],
-                "usage": {"input_tokens": 10, "output_tokens": 5}}),
-        ),
-        ("messages", true) => sse(vec![
-            json!({"type": "message_start", "message": {"model": model,
-                "usage": {"input_tokens": 10, "output_tokens": 1}}}),
-            json!({"type": "message_delta", "usage": {"output_tokens": 5}}),
-            json!({"type": "message_stop"}),
-        ]),
-        ("completions", false) => Response::json(
-            200,
-            &json!({"model": model, "choices": [{"message": {"content": "hello"},
-                "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
-        ),
-        ("completions", true) => sse(vec![
-            json!({"model": model, "choices": [{"delta": {"content": "hello"}}]}),
-            json!({"model": model, "choices": [],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
-        ]),
-        _ => sse(vec![
-            json!({"type": "response.completed", "response": {"model": model,
-                "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 5}}}),
-        ]),
-    }
-}
-
-/// Every attribution header a harness could forge, in other cases and
-/// twice, and its own credential where the gateway would not read it.
-fn forged(api: &str) -> Value {
-    let credential = match api {
-        "anthropic" => json!(["Authorization", "Bearer forged-aiplex-credential"]),
-        _ => json!(["api-key", "forged-aiplex-credential"]),
-    };
-    json!([
-        ["X-Client-Request-Id", "forged-1"],
-        ["x-client-request-id", "forged-2"],
-        [
-            "X-AIPLEX-TAGS",
-            "by_branch=forged,by_turn=99,by_harness=forged"
-        ],
-        ["x-aiplex-tags", "by_turn=98"],
-        ["X-AIPlex-Other", "forged"],
-        [
-            "traceparent",
-            "00-11111111111111111111111111111111-2222222222222222-01"
-        ],
-        [
-            "TRACEPARENT",
-            "00-33333333333333333333333333333333-4444444444444444-01"
-        ],
-        ["tracestate", "vendor=forged"],
-        ["X-Request-Id", "forged-request"],
-        credential
-    ])
-}
-
-fn call(label: &str, api: &str, path: &str, model: &str, stream: bool) -> Value {
-    json!({"label": label, "api": api, "path": path, "model": model, "stream": stream,
-        "headers": forged(api)})
-}
-
-/// The AIPlex backends at `first` and `second`, a provider reached
-/// directly at `direct`, and their routes.
-fn config(first: &MockHttp, second: &MockHttp, direct: &MockHttp) -> Value {
-    let plane = |api: &str, mock: &MockHttp| {
-        json!({"api": api, "url": format!("{}/ap/ide", mock.url()), "key": "aiplex",
-            "control_plane": "aiplex"})
-    };
-    json!({
-        "backends": {
-            "aiplex-anthropic": plane("anthropic", first),
-            "aiplex-openai": plane("openai", first),
-            "spare-anthropic": plane("anthropic", second),
-            "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"}
-        },
-        "routes": [
-            {"model": "direct-*", "backends": ["direct"]},
-            {"model": "claude-haiku-*", "backends": ["aiplex-openai"],
-                "backend_model": "gpt-5-mini"},
-            {"model": "claude-*", "backends": ["aiplex-anthropic", "spare-anthropic"]},
-            {"model": "refuse-*", "backends": ["aiplex-anthropic", "spare-anthropic"],
-                "weights": [1, 3]},
-            {"model": "relay-*", "backends": ["aiplex-anthropic"],
-                "fallbacks": ["spare-anthropic"]}
-        ],
-        "audit": "contents",
-        "seed": 11
-    })
-}
-
-fn use_gateway(f: &Fixture, config: Value) {
-    std::fs::write(f.dir.join("aiplex"), format!("{AIPLEX_TOKEN}\n")).unwrap();
-    std::fs::write(f.dir.join("anthropic"), PROVIDER_KEY).unwrap();
-    let config: models::Config = serde_json::from_value(config).unwrap();
-    let signer = models::Signer::local(&f.yard).unwrap();
-    let dir = f.dir.clone();
-    let gateway =
-        models::Gateway::new(&config, signer, move |name| KeySource::File(dir.join(name))).unwrap();
-    f.yard.use_models(gateway);
-}
-
-/// Run the plan as branch `name`, with `trace` as the turn's trace context:
-/// the branch's events and what the harness read, by label.
-fn run(
-    f: &Fixture,
-    name: &str,
-    trace: Option<&str>,
-    plan: &Value,
-) -> (Vec<RecordedEvent>, BTreeMap<String, Value>) {
-    let script = f.dir.join("harness.py");
-    std::fs::write(&script, HARNESS).unwrap();
-    let plan_file = f.dir.join(format!("{name}.plan.json"));
-    let out_file = f.dir.join(format!("{name}.out.json"));
-    std::fs::write(&plan_file, plan.to_string()).unwrap();
-    let prompt = format!(
-        "SH python3 {} {} {}",
-        script.display(),
-        plan_file.display(),
-        out_file.display()
-    );
-    let options = TaskOptions {
-        policy: Policy::allow_all(),
-        provision: Some(Provisioning {
-            models: Some(models::ModelAccess {
-                allow: vec!["*".into()],
-            }),
-            ..Provisioning::default()
-        }),
-        budget: Budget {
-            max_duration: Some(Duration::from_secs(120)),
-            ..Budget::default()
-        },
-        trace_parent: trace.map(str::to_owned),
-        ..f.options()
-    };
-    let branch = f.task(&prompt).options(options).name(name).run().unwrap();
-    let events = branch.events().unwrap();
-    let read = std::fs::read_to_string(&out_file);
-    assert!(
-        read.is_ok(),
-        "the harness wrote no answers: {}",
-        text(&events)
-    );
-    (events, serde_json::from_str(&read.unwrap()).unwrap())
-}
-
-fn calls(events: &[RecordedEvent]) -> BTreeMap<String, ModelCall> {
-    events
-        .iter()
-        .filter_map(|e| match &e.activity {
-            Activity::Model(m) => match m.as_ref() {
-                ModelActivity::Call(call) => Some((call.model.clone(), call.clone())),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect()
-}
-
-/// The requests in `seen` for `model`.
-fn asked<'a>(seen: &'a [Request], model: &str) -> Vec<&'a Request> {
-    seen.iter().filter(|r| model_of(r) == model).collect()
-}
-
-/// Every file under `dir`, read.
-fn read_all(dir: &Path) -> String {
-    let mut all = String::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        match path.is_dir() {
-            true => all.push_str(&read_all(&path)),
-            false => all.push_str(&std::fs::read_to_string(&path).unwrap()),
-        }
-    }
-    all
-}
 
 #[test]
 fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path() {
@@ -485,9 +171,43 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
             "{model}"
         );
         assert_eq!(request.header_values("traceparent"), [TRACE], "{model}");
-        for gone in ["tracestate", "x-request-id", "x-aiplex-other"] {
+        // Nothing else the harness sent speaks for it: not who it is, not
+        // where it is, not a cookie.
+        for gone in [
+            "tracestate",
+            "x-request-id",
+            "x-aiplex-other",
+            "x-goog-iap-jwt-assertion",
+            "x-goog-api-key",
+            "cookie",
+            "forwarded",
+            "x-forwarded-for",
+            "x-real-ip",
+            "x-tenant",
+            "x-user",
+            "x-stainless-lang",
+        ] {
             assert!(request.header_values(gone).is_empty(), "{model}: {gone}");
         }
+        // The APIs' own headers go as the harness sent them.
+        if request.path.ends_with("/v1/messages") {
+            assert_eq!(
+                request.header_values("anthropic-beta"),
+                ["prompt-caching-2024-07-31,tools-2024-04-04"],
+                "{model}"
+            );
+            assert_eq!(request.header_values("anthropic-version"), ["2023-06-01"]);
+        }
+        assert_eq!(
+            request.header_values("openai-beta"),
+            ["assistants=v2"],
+            "{model}"
+        );
+        assert_eq!(
+            request.header_values("idempotency-key"),
+            ["idem-1"],
+            "{model}"
+        );
         // Spelled as the contract spells them.
         let names: Vec<&str> = request
             .sent_headers
@@ -576,7 +296,9 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
             expected,
             "{label}"
         );
-        assert_eq!(got["error_code"], code(status), "{label}");
+        // AIPlex's own headers are Branchyard's to record, not the
+        // harness's to read.
+        assert_eq!(got["error_code"], Value::Null, "{label}");
         let retry = match status {
             429 | 503 => json!("7"),
             _ => Value::Null,
@@ -667,6 +389,8 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
     );
     assert_eq!(read["direct"]["status"], 200);
     assert_eq!(plain[0].header_values("x-api-key"), [PROVIDER_KEY]);
+    assert_eq!(plain[0].header_values("X-Forwarded-For"), ["203.0.113.9"]);
+    assert_eq!(plain[0].header_values("cookie"), ["session=forged-cookie"]);
     assert_eq!(
         plain[0].header_values("X-Client-Request-Id"),
         ["forged-1", "forged-2"]
@@ -838,4 +562,262 @@ fn a_call_no_route_takes_goes_to_the_plain_backends_of_its_api_else_to_aiplex() 
         .iter()
         .any(|(_, v)| v.contains("forged")));
     access.finish();
+}
+
+#[test]
+fn an_answer_holding_the_credential_or_pointing_at_aiplex_never_reaches_the_harness() {
+    let f = Fixture::new();
+    let elsewhere = MockHttp::start(|_| branchyard_testkit::Response::new(200, "elsewhere"));
+    let (first, second, direct) = (
+        access_point("one", format!("{}/stolen", elsewhere.url())),
+        access_point("two", format!("{}/stolen", elsewhere.url())),
+        aiplex("direct"),
+    );
+    let mut config = config(&first, &second, &direct);
+    config["routes"].as_array_mut().unwrap().extend([
+        json!({"model": "echo-*", "backends": ["aiplex-anthropic"]}),
+        json!({"model": "gpt-echo-*", "backends": ["aiplex-openai"]}),
+        json!({"model": "redirect-*", "backends": ["aiplex-anthropic"],
+                "fallbacks": ["spare-anthropic"]}),
+        json!({"model": "headers-*", "backends": ["aiplex-anthropic"]}),
+    ]);
+    use_gateway(&f, config);
+    let openai_echo =
+        |label: &str, model: &str| call(label, "openai", "/chat/completions", model, false);
+    let plan = json!([
+        call("echo 401", "anthropic", "/v1/messages", "echo-401", false),
+        call("echo 403", "anthropic", "/v1/messages", "echo-403", false),
+        openai_echo("echo 401 openai", "echo-401-o"),
+        openai_echo("echo 403 openai", "echo-403-o"),
+        call(
+            "echo streamed",
+            "anthropic",
+            "/v1/messages",
+            "echo-stream-401",
+            true
+        ),
+        call(
+            "relayed echo",
+            "anthropic",
+            "/v1/messages",
+            "relay-echo-503",
+            false
+        ),
+        call("headers", "anthropic", "/v1/messages", "headers-ok", false),
+        call(
+            "redirect",
+            "anthropic",
+            "/v1/messages",
+            "redirect-302",
+            false
+        ),
+    ]);
+    let (events, read) = run(&f, "echo", None, &plan);
+    let calls = calls(&events);
+    // An answer holding the credential: Branchyard's own error, the status
+    // kept, the reason on the event, the body nowhere.
+    for (label, model, status) in [
+        ("echo 401", "echo-401", 401),
+        ("echo 403", "echo-403", 403),
+        ("echo 401 openai", "echo-401-o", 401),
+        ("echo 403 openai", "echo-403-o", 403),
+        ("echo streamed", "echo-stream-401", 401),
+        ("relayed echo", "relay-echo-503", 503),
+    ] {
+        let got = &read[label];
+        assert_eq!(got["status"], status, "{label}: {got}");
+        let body = got["body"].as_str().unwrap();
+        assert!(!body.contains(AIPLEX_TOKEN), "{label}: {body}");
+        assert!(body.contains("withheld"), "{label}: {body}");
+        let call = &calls[model];
+        let reason = call.reason.as_deref().unwrap();
+        assert!(reason.contains("held the credential"), "{label}: {reason}");
+        assert!(call.control_plane.is_some(), "{label}");
+    }
+    // The echoing calls were each sent once, so the test saw what it meant.
+    let seen = [first.requests(), second.requests()].concat();
+    assert_eq!(asked(&seen, "echo-stream-401").len(), 1);
+    assert_eq!(asked(&seen, "relay-echo-503").len(), 2);
+    // Of AIPlex's answer headers, only what an SDK reads.
+    let got = &read["headers"];
+    assert_eq!(got["status"], 200, "{got}");
+    for (name, _) in AIPLEX_ONLY {
+        assert!(
+            got_header(got, name).is_empty(),
+            "{name} reached the harness: {got}"
+        );
+    }
+    for (name, value) in SDK_HEADERS {
+        assert_eq!(got_header(got, name), [*value], "{name}: {got}");
+    }
+    assert!(got_header(got, "x-aiplex-request-id").is_empty());
+    // A redirect is neither followed nor relayed: both AIPlex backends
+    // redirected, so the call failed, and the target heard nothing.
+    let got = &read["redirect"];
+    assert_eq!(got["status"], 502, "{got}");
+    assert!(got_header(got, "location").is_empty(), "{got}");
+    assert_eq!(asked(&seen, "redirect-302").len(), 2);
+    assert!(elsewhere.requests().is_empty(), "the redirect was followed");
+    let reason = calls["redirect-302"].reason.as_deref().unwrap();
+    assert!(
+        reason.contains("answered with a redirect (302), not followed"),
+        "{reason}"
+    );
+    // Neither the token nor an echo of it is in the events or the audit.
+    let recorded = serde_json::to_string(&events).unwrap();
+    assert!(!recorded.contains(AIPLEX_TOKEN));
+    let audit = read_all(&f.root.join(".branchyard/models/audit"));
+    assert!(!audit.contains(AIPLEX_TOKEN));
+    first.finish();
+    second.finish();
+    direct.finish();
+    elsewhere.finish();
+}
+
+#[test]
+fn a_call_sent_to_aiplex_names_its_id_whatever_came_back() {
+    let f = Fixture::new();
+    let (first, second) = (aiplex("one"), aiplex("two"));
+    // A response head with a byte that is not UTF-8 in AIPlex's id.
+    let raw = Banner::start(
+        b"HTTP/1.1 200 OK\r\nX-Aiplex-Request-Id: req\xff1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        1,
+    );
+    let plane = |api: &str, url: String| json!({"api": api, "url": url, "key": "aiplex", "control_plane": "aiplex"});
+    let config = json!({
+        "backends": {
+            "ap": plane("anthropic", format!("{}/ap/ide", first.url())),
+            "spare": plane("anthropic", format!("{}/ap/ide", second.url())),
+            "down": plane("anthropic", "http://127.0.0.1:1/ap/ide".into()),
+            "raw": plane("anthropic", format!("http://{}/ap/ide", raw.addr()))
+        },
+        "routes": [
+            {"model": "refused-conn-*", "backends": ["down"]},
+            {"model": "hang-solo-*", "backends": ["ap"]},
+            {"model": "hang-*", "backends": ["ap"], "fallbacks": ["spare"]},
+            {"model": "raw-*", "backends": ["raw"]},
+            {"model": "*", "backends": ["ap"]}
+        ]
+    });
+    // The product's own clock: a backend quiet for this long has failed.
+    use_gateway_quiet(&f, config, Some(Duration::from_secs(3)));
+    let mut through = call(
+        "pass-through",
+        "anthropic",
+        "/v1/messages",
+        "claude-x",
+        false,
+    );
+    through["raw_path"] = json!("/backends/ap/v1/messages");
+    let plan = json!([
+        call(
+            "refused",
+            "anthropic",
+            "/v1/messages",
+            "refused-conn-1",
+            false
+        ),
+        call("closed", "anthropic", "/v1/messages", "close-1", false),
+        call("timeout", "anthropic", "/v1/messages", "hang-1", false),
+        call(
+            "timeout alone",
+            "anthropic",
+            "/v1/messages",
+            "hang-solo-1",
+            false
+        ),
+        call("esc id", "anthropic", "/v1/messages", "esc-id", false),
+        call(
+            "newline id",
+            "anthropic",
+            "/v1/messages",
+            "newline-id",
+            false
+        ),
+        call("esc code", "anthropic", "/v1/messages", "esc-code", false),
+        call(
+            "newline code",
+            "anthropic",
+            "/v1/messages",
+            "newline-code",
+            false
+        ),
+        call("not utf-8", "anthropic", "/v1/messages", "raw-1", false),
+        through,
+    ]);
+    let (events, read) = run(&f, "noanswer", None, &plan);
+    let calls = calls(&events);
+    let seen = [first.requests(), second.requests()].concat();
+    // No answer, or one the gateway cannot read: Branchyard's own error,
+    // nothing of AIPlex's kept, and the event names the id the call was
+    // sent under.
+    for (label, model) in [
+        ("refused", "refused-conn-1"),
+        ("closed", "close-1"),
+        ("timeout", "hang-1"),
+        ("timeout alone", "hang-solo-1"),
+        ("esc id", "esc-id"),
+        ("newline id", "newline-id"),
+        ("esc code", "esc-code"),
+        ("newline code", "newline-code"),
+    ] {
+        let got = &read[label];
+        assert_eq!(got["status"], 502, "{label}: {got}");
+        assert!(
+            got["body"]
+                .as_str()
+                .unwrap()
+                .contains("Branchyard's model gateway"),
+            "{label}: {got}"
+        );
+        let call = &calls[model];
+        let plane = call.control_plane.as_deref();
+        assert!(
+            plane.is_some_and(|p| !p.call_id.is_empty()),
+            "{label}: {call:?}"
+        );
+        let plane = plane.unwrap();
+        assert_eq!(
+            (&plane.request_id, &plane.error_code),
+            (&None, &None),
+            "{label}"
+        );
+        // The id is the one AIPlex was sent, where it got the call.
+        for request in asked(&seen, model) {
+            assert_eq!(
+                request.header("X-Client-Request-Id"),
+                Some(plane.call_id.as_str())
+            );
+        }
+    }
+    // A byte that is not UTF-8 is legal in a header value (obs-text): the
+    // codec reads it as U+FFFD, the id is outside the contract's alphabet
+    // and is not kept, and the answer reaches the harness without it. (The
+    // listener closes once it has written, so the gateway can also see the
+    // connection reset first and answer 502; either way nothing is kept.)
+    let got = &read["not utf-8"];
+    assert!(got["status"] == 200 || got["status"] == 502, "{got}");
+    assert!(got_header(got, "x-aiplex-request-id").is_empty(), "{got}");
+    let plane = calls["raw-1"].control_plane.as_deref().unwrap();
+    assert!(!plane.call_id.is_empty());
+    assert_eq!((&plane.request_id, &plane.error_code), (&None, &None));
+    // Quiet after the call was sent: it may have been billed, so it is not
+    // sent to the second backend.
+    assert_eq!(asked(&first.requests(), "hang-1").len(), 1);
+    assert!(asked(&second.requests(), "hang-1").is_empty());
+    // A turn number past 2^31 fits a tag (unit tested); the pass-through
+    // path never reaches an AIPlex backend, by its own check.
+    let got = &read["pass-through"];
+    assert_eq!(got["status"], 404, "{got}");
+    assert!(
+        got["body"]
+            .as_str()
+            .unwrap()
+            .contains("the pass-through path never reaches"),
+        "{got}"
+    );
+    assert!(asked(&seen, "claude-x").is_empty());
+    first.finish();
+    second.finish();
+    raw.finish();
 }
