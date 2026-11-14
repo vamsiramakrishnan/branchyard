@@ -106,7 +106,7 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
             "refuse-429-stream",
             true,
         ),
-        // No route takes this one, so only AIPlex's OpenAI backend may.
+        // No route names this one, so it is AIPlex's OpenAI backend's.
         call(
             "refuse 503 unrouted",
             "openai",
@@ -119,8 +119,9 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
         call("relay 429", "anthropic", "/v1/messages", "relay-429", false),
         call("relay 503", "anthropic", "/v1/messages", "relay-503", false),
         call("relay 404", "anthropic", "/v1/messages", "relay-404", false),
-        // No route, on an API with a plain backend: the plain one only, as
-        // before; its 503 never moves the call to AIPlex.
+        // No route names this one either, on an API that also has a plain
+        // backend: it is AIPlex's all the same, both AIPlex backends in
+        // turn, and the provider's 503 never moves it to the plain one.
         call(
             "relay 503 unrouted",
             "anthropic",
@@ -370,22 +371,31 @@ fn a_control_plane_hears_only_the_gateway_and_its_refusal_is_final_on_every_path
         calls["relay-503"].failed_over
     );
     assert_eq!(read["relay 404"]["status"], 404);
+    // The model no route names: each AIPlex backend of its API once, in
+    // name order, under one id; never the plain backend beside them.
     assert_eq!(read["relay 503 unrouted"]["status"], 503);
-    assert!(asked(&seen, "llama-relay-503").is_empty());
-    assert_eq!(calls["llama-relay-503"].backend.as_deref(), Some("direct"));
-    assert_eq!(calls["llama-relay-503"].control_plane, None);
+    assert_eq!(asked(&first.requests(), "llama-relay-503").len(), 1);
+    assert_eq!(asked(&second.requests(), "llama-relay-503").len(), 1);
+    let unrouted = &calls["llama-relay-503"];
+    assert_eq!(unrouted.decision, "failed", "{unrouted:?}");
+    assert!(unrouted.control_plane.is_some(), "{unrouted:?}");
+    assert_eq!(unrouted.failed_over.len(), 1, "{unrouted:?}");
+    assert!(
+        unrouted.failed_over[0].starts_with("aiplex-anthropic: 503"),
+        "{unrouted:?}"
+    );
 
     // The folded header: refused by the gateway, sent nowhere.
     assert_eq!(read["folded"]["status"], 400, "{}", read["folded"]);
     assert!(asked(&seen, "claude-folded").is_empty());
 
-    // The provider reached directly saw its own route's call and the
-    // unrouted one, as it always has: the harness's headers and the provider's key, and none
-    // of the gateway's attribution.
+    // The provider reached directly saw its own route's call and no
+    // other, as a plain backend always has: the harness's headers and the
+    // provider's key, and none of the gateway's attribution.
     let plain = direct.requests();
     assert_eq!(
         plain.iter().map(model_of).collect::<Vec<_>>(),
-        ["llama-relay-503", "direct-ok"]
+        ["direct-ok"]
     );
     assert_eq!(read["direct"]["status"], 200);
     assert_eq!(plain[0].header_values("x-api-key"), [PROVIDER_KEY]);
@@ -457,11 +467,12 @@ fn a_branch_name_that_does_not_fit_a_tag_is_left_out_and_no_trace_is_made_up() {
 }
 
 #[test]
-fn a_call_no_route_takes_goes_to_the_plain_backends_of_its_api_else_to_aiplex() {
+fn a_call_no_route_names_goes_to_aiplex_never_to_a_plain_backend_and_the_model_list_as_before() {
     let f = Fixture::new();
     let access = aiplex("one");
-    // Anthropic's API: a plain backend that refuses connections, and an
-    // AIPlex backend a route names. OpenAI's: AIPlex only, named by none.
+    // Anthropic's API: a plain backend that refuses connections, which no
+    // route names, and an AIPlex backend a route names. OpenAI's: AIPlex
+    // only, named by none.
     let at = format!("{}/ap/ide", access.url());
     use_gateway(
         &f,
@@ -514,28 +525,38 @@ fn a_call_no_route_takes_goes_to_the_plain_backends_of_its_api_else_to_aiplex() 
     ]);
     let (events, read) = run(&f, "unrouted", Some(TRACE), &plan);
     let seen = access.requests();
-    // The plain backend could not be reached: the call failed there, and
-    // AIPlex heard nothing of it, nor of the model list.
-    for label in ["unrouted", "models anthropic"] {
-        assert_eq!(read[label]["status"], 502, "{label}: {}", read[label]);
-    }
-    assert!(asked(&seen, "llama-3").is_empty());
+    let calls = calls(&events);
+    // The model no route names is AIPlex's, though its API has a plain
+    // backend: AIPlex answered, and the plain one was never tried (it
+    // refuses connections, and nothing failed).
+    assert_eq!(read["unrouted"]["status"], 200, "{}", read["unrouted"]);
+    assert_eq!(asked(&seen, "llama-3").len(), 1);
+    let unrouted = &calls["llama-3"];
+    assert_eq!(unrouted.backend.as_deref(), Some("aiplex-anthropic"));
+    assert!(unrouted.control_plane.is_some(), "{unrouted:?}");
+    assert!(unrouted.failed_over.is_empty(), "{unrouted:?}");
+    // The model list is answered as before: by the plain backend of its
+    // API, which could not be reached, so it failed there, and AIPlex
+    // heard nothing of it.
+    let listed = &read["models anthropic"];
+    assert_eq!(listed["status"], 502, "{listed}");
+    assert!(
+        listed["body"]
+            .as_str()
+            .unwrap()
+            .contains("down: could not connect"),
+        "{listed}"
+    );
     assert!(
         !seen.iter().any(|r| r.method == "GET"
             && r.path == "/ap/ide/v1/models"
             && r.header("anthropic-version").is_some()),
         "{seen:?}"
     );
-    let calls = calls(&events);
-    assert!(calls["llama-3"]
-        .reason
-        .as_deref()
-        .unwrap()
-        .contains("down: could not connect"));
     // A route names AIPlex: it answers.
     assert_eq!(read["routed"]["status"], 200);
-    // OpenAI's API has no plain backend: an unrouted call, and the model
-    // list, go to AIPlex, and its refusal is final.
+    // OpenAI's API has no plain backend: a call no route names, and the
+    // model list, go to AIPlex, and its refusal is final.
     assert_eq!(
         read["unrouted openai"]["status"], 200,
         "{}",
@@ -835,22 +856,20 @@ fn a_call_sent_to_aiplex_names_its_id_whatever_came_back() {
     assert_eq!(asked(&first.requests(), "hang-1").len(), 1);
     assert!(asked(&second.requests(), "hang-1").is_empty());
     // A turn number past 2^31 fits a tag (unit tested); the pass-through
-    // path never reaches an AIPlex backend, by its own check.
+    // path reaches no backend while a control plane is configured.
     let got = &read["pass-through"];
     assert_eq!(got["status"], 404, "{got}");
     // The harness is told what it is told of a backend that is not there;
     // the event has the reason.
     let body = got["body"].as_str().unwrap();
     assert!(body.contains("no backend ap"), "{got}");
-    assert!(!body.contains("control-plane"), "{got}");
-    assert!(
-        calls["claude-x"]
-            .reason
-            .as_deref()
-            .unwrap()
-            .contains("ap is a control-plane backend, which the pass-through path never reaches"),
-        "{:?}",
-        calls["claude-x"].reason
+    assert!(!body.contains("control plane"), "{got}");
+    assert_eq!(
+        calls["claude-x"].reason.as_deref(),
+        Some(
+            "the pass-through path is closed while a control plane is configured: ap is not \
+             reached by it"
+        )
     );
     assert!(asked(&seen, "claude-x").is_empty());
     first.finish();
@@ -1125,11 +1144,11 @@ fn a_harness_that_goes_away_during_a_refusal_leaves_it_a_refusal() {
 }
 
 #[test]
-fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
+fn only_the_listed_routes_are_served_beside_a_control_plane_whichever_backend_would_take_them() {
     let f = Fixture::new();
     let (access, direct) = (aiplex("one"), aiplex("direct"));
-    // Anthropic's API: AIPlex by route, and a plain backend for the rest.
-    // OpenAI's: AIPlex only, so a call no route takes goes to it too.
+    // Anthropic's API: AIPlex by route, and a plain backend by route.
+    // OpenAI's: AIPlex only, so a call no route names goes to it.
     let at = format!("{}/ap/ide", access.url());
     use_gateway(
         &f,
@@ -1141,7 +1160,10 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
                     "control_plane": "aiplex"},
                 "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"}
             },
-            "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]
+            "routes": [
+                {"model": "claude-*", "backends": ["aiplex-anthropic"]},
+                {"model": "direct-*", "backends": ["direct"]}
+            ]
         }),
     );
     let post =
@@ -1204,6 +1226,37 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
             "o3-gemini",
             "POST /v1/../v1beta/models/gemini-pro:generateContent",
         ),
+        // The one list holds a plain backend to it too: a model its route
+        // names, and a model no route names, on a path that is not a
+        // route. Version 1 sent these to the plain backend as written.
+        (
+            "plain tools",
+            "anthropic",
+            "/mcp",
+            "direct-tools",
+            "POST /mcp",
+        ),
+        (
+            "plain slash",
+            "anthropic",
+            "/v1/messages/",
+            "direct-slash",
+            "POST /v1/messages/",
+        ),
+        (
+            "plain batches",
+            "anthropic",
+            "/v1/messages/batches",
+            "direct-batches",
+            "POST /v1/messages/batches",
+        ),
+        (
+            "unrouted tools",
+            "anthropic",
+            "/mcp",
+            "llama-3",
+            "POST /mcp",
+        ),
     ];
     let mut plan: Vec<Value> = refused
         .iter()
@@ -1227,8 +1280,9 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
         post("chat", "openai", "/chat/completions", "o3-ok"),
         post("responses", "openai", "/responses", "o3-ok-responses"),
         get("models", "/models?limit=5"),
-        // A plain backend is sent what the harness asks for, as before.
-        post("plain", "anthropic", "/mcp", "llama-3"),
+        // A plain backend is sent a route too, for a model its own route
+        // names.
+        post("plain", "anthropic", "/v1/messages?beta=true", "direct-ok"),
     ]);
     let (events, read) = run(&f, "routes", None, &Value::Array(plan));
     let calls = calls(&events);
@@ -1237,7 +1291,10 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
             "anthropic" => "POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models",
             _ => "POST /v1/chat/completions, POST /v1/responses, GET /v1/models",
         };
-        let why = format!("{shown} is not a route a control-plane backend is asked ({routes})");
+        let why = format!(
+            "{shown} is not a route the gateway serves while a control plane is configured \
+             ({routes})"
+        );
         assert_eq!(read[label]["status"], 403, "{label}: {}", read[label]);
         let body = read[label]["body"].as_str().unwrap();
         assert!(body.contains(&why), "{label}: {body}");
@@ -1255,10 +1312,9 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
         );
     }
     assert_eq!(read["skills"]["status"], 403, "{}", read["skills"]);
-    assert!(read["skills"]["body"]
-        .as_str()
-        .unwrap()
-        .contains("GET /v1/../skills is not a route a control-plane backend is asked"));
+    assert!(read["skills"]["body"].as_str().unwrap().contains(
+        "GET /v1/../skills is not a route the gateway serves while a control plane is configured"
+    ));
     // AIPlex heard the routes, and nothing else.
     let heard: Vec<String> = access
         .requests()
@@ -1279,16 +1335,18 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
         assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
     }
     assert_eq!(calls["claude-ok-json"].decision, "allowed");
-    // The plain backend was sent the path as the harness wrote it, with its
-    // own key.
+    // The plain backend heard the one route for its own model, with its
+    // own key, and none of the paths that are not routes.
     let plain = direct.requests();
     assert_eq!(plain.len(), 1, "{plain:?}");
     assert_eq!(
         (plain[0].method.as_str(), plain[0].path.as_str()),
-        ("POST", "/mcp")
+        ("POST", "/v1/messages?beta=true")
     );
+    assert_eq!(model_of(&plain[0]), "direct-ok");
     assert_eq!(plain[0].header_values("x-api-key"), [PROVIDER_KEY]);
     assert_eq!(read["plain"]["status"], 200, "{}", read["plain"]);
+    assert_eq!(calls["direct-ok"].backend.as_deref(), Some("direct"));
     access.finish();
     direct.finish();
 }
@@ -1347,7 +1405,8 @@ fn a_body_the_gateway_did_not_read_is_not_routed_beside_a_control_plane() {
                 "control_plane": "aiplex"}
         });
         if mixed {
-            // A plain backend of each API: where a call no route takes goes.
+            // A plain backend of each API, which no route names: version 1
+            // sent it what no route named, and an unread body was one.
             backends["direct"] =
                 json!({"api": "anthropic", "url": direct.url(), "key": "anthropic"});
             backends["direct-openai"] =
@@ -1513,9 +1572,9 @@ fn a_plain_only_gateway_forwards_what_it_cannot_read_as_it_always_did() {
 }
 
 #[test]
-fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
+fn the_pass_through_path_is_closed_beside_a_control_plane_and_says_the_same_of_every_name() {
     let f = Fixture::new();
-    let (access, direct) = (aiplex("one"), aiplex("direct"));
+    let (access, direct) = (aiplex("one"), provider());
     let at = format!("{}/ap/ide", access.url());
     use_gateway(
         &f,
@@ -1524,8 +1583,12 @@ fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
                 "control_plane": "aiplex"},
             "aiplex-openai": {"api": "openai", "url": at, "key": "aiplex",
                 "control_plane": "aiplex"},
-            "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"}
-        }, "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]}),
+            "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"},
+            "gen": {"api": "generic", "url": direct.url(), "key": "anthropic"}
+        }, "routes": [
+            {"model": "claude-*", "backends": ["aiplex-anthropic"]},
+            {"model": "direct-*", "backends": ["direct"]}
+        ]}),
     );
     let through = |label: &str, backend: &str, model: &str| {
         let mut call = call(label, "anthropic", "/v1/messages", model, false);
@@ -1535,43 +1598,74 @@ fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
     let mut listing = json!({"label": "models with a body", "api": "openai", "path": "/models",
         "model": "", "method": "GET", "headers": []});
     listing["body_bytes"] = json!(br#"{"model":"o3-ok"}"#.as_slice());
-    let plan = json!([
-        through("plane", "aiplex-anthropic", "claude-pass-plane"),
-        through("none", "nowhere", "claude-pass-none"),
+    // The model list of an API whose backend is plain, with a body: a GET
+    // takes none whoever would get it, so the list never carries a model.
+    let mut plain_listing = json!({"label": "plain models with a body", "api": "anthropic",
+        "path": "/v1/models", "model": "", "method": "GET", "headers": []});
+    plain_listing["body_bytes"] = json!(br#"{"model":"direct-ok"}"#.as_slice());
+    // Every kind of name: an AIPlex backend, a plain backend whose route
+    // names the model asked for, a generic backend, and none.
+    let names = [
+        ("plane", "aiplex-anthropic", "claude-pass-plane"),
+        ("plain", "direct", "direct-pass-plain"),
+        ("generic", "gen", "claude-pass-generic"),
+        ("none", "nowhere", "claude-pass-none"),
+    ];
+    let mut plan: Vec<Value> = names
+        .iter()
+        .map(|(label, backend, model)| through(label, backend, model))
+        .collect();
+    plan.extend([
         listing,
-        {"label": "models", "api": "openai", "path": "/models", "model": "",
-            "method": "GET", "headers": []},
+        plain_listing,
+        json!({"label": "models", "api": "openai", "path": "/models", "model": "",
+            "method": "GET", "headers": []}),
     ]);
-    let (events, read) = run(&f, "pass", None, &plan);
-    // One answer for a backend that is not there and one the path never
-    // reaches: the harness cannot tell which names are control planes.
-    for label in ["plane", "none"] {
-        assert_eq!(read[label]["status"], 404, "{label}: {}", read[label]);
-    }
+    let (events, read) = run(&f, "pass", None, &Value::Array(plan));
+    // One answer for every name: the harness cannot tell a backend that is
+    // there from one that is not, nor which names are control planes.
     let told =
         |label: &str, name: &str| read[label]["body"].as_str().unwrap().replace(name, "NAME");
-    assert_eq!(told("plane", "aiplex-anthropic"), told("none", "nowhere"));
+    for (label, backend, _) in names {
+        assert_eq!(read[label]["status"], 404, "{label}: {}", read[label]);
+        assert_eq!(told(label, backend), told("none", "nowhere"), "{label}");
+    }
     assert!(told("plane", "aiplex-anthropic").contains("no backend NAME"));
     // The event is the operator's, and has the reason.
     let calls = calls(&events);
-    assert_eq!(
-        calls["claude-pass-plane"].reason.as_deref(),
-        Some("aiplex-anthropic is a control-plane backend, which the pass-through path never reaches")
-    );
-    assert_eq!(
-        calls["claude-pass-none"].reason.as_deref(),
-        Some("no backend nowhere")
-    );
-    // A GET with a body is not sent to a control plane; without one it is.
-    let got = &read["models with a body"];
-    assert_eq!(got["status"], 400, "{got}");
-    assert!(
-        got["body"]
-            .as_str()
-            .unwrap()
-            .contains("a GET with a body is not sent to a control-plane backend"),
-        "{got}"
-    );
+    for (label, backend, model) in names {
+        let event = &calls[model];
+        assert_eq!(
+            (event.decision.as_str(), event.status),
+            ("failed", 404),
+            "{label}"
+        );
+        assert_eq!(
+            (&event.backend, &event.control_plane),
+            (&None, &None),
+            "{label}"
+        );
+        let why = match backend {
+            "nowhere" => "no backend nowhere".to_owned(),
+            _ => format!(
+                "the pass-through path is closed while a control plane is configured: \
+                 {backend} is not reached by it"
+            ),
+        };
+        assert_eq!(event.reason.as_deref(), Some(why.as_str()), "{label}");
+    }
+    // A GET with a body is sent to neither kind of backend.
+    for label in ["models with a body", "plain models with a body"] {
+        let got = &read[label];
+        assert_eq!(got["status"], 400, "{label}: {got}");
+        assert!(
+            got["body"]
+                .as_str()
+                .unwrap()
+                .contains("a GET with a body is not sent on while a control plane is configured"),
+            "{label}: {got}"
+        );
+    }
     assert_eq!(read["models"]["status"], 200, "{}", read["models"]);
     let heard = access.requests();
     assert_eq!(heard.len(), 1, "{heard:?}");
@@ -1580,7 +1674,7 @@ fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
         ("GET", "/ap/ide/v1/models")
     );
     assert!(heard[0].body.is_empty());
-    assert!(direct.requests().is_empty());
+    assert!(direct.requests().is_empty(), "{:?}", direct.requests());
     access.finish();
     direct.finish();
 }
@@ -1611,8 +1705,9 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
         call
     };
     let plan = json!([
-        // A model whose route names AIPlex, asked for in the other API and
-        // by the pass-through path.
+        // A model whose route names AIPlex, asked for in the other API,
+        // in another spelling of its name there, and by the pass-through
+        // path.
         call(
             "other api",
             "openai",
@@ -1627,6 +1722,13 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
             "claude-y",
             false
         ),
+        call(
+            "other api, other spelling",
+            "openai",
+            "/chat/completions",
+            " Claude-W",
+            false
+        ),
         through("pass-through", "claude-z"),
         // Its own API: AIPlex.
         call(
@@ -1636,7 +1738,7 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
             "claude-ok-json",
             false
         ),
-        // A model with a plain route, and one with no route, as before.
+        // A model with a plain route, as before.
         call(
             "plain route",
             "openai",
@@ -1644,9 +1746,11 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
             "gpt-ok",
             false
         ),
+        // A model no route names, on an API that has a plain backend and
+        // no AIPlex one: nobody's, in the API and by the pass-through path.
         call("no route", "openai", "/chat/completions", "llama-3", false),
         through("pass-through no route", "llama-4"),
-        // One reading of the model on any body the gateway parsed.
+        // A path that is not a route, whatever its body names.
         raw(
             "twice elsewhere",
             "openai",
@@ -1664,21 +1768,10 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
     ]);
     let (events, read) = run(&f, "governed", None, &plan);
     let calls = calls(&events);
-    let other = ", or give that route an AIPlex backend of the openai API";
-    for (label, model, how, remedy) in [
-        ("other api", "claude-x", "it speaks the openai API", other),
-        (
-            "other api responses",
-            "claude-y",
-            "it speaks the openai API",
-            other,
-        ),
-        (
-            "pass-through",
-            "claude-z",
-            "the pass-through path names a plain backend",
-            "",
-        ),
+    for (label, model) in [
+        ("other api", "claude-x"),
+        ("other api responses", "claude-y"),
+        ("other api, other spelling", " Claude-W"),
     ] {
         let got = &read[label];
         assert_eq!(got["status"], 404, "{label}: {got}");
@@ -1703,27 +1796,65 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
             Some(
                 format!(
                     "the route \"claude-*\" matches {model} and names the control-plane \
-                     backend ap-anthropic, and none of them takes this request ({how}); it is \
-                     not sent to a plain backend instead: put a route for {model} before that \
-                     one{remedy}"
+                     backend ap-anthropic, and none of them takes this request (it speaks the \
+                     openai API); it is not sent to a plain backend instead: put a route for \
+                     {model} before that one, or give that route an AIPlex backend of the \
+                     openai API"
                 )
                 .as_str()
             ),
             "{label}"
         );
     }
-    for label in ["twice elsewhere", "case elsewhere"] {
-        assert_eq!(read[label]["status"], 400, "{label}: {}", read[label]);
-    }
-    // The plain stand-in heard only the calls that were its own before.
-    let heard: Vec<String> = direct.requests().iter().map(model_of).collect();
-    assert_eq!(heard, ["gpt-ok", "llama-3", "llama-4"]);
-    for label in [
-        "own api",
-        "plain route",
-        "no route",
-        "pass-through no route",
+    // The pass-through path is closed, whatever model it carries.
+    for (label, model) in [
+        ("pass-through", "claude-z"),
+        ("pass-through no route", "llama-4"),
     ] {
+        let got = &read[label];
+        assert_eq!(got["status"], 404, "{label}: {got}");
+        assert!(
+            got["body"].as_str().unwrap().contains("no backend gen"),
+            "{label}: {got}"
+        );
+        assert_eq!(
+            calls[model].reason.as_deref(),
+            Some(
+                "the pass-through path is closed while a control plane is configured: gen is \
+                 not reached by it"
+            ),
+            "{label}"
+        );
+    }
+    // No route names the model and its API has no AIPlex backend: sent
+    // nowhere. The event says what to add; the harness is told no
+    // backend's name.
+    let got = &read["no route"];
+    assert_eq!(got["status"], 404, "{got}");
+    let body = got["body"].as_str().unwrap();
+    assert!(
+        body.contains(
+            "no route names llama-3, and it is not sent to a backend no route names for it"
+        ),
+        "{body}"
+    );
+    assert!(!body.contains("openai"), "{body}");
+    assert_eq!(
+        calls["llama-3"].reason.as_deref(),
+        Some(
+            "no route names llama-3 for a request in the openai API, and beside a control \
+             plane a model no route names is an AIPlex backend's, of which this API has none, \
+             so the request is sent nowhere: add a route for llama-3; a last route with model \
+             = \"*\" that names a plain backend sends it everything no earlier route names"
+        )
+    );
+    for label in ["twice elsewhere", "case elsewhere"] {
+        assert_eq!(read[label]["status"], 403, "{label}: {}", read[label]);
+    }
+    // The plain stand-in heard the one call a route names it for.
+    let heard: Vec<String> = direct.requests().iter().map(model_of).collect();
+    assert_eq!(heard, ["gpt-ok"]);
+    for label in ["own api", "plain route"] {
         assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
     }
     assert_eq!(access.requests().len(), 1);

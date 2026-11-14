@@ -1375,7 +1375,7 @@ fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
         "{}",
         report.fix("models.audience")
     );
-    // One row however many backends, between the keys and the prices.
+    // One row however many backends, between the keys and the routes row.
     let names: Vec<&str> = report.value["checks"]
         .as_array()
         .unwrap()
@@ -1388,7 +1388,11 @@ fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
         ["models.keys", "models.url"],
         "{names:?}"
     );
-    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    assert_eq!(
+        names[at + 1..],
+        ["models.routes", "models.prices"],
+        "{names:?}"
+    );
     assert_eq!(
         names.iter().filter(|n| **n == "models.audience").count(),
         1,
@@ -1456,7 +1460,8 @@ fn a_control_planes_plain_http_url_off_loopback_is_one_warning_row() {
         "{}",
         report.fix("models.url")
     );
-    // One row, after the keys; no audience row without a signed token.
+    // One row, after the keys; no audience row without a signed token, and
+    // the routes row beside a control plane.
     let names: Vec<&str> = report.value["checks"]
         .as_array()
         .unwrap()
@@ -1465,7 +1470,11 @@ fn a_control_planes_plain_http_url_off_loopback_is_one_warning_row() {
         .collect();
     let at = names.iter().position(|n| *n == "models.url").unwrap();
     assert_eq!(names[at - 1], "models.keys", "{names:?}");
-    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    assert_eq!(
+        names[at + 1..],
+        ["models.routes", "models.prices"],
+        "{names:?}"
+    );
     // https, or http on this machine: ok, naming the backends.
     repo.project_file(&format!(
         "{}{}{routes}",
