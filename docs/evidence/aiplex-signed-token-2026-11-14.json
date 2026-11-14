@@ -15,7 +15,7 @@
     "--aiplex-commit",
     "f4e3991",
     "--branchyard-commit",
-    "cc9e7dc",
+    "8d6c52f",
     "--out",
     "docs/evidence/aiplex-signed-token-2026-11-14.json"
   ],
@@ -36,12 +36,12 @@
       "from": "`aiplex version`"
     },
     "branchyard_commit": {
-      "value": "cc9e7dc",
+      "value": "8d6c52f",
       "verified": false,
       "note": "stated on the command line; `by --version` prints no commit"
     },
     "binary_sha256": {
-      "by": "41f75911ab07fea5f1e342f47a15d29c13afc31b637ecc46c51a1ce08d46f6e6",
+      "by": "9962fe9ac73e3f1f7110a0b4063f19240623363130121f9addd1cdad56b7889a",
       "fake-acp-agent": "23c9ab1c3ec7b0f4e2ae04b0a75d7974ad75b1225952aa505112a34164763d6b",
       "aiplex": "8cf5752b9baf0ff49a1ce3bd4b38414e75ec1c0954e15dbd2cd243a7822a1e0d",
       "aiplex-api": "31eb87e696883b0dff09cf9b25f8289bbe974ec4800451ccc279a034a8f21017"
@@ -333,7 +333,7 @@
         "failed_over": null,
         "records_for_the_call_id": 0,
         "event_text": [
-          "2026-11-14T08:57:01.512Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-be998de66b29929f-39, call Pf545RNPKStIlIt5DfJ3vQ)"
+          "2026-11-14T10:48:37.525Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-639c75f5924b7171-39, call UmJsWSVssRug8wp7IO0OTA)"
         ]
       }
     },
@@ -378,7 +378,7 @@
   "observations": {
     "identity_plan": [
       "Identity plan: agent qualify-branchyard, binding by (branchyard)",
-      "  Issuer:   http://127.0.0.1:60865",
+      "  Issuer:   http://127.0.0.1:33333",
       "  Subject:  branchyard:default",
       "  Audience: qualify-aiplex",
       "",
@@ -389,16 +389,16 @@
     ],
     "by_log_text": {
       "probe": [
-        "2026-11-14T08:57:00.273Z  model: mock-claude refused via aiplex-local-anthropic (403, refused by aiplex (ACTION_DENIED), 9 ms, aiplex request req-be998de66b29929f-22, call hh_8W4cYQjt9bRRZs170hw)"
+        "2026-11-14T10:48:36.312Z  model: mock-claude refused via aiplex-local-anthropic (403, refused by aiplex (ACTION_DENIED), 6 ms, aiplex request req-639c75f5924b7171-22, call jD4TernZxQQU3Wz6QC33zQ)"
       ],
       "qualify": [
-        "2026-11-14T08:57:00.775Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 5 ms, aiplex request req-be998de66b29929f-27, call KV8JRyefxs53gvU_qfampw)",
-        "2026-11-14T08:57:00.778Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-be998de66b29929f-28, call GKNY6J_6PXiXDRWG9id4ww)",
-        "2026-11-14T08:57:00.782Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 3 ms, aiplex request req-be998de66b29929f-29, call 9fdU6x9ev6NjFjaseiQlQQ)",
-        "2026-11-14T08:57:00.786Z  model: mock-absent refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 3 ms, aiplex request req-be998de66b29929f-30, call _LQmZBEzd8Y0VrIYohLDuw)"
+        "2026-11-14T10:48:36.809Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 5 ms, aiplex request req-639c75f5924b7171-27, call 52WjV7GzA0Ofqb2F1Dk7ow)",
+        "2026-11-14T10:48:36.813Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-639c75f5924b7171-28, call wDoI7Y9pNAfn4RcqlsMx1g)",
+        "2026-11-14T10:48:36.819Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 4 ms, aiplex request req-639c75f5924b7171-29, call 9NpIDpetfEdmgHfkRpOJWQ)",
+        "2026-11-14T10:48:36.822Z  model: mock-absent refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-639c75f5924b7171-30, call 9k880sodAJU2s9dOYiZG_A)"
       ],
       "neg": [
-        "2026-11-14T08:57:01.512Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-be998de66b29929f-39, call Pf545RNPKStIlIt5DfJ3vQ)"
+        "2026-11-14T10:48:37.525Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-639c75f5924b7171-39, call UmJsWSVssRug8wp7IO0OTA)"
       ]
     },
     "harness_env": {
@@ -419,8 +419,8 @@
         }
       ],
       "variables_naming_aiplex": [],
-      "anthropic_base_url": "http://127.0.0.1:42957/anthropic",
-      "openai_base_url": "http://127.0.0.1:42957/openai/v1"
+      "anthropic_base_url": "http://127.0.0.1:38357/anthropic",
+      "openai_base_url": "http://127.0.0.1:38357/openai/v1"
     },
     "callers_seen": [
       [
