@@ -11,8 +11,13 @@ Branchyard configuration; the script adds a second AIPlex backend for the model 
 a stand-in "direct provider" (a plain backend served by this script) beside them; one turn of the fake
 agent runs a Python harness that calls the turn's gateway (both wires, one streamed, one refused by
 AIPlex, one with forged attribution headers, one for the stand-in's model, one for a model no route
-takes); the script reads `by log --json`, the stand-in's request count and AIPlex's usage records and
-checks that the two systems' records join; and finally stops AIPlex and makes one more call.
+names, which the gateway sends to AIPlex, not to the stand-in); the script reads `by log --json`, the
+stand-in's request count and AIPlex's usage records and checks that the two systems' records join; then
+sends, one turn each, the requests that hide their model (another spelling of a listed path, a path outside
+the list, the pass-through path to the stand-in's backend, a body the gateway cannot read), which the
+gateway must refuse itself with nothing reaching the stand-in or AIPlex's ledger, and a model's name in
+another letter case, which must go to AIPlex and not to the stand-in; and finally stops AIPlex and makes
+one more call.
 There is no model, no real coding agent and no cloud call. Scenario 2 (`--federated`; a token the
 Branchyard server signs; same section, "A token Branchyard signs") runs a real `by serve` with no
 AIPlex token anywhere, binds its tenant to an AIPlex agent through the `branchyard` preset, and
@@ -71,10 +76,13 @@ RECORD_WAIT = 30.0
 MODEL_ABSENT = "mock-absent"
 MODEL_DIRECT = "direct-claude"
 MODEL_UNROUTED = "unrouted-claude"
+MODEL_ROUTED = "mock-claude"
+MODEL_OTHER_CASE = "MOCK-CLAUDE"
 BACKEND_ANTHROPIC = "aiplex-local-anthropic"
 BACKEND_SECOND = "aiplex-local-anthropic-2"
 BACKEND_DIRECT = "direct-anthropic"
 REFUSED_BACKENDS = (BACKEND_ANTHROPIC, BACKEND_SECOND)
+AIPLEX_BACKENDS = (BACKEND_ANTHROPIC, BACKEND_SECOND)
 FORGED_ID = "forged-id"
 FORGED_TAGS = "by_branch=forged"
 FORBIDDEN_RESPONSE_HEADERS = ("www-authenticate", "set-cookie", "location", "link", "content-location", "via", "server")
@@ -130,6 +138,11 @@ NOT_DONE = (
     "`traceparent`: a local turn has no trace context, so none was sent and AIPlex made its own trace ids",
     "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, a person's token, an agent's token)",
     "a Branchyard server (`by serve`): only a local yard ran here; scenario 2 runs one",
+    "a request that hides its model any other way than the four probed (another spelling of a listed path, a path "
+    "outside the list, the pass-through path, a body the gateway cannot read) and the one letter-case variant: "
+    "white space around a name, an alias or a vendor prefix, another endpoint or method, a `model` that is not at "
+    "the top level, a body with a content coding, and the OpenAI wire were not probed",
+    'a plain backend that a route names with `model = "*"` beside the AIPlex ones, and a second plain backend',
     "a run on another operating system",
     "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified",
 )
@@ -160,8 +173,10 @@ FINDINGS = {
 }
 
 # (label, api, model, flags, kind): what the harness calls, in order. The kind is the script's own
-# decision of what must happen to the call: `allowed` and `refused` go to AIPlex (the second is refused
-# by AIPlex itself), `direct` goes to the stand-in plain backend.
+# decision of what must happen to the call: `allowed`, `refused` and `unrouted` go to AIPlex (the second is
+# refused by AIPlex itself because the route names a model AIPlex does not serve; the third is refused by AIPlex
+# because no route names the model, and the gateway sends such a call to the AIPlex backends of its API, never
+# to the plain one), `direct` goes to the stand-in plain backend, which a route names for that model.
 CALLS: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
     ("a", "anthropic", "mock-claude", (), "allowed"),
     ("b", "openai", "mock-gpt", (), "allowed"),
@@ -169,10 +184,81 @@ CALLS: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
     ("d", "anthropic", MODEL_ABSENT, (), "refused"),
     ("e", "openai", "mock-gpt", ("forge",), "allowed"),
     ("f", "anthropic", MODEL_DIRECT, (), "direct"),
-    ("g", "anthropic", MODEL_UNROUTED, (), "direct"),
+    ("g", "anthropic", MODEL_UNROUTED, (), "unrouted"),
 )
+AIPLEX_KINDS = ("allowed", "refused", "unrouted")
+REFUSED_KINDS = ("refused", "unrouted")
 KIND = {label: kind for label, _api, _model, _flags, kind in CALLS}
 OPERATION = {"anthropic": "messages", "openai": "chat-completions"}
+
+
+def _messages_body(model: str) -> bytes:
+    return json.dumps({"model": model, "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+
+# The requests that hide their model, each sent alone (its own turn) through the turn's gateway, which must refuse
+# it itself: the status it must answer is the gateway's own (403 for a path outside the list, 404 for the
+# pass-through path, 400 for a body it cannot read). Each names the plain-routed model where a body can be read, so
+# a gateway that still offers it to the plain backend sends it to the stand-in.
+HIDDEN_PROBES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "other-spelling",
+        "what": "a listed path in another spelling (a trailing slash) with a readable body for the plain-routed model",
+        "path": "/v1/messages/",
+        "content_type": "application/json",
+        "body": _messages_body(MODEL_DIRECT),
+        "status": 403,
+    },
+    {
+        "id": "other-endpoint",
+        "what": "a path outside the list (the batches endpoint) with a readable body whose top-level model is the "
+        "plain-routed one",
+        "path": "/v1/messages/batches",
+        "content_type": "application/json",
+        "body": _messages_body(MODEL_DIRECT),
+        "status": 403,
+    },
+    {
+        "id": "pass-through",
+        "what": "the pass-through path to the stand-in's backend name, at the gateway's root "
+        "($BRANCHYARD_MODEL_GATEWAY/backends/NAME/..., not under the Anthropic API prefix)",
+        "path": f"/backends/{BACKEND_DIRECT}/v1/messages",
+        "base": "gateway-root",
+        "content_type": "application/json",
+        "body": _messages_body(MODEL_DIRECT),
+        "status": 404,
+    },
+    {
+        "id": "unreadable-body",
+        "what": "a body the gateway cannot read on a listed path (one byte that is not UTF-8, text/plain)",
+        "path": "/v1/messages",
+        "content_type": "text/plain",
+        "body": b"\xff",
+        "status": 400,
+    },
+)
+# The one probe that must go to AIPlex: the AIPlex-routed model's name in another letter case.
+CASE_PROBE: dict[str, Any] = {
+    "id": "other-letter-case",
+    "what": f"the AIPlex-routed model `{MODEL_ROUTED}` written `{MODEL_OTHER_CASE}`",
+    "path": "/v1/messages",
+    "content_type": "application/json",
+    "body": _messages_body(MODEL_OTHER_CASE),
+}
+PROBES = (*HIDDEN_PROBES, CASE_PROBE)
+# What the harness is given: the probes as data (the bodies in hex), the one source of what it sends.
+PROBE_SPECS = json.dumps(
+    [
+        {
+            "id": p["id"],
+            "path": p["path"],
+            "base": p.get("base", "api"),
+            "content_type": p["content_type"],
+            "body_hex": p["body"].hex(),
+        }
+        for p in PROBES
+    ]
+)
 
 
 def window_hits(value: str, digests: Iterable[tuple[str, str]]) -> bool:
@@ -190,7 +276,9 @@ def window_hits(value: str, digests: Iterable[tuple[str, str]]) -> bool:
 # is given digests of the token (never the token): QUALIFY_TOKEN_DIGESTS is `length:sha256` pairs for the
 # whole token and for its signature segment, searched for in every variable of its own environment.
 HARNESS = (
-    r"""
+    "PROBE_SPECS = "
+    + repr(PROBE_SPECS)
+    + r"""
 from collections.abc import Iterable
 import base64, hashlib, json, os, re, sys, urllib.error, urllib.request
 
@@ -202,6 +290,8 @@ names_aiplex = re.compile(hosts + ":" + re.escape(port) + r"(?!\d)") if port els
 """
     + inspect.getsource(window_hits)
     + r"""
+
+PROBES = {p["id"]: p for p in json.loads(PROBE_SPECS)}
 
 mine = {k: v for k, v in os.environ.items() if not k.startswith("QUALIFY_")}
 
@@ -232,6 +322,50 @@ env = {
 }
 
 
+def fetch(request, result):
+    try:
+        with opener.open(request, timeout=60) as response:
+            return response.read(), response.status, response.headers
+    except urllib.error.HTTPError as error:
+        return error.read(), error.code, error.headers
+    except OSError as error:
+        result["transport_error"] = type(error).__name__
+        return b"", None, {}
+
+
+def probe(probe_id):
+    # one request the gateway must refuse (or, for the letter-case probe, route): what is sent and what came back
+    spec = PROBES[probe_id]
+    path = spec["path"]
+    data = bytes.fromhex(spec["body_hex"])
+    headers = {
+        "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+        "anthropic-version": "2023-06-01",
+        "content-type": spec["content_type"],
+    }
+    base = spec["base"]
+    result = {"id": probe_id, "method": "POST", "path": path, "base": base, "content_type": spec["content_type"]}
+    result["body_bytes"] = len(data)
+    if base == "gateway-root":
+        root = os.environ.get("BRANCHYARD_MODEL_GATEWAY")
+        if not root:
+            # no root to send to: nothing is sent, and the probe is never a pass
+            result.update(status=None, transport_error="BRANCHYARD_MODEL_GATEWAY is not set in the harness")
+            return result
+    else:
+        root = os.environ["ANTHROPIC_BASE_URL"]
+    request = urllib.request.Request(root.rstrip("/") + path, data=data, headers=headers, method="POST")
+    body, status, got = fetch(request, result)
+    result.update(
+        status=status,
+        aiplex_request_id=got.get("X-Aiplex-Request-Id"),
+        aiplex_error_code=got.get("X-Aiplex-Error-Code"),
+        response_header_names=sorted({k.lower() for k in got.keys()}),
+        body_head=body[:120].decode("utf-8", "replace"),
+    )
+    return result
+
+
 def call(label, api, model, stream, forge):
     if api == "anthropic":
         url = os.environ["ANTHROPIC_BASE_URL"] + "/v1/messages"
@@ -256,14 +390,7 @@ def call(label, api, model, stream, forge):
         if secret_header in sent:
             sent[secret_header] = "<omitted>"
     result = {"label": label, "api": api, "model": model, "stream": stream, "forged": forge, "sent_headers": sent}
-    try:
-        with opener.open(request, timeout=60) as response:
-            data, status, got = response.read(), response.status, response.headers
-    except urllib.error.HTTPError as error:
-        data, status, got = error.read(), error.code, error.headers
-    except OSError as error:
-        data, status, got = b"", None, {}
-        result["transport_error"] = type(error).__name__
+    data, status, got = fetch(request, result)
     result.update(
         status=status,
         bytes=len(data),
@@ -277,13 +404,18 @@ def call(label, api, model, stream, forge):
 
 
 calls = []
+probes = []
 for spec in sys.argv[2:]:
     label, rest = spec.split(":", 1)
+    if label == "probe":
+        probes.append(probe(rest))
+        print("probe", rest, probes[-1]["status"])
+        continue
     api, model, *flags = rest.split(",")
     calls.append(call(label, api, model, "stream" in flags, "forge" in flags))
     print("call", label, calls[-1]["status"], calls[-1]["aiplex_error_code"])
 with open(sys.argv[1], "w") as out:
-    json.dump({"env": env, "calls": calls}, out)
+    json.dump({"env": env, "calls": calls, "probes": probes}, out)
 """
 )
 
@@ -303,7 +435,8 @@ SERVER_SCOPES = (
     "llm:surface:local-messages:*",
     "llm:surface:local-models:*",
 )
-# What scenario 2's turn calls: the same calls as scenario 1 minus the stand-in's and the forged ones.
+# What scenario 2's turn calls: the same calls as scenario 1 minus the stand-in's, the unrouted one (its turn has no
+# plain backend, and every model it calls is routed) and the forged ones.
 CALLS2: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
     ("a", "anthropic", "mock-claude", (), "allowed"),
     ("b", "openai", "mock-gpt", (), "allowed"),
@@ -505,7 +638,7 @@ def response_header_problems(calls: Iterable[Mapping[str, Any]]) -> list[str]:
     (or being the server's own framing), the named ones among them, and any `X-Aiplex-*`."""
     problems = []
     for call in calls:
-        if KIND.get(str(call.get("label"))) not in ("allowed", "refused"):
+        if KIND.get(str(call.get("label"))) not in AIPLEX_KINDS:
             continue
         extra = [
             h
@@ -546,7 +679,7 @@ def compare_event(label: str, event: Mapping[str, Any], seen: Mapping[str, Any],
         problems.append(f"{label}: no usable aiplex request id on the event")
     if not CALL_ID.fullmatch(str(plane.get("call_id") or "")):
         problems.append(f"{label}: the event's call id is not 22 characters of A-Z a-z 0-9 - _")
-    if kind == "refused":
+    if kind in REFUSED_KINDS:
         if event.get("decision") != "refused":
             problems.append(f"{label}: decision is {event.get('decision')!r}, not 'refused'")
         if plane.get("error_code") != "MODEL_NOT_FOUND":
@@ -567,8 +700,8 @@ def event_problems(
     harness_calls: Sequence[Mapping[str, Any]],
     events: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    """What is wrong with Branchyard's events as a whole. Which call is refused comes from the script's table,
-    never from what the harness reports, and exactly that call, and no other, must be a refusal by AIPlex."""
+    """What is wrong with Branchyard's events as a whole. Which calls are refused comes from the script's table,
+    never from what the harness reports, and exactly those calls, and no other, must be a refusal by AIPlex."""
     table = list(table)
     problems = []
     if len(harness_calls) != len(table) or len(events) != len(table):
@@ -583,7 +716,7 @@ def event_problems(
         for t, e in zip(table, events, strict=True)
         if e.get("decision") == "refused" or (e.get("control_plane") or {}).get("error_code")
     ]
-    expected = [t[0] for t in table if t[4] == "refused"]
+    expected = [t[0] for t in table if t[4] in REFUSED_KINDS]
     if refused != expected:
         problems.append(f"refused calls are {refused}, expected exactly {expected}")
     ids = [
@@ -644,7 +777,7 @@ def compare_record(
         problems.append(f"{label}: record client_request_id is not Branchyard's call id")
     if record.get("model_id") != seen.get("model"):
         problems.append(f"{label}: record model is {record.get('model_id')!r}")
-    if kind == "refused":
+    if kind in REFUSED_KINDS:
         if not record.get("operation"):
             problems.append(f"{label}: the refusal's record names no operation")
         if record.get("status") == "ok" or not record.get("error_class"):
@@ -674,7 +807,8 @@ def direct_problems(
     aiplex_bound: int,
 ) -> list[str]:
     """Why the plain backend cannot be said to work beside the AIPlex ones: the stand-in answered exactly the direct
-    calls, never saw the AIPlex token, and AIPlex holds records for the AIPlex-bound calls only."""
+    calls (a route names it for their model) and no other, never saw the AIPlex token, and AIPlex holds records for
+    the AIPlex-bound calls only, none for a model the stand-in served."""
     problems = []
     direct = [c for c in calls if KIND.get(str(c.get("label"))) == "direct"]
     if [r.get("model") for r in stand_in] != [c.get("model") for c in direct]:
@@ -685,8 +819,108 @@ def direct_problems(
         problems.append("a direct call was not answered by the stand-in")
     if len(aiplex_records) != aiplex_bound:
         problems.append(f"AIPlex holds {len(aiplex_records)} records, {aiplex_bound} calls went to it")
-    if any(r.get("model_id") in (MODEL_DIRECT, MODEL_UNROUTED) for r in aiplex_records):
+    if any(r.get("model_id") == MODEL_DIRECT for r in aiplex_records):
         problems.append("AIPlex holds a record for a call that went to the stand-in")
+    return problems
+
+
+def unrouted_problems(
+    call: Mapping[str, Any],
+    event: Mapping[str, Any],
+    stand_in: Sequence[Mapping[str, Any]],
+    records_for_the_call_id: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Why the call no route names cannot be said to have gone to AIPlex and been refused there for good: the
+    harness got a 404 that is not the stand-in's body, the event carries AIPlex's MODEL_NOT_FOUND (the gateway strips
+    AIPlex's headers before the harness, so the code is read from the event), the refusal is final (one backend
+    named, none tried before it, one record for the call's id), and not one request for that model reached the
+    stand-in."""
+    problems = []
+    plane = event.get("control_plane") or {}
+    if call.get("status") != 404:
+        problems.append(f"the harness got {call.get('status')}, not AIPlex's 404")
+    if "stand-in" in str(call.get("body_head")):
+        problems.append("the answer is the stand-in's")
+    if plane.get("plane") != "aiplex" or plane.get("error_code") != "MODEL_NOT_FOUND":
+        problems.append(f"the event is not AIPlex's MODEL_NOT_FOUND refusal (backend {event.get('backend')!r})")
+    problems += refusal_final_problems(event, records_for_the_call_id)
+    reached = [r for r in stand_in if r.get("model") == MODEL_UNROUTED]
+    if reached:
+        problems.append(f"the stand-in received {len(reached)} request(s) for {MODEL_UNROUTED}")
+    return problems
+
+
+def probe_sent_problems(spec: Mapping[str, Any], seen: Mapping[str, Any] | None) -> list[str]:
+    """Why a probe cannot count: it must have been sent as specified and have got an answer. A probe that was not
+    sent, or got no answer, is never a pass."""
+    if not seen:
+        return ["the harness reported nothing for the probe"]
+    problems = []
+    if seen.get("id") != spec["id"] or seen.get("path") != spec["path"] or seen.get("method") != "POST":
+        problems.append(f"the harness sent {seen.get('method')} {seen.get('path')!r}, not POST {spec['path']!r}")
+    if seen.get("base") != spec.get("base", "api"):
+        problems.append(f"the harness sent it under {seen.get('base')!r}, not {spec.get('base', 'api')!r}")
+    if seen.get("content_type") != spec["content_type"] or seen.get("body_bytes") != len(spec["body"]):
+        problems.append("the harness sent another body or content type than the probe's")
+    if seen.get("transport_error") or not isinstance(seen.get("status"), int):
+        problems.append(f"the probe got no answer ({seen.get('transport_error')})")
+    return problems
+
+
+def hidden_probe_problems(
+    spec: Mapping[str, Any],
+    seen: Mapping[str, Any] | None,
+    events: Sequence[Mapping[str, Any]],
+    stand_in_before: int,
+    stand_in_after: int,
+    records_before: int,
+    records_after: int,
+) -> list[str]:
+    """Why a request that hides its model cannot be said to have reached neither side: the gateway's own refusal
+    (the status its rule gives, no AIPlex header, not the stand-in's body), no request more at the stand-in, no
+    record more in AIPlex's ledger, and no event that names the stand-in or an AIPlex call."""
+    problems = probe_sent_problems(spec, seen)
+    if seen is None or not isinstance(seen.get("status"), int):
+        return problems
+    if seen.get("status") != spec["status"]:
+        problems.append(f"the gateway answered {seen.get('status')}, not its own {spec['status']}")
+    if "stand-in" in str(seen.get("body_head")):
+        problems.append("the answer is the stand-in's")
+    if seen.get("aiplex_request_id") or seen.get("aiplex_error_code"):
+        problems.append("the answer carries an AIPlex header")
+    if stand_in_after != stand_in_before:
+        problems.append(f"the stand-in received {stand_in_after - stand_in_before} request(s)")
+    if records_after != records_before:
+        problems.append(f"AIPlex's ledger holds {records_after - records_before} new record(s)")
+    for event in events:
+        if event.get("backend") == BACKEND_DIRECT:
+            problems.append("an event names the stand-in's backend")
+        if (event.get("control_plane") or {}).get("request_id"):
+            problems.append("an event carries an AIPlex request id")
+    return problems
+
+
+def case_probe_problems(
+    spec: Mapping[str, Any],
+    seen: Mapping[str, Any] | None,
+    events: Sequence[Mapping[str, Any]],
+    stand_in_before: int,
+    stand_in_after: int,
+) -> list[str]:
+    """Why a model's name in another letter case cannot be said to have gone to AIPlex and not to the stand-in: one
+    event that names an AIPlex backend and carries AIPlex's control plane, and no request at the stand-in. What
+    AIPlex answered is recorded, not asserted: the rule promises only where the request goes."""
+    problems = probe_sent_problems(spec, seen)
+    if stand_in_after != stand_in_before:
+        problems.append(f"the stand-in received {stand_in_after - stand_in_before} request(s)")
+    if len(events) != 1:
+        problems.append(f"{len(events)} events for the probe, not 1")
+        return problems
+    event = events[0]
+    if event.get("backend") not in AIPLEX_BACKENDS:
+        problems.append(f"the event names backend {event.get('backend')!r}, not an AIPlex backend")
+    if (event.get("control_plane") or {}).get("plane") != "aiplex":
+        problems.append("the event has no AIPlex control plane")
     return problems
 
 
@@ -1319,6 +1553,10 @@ class Run:
             "QUALIFY_DIRECT_KEY": "stand-in-key",
         }
 
+    def probe_command(self, results: Path, probe_id: str) -> str:
+        """The `SH` prompt line that makes the fake agent run the harness for one probe."""
+        return f"SH python3 {self.scratch / 'harness.py'} {results} probe:{probe_id}"
+
     def harness_command(self, results: Path, calls: Iterable[tuple[str, str, str, tuple[str, ...], str]]) -> str:
         """The `SH` prompt line that makes the fake agent run the harness."""
         specs = " ".join(f"{label}:{','.join((api, model, *flags))}" for label, api, model, flags, _kind in calls)
@@ -1424,8 +1662,9 @@ class Run:
         self.check(
             "branchyard-events",
             "`by log --json` has one `model` event per call: for the calls to AIPlex, AIPlex's request id and "
-            "Branchyard's call id; exactly call d refused, as refused by aiplex with MODEL_NOT_FOUND; for the calls "
-            "to the stand-in provider, no AIPlex control plane",
+            "Branchyard's call id; exactly calls d (a model a route names that AIPlex does not serve) and g "
+            f"(`{MODEL_UNROUTED}`, which no route names) refused, as refused by aiplex with MODEL_NOT_FOUND, by one "
+            "of the AIPlex backends; for the call to the stand-in provider (f), no AIPlex control plane",
             not problems,
             problems=problems,
             events=[
@@ -1461,9 +1700,13 @@ class Run:
                 continue
             plane = event.get("control_plane") or {}
             request_id, call_id = str(plane.get("request_id")), str(plane.get("call_id"))
-            by_request = wait_until(partial(self.find, "--request-id", request_id), RECORD_WAIT)
-            by_client = self.find("--client-request-id", call_id)
+            # an event with no AIPlex ids (the call did not go to AIPlex) has nothing to look up
+            lookup = bool(plane.get("request_id")) and bool(plane.get("call_id"))
+            by_request = wait_until(partial(self.find, "--request-id", request_id), RECORD_WAIT) if lookup else []
+            by_client = self.find("--client-request-id", call_id) if lookup else []
             problems = []
+            if not lookup:
+                problems.append("the event has no AIPlex request id and call id to look up")
             if len(by_request) != 1:
                 problems.append(f"{len(by_request)} records for the request id")
             if len(by_client) != 1 or (by_request and by_client[0].get("id") != by_request[0].get("id")):
@@ -1506,6 +1749,26 @@ class Run:
                     backend=event.get("backend"),
                     records_for_the_call_id=len(by_client),
                 )
+            if kind == "unrouted":
+                stand_in = self.stand_in.requests if self.stand_in is not None else []
+                final = unrouted_problems(call, event, stand_in, by_client)
+                self.check(
+                    "unrouted-call-refused-by-aiplex",
+                    f"the call for `{MODEL_UNROUTED}`, which no route names, went to the AIPlex backends of its API "
+                    "and not to the plain stand-in backend: AIPlex refused it (the harness got 404 with a body that is "
+                    "not the stand-in's; the event's control_plane.error_code is MODEL_NOT_FOUND, since the gateway "
+                    "strips AIPlex's headers before the harness), the refusal is final (the event names one AIPlex "
+                    "backend and lists none tried before it, and AIPlex holds exactly one record for the call's "
+                    "id), and the stand-in received no request for it",
+                    not final,
+                    problems=final,
+                    backend=event.get("backend"),
+                    failed_over=event.get("failed_over"),
+                    records_for_the_call_id=len(by_client),
+                    stand_in_requests_for_the_model=sum(1 for r in stand_in if r.get("model") == MODEL_UNROUTED),
+                    harness_status=call.get("status"),
+                    harness_body_head=call.get("body_head"),
+                )
             if call["forged"]:
                 found = self.find("--client-request-id", FORGED_ID)
                 forged = forged_problems(call, record, found, call_id)
@@ -1535,9 +1798,10 @@ class Run:
         problems = direct_problems(harness["calls"], self.stand_in.requests, records, bound)
         self.check(
             "direct-provider-beside-aiplex",
-            f"a call for `{MODEL_DIRECT}` (a route to the plain stand-in backend) and a call for `{MODEL_UNROUTED}` "
-            "(no route; the API has a plain backend, so it goes to plain backends only) are answered by the stand-in, "
-            "which never receives the AIPlex token, while AIPlex holds records only for the calls routed to it",
+            f"a call for `{MODEL_DIRECT}` (a route names the plain stand-in backend for it) is answered by the "
+            "stand-in, and the stand-in answers no other call of the turn (not the one for "
+            f"`{MODEL_UNROUTED}`, which no route names); it never receives the AIPlex token, while AIPlex holds "
+            "records only for the calls that went to it (none for the stand-in's model)",
             not problems,
             problems=problems,
             stand_in_requests=[{k: v for k, v in r.items() if k != "token_seen"} for r in self.stand_in.requests],
@@ -1545,12 +1809,108 @@ class Run:
             aiplex_bound_calls=bound,
         )
 
-    def check_outage(self, before: int) -> None:
+    def aiplex_record_count(self) -> int:
+        """How many records AIPlex's ledger holds."""
+        everything = self.aiplex("usage", "records", "--all", "-o", "json")
+        if everything.code != 0:
+            raise StepError(f"`aiplex usage records --all` exited {everything.code}")
+        return len(parse_records(everything.out))
+
+    def settled_record_count(self, before: int, timeout: float) -> int:
+        """The ledger's record count once it differs from `before`, or after `timeout` seconds if it never does
+        (the ledger is written after the answer: a record that should not exist gets a bounded time to show)."""
+        wait_until(lambda: self.aiplex_record_count() != before, timeout)
+        return self.aiplex_record_count()
+
+    def send_probe(self, spec: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]], int, int]:
+        """One probe in a turn of its own (`by send`): what the harness saw of it, the call events the turn wrote,
+        and the stand-in's request count before and after. A probe that could not run is None, never a pass."""
+        if self.stand_in is None:
+            raise StepError("the stand-in provider is not running")
+        results = self.scratch / f"results-probe-{spec['id']}.json"
+        results.unlink(missing_ok=True)
+        stand_before = len(self.stand_in.requests)
+        events_before = len(call_events(parse_events(self.by("log", BRANCH, "--json").out)))
+        send = self.by("send", BRANCH, "--yes", "--", self.probe_command(results, spec["id"]), timeout=TURN_TIMEOUT)
+        seen: dict[str, Any] | None = None
+        if send.code == 0:
+            probes = self.read_results(results).get("probes") or []
+            seen = probes[0] if probes else None
+        events = call_events(parse_events(self.by("log", BRANCH, "--json").out))[events_before:]
+        return seen, events, stand_before, len(self.stand_in.requests)
+
+    def check_hidden_models(self) -> None:
+        """Requests that hide their model reach neither the stand-in nor AIPlex's ledger; another letter case of
+        an AIPlex-routed model goes to AIPlex and not to the stand-in."""
+        for spec in HIDDEN_PROBES:
+            records_before = self.aiplex_record_count()
+            seen, events, stand_before, stand_after = self.send_probe(spec)
+            # the ledger is written after the answer: give a record that should not exist a bounded time to show
+            records_after = self.settled_record_count(records_before, 3.0)
+            problems = hidden_probe_problems(
+                spec, seen, events, stand_before, stand_after, records_before, records_after
+            )
+            self.check(
+                f"hidden-model-{spec['id']}",
+                f"{spec['what']}: the gateway refuses it itself (status {spec['status']}, not the stand-in's answer, "
+                "no AIPlex header), the stand-in receives no request, AIPlex's ledger gains no record, and no event "
+                "names the stand-in's backend or carries an AIPlex request id",
+                not problems,
+                problems=problems,
+                method="POST",
+                path=spec["path"],
+                url_form=(
+                    "{BRANCHYARD_MODEL_GATEWAY}" if spec.get("base") == "gateway-root" else "{ANTHROPIC_BASE_URL}"
+                )
+                + spec["path"],
+                content_type=spec["content_type"],
+                body_bytes=len(spec["body"]),
+                harness_status=(seen or {}).get("status"),
+                harness_body_head=(seen or {}).get("body_head"),
+                stand_in_requests_before_and_after=[stand_before, stand_after],
+                aiplex_records_before_and_after=[records_before, records_after],
+                events=[
+                    {k: e.get(k) for k in ("model", "decision", "status", "backend", "reason", "control_plane")}
+                    for e in events
+                ],
+            )
+        spec = CASE_PROBE
+        records_before = self.aiplex_record_count()
+        seen, events, stand_before, stand_after = self.send_probe(spec)
+        records_after = self.settled_record_count(records_before, 10.0)
+        problems = case_probe_problems(spec, seen, events, stand_before, stand_after)
+        answer = (
+            f"AIPlex answered {seen.get('status')} {seen.get('aiplex_error_code') or ''}".rstrip()
+            if seen and seen.get("aiplex_request_id")
+            else f"the answer carried no AIPlex request id (status {(seen or {}).get('status')})"
+        )
+        self.check(
+            f"letter-case-{spec['id']}",
+            f"{spec['what']} goes to AIPlex and not to the stand-in: the event names an AIPlex backend with AIPlex's "
+            f"control plane and the stand-in receives no request; what AIPlex answered is recorded, not asserted "
+            f"(here: {answer})",
+            not problems,
+            problems=problems,
+            path=spec["path"],
+            harness_status=(seen or {}).get("status"),
+            harness_aiplex_error_code=(seen or {}).get("aiplex_error_code"),
+            harness_aiplex_request_id=(seen or {}).get("aiplex_request_id"),
+            harness_body_head=(seen or {}).get("body_head"),
+            stand_in_requests_before_and_after=[stand_before, stand_after],
+            aiplex_records_before_and_after=[records_before, records_after],
+            events=[
+                {k: e.get(k) for k in ("model", "decision", "status", "backend", "reason", "control_plane")}
+                for e in events
+            ],
+        )
+
+    def check_outage(self) -> None:
         """With AIPlex stopped, a call fails with Branchyard's own error, no other backend is tried, and no
         request reaches the direct provider."""
         if self.stand_in is None:
             raise StepError("the stand-in provider is not running")
         stand_before = len(self.stand_in.requests)
+        before = len(call_events(parse_events(self.by("log", BRANCH, "--json").out)))
         stop = self.aiplex("dev", "stop")
         self.stop_exits.append(stop.code)
         self.dev_started = False
@@ -2076,7 +2436,8 @@ def scenario_one(run: Run) -> None:
     step(run, "events", lambda: run.check_events(harness, events))
     step(run, "records", lambda: run.check_records(harness, events, show))
     step(run, "direct", lambda: run.check_direct(harness))
-    step(run, "outage", lambda: run.check_outage(len(events)))
+    step(run, "hidden-models", run.check_hidden_models)
+    step(run, "outage", run.check_outage)
 
 
 def scenario_two(run: Run) -> None:
@@ -2146,10 +2507,13 @@ written); 130 interrupted. `aiplex dev stop` always runs.
 
 Covers (scenario 1, a stored token, contract sections 1 to 6 and 8): the configuration `aiplex connect` writes
 and the real `by` parser; both wires, streamed, refused, forged headers; Branchyard's events and AIPlex's records
-joined by id; the refusal's finality; a plain backend beside the AIPlex ones; an AIPlex outage; the token's
-whereabouts. With --federated, scenario 2 instead (contract section 7): a `by serve` server whose AIPlex
-backends are signed with the server's own token, an agent bound to it in AIPlex, a turn run on the server, the
-key set, and a wrong-audience negative control. Does not cover: a real model or coding agent;
+joined by id; the refusal's finality; a model no route names going to AIPlex and not to the plain backend;
+a plain backend beside the AIPlex ones; requests that hide their model (another spelling of a path, a path
+outside the list, the pass-through path, an unreadable body) refused by the gateway with nothing reaching the
+plain backend or AIPlex's ledger, and another letter case of an AIPlex-routed model going to AIPlex; an AIPlex
+outage; the token's whereabouts. With --federated, scenario 2 instead (contract section 7): a `by serve`
+server whose AIPlex backends are signed with the server's own token, an agent bound to it in AIPlex, a turn
+run on the server, the key set, and a wrong-audience negative control. Does not cover: a real model or coding agent;
 traceparent; a cloud AIPlex; a Branchyard worker, sandbox or TLS; other operating systems.
 The Branchyard commit is recorded as stated, not verified (`by --version` prints none);
 the AIPlex commit is read from the binary and must match --aiplex-commit when that is given.

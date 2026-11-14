@@ -3636,6 +3636,34 @@ mod tests {
             gateway.backends[0].control_plane,
             Some(branchyard::models::ControlPlane::Aiplex)
         );
+        // An AIPlex backend that no route names beside a plain backend of
+        // its API: read (it takes what no route names), and the plain
+        // backend no route names is said among the warnings, since beside
+        // AIPlex it is sent only the model list.
+        write(
+            r#"{"backends": {"aiplex": {"api": "openai", "url": "https://aiplex.example.com/ap/ide",
+                "key": "anthropic", "control_plane": "aiplex"},
+                "direct": {"api": "openai", "key": "OPENAI_API_KEY"}}}"#,
+            "{}",
+        );
+        let partial = load_file(&path).unwrap();
+        let models_warnings: Vec<&String> = partial
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("models."))
+            .collect();
+        assert_eq!(
+            models_warnings,
+            [
+                "models.backends.direct: no route names this plain backend, so beside an AIPlex \
+              backend it is sent only the model list; add a route for the models it should \
+              serve (a last route with model = \"*\" sends it every model no earlier route \
+              names)"
+            ]
+        );
+        config.models = partial.models;
+        let gateway = crate::models::gateway_for(&config, "app").unwrap().unwrap();
+        assert_eq!(gateway.backends.len(), 2);
         config.models = None;
         assert!(crate::models::gateway_for(&config, "app")
             .unwrap()

@@ -44781,7 +44781,7 @@
               "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
             }
           ],
-          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead. While one is configured, a plain\nbackend is sent only what a route names for it, and the model list."
         },
         "ModelCall": {
           "type": "object",
@@ -51242,7 +51242,7 @@
               "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
             }
           ],
-          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead. While one is configured, a plain\nbackend is sent only what a route names for it, and the model list."
         },
         "ModelCall": {
           "type": "object",
@@ -64556,7 +64556,7 @@
               "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
             }
           ],
-          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead. While one is configured, a plain\nbackend is sent only what a route names for it, and the model list."
         },
         "ModelCall": {
           "type": "object",

@@ -406,13 +406,6 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
             vec!["models.routes[0]", "aiplex-anthropic", "direct"],
         ),
         (
-            format!("{backend}{plain}"),
-            vec![
-                "models.backends.aiplex-anthropic",
-                "add a route that names it",
-            ],
-        ),
-        (
             backend.replace("control_plane = \"aiplex\"", "control_plane = \"aiplexx\""),
             vec![
                 "models.backends.aiplex-anthropic.control_plane",
@@ -453,5 +446,20 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
             assert!(said.contains(needle), "{needle:?} not in {said}");
         }
     }
+    // An AIPlex backend that no route names, beside a plain backend of its
+    // API, is accepted: it takes what no route names, and the plain backend
+    // is sent only the model list.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        format!("version = 1\n\n{backend}{plain}"),
+    )
+    .unwrap();
+    let out = repo.by(&["config", "validate"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        stderr(&out),
+        String::from_utf8_lossy(&out.stdout)
+    );
     access.finish();
 }

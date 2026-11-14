@@ -525,14 +525,17 @@ fn dropped(name: &str) -> bool {
         || name.starts_with("x-branchyard-")
 }
 
-/// The routes a control-plane backend is asked, by the API the harness
-/// speaks: the integration contract's transport table, by method and exact
-/// path. An access point serves more under its URL (its other wires, whose
-/// paths name the model; embeddings and media; its tools at `/mcp`; its
+/// The routes the gateway serves while a control plane is configured, by
+/// the API the harness speaks: the integration contract's transport table,
+/// by method and exact path, for both kinds of backend.
+///
+/// An access point serves more under its URL (its other wires, whose paths
+/// name the model; embeddings and media; its tools at `/mcp`; its
 /// registries), and the harness's path would take the backend's credential
-/// to any of it, past the turn's model scope and the gateway's metering
-/// (`docs/model-gateway.md`, "What is sent").
-pub(crate) const CONTROL_PLANE_ROUTES: &[(Api, &str, &str)] = &[
+/// to any of it. And a plain backend beside a control plane is sent only
+/// what a route names for it: on another path the gateway reads no model,
+/// so no route could name it (`docs/model-gateway.md`, "What is sent").
+pub(crate) const LISTED_ROUTES: &[(Api, &str, &str)] = &[
     (Api::Anthropic, "POST", "/v1/messages"),
     (Api::Anthropic, "POST", "/v1/messages/count_tokens"),
     (Api::Anthropic, "GET", "/v1/models"),
@@ -541,29 +544,31 @@ pub(crate) const CONTROL_PLANE_ROUTES: &[(Api, &str, &str)] = &[
     (Api::Openai, "GET", "/v1/models"),
 ];
 
-/// Whether `method path` is one of [`CONTROL_PLANE_ROUTES`] for `api`: the
-/// method and the path before any query, byte for byte. A query is the
-/// API's own and passes; a path is not normalized, so `/v1/messages/` and
-/// `/v1/messages/../mcp` are not routes.
-fn control_plane_route(api: Api, method: &str, path: &str) -> bool {
+/// Whether `method path` is one of [`LISTED_ROUTES`] for `api`: the method
+/// and the path before any query, byte for byte. A query is the API's own
+/// and passes; a path is not normalized, so `/v1/messages/` and
+/// `/v1/messages/../mcp` are not routes, and neither is anything on the
+/// pass-through path.
+fn listed_route(api: Api, method: &str, path: &str) -> bool {
     let path = path.split_once('?').map_or(path, |(path, _)| path);
-    CONTROL_PLANE_ROUTES
+    LISTED_ROUTES
         .iter()
         .any(|(a, m, p)| *a == api && *m == method && *p == path)
 }
 
-/// Why `method path` is not sent to a control-plane backend of `api`: what
-/// was asked, and the routes that are. The harness chose the method and
-/// the path, so they are shown only when short and printable.
-fn not_a_control_plane_route(api: Api, method: &str, path: &str) -> String {
+/// Why `method path` is not served for `api` while a control plane is
+/// configured: what was asked, and the routes that are. The harness chose
+/// the method and the path, so they are shown only when short and
+/// printable.
+fn not_a_listed_route(api: Api, method: &str, path: &str) -> String {
     let asked = shown_request(method, path);
-    let routes: Vec<String> = CONTROL_PLANE_ROUTES
+    let routes: Vec<String> = LISTED_ROUTES
         .iter()
         .filter(|(a, _, _)| *a == api)
         .map(|(_, m, p)| format!("{m} {p}"))
         .collect();
     format!(
-        "{asked} is not a route a control-plane backend is asked ({})",
+        "{asked} is not a route the gateway serves while a control plane is configured ({})",
         routes.join(", ")
     )
 }
@@ -640,7 +645,10 @@ fn shown_request(method: &str, path: &str) -> String {
 /// model one way: a `model` that is a string, once, with no member named
 /// `model` in another letter case. Otherwise the gateway would route by one
 /// reading and a backend take another. `None` for a request that passes;
-/// one without a `model` member is a call no route takes.
+/// one without a `model` member names no model, and is the control plane's
+/// or nobody's ([`Gateway::plan`]). (`handle` asks this only of a listed
+/// route, [`listed_route`]: a request on any other path was refused before
+/// it.)
 fn unread_body(request: &Request, path: &str, json: Option<&Value>) -> Option<String> {
     let route = path.split_once('?').map_or(path, |(route, _)| route);
     let json_route = request.method == "POST" && JSON_ROUTES.contains(&route);
@@ -1065,11 +1073,16 @@ fn handle(stream: TcpStream, state: &TurnState) {
         false => serde_json::from_slice(&request.body).ok(),
     };
     // A JSON body the gateway cannot read could name a model it cannot
-    // check: refused, never forwarded.
+    // check: refused, never forwarded. With a control plane configured it is
+    // refused later, after the turn's token and the route list (`handle`'s
+    // order there is the integration's): by the route list on a path that
+    // is not a route, else by the body rule ([`unread_body`]) or as a GET
+    // with a body.
     let says_json = request
         .header("content-type")
         .is_some_and(|t| t.to_ascii_lowercase().contains("json"));
-    if says_json && !request.body.is_empty() && json.is_none() {
+    if says_json && !request.body.is_empty() && json.is_none() && !state.gateway.has_control_plane()
+    {
         refuse(
             &mut out,
             api,
@@ -1109,12 +1122,56 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     };
-    // With a control plane configured, a request whose body is JSON by its
-    // API's definition is routed only when the gateway read it. Otherwise
-    // the turn's scope would not see its model, and beside a plain backend
-    // it would be planned as a call no route takes and go to the provider,
-    // although its model's route names the control plane.
+    // Beside a control plane, a plain backend is sent only what a route
+    // names for it, on the listed routes; everything else is the control
+    // plane's or nobody's. So this much is settled here, after the turn's
+    // token and before anything is planned, counted, minted or sent,
+    // whichever backend would have taken the request.
     if state.gateway.has_control_plane() {
+        let refusal = match &named {
+            // The pass-through path is closed: it would carry whatever the
+            // harness sent to one backend, under no route. Every name gets
+            // the answer of a name that is not there; the event has the
+            // reason, which is the operator's.
+            Some(name) => {
+                let why = match state.gateway.backend(name) {
+                    Some(_) => format!(
+                        "the pass-through path is closed while a control plane is configured: \
+                         {name} is not reached by it"
+                    ),
+                    None => format!("no backend {name}"),
+                };
+                Some((404, "failed", "failed", why, format!("no backend {name}")))
+            }
+            // One list of routes, for both kinds of backend.
+            None if !listed_route(api, &request.method, &path) => {
+                let why = not_a_listed_route(api, &request.method, &path);
+                Some((403, "denied", "denied", why.clone(), why))
+            }
+            // The model list is the one listed GET, and it takes no body:
+            // with one it could name a model.
+            None if request.method == "GET" && !request.body.is_empty() => {
+                let why = "a GET with a body is not sent on while a control plane is configured"
+                    .to_owned();
+                Some((400, "failed", "bad_request", why.clone(), why))
+            }
+            None => None,
+        };
+        if let Some((status, decision, kind, why, told)) = refusal {
+            done(&mut call, decision, status, Some(why));
+            refuse(
+                &mut out,
+                api,
+                status,
+                kind,
+                &format!("Branchyard's model gateway: {told}"),
+                &[],
+            );
+            return;
+        }
+        // A request whose body is JSON by its API's definition is routed
+        // only when the gateway read it as its backend will: the turn's
+        // scope and the routes go by the model it names.
         if let Some(why) = unread_body(&request, &path, json.as_ref()) {
             done(&mut call, "failed", 400, Some(why.clone()));
             refuse(
@@ -1161,53 +1218,22 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // Backends, and the route's rate limit.
     let gateway = &state.gateway;
     let model = (!call.model.is_empty()).then_some(call.model.as_str());
-    // The pass-through path names one backend, never a control plane's:
-    // it would carry whatever the harness sent, under no route.
+    // The model list names no model and spends nothing: the one request a
+    // plain backend beside a control plane is sent without a route.
+    let listing = request.method == "GET" && path.split('?').next() == Some("/v1/models");
+    // The pass-through path names one backend. (Beside a control plane it
+    // is closed, above.)
     let (index, order): (Option<usize>, Vec<&Backend>) = match &named {
-        Some(name) => (
-            None,
-            gateway
-                .backend(name)
-                .filter(|b| b.control_plane.is_none())
-                .into_iter()
-                .collect(),
-        ),
-        None => gateway.plan(api, model),
+        Some(name) => (None, gateway.backend(name).into_iter().collect()),
+        None => gateway.plan(api, model, listing),
     };
-    if order.is_empty() {
-        let why = match &named {
-            Some(name) if gateway.backend(name).is_some() => format!(
-                "{name} is a control-plane backend, which the pass-through path never reaches"
-            ),
-            Some(name) => format!("no backend {name}"),
-            None => format!(
-                "no backend serves the {api} API for {}",
-                model.unwrap_or("this request")
-            ),
-        };
-        // The event has the reason, which is the operator's. The harness
-        // is told the same of a backend that is not there and of one the
-        // path never reaches, so it cannot learn which names are control
-        // planes.
-        let told = match &named {
-            Some(name) => format!("no backend {name}"),
-            None => why.clone(),
-        };
-        done(&mut call, "failed", 404, Some(why));
-        refuse(
-            &mut out,
-            api,
-            404,
-            "failed",
-            &format!("Branchyard's model gateway: {told}"),
-            &[],
-        );
-        return;
-    }
     // A model the gateway read whose route names control-plane backends
-    // goes to one of them or nowhere: not to a plain backend because the
-    // request speaks another API than those backends, nor by the
-    // pass-through path.
+    // goes to one of them or nowhere: not to the plain backends of a later
+    // route because the request speaks another API than those backends,
+    // and nowhere when its API has no backend at all for it. (The
+    // pass-through path, the other way past a route, is closed above.)
+    // Asked before the next check, so the event names the route that
+    // decided.
     if let Some(model) = model {
         let governed = gateway
             .governed_by(model)
@@ -1217,18 +1243,11 @@ fn handle(stream: TcpStream, state: &TurnState) {
             // what an operator can change.
             let why = format!(
                 "the route {pattern:?} matches {model} and names the control-plane backend{} \
-                 {}, and none of them takes this request ({}); it is not sent to a plain \
-                 backend instead: put a route for {model} before that one{}",
+                 {}, and none of them takes this request (it speaks the {api} API); it is not \
+                 sent to a plain backend instead: put a route for {model} before that one, or \
+                 give that route an AIPlex backend of the {api} API",
                 if planes.len() == 1 { "" } else { "s" },
                 planes.join(", "),
-                match &named {
-                    Some(_) => "the pass-through path names a plain backend".to_owned(),
-                    None => format!("it speaks the {api} API"),
-                },
-                match &named {
-                    Some(_) => String::new(),
-                    None => format!(", or give that route an AIPlex backend of the {api} API"),
-                }
             );
             // The harness is told no backend's name.
             let told = format!(
@@ -1240,38 +1259,51 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     }
-    // A control plane is asked only the integration's routes: its access
-    // point serves its tools and its other wires under the same URL, where
-    // the harness's path would take the backend's credential.
-    if order.iter().any(|b| b.control_plane.is_some())
-        && !control_plane_route(api, &request.method, &path)
-    {
-        let why = not_a_control_plane_route(api, &request.method, &path);
-        done(&mut call, "denied", 403, Some(why.clone()));
+    if order.is_empty() {
+        let (why, told) = match (&named, model) {
+            (Some(name), _) => (format!("no backend {name}"), format!("no backend {name}")),
+            // Beside a control plane, what no route names is the control
+            // plane's, and this API has no backend of it: the request is
+            // nobody's. The event says what an operator can change; the
+            // harness is told no backend's name.
+            (None, Some(model)) if gateway.has_control_plane() && !listing => (
+                format!(
+                    "no route names {model} for a request in the {api} API, and beside a \
+                     control plane a model no route names is an AIPlex backend's, of which \
+                     this API has none, so the request is sent nowhere: add a route for \
+                     {model}; a last route with model = \"*\" that names a plain backend \
+                     sends it everything no earlier route names"
+                ),
+                format!(
+                    "no route names {model}, and it is not sent to a backend no route names \
+                     for it"
+                ),
+            ),
+            (None, None) if gateway.has_control_plane() && !listing => (
+                format!(
+                    "this request names no model, so no route can name it, and beside a \
+                     control plane such a request is an AIPlex backend's; the {api} API has \
+                     none, so it is sent nowhere"
+                ),
+                "this request names no model, and it is not sent to a backend no route names \
+                 for it"
+                    .to_owned(),
+            ),
+            (None, model) => {
+                let why = format!(
+                    "no backend serves the {api} API for {}",
+                    model.unwrap_or("this request")
+                );
+                (why.clone(), why)
+            }
+        };
+        done(&mut call, "failed", 404, Some(why));
         refuse(
             &mut out,
             api,
-            403,
-            "denied",
-            &format!("Branchyard's model gateway: {why}"),
-            &[],
-        );
-        return;
-    }
-    // Nor is a control plane sent a body on a GET: the model list takes
-    // none, and the gateway reads none there.
-    if request.method == "GET"
-        && !request.body.is_empty()
-        && order.iter().any(|b| b.control_plane.is_some())
-    {
-        let why = "a GET with a body is not sent to a control-plane backend".to_owned();
-        done(&mut call, "failed", 400, Some(why.clone()));
-        refuse(
-            &mut out,
-            api,
-            400,
-            "bad_request",
-            &format!("Branchyard's model gateway: {why}"),
+            404,
+            "failed",
+            &format!("Branchyard's model gateway: {told}"),
             &[],
         );
         return;
@@ -2719,7 +2751,7 @@ mod tests {
     }
 
     #[test]
-    fn a_control_plane_is_asked_only_the_integrations_routes() {
+    fn only_the_listed_routes_are_served_beside_a_control_plane() {
         use Api::{Anthropic, Generic, Openai};
         for (api, method, path) in [
             (Anthropic, "POST", "/v1/messages"),
@@ -2734,7 +2766,7 @@ mod tests {
             // A query is not the path, whatever it holds.
             (Openai, "GET", "/v1/models?next=/mcp"),
         ] {
-            assert!(control_plane_route(api, method, path), "{method} {path}");
+            assert!(listed_route(api, method, path), "{method} {path}");
         }
         for (api, method, path) in [
             // What an access point serves beside them.
@@ -2782,19 +2814,19 @@ mod tests {
             (Anthropic, "POST", "/"),
             (Anthropic, "POST", "?/v1/messages"),
         ] {
-            assert!(!control_plane_route(api, method, path), "{method} {path}");
+            assert!(!listed_route(api, method, path), "{method} {path}");
         }
         // The refusal names what was asked, without its query, and the
         // routes of the API; never text a terminal would act on.
         assert_eq!(
-            not_a_control_plane_route(Anthropic, "POST", "/mcp/github?token=x"),
-            "POST /mcp/github is not a route a control-plane backend is asked (POST \
-             /v1/messages, POST /v1/messages/count_tokens, GET /v1/models)"
+            not_a_listed_route(Anthropic, "POST", "/mcp/github?token=x"),
+            "POST /mcp/github is not a route the gateway serves while a control plane is \
+             configured (POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models)"
         );
         assert_eq!(
-            not_a_control_plane_route(Openai, "GET", "/v1/../skills"),
-            "GET /v1/../skills is not a route a control-plane backend is asked (POST \
-             /v1/chat/completions, POST /v1/responses, GET /v1/models)"
+            not_a_listed_route(Openai, "GET", "/v1/../skills"),
+            "GET /v1/../skills is not a route the gateway serves while a control plane is \
+             configured (POST /v1/chat/completions, POST /v1/responses, GET /v1/models)"
         );
         for (method, path) in [
             ("POST", "/a\u{1b}[2J"),
@@ -2807,7 +2839,7 @@ mod tests {
             ("METHODTHATISTOOLONG", "/mcp"),
         ] {
             assert!(
-                not_a_control_plane_route(Anthropic, method, path)
+                not_a_listed_route(Anthropic, method, path)
                     .starts_with("this request is not a route"),
                 "{method:?} {path:?}"
             );

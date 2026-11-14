@@ -2285,7 +2285,7 @@
           ]
         },
         "control_plane": {
-          "description": "`aiplex` when this backend is an AIPlex access point\n(`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told\nwhich branch, turn and harness is calling, its own refusals are\nfinal, and a route that names it names only such backends. An\n`anthropic` or `openai` backend with a key and no `compat`.",
+          "description": "`aiplex` when this backend is an AIPlex access point\n(`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told\nwhich branch, turn and harness is calling, its own refusals are\nfinal, and a route that names it names only such backends. With\none configured, a plain backend is sent only what a route names for\nit, and the model list; the rest goes to an AIPlex backend or is\nrefused. An `anthropic` or `openai` backend with a key and no\n`compat`.",
           "type": [
             "string",
             "null"

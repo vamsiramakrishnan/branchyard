@@ -524,7 +524,8 @@ pub fn federable_tenant(tenant: &str) -> bool {
 /// reach the provider, and records it. The gateway sends it the credential
 /// as a bearer token and says which branch, turn and harness is calling;
 /// its refusal reaches the harness as it is, and no call a route sends to
-/// it goes to a plain backend instead.
+/// it goes to a plain backend instead. While one is configured, a plain
+/// backend is sent only what a route names for it, and the model list.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -908,7 +909,6 @@ impl Gateway {
                 backend_model: r.backend_model.clone(),
             });
         }
-        check_unrouted(&backends, &routes)?;
         check_shared_keys(&backends)?;
         let budget = config.budget.clone().unwrap_or_default();
         if budget.alert_at.is_some_and(|a| !(a > 0.0 && a <= 1.0)) {
@@ -964,18 +964,16 @@ impl Gateway {
         self.backends.iter().any(|b| b.control_plane.is_some())
     }
 
-    /// The first route whose pattern matches `model`, whatever API a
-    /// request speaks, when it names control-plane backends: its pattern and
-    /// those backends. A model the gateway read that such a route takes
+    /// The first route whose pattern takes `model` (a control plane's route
+    /// in any spelling of the name, a plain route as written), whatever API
+    /// a request speaks, when it names control-plane backends: its pattern
+    /// and those backends. A model the gateway read that such a route takes
     /// goes to one of them or nowhere, so the order of the routes decides:
     /// a wider pattern before a narrower one takes the narrower one's
-    /// models. `None` when no route's pattern matches `model`, or the first
+    /// models. `None` when no route's pattern takes `model`, or the first
     /// that does names plain backends.
     pub(crate) fn governed_by(&self, model: &str) -> Option<(&str, Vec<&str>)> {
-        let route = self
-            .routes
-            .iter()
-            .find(|r| branchyard_provision::connectors::glob_match(&r.model, model))?;
+        let route = self.routes.iter().find(|r| self.takes(r, model))?;
         let planes: Vec<&str> = route
             .backends
             .iter()
@@ -1069,14 +1067,42 @@ impl Gateway {
         self.backends.iter().find(|b| b.name == name)
     }
 
+    /// Whether route `r` names a control-plane backend. Such a route names
+    /// only control-plane backends ([`Gateway::new`]).
+    fn governs(&self, r: &Route) -> bool {
+        r.backends
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&r.fallbacks)
+            .any(|name| {
+                self.backend(name)
+                    .is_some_and(|b| b.control_plane.is_some())
+            })
+    }
+
+    /// Whether route `r`'s pattern takes `model`. A route of plain backends
+    /// matches the name as it is written, as it always did. A route that
+    /// names control-plane backends matches it without regard to letter
+    /// case and to white space around it ([`any_spelling`]): `Claude-X` and
+    /// `claude-x ` are the control plane's when `claude-*` is, so another
+    /// spelling of a name does not carry a model past its route. The name
+    /// is sent on as it was written; the control plane decides what it
+    /// means.
+    fn takes(&self, r: &Route, model: &str) -> bool {
+        match self.governs(r) {
+            true => any_spelling(&r.model, model),
+            false => branchyard_provision::connectors::glob_match(&r.model, model),
+        }
+    }
+
     /// The backends of `order` a call may be sent to: never both kinds,
     /// so a refusal or an outage of one kind never moves the call to the
     /// other. A route that names a control-plane backend names only
     /// control-plane backends ([`Gateway::new`]), and this holds at run time
-    /// whatever the routes say: its plain backends are dropped. A call no
-    /// route takes (`routed` false) goes to the plain backends of its API
-    /// when there are any, as before control planes existed, and to its
-    /// control-plane backends only when it has no plain one.
+    /// whatever the routes say: its plain backends are dropped (`routed`).
+    /// Of the backends that answer the model list beside a control plane
+    /// (`routed` false), the plain ones are kept when there are any, and
+    /// the control plane's otherwise.
     pub(crate) fn confine<'a>(&self, routed: bool, order: Vec<&'a Backend>) -> Vec<&'a Backend> {
         let planes = order.iter().any(|b| b.control_plane.is_some());
         let plain = order.iter().any(|b| b.control_plane.is_none());
@@ -1103,8 +1129,15 @@ impl Gateway {
                 r.bridges(self, api)
                     && (models.is_empty()
                         || models.iter().any(|m| {
-                            branchyard_provision::connectors::glob_match(&r.model, m)
-                                || branchyard_provision::connectors::glob_match(m, &r.model)
+                            // A control plane's route reads a name in any
+                            // letter case, so its pattern and a scope's
+                            // overlap that way too.
+                            let (pattern, m) = match self.governs(r) {
+                                true => (r.model.to_lowercase(), m.to_lowercase()),
+                                false => (r.model.clone(), m.clone()),
+                            };
+                            branchyard_provision::connectors::glob_match(&pattern, &m)
+                                || branchyard_provision::connectors::glob_match(&m, &pattern)
                         }))
             })
     }
@@ -1116,16 +1149,41 @@ impl Gateway {
         }
     }
 
-    /// The backends to try for `model` on `api`, in order: the route's
-    /// weighted backends (one chosen by weight first, then the rest in
-    /// order), then its fallbacks. Without a route, every backend of
-    /// `api` in order. Also the route's index, for its rate limit. A
-    /// route naming a `backend_model` also offers its backends of an API
-    /// the request translates to. Either way [`Gateway::confine`] has the
-    /// last word: one call's backends are never of both kinds.
-    pub(crate) fn plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
+    /// The backends to try for `model` on `api`, in order, and the route's
+    /// index, for its rate limit.
+    ///
+    /// A route takes it: the route's weighted backends (one chosen by
+    /// weight first, then the rest in order), then its fallbacks. A route
+    /// naming a `backend_model` also offers its backends of an API the
+    /// request translates to. [`Gateway::confine`] has the last word: one
+    /// call's backends are never of both kinds.
+    ///
+    /// No route takes it (its model matches none that this request can use,
+    /// or it names none). Without a control plane: every backend of `api`
+    /// in order, as it always was. Beside a control plane, a plain backend
+    /// is sent only what a route names for it, so the request is the
+    /// control plane's or nobody's: the control-plane backends of `api`,
+    /// which may be none. The one exception is the model list (`listing`),
+    /// which names no model and spends nothing: it is answered as before,
+    /// by the plain backends of `api` when there are any, else by its
+    /// control-plane backends.
+    pub(crate) fn plan(
+        &self,
+        api: Api,
+        model: Option<&str>,
+        listing: bool,
+    ) -> (Option<usize>, Vec<&Backend>) {
         let (index, order) = self.unconfined_plan(api, model);
-        (index, self.confine(index.is_some(), order))
+        let order = match (index, self.has_control_plane()) {
+            (Some(_), _) => self.confine(true, order),
+            (None, false) => order,
+            (None, true) if listing => self.confine(false, order),
+            (None, true) => order
+                .into_iter()
+                .filter(|b| b.control_plane.is_some())
+                .collect(),
+        };
+        (index, order)
     }
 
     fn unconfined_plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
@@ -1134,7 +1192,7 @@ impl Gateway {
         };
         let route = model.and_then(|m| {
             self.routes.iter().enumerate().find(|(_, r)| {
-                branchyard_provision::connectors::glob_match(&r.model, m)
+                self.takes(r, m)
                     && r.backends
                         .iter()
                         .map(|(name, _)| name)
@@ -1373,9 +1431,23 @@ fn check_auth(name: &str, b: &BackendConfig, signer: &Signer) -> Result<Option<S
     }
 }
 
-/// Refuse a control-plane backend that no route names when a plain
-/// backend speaks its API: a call no route takes goes to the plain one
-/// ([`Gateway::confine`]), so it would never be used.
+/// Whether `pattern` matches the model name `model` in any spelling of it:
+/// without regard to letter case, and to white space around the name. What
+/// a route that names control-plane backends asks, so `Claude-X`, `claude-x `
+/// and ` CLAUDE-x` are all `claude-*`'s.
+///
+/// Three tries, and one is enough: the pattern and the name in Unicode
+/// lower case, the name with the white space around it removed
+/// (`str::trim`) and with it kept; then both exactly as written, so that
+/// lower case never loses a match the pattern had (a `?` counts one byte,
+/// and a character's lower case can be longer than the character).
+pub(crate) fn any_spelling(pattern: &str, model: &str) -> bool {
+    use branchyard_provision::connectors::glob_match;
+    let lower = pattern.to_lowercase();
+    let name = model.to_lowercase();
+    glob_match(&lower, name.trim()) || glob_match(&lower, &name) || glob_match(pattern, model)
+}
+
 /// Whether `value` holds the control plane's token `token`: it is the token,
 /// or has it inside, as `Bearer <token>` has. A token too short to be used
 /// (`MIN_CONTROL_PLANE_KEY`) is looked for only as the whole value, since
@@ -1456,29 +1528,6 @@ fn check_shared_keys(backends: &[Backend]) -> Result<(), String> {
                  sent only to its own url; give {plain} a key of its own",
                 plain = plain.name,
                 plane = plane.name
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn check_unrouted(backends: &[Backend], routes: &[Route]) -> Result<(), String> {
-    for backend in backends.iter().filter(|b| b.control_plane.is_some()) {
-        let named = routes.iter().any(|r| {
-            r.backends.iter().any(|(n, _)| *n == backend.name)
-                || r.fallbacks.contains(&backend.name)
-        });
-        let plain = backends
-            .iter()
-            .find(|b| b.api == backend.api && b.control_plane.is_none());
-        if let (false, Some(plain)) = (named, plain) {
-            return Err(format!(
-                "models.backends.{name}: no route names this control-plane backend, and a call \
-                 no route takes goes to the plain {api} backend {plain}, so it would never be \
-                 used; add a route that names it ([[models.routes]] with backends = [\"{name}\"])",
-                name = backend.name,
-                api = backend.api,
-                plain = plain.name,
             ));
         }
     }
@@ -2252,7 +2301,8 @@ mod tests {
                 Gateway::new(&config(seed), signer(), |n| KeySource::Env(n.into())).unwrap();
             (0..400)
                 .map(|_| {
-                    let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+                    let (route, order) =
+                        gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"), false);
                     assert_eq!(route, Some(0));
                     order.iter().map(|b| b.name.clone()).collect()
                 })
@@ -2275,13 +2325,13 @@ mod tests {
         assert!((250..350).contains(&a), "{a} of 400");
         // Without a route, every backend of the API in order.
         let gateway = Gateway::new(&config(1), signer(), |n| KeySource::Env(n.into())).unwrap();
-        let (route, order) = gateway.plan(Api::Openai, Some("gpt-5"));
+        let (route, order) = gateway.plan(Api::Openai, Some("gpt-5"), false);
         assert_eq!(route, None);
         assert_eq!(
             order.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
             ["o"]
         );
-        let (route, order) = gateway.plan(Api::Anthropic, None);
+        let (route, order) = gateway.plan(Api::Anthropic, None, false);
         assert_eq!(route, None);
         assert_eq!(order.len(), 3);
     }
@@ -2387,7 +2437,7 @@ mod tests {
         let gateway = Gateway::new(&config, signer(), |n| KeySource::Env(n.into())).unwrap();
         // The route's OpenAI backend serves the Anthropic request, asked for
         // the route's model.
-        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"), false);
         assert_eq!(route, Some(0));
         assert_eq!(
             order.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
@@ -2397,11 +2447,14 @@ mod tests {
         // A generic backend is never translated to; without a route,
         // nothing crosses APIs.
         assert!(gateway
-            .plan(Api::Anthropic, Some("mistral-large"))
+            .plan(Api::Anthropic, Some("mistral-large"), false)
             .1
             .is_empty());
-        assert!(gateway.plan(Api::Anthropic, Some("llama-3")).1.is_empty());
-        assert!(gateway.plan(Api::Anthropic, None).1.is_empty());
+        assert!(gateway
+            .plan(Api::Anthropic, Some("llama-3"), false)
+            .1
+            .is_empty());
+        assert!(gateway.plan(Api::Anthropic, None, false).1.is_empty());
         // A harness stays on the gateway for the models the route covers,
         // and runs direct for others.
         for allow in [["claude-*"], ["*"], ["claude-opus-*"]] {
@@ -2433,7 +2486,7 @@ mod tests {
         .unwrap();
         let gateway = Gateway::new(&plain, signer(), |n| KeySource::Env(n.into())).unwrap();
         assert!(gateway
-            .plan(Api::Anthropic, Some("claude-sonnet-4-6"))
+            .plan(Api::Anthropic, Some("claude-sonnet-4-6"), false)
             .1
             .is_empty());
         assert!(!gateway.serves_for(Api::Anthropic, &["claude-*".into()]));
@@ -2891,23 +2944,6 @@ mod tests {
                     "key": "aiplex", "control_plane": "aiplex"}}}),
                 vec!["models.backends.g.control_plane", "not generic"],
             ),
-            // One that no route names, beside a plain backend of its API,
-            // would never be used: refused, saying what to add.
-            (
-                json!({"backends": {"ap": plane("openai"), "direct": plain("openai")}}),
-                vec![
-                    "models.backends.ap",
-                    "no route names",
-                    "plain openai backend direct",
-                    "add a route that names it",
-                    "backends = [\"ap\"]",
-                ],
-            ),
-            (
-                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
-                    "routes": [{"model": "claude-*", "backends": ["direct"]}]}),
-                vec!["models.backends.ap", "no route names"],
-            ),
             // It needs its token, and takes no compatibility layer.
             (
                 json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
@@ -2934,6 +2970,26 @@ mod tests {
                 );
             }
         }
+        // One that no route names, beside a plain backend of its API, was
+        // refused as never used. It is used now, for what no route names,
+        // so the configuration is accepted, and the plain backend beside
+        // it is sent only what a route names for it and the model list.
+        let unrouted =
+            built(json!({"backends": {"ap": plane("openai"), "direct": plain("openai")}})).unwrap();
+        for model in [Some("gpt-5"), None] {
+            let (route, order) = unrouted.plan(Api::Openai, model, false);
+            assert_eq!((route, names(&order)), (None, vec!["ap".to_owned()]));
+        }
+        assert_eq!(names(&unrouted.plan(Api::Openai, None, true).1), ["direct"]);
+        let beside = built(json!({
+            "backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+            "routes": [{"model": "claude-*", "backends": ["direct"]}]
+        }))
+        .unwrap();
+        let (route, order) = beside.plan(Api::Anthropic, Some("claude-x"), false);
+        assert_eq!((route, names(&order)), (Some(0), vec!["direct".to_owned()]));
+        let (route, order) = beside.plan(Api::Anthropic, Some("llama-3"), false);
+        assert_eq!((route, names(&order)), (None, vec!["ap".to_owned()]));
         // What the contract shows is accepted: one backend per API, both
         // control planes, a route each, and a plain route beside them.
         let gateway = built(json!({
@@ -2951,7 +3007,7 @@ mod tests {
         );
         assert_eq!(gateway.backend("direct").unwrap().control_plane, None);
         // Alone on its API, or beside a plain backend of another API, one
-        // that no route names is used by calls no route takes.
+        // that no route names takes the requests no route names.
         for config in [
             json!({"backends": {"ap": plane("openai")}}),
             json!({"backends": {"ap": plane("openai"), "direct": plain("anthropic")}}),
@@ -2971,6 +3027,40 @@ mod tests {
             serde_json::to_value(&config).unwrap()["backends"]["p"].get("control_plane"),
             None
         );
+    }
+
+    #[test]
+    fn a_control_planes_route_reads_a_name_in_any_spelling() {
+        for (pattern, name) in [
+            ("claude-*", "claude-x"),
+            ("claude-*", "Claude-X"),
+            ("claude-*", "claude-x "),
+            ("claude-*", " CLAUDE-x"),
+            ("claude-*", "\tClaude-x\n"),
+            ("Claude-*", "claude-x"),
+            ("gpt-?", "GPT-4"),
+            ("*", ""),
+            ("*", "  "),
+            // White space as Unicode has it, not only ASCII's.
+            ("claude-*", "\u{a0}claude-x\u{3000}"),
+            // The name with its white space kept is tried too: here `?`
+            // takes the space.
+            ("?claude-x", " Claude-X"),
+            // And both as written, so lower case never loses a match: `?`
+            // counts a byte, and this letter's lower case is a byte longer.
+            ("??", "\u{130}"),
+        ] {
+            assert!(any_spelling(pattern, name), "{pattern:?} {name:?}");
+        }
+        for (pattern, name) in [
+            ("claude-*", "anthropic/claude-x"),
+            ("claude-*", "c laude-x"),
+            ("claude-*", "claude"),
+            ("claude-x", "claude-x y"),
+            ("gpt-?", "gpt-4o"),
+        ] {
+            assert!(!any_spelling(pattern, name), "{pattern:?} {name:?}");
+        }
     }
 
     #[test]
@@ -2997,7 +3087,7 @@ mod tests {
         // The weighted choice, the route's other backends and its fallbacks:
         // control planes only, every time.
         for _ in 0..200 {
-            let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+            let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"), false);
             assert_eq!(route, Some(1));
             let order = names(&order);
             assert!(
@@ -3006,33 +3096,56 @@ mod tests {
             );
         }
         // A translated route to a control plane offers only it.
-        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-haiku-4-5"));
+        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-haiku-4-5"), false);
         assert_eq!((route, names(&order)), (Some(0), vec!["apo".to_owned()]));
         // A route the operator sends to a plain backend stays as it is.
-        let (route, order) = gateway.plan(Api::Anthropic, Some("local-7b"));
+        let (route, order) = gateway.plan(Api::Anthropic, Some("local-7b"), false);
         assert_eq!(
             (route, names(&order)),
             (Some(2), vec!["direct-b".to_owned()])
         );
-        // No route, on an API with plain backends: only those, in name
-        // order, as before control planes existed; a model or none.
-        let (route, order) = gateway.plan(Api::Anthropic, Some("llama-3"));
+        // No route names the model, or the request names none: the control
+        // plane's backends of the API, in name order, and never a plain
+        // one, though the API has two.
+        for model in [Some("llama-3"), None] {
+            let (route, order) = gateway.plan(Api::Anthropic, model, false);
+            assert_eq!(
+                (route, names(&order)),
+                (None, vec!["ap1".into(), "ap2".into(), "ap3".into()])
+            );
+        }
+        // The model list alone is answered as before: by the plain
+        // backends of the API when it has any.
         assert_eq!(
-            (route, names(&order)),
-            (None, vec!["direct-a".into(), "direct-b".into()])
-        );
-        assert_eq!(
-            names(&gateway.plan(Api::Anthropic, None).1),
+            names(&gateway.plan(Api::Anthropic, None, true).1),
             ["direct-a", "direct-b"]
         );
-        // No route, on an API with only control planes: those.
-        let (route, order) = gateway.plan(Api::Openai, Some("o3"));
+        // On an API with only control planes: those, for all three.
+        let (route, order) = gateway.plan(Api::Openai, Some("o3"), false);
         assert_eq!((route, names(&order)), (None, vec!["apo".to_owned()]));
-        assert_eq!(names(&gateway.plan(Api::Openai, None).1), ["apo"]);
+        assert_eq!(names(&gateway.plan(Api::Openai, None, false).1), ["apo"]);
+        assert_eq!(names(&gateway.plan(Api::Openai, None, true).1), ["apo"]);
+        // A control plane's route takes a name in any letter case and with
+        // white space around it; a plain route takes it as written, so
+        // another spelling of its model is nobody's but the control plane's.
+        for name in [
+            "Claude-Sonnet-4-6",
+            "claude-sonnet-4-6 ",
+            " CLAUDE-sonnet-4-6\t",
+        ] {
+            let (route, order) = gateway.plan(Api::Anthropic, Some(name), false);
+            assert_eq!(route, Some(1), "{name:?}");
+            assert!(order.iter().all(|b| b.control_plane.is_some()), "{name:?}");
+        }
+        let (route, order) = gateway.plan(Api::Anthropic, Some("LOCAL-7b"), false);
+        assert_eq!(
+            (route, names(&order)),
+            (None, vec!["ap1".into(), "ap2".into(), "ap3".into()])
+        );
         // An order of both kinds is cut to one at run time: to the control
         // planes for a route (a route changed after the configuration was
         // checked still sends nothing to a plain backend), to the plain
-        // backends for a call no route takes.
+        // backends for the model list.
         let both: Vec<&Backend> = ["ap1", "direct-a", "ap2"]
             .iter()
             .map(|n| gateway.backend(n).unwrap())
@@ -3042,7 +3155,7 @@ mod tests {
         gateway.routes[1].fallbacks.push("direct-a".into());
         gateway.routes[1].backends.push(("direct-a".into(), 5));
         for _ in 0..50 {
-            let (_, order) = gateway.plan(Api::Anthropic, Some("claude-opus-4"));
+            let (_, order) = gateway.plan(Api::Anthropic, Some("claude-opus-4"), false);
             assert!(
                 order.iter().all(|b| b.control_plane.is_some()),
                 "{:?}",
@@ -3050,15 +3163,46 @@ mod tests {
             );
             assert_eq!(order.len(), 3);
         }
-        // Without a control plane, nothing changes: every backend of the
-        // API, in name order.
-        let gateway = built(json!({
-            "backends": {"b": plain("anthropic"), "a": plain("anthropic")}
+        // An API with a plain backend only, beside a control plane of the
+        // other API: what no route names is nobody's there.
+        let other = built(json!({
+            "backends": {"apo": plane("openai"), "direct": plain("anthropic")},
+            "routes": [{"model": "claude-*", "backends": ["direct"]}]
         }))
         .unwrap();
+        for model in [Some("llama-3"), Some("Claude-x"), None] {
+            let (route, order) = other.plan(Api::Anthropic, model, false);
+            assert_eq!(
+                (route, names(&order)),
+                (None, Vec::<String>::new()),
+                "{model:?}"
+            );
+        }
+        assert_eq!(names(&other.plan(Api::Anthropic, None, true).1), ["direct"]);
+        let (route, order) = other.plan(Api::Anthropic, Some("claude-x"), false);
+        assert_eq!((route, names(&order)), (Some(0), vec!["direct".to_owned()]));
+        // Without a control plane, nothing changes: every backend of the
+        // API, in name order, for a model, for none and for the list, and
+        // a name is matched as it is written.
+        let gateway = built(json!({
+            "backends": {"b": plain("anthropic"), "a": plain("anthropic")},
+            "routes": [{"model": "claude-*", "backends": ["b"]}]
+        }))
+        .unwrap();
+        for (model, listing) in [(Some("x"), false), (None, false), (None, true)] {
+            assert_eq!(
+                names(&gateway.plan(Api::Anthropic, model, listing).1),
+                ["a", "b"],
+                "{model:?}"
+            );
+        }
         assert_eq!(
-            names(&gateway.plan(Api::Anthropic, Some("x")).1),
+            names(&gateway.plan(Api::Anthropic, Some("Claude-x"), false).1),
             ["a", "b"]
+        );
+        assert_eq!(
+            gateway.plan(Api::Anthropic, Some("claude-x"), false).0,
+            Some(0)
         );
         let a = gateway.backend("a").unwrap();
         assert_eq!(names(&gateway.confine(false, vec![a])), ["a"]);

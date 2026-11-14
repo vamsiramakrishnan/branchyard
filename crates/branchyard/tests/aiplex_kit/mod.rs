@@ -27,7 +27,8 @@ pub const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 /// calls, each `{label, api, path, model, stream, headers, fold, method}`
 /// (`method` `GET` sends no body; `raw_path`, a path at the gateway's root
 /// such as the pass-through `/backends/NAME/...`; a path is sent as
-/// written, with its query and without normalizing it; `body_bytes`, the
+/// written, byte for byte after the base URL's own path: its query, a
+/// `#fragment`, a backslash, nothing normalized; `body_bytes`, the
 /// body's bytes as numbers, sent as they are with any method, under
 /// `content_type`, or under none when that is empty), sent
 /// with `http.client` so a header can be repeated, in any case, or folded
@@ -70,9 +71,10 @@ for call in plan:
     if call.get("raw_path"):
         base = os.environ["BRANCHYARD_MODEL_GATEWAY"]
         headers = [("x-api-key", token), ("anthropic-version", "2023-06-01")]
-    url = urllib.parse.urlsplit(base + (call.get("raw_path") or call["path"]))
-    conn = http.client.HTTPConnection(url.hostname, url.port, timeout=60)
-    conn.putrequest(method, url.path + ("?" + url.query if url.query else ""), skip_accept_encoding=True)
+    where = urllib.parse.urlsplit(base)
+    target = where.path + (call.get("raw_path") or call["path"])
+    conn = http.client.HTTPConnection(where.hostname, where.port, timeout=60)
+    conn.putrequest(method, target, skip_accept_encoding=True)
     for name, value in headers + [tuple(h) for h in call.get("headers", [])]:
         conn.putheader(name, value)
     if call.get("fold"):
@@ -380,6 +382,13 @@ pub fn access_point(name: &'static str, redirect_to: String) -> MockHttp {
         }
         answer(request, &model).header("X-Aiplex-Request-Id", &id)
     })
+}
+
+/// A provider reached directly that answers anything it is sent, and
+/// records it: for requests whose body [`access_point`] could not read (it
+/// answers by the model a JSON body names).
+pub fn provider() -> MockHttp {
+    MockHttp::start(|_| Response::json(200, &json!({"ok": true})))
 }
 
 /// The model a request's body names; empty for one without a body.

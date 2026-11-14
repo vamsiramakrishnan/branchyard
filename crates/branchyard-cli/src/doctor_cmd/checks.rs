@@ -1551,7 +1551,46 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
     let mut checks = vec![keys_row(&rows)];
     checks.extend(transport_row(&config.models));
     checks.extend(audience_row(&config.models));
+    checks.extend(routes_row(&config.models));
     checks
+}
+
+/// `models.routes`: what the routes leave unreached beside a control plane
+/// ([`ModelsConfig::route_notes`]): a route behind an earlier one of the
+/// other kind that covers its pattern, a generic backend, a plain backend
+/// no route names. One row when a backend is an AIPlex access point, and
+/// none without one.
+///
+/// [`ModelsConfig::route_notes`]: branchyard_setup::config::ModelsConfig::route_notes
+fn routes_row(models: &branchyard_setup::config::ModelsConfig) -> Option<Check> {
+    const NAME: &str = "models.routes";
+    let planes: Vec<&str> = models
+        .backends
+        .iter()
+        .filter(|(_, backend)| backend.control_plane.is_some())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if planes.is_empty() {
+        return None;
+    }
+    let notes = models.route_notes();
+    Some(match notes.is_empty() {
+        true => Check::ok(
+            NAME,
+            format!(
+                "beside the control-plane backends ({}), every route can be reached and every \
+                 plain backend has a route",
+                planes.join(", ")
+            ),
+        ),
+        false => Check::warn(
+            NAME,
+            notes.join("; "),
+            "order the routes so each is reached, and give each plain backend a route; a plain \
+             backend beside AIPlex is sent only what a route names for it \
+             (docs/model-gateway.md#what-a-plain-backend-beside-an-aiplex-one-is-sent)",
+        ),
+    })
 }
 
 /// `models.url`: whether a control-plane backend's `url` is plain `http://`
@@ -2456,6 +2495,61 @@ mod tests {
             Some(
                 "use an https:// url, or make sure the network between Branchyard and AIPlex \
                  encrypts what it carries (docs/model-gateway.md#configuring-it)"
+            )
+        );
+    }
+
+    #[test]
+    fn the_routes_row_is_one_row_and_only_beside_a_control_plane() {
+        let models = |config: serde_json::Value| -> branchyard_setup::config::ModelsConfig {
+            serde_json::from_value(config).unwrap()
+        };
+        let plane = serde_json::json!({
+            "api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+            "control_plane": "aiplex", "key": "aiplex",
+        });
+        let plain = serde_json::json!({"api": "anthropic", "key": "k"});
+        // No control-plane backend: no row, whatever the routes leave out.
+        assert_eq!(
+            routes_row(&models(serde_json::json!({"backends": {"direct": plain}}))),
+            None
+        );
+        // Every route and plain backend reached: ok, naming the backends.
+        let ok = routes_row(&models(serde_json::json!({
+            "backends": {"ap": plane, "direct": plain},
+            "routes": [{"model": "claude-*", "backends": ["ap"]},
+                {"model": "*", "backends": ["direct"]}],
+        })))
+        .unwrap();
+        assert_eq!((ok.name.as_str(), ok.status), ("models.routes", Status::Ok));
+        assert_eq!(
+            ok.detail,
+            "beside the control-plane backends (ap), every route can be reached and every plain \
+             backend has a route"
+        );
+        assert_eq!(ok.fix, None);
+        // A plain backend no route names: a warning with the note.
+        let warn = routes_row(&models(serde_json::json!({
+            "backends": {"ap": plane, "direct": plain},
+            "routes": [{"model": "claude-*", "backends": ["ap"]}],
+        })))
+        .unwrap();
+        assert_eq!(
+            (warn.name.as_str(), warn.status),
+            ("models.routes", Status::Warn)
+        );
+        assert!(
+            warn.detail
+                .starts_with("models.backends.direct: no route names this plain backend"),
+            "{}",
+            warn.detail
+        );
+        assert_eq!(
+            warn.fix.as_deref(),
+            Some(
+                "order the routes so each is reached, and give each plain backend a route; a \
+                 plain backend beside AIPlex is sent only what a route names for it \
+                 (docs/model-gateway.md#what-a-plain-backend-beside-an-aiplex-one-is-sent)"
             )
         );
     }

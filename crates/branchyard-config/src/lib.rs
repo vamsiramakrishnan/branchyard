@@ -1277,8 +1277,11 @@ pub struct ModelBackendConfig {
     /// `aiplex` when this backend is an AIPlex access point
     /// (`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told
     /// which branch, turn and harness is calling, its own refusals are
-    /// final, and a route that names it names only such backends. An
-    /// `anthropic` or `openai` backend with a key and no `compat`.
+    /// final, and a route that names it names only such backends. With
+    /// one configured, a plain backend is sent only what a route names for
+    /// it, and the model list; the rest goes to an AIPlex backend or is
+    /// refused. An `anthropic` or `openai` backend with a key and no
+    /// `compat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<String>,
     /// `turn-token`: instead of a `key`, the gateway presents a token the
@@ -1419,8 +1422,9 @@ impl ModelsConfig {
 
     /// What an operator should look at that is not wrong, as a server says
     /// it when it reads its configuration file: the
-    /// [audience notes](ModelsConfig::audience_notes), then the
-    /// [transport notes](ModelsConfig::transport_notes).
+    /// [audience notes](ModelsConfig::audience_notes), the
+    /// [transport notes](ModelsConfig::transport_notes), then the
+    /// [route notes](ModelsConfig::route_notes).
     pub fn notes(&self) -> Vec<String> {
         let mut notes = self.audience_notes();
         notes.extend(self.transport_notes());
@@ -1428,44 +1432,101 @@ impl ModelsConfig {
         notes
     }
 
-    /// A route of plain backends that no request reaches: an earlier route
-    /// that names control-plane backends has a pattern that covers its own
-    /// (`*` before `gpt-*`), and the first route whose pattern matches a
-    /// model decides, whatever API the request speaks, so the models the
-    /// later route was written for are held to the earlier one's backends.
+    /// What no request reaches, or reaches less than the routes say, in a
+    /// configuration that has a control-plane backend (none without one),
+    /// in this order:
+    ///
+    /// - A route of plain backends behind an earlier route that names
+    ///   control-plane backends and whose pattern covers its own (`*`
+    ///   before `gpt-*`): the first route whose pattern matches a model
+    ///   decides, whatever API the request speaks, so the models the later
+    ///   route was written for are held to the earlier one's backends.
+    /// - A route that names control-plane backends behind an earlier route
+    ///   of plain backends whose pattern covers its own (`*` before
+    ///   `claude-*`): every name the earlier pattern matches as written
+    ///   goes to the plain backends, the opposite of what the later route
+    ///   asks for.
+    /// - A generic backend: only the pass-through path reaches one, and it
+    ///   is closed beside a control plane.
+    /// - A plain backend that no route names: beside a control plane it is
+    ///   sent only the model list.
+    ///
+    /// Patterns are compared with `glob_covers`, which is sound and not
+    /// complete, so a pair of patterns it cannot tell about is not noted.
     pub fn route_notes(&self) -> Vec<String> {
-        let governed = |route: &ModelRouteConfig| {
-            route.backends.iter().chain(&route.fallbacks).any(|name| {
-                self.backends
-                    .get(name)
-                    .is_some_and(|backend| backend.control_plane.is_some())
+        let plane = |name: &String| {
+            self.backends
+                .get(name)
+                .is_some_and(|backend| backend.control_plane.is_some())
+        };
+        if !self.backends.keys().any(plane) {
+            return Vec::new();
+        }
+        let governed =
+            |route: &ModelRouteConfig| route.backends.iter().chain(&route.fallbacks).any(plane);
+        let covered_by = |at: usize, earlier_governed: bool| {
+            let later = &self.routes[at];
+            self.routes[..at].iter().enumerate().find(|(_, earlier)| {
+                governed(earlier) == earlier_governed
+                    && branchyard_provision::connectors::glob_covers(&earlier.model, &later.model)
             })
         };
-        self.routes
-            .iter()
-            .enumerate()
-            .filter(|(_, later)| !governed(later))
-            .filter_map(|(at, later)| {
-                let (before, earlier) =
-                    self.routes[..at].iter().enumerate().find(|(_, earlier)| {
-                        // Every model the later pattern matches, the
-                        // earlier one matches too: sound and not complete,
-                        // so a pattern it cannot tell about is not noted.
-                        governed(earlier)
-                            && branchyard_provision::connectors::glob_covers(
-                                &earlier.model,
-                                &later.model,
-                            )
-                    })?;
-                Some(format!(
-                    "models.routes[{at}]: no request reaches this route for {:?}: the earlier \
-                     route for {:?} (models.routes[{before}]) covers its pattern and names \
-                     AIPlex backends, and the first route whose pattern matches a model decides, \
-                     whatever API the request speaks; put this route before that one",
-                    later.model, earlier.model
-                ))
-            })
-            .collect()
+        let mut notes = Vec::new();
+        for (at, later) in self.routes.iter().enumerate() {
+            match governed(later) {
+                false => {
+                    if let Some((before, earlier)) = covered_by(at, true) {
+                        notes.push(format!(
+                            "models.routes[{at}]: no request reaches this route for {:?}: the \
+                             earlier route for {:?} (models.routes[{before}]) covers its pattern \
+                             and names AIPlex backends, and the first route whose pattern matches \
+                             a model decides, whatever API the request speaks; put this route \
+                             before that one",
+                            later.model, earlier.model
+                        ));
+                    }
+                }
+                true => {
+                    if let Some((before, earlier)) = covered_by(at, false) {
+                        notes.push(format!(
+                            "models.routes[{at}]: the earlier route for {:?} \
+                             (models.routes[{before}]) names plain backends and covers this \
+                             route's pattern {:?}, and the first route whose pattern matches a \
+                             model decides: a model named as this pattern has it goes to the \
+                             plain backend, and only a name the earlier pattern does not match as \
+                             written (another letter case, white space around it) can reach this \
+                             route's AIPlex backends; put this route before that one",
+                            earlier.model, later.model
+                        ));
+                    }
+                }
+            }
+        }
+        for (name, backend) in &self.backends {
+            if backend.control_plane.is_some() {
+                continue;
+            }
+            if backend.api == "generic" {
+                notes.push(format!(
+                    "models.backends.{name}: nothing reaches this generic backend: only the \
+                     pass-through path does, and it is closed while a control plane is configured"
+                ));
+                continue;
+            }
+            let named = self
+                .routes
+                .iter()
+                .any(|r| r.backends.contains(name) || r.fallbacks.contains(name));
+            if !named {
+                notes.push(format!(
+                    "models.backends.{name}: no route names this plain backend, so beside an \
+                     AIPlex backend it is sent only the model list; add a route for the models it \
+                     should serve (a last route with model = \"*\" sends it every model no \
+                     earlier route names)"
+                ));
+            }
+        }
+        notes
     }
 
     /// A control-plane backend whose `url` is plain `http://` on a host
@@ -1699,30 +1760,6 @@ impl ModelsConfig {
                          control-plane backends, or a refusal or an outage of the control plane \
                          would send its call to {plain} directly",
                         route.model
-                    ),
-                );
-            }
-        }
-        for (name, backend) in &self.backends {
-            if backend.control_plane.is_none() {
-                continue;
-            }
-            let named = self
-                .routes
-                .iter()
-                .any(|r| r.backends.contains(name) || r.fallbacks.contains(name));
-            let plain = self
-                .backends
-                .iter()
-                .find(|(_, b)| b.api == backend.api && b.control_plane.is_none());
-            if let (false, Some((plain, _))) = (named, plain) {
-                return fail(
-                    &format!("backends.{name}"),
-                    format!(
-                        "no route names this control-plane backend, and a call no route takes \
-                         goes to the plain {} backend {plain}, so it would never be used; add a \
-                         route that names it ([[models.routes]] with backends = [\"{name}\"])",
-                        backend.api
                     ),
                 );
             }
@@ -4573,15 +4610,6 @@ classes = { compensable = "allow" }
                     "plain backend direct",
                 ],
             ),
-            (
-                format!("{}{plain}", plane("ap", "anthropic")),
-                vec![
-                    "models.backends.ap",
-                    "no route names",
-                    "plain anthropic backend direct",
-                    "add a route that names it",
-                ],
-            ),
         ] {
             let error = parse(&format!("version = 1\n\n{text}"))
                 .unwrap_err()
@@ -4590,6 +4618,105 @@ classes = { compensable = "allow" }
                 assert!(error.contains(needle), "{needle:?} not in {error}\n{text}");
             }
         }
+        // One that no route names, beside a plain backend of its API, was
+        // refused as never used. It takes what no route names now, so it is
+        // read; the plain backend no route names is noted instead.
+        for routes in [
+            String::new(),
+            "[[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"direct\"]\n".to_owned(),
+        ] {
+            let text = format!("version = 1\n\n{}{plain}{routes}", plane("ap", "anthropic"));
+            let config = parse(&text).unwrap();
+            assert!(config.models.backends["ap"].control_plane.is_some());
+            let noted = config.models.notes().join("\n");
+            assert_eq!(
+                noted.contains("no route names this plain backend"),
+                routes.is_empty(),
+                "{noted}"
+            );
+            assert!(!noted.contains("ap"), "{noted}");
+        }
+    }
+
+    #[test]
+    fn what_no_request_reaches_beside_a_control_plane_is_noted() {
+        let file = |extra: &str, routes: &[(&str, &str)]| {
+            let mut text = format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"anthropic\"\n\
+                 key = \"ANTHROPIC_API_KEY\"\n\n{extra}"
+            );
+            for (model, backend) in routes {
+                text.push_str(&format!(
+                    "[[models.routes]]\nmodel = \"{model}\"\nbackends = [\"{backend}\"]\n\n"
+                ));
+            }
+            parse(&text).unwrap().models
+        };
+        // An AIPlex route behind a plain route that covers its pattern:
+        // `*` first, and the same pattern first.
+        for (earlier, later) in [
+            ("*", "claude-*"),
+            ("claude-*", "claude-*"),
+            ("claude-*", "claude-opus-*"),
+        ] {
+            let models = file("", &[(earlier, "direct"), (later, "ap")]);
+            assert_eq!(
+                models.route_notes(),
+                [format!(
+                    "models.routes[1]: the earlier route for {earlier:?} (models.routes[0]) \
+                     names plain backends and covers this route's pattern {later:?}, and the \
+                     first route whose pattern matches a model decides: a model named as this \
+                     pattern has it goes to the plain backend, and only a name the earlier \
+                     pattern does not match as written (another letter case, white space \
+                     around it) can reach this route's AIPlex backends; put this route before \
+                     that one"
+                )],
+                "{earlier} {later}"
+            );
+        }
+        // A generic backend: only the pass-through path reaches one, and
+        // it is closed beside a control plane.
+        let generic = "[models.backends.local]\napi = \"generic\"\n\
+                       url = \"http://127.0.0.1:8080\"\nkey = \"k\"\n\n";
+        let models = file(generic, &[("claude-*", "ap"), ("*", "direct")]);
+        assert_eq!(
+            models.route_notes(),
+            [
+                "models.backends.local: nothing reaches this generic backend: only the \
+              pass-through path does, and it is closed while a control plane is configured"
+            ]
+        );
+        // A plain backend no route names: sent only the model list.
+        let models = file("", &[("claude-*", "ap")]);
+        assert_eq!(
+            models.route_notes(),
+            [
+                "models.backends.direct: no route names this plain backend, so beside an AIPlex \
+              backend it is sent only the model list; add a route for the models it should \
+              serve (a last route with model = \"*\" sends it every model no earlier route \
+              names)"
+            ]
+        );
+        assert_eq!(models.notes(), models.route_notes());
+        // The orders that are fine, and the same backends without a
+        // control plane: nothing to say.
+        for routes in [
+            &[("claude-*", "ap"), ("*", "direct")][..],
+            &[("llama-*", "direct"), ("claude-*", "ap")],
+            &[("claude-opus-*", "direct"), ("claude-*", "ap")],
+            &[("claude-?", "direct"), ("claude-*", "ap")],
+        ] {
+            assert!(file("", routes).route_notes().is_empty(), "{routes:?}");
+        }
+        let plain_only = parse(&format!(
+            "version = 1\n\n[models.backends.direct]\napi = \"anthropic\"\nkey = \"k\"\n\n\
+             [models.backends.other]\napi = \"anthropic\"\nkey = \"k\"\n\n{generic}\
+             [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"direct\"]\n"
+        ))
+        .unwrap();
+        assert!(plain_only.models.notes().is_empty());
     }
 
     #[test]
