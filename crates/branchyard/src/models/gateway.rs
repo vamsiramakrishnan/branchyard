@@ -556,14 +556,7 @@ fn control_plane_route(api: Api, method: &str, path: &str) -> bool {
 /// was asked, and the routes that are. The harness chose the method and
 /// the path, so they are shown only when short and printable.
 fn not_a_control_plane_route(api: Api, method: &str, path: &str) -> String {
-    let path = path.split_once('?').map_or(path, |(path, _)| path);
-    let printable = |text: &str, most: usize| {
-        !text.is_empty() && text.len() <= most && text.bytes().all(|b| b.is_ascii_graphic())
-    };
-    let asked = match printable(method, 16) && printable(path, 96) {
-        true => format!("{method} {path}"),
-        false => "this request".to_owned(),
-    };
+    let asked = shown_request(method, path);
     let routes: Vec<String> = CONTROL_PLANE_ROUTES
         .iter()
         .filter(|(a, _, _)| *a == api)
@@ -574,6 +567,12 @@ fn not_a_control_plane_route(api: Api, method: &str, path: &str) -> String {
         routes.join(", ")
     )
 }
+
+/// What follows a plain backend's name in the reason it was not sent a
+/// call, before the name of the control-plane backend whose token its key
+/// holds: the event's reason has both names, the harness's answer the
+/// plain backend's only.
+const HOLDS_A_TOKEN: &str = ": its key holds the token of the control-plane backend ";
 
 /// The routes whose body is JSON by their API's definition, with the model
 /// in it: what the gateway reads before it routes.
@@ -618,37 +617,55 @@ fn model_members(body: &[u8]) -> (usize, usize) {
     serde::Deserializer::deserialize_map(&mut body, Count).unwrap_or((0, 0))
 }
 
-/// Why `request` is not routed by a gateway that has a control plane, when
-/// it is a `POST` to one of [`JSON_ROUTES`] whose body the gateway did not
-/// read as its backend will: an encoded body, a body that is not JSON as
-/// the gateway's parser reads it (bytes that are not UTF-8, a lone
-/// surrogate, nesting past the parser's limit), not an object, a `model`
-/// that is not a string, or more than one member that a parser could take
-/// for the model. `None` for any other request, and for a body the gateway
-/// read; one without a `model` member is a call no route takes.
+/// `method path` as a message may show them, the path before any query: the
+/// harness chose both, so only when short and printable.
+fn shown_request(method: &str, path: &str) -> String {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let printable = |text: &str, most: usize| {
+        !text.is_empty() && text.len() <= most && text.bytes().all(|b| b.is_ascii_graphic())
+    };
+    match printable(method, 16) && printable(path, 96) {
+        true => format!("{method} {path}"),
+        false => "this request".to_owned(),
+    }
+}
+
+/// Why `request` is not routed by a gateway that has a control plane: the
+/// gateway did not read its model as a backend will.
+///
+/// A `POST` to one of [`JSON_ROUTES`] must have a body the gateway read:
+/// not encoded, JSON as the gateway's parser reads it (it refuses bytes
+/// that are not UTF-8, a lone surrogate, nesting past its limit), and an
+/// object. And every JSON object the gateway parsed, on any path, names its
+/// model one way: a `model` that is a string, once, with no member named
+/// `model` in another letter case. Otherwise the gateway would route by one
+/// reading and a backend take another. `None` for a request that passes;
+/// one without a `model` member is a call no route takes.
 fn unread_body(request: &Request, path: &str, json: Option<&Value>) -> Option<String> {
     let route = path.split_once('?').map_or(path, |(route, _)| route);
-    if request.method != "POST" || !JSON_ROUTES.contains(&route) {
-        return None;
-    }
+    let json_route = request.method == "POST" && JSON_ROUTES.contains(&route);
+    let what = shown_request(&request.method, route);
     let refused = |why: &str| {
         Some(format!(
-            "the body of POST {route} {why}; with a control plane configured the gateway routes \
+            "the body of {what} {why}; with a control plane configured the gateway routes \
              such a request only when it read the model as the backend will"
         ))
     };
-    if let Some(coding) = encoded(&request.headers) {
-        return refused(&format!("is encoded ({coding})"));
+    if json_route {
+        if let Some(coding) = encoded(&request.headers) {
+            return refused(&format!("is encoded ({coding})"));
+        }
+        if json.is_none() {
+            return refused(
+                "is not JSON the gateway can read (valid UTF-8, one JSON value, nested no \
+                 deeper than its parser reads)",
+            );
+        }
+        if json.is_some_and(|json| !json.is_object()) {
+            return refused("is not a JSON object");
+        }
     }
-    let Some(json) = json else {
-        return refused(
-            "is not JSON the gateway can read (valid UTF-8, one JSON value, nested no deeper \
-             than its parser reads)",
-        );
-    };
-    let Some(object) = json.as_object() else {
-        return refused("is not a JSON object");
-    };
+    let object = json.and_then(Value::as_object)?;
     if object.get("model").is_some_and(|model| !model.is_string()) {
         return refused("names a model that is not a string");
     }
@@ -1187,6 +1204,33 @@ fn handle(stream: TcpStream, state: &TurnState) {
         );
         return;
     }
+    // A model the gateway read whose route names control-plane backends
+    // goes to one of them or nowhere: not to a plain backend because the
+    // request speaks another API than those backends, nor by the
+    // pass-through path.
+    if let Some(model) = model {
+        let planes = gateway.governed_by(model);
+        if !planes.is_empty() && !order.iter().any(|b| b.control_plane.is_some()) {
+            let why = format!(
+                "the route for {model} names the control-plane backend{} {}, and none of them \
+                 takes this request ({}); it is not sent to a plain backend instead",
+                if planes.len() == 1 { "" } else { "s" },
+                planes.join(", "),
+                match &named {
+                    Some(_) => "the pass-through path names a plain backend".to_owned(),
+                    None => format!("it speaks the {api} API"),
+                }
+            );
+            // The harness is told no backend's name.
+            let told = format!(
+                "Branchyard's model gateway: the route for {model} has no backend that takes \
+                 this request, and it is not sent to another"
+            );
+            done(&mut call, "failed", 404, Some(why));
+            refuse(&mut out, api, 404, "failed", &told, &[]);
+            return;
+        }
+    }
     // A control plane is asked only the integration's routes: its access
     // point serves its tools and its other wires under the same URL, where
     // the harness's path would take the backend's credential.
@@ -1322,8 +1366,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
             // message names the two backends, never the value.
             if let Some(plane) = gateway.token_held_by(&key) {
                 call.failed_over.push(format!(
-                    "{}: its key holds the token of the control-plane backend {plane}, which \
-                     is sent only to that backend",
+                    "{}{HOLDS_A_TOKEN}{plane}, which is sent only to that backend",
                     backend.name
                 ));
                 continue;
@@ -1607,13 +1650,29 @@ fn handle(stream: TcpStream, state: &TurnState) {
             }
             None => {
                 let why = call.failed_over.join("; ");
-                done(&mut call, "failed", 502, Some(why.clone()));
+                // The event has every reason. The harness is not told the
+                // name of the control-plane backend whose token a plain
+                // backend's key holds.
+                let told: Vec<String> = call
+                    .failed_over
+                    .iter()
+                    .map(|tried| match tried.split_once(HOLDS_A_TOKEN) {
+                        Some((backend, _)) => {
+                            format!("{backend}: its key is not one it may be sent")
+                        }
+                        None => tried.clone(),
+                    })
+                    .collect();
+                done(&mut call, "failed", 502, Some(why));
                 refuse(
                     &mut out,
                     api,
                     502,
                     "failed",
-                    &format!("Branchyard's model gateway: no backend answered: {why}"),
+                    &format!(
+                        "Branchyard's model gateway: no backend answered: {}",
+                        told.join("; ")
+                    ),
                     &[],
                 );
             }
@@ -1921,6 +1980,16 @@ fn encoded(headers: &[(String, String)]) -> Option<String> {
         .filter(|(n, _)| n.eq_ignore_ascii_case("content-encoding"))
         .map(|(_, v)| v.trim().to_ascii_lowercase())
         .find(|v| !v.is_empty() && v != "identity")
+        // Its sender chose it: named in a message only when short and
+        // printable.
+        .map(|coding| {
+            let shown =
+                coding.len() <= 32 && coding.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
+            match shown {
+                true => coding,
+                false => "a coding too long or not printable to show".to_owned(),
+            }
+        })
 }
 
 /// Whether `value` is a delay in seconds (at most a day) or an HTTP date.
@@ -2571,6 +2640,64 @@ mod tests {
         );
         assert_eq!(why("/v1/embeddings", b"\xff", &[]), None);
         assert_eq!(why("/v1/messages/", b"\xff", &[]), None);
+        // But any JSON object the gateway parsed names its model one way,
+        // on whatever path: it routes by what it read.
+        assert_eq!(
+            why("/v1/embeddings", br#"{"model":"m","input":"x"}"#, &[]),
+            None
+        );
+        assert_eq!(why("/v1/embeddings", br#"["m"]"#, &[]), None);
+        for (body, what) in [
+            (
+                br#"{"model":"m","model":"n"}"#.as_slice(),
+                "names its model more than once",
+            ),
+            (
+                br#"{"Model":"m"}"#,
+                "has a member named model in another letter case, which some parsers read \
+                 as the model",
+            ),
+            (br#"{"model":7}"#, "names a model that is not a string"),
+        ] {
+            assert_eq!(
+                why("/v1/embeddings", body, &[]),
+                Some(format!(
+                    "the body of POST /v1/embeddings {what}; with a control plane configured \
+                     the gateway routes such a request only when it read the model as the \
+                     backend will"
+                ))
+            );
+        }
+        // A method or a path that is not short and printable is not shown.
+        let odd = unread_body(
+            &request("P\u{1b}ST", br#"{"Model":"m"}"#, &[]),
+            "/v1/x",
+            serde_json::from_slice(br#"{"Model":"m"}"#).ok().as_ref(),
+        );
+        assert!(odd
+            .unwrap()
+            .starts_with("the body of this request has a member"));
+        // A coding is named only when short and printable.
+        let long = "x".repeat(3000);
+        assert_eq!(
+            why(
+                "/v1/messages",
+                br#"{"model":"m"}"#,
+                &[("Content-Encoding", &long)]
+            ),
+            said(
+                "/v1/messages",
+                "is encoded (a coding too long or not printable to show)"
+            )
+        );
+        assert_eq!(
+            encoded(&[("content-encoding".to_owned(), "GZip, br".to_owned())]).as_deref(),
+            Some("gzip, br")
+        );
+        assert_eq!(
+            encoded(&[("Content-Encoding".to_owned(), "gz\u{1b}ip".to_owned())]).as_deref(),
+            Some("a coding too long or not printable to show")
+        );
         assert_eq!(
             unread_body(&request("GET", b"\xff", &[]), "/v1/messages", None),
             None

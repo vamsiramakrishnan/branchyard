@@ -1293,46 +1293,25 @@ pub struct ModelBackendConfig {
     pub audience: Option<String>,
 }
 
-/// `url` as a message may show it: without its user information
-/// (`user:password@`), which is whatever stands before the last `@` of the
-/// authority. The gateway's own URL parser shows a URL the same way
-/// (`branchyard_wire::without_userinfo`).
-fn shown_url(url: &str) -> String {
-    let start = url.find("://").map_or(0, |at| at + 3);
-    let end = url[start..]
-        .find(['/', '?', '#'])
-        .map_or(url.len(), |at| start + at);
-    match url[start..end].rfind('@') {
-        Some(at) => format!("{}{}", &url[..start], &url[start + at + 1..]),
-        None => url.to_owned(),
-    }
+/// `url` as a message or an output may show it: without its user
+/// information (`user:password@`), conservatively. One function for every
+/// URL that comes from configuration: the gateway's own parser shows a URL
+/// it refuses the same way (`branchyard_wire::without_userinfo`).
+pub fn shown_url(url: &str) -> String {
+    branchyard_wire::without_userinfo(url)
 }
 
 /// Why `url` is no address for a control-plane backend, where its
-/// credential is sent: it must be plain text with a host, and a base URL
-/// (no user information, no query, no fragment), as the gateway's own
-/// parser requires when the gateway is built; this is what `by config
-/// validate` says of it, in the parser's words.
-fn access_point_address(url: &str) -> Result<(), &'static str> {
-    if url.bytes().any(|b| b <= b' ' || b >= 0x7f) {
-        return Err("has whitespace, control or non-ASCII characters");
-    }
-    if shown_url(url) != url {
-        return Err(
-            "has user information (user:password@), which is not taken; it is left out of \
-             this message",
-        );
-    }
-    if url.contains('#') {
-        return Err("must not have a fragment");
-    }
-    if url.contains('?') {
-        return Err("must be a base URL: a host and a path, no query");
-    }
-    match url_host(url) {
-        Some(_) => Ok(()),
-        None => Err("names no host"),
-    }
+/// credential is sent, in the words of the gateway's own URL parser, which
+/// refuses the same when the gateway is built: a base URL with a host, no
+/// user information, no query and no fragment, a numeric port, and no
+/// whitespace, control or non-ASCII characters. The reason shows the URL
+/// as [`shown_url`] does.
+fn access_point_address(url: &str) -> Result<(), String> {
+    branchyard_wire::HttpUrl::parse(url)
+        .and_then(branchyard_wire::HttpUrl::without_query)
+        .map(|_| ())
+        .map_err(|why| why.to_string())
 }
 
 /// The host of an `http(s)` URL, lower-cased and without its port; `None`
@@ -1549,10 +1528,7 @@ impl ModelsConfig {
                     Some(Err(why)) => {
                         return fail(
                             &format!("backends.{name}.url"),
-                            format!(
-                                "{:?} {why}; write the access point, {looks}",
-                                shown_url(backend.url.as_deref().unwrap_or_default())
-                            ),
+                            format!("{why}; write the access point, {looks}"),
                         )
                     }
                     Some(Ok(())) => {}
@@ -2864,6 +2840,37 @@ impl ProjectConfig {
         self.network.policy()?;
         self.network.mirror_rules()?;
         self.models.check()?;
+        // A plain backend that reads its key from where a control-plane
+        // backend reads its token (the same variable or file, under another
+        // secret's name) would be sent the token at a provider's address.
+        let reference = |key: &str| self.secrets.get(key).map_or(key, String::as_str).to_owned();
+        for (name, backend) in &self.models.backends {
+            let Some(key) = backend
+                .key
+                .as_deref()
+                .filter(|_| backend.control_plane.is_none())
+            else {
+                continue;
+            };
+            let plane = self.models.backends.iter().find(|(_, b)| {
+                b.control_plane.is_some()
+                    && b.key
+                        .as_deref()
+                        .is_some_and(|k| reference(k) == reference(key))
+            });
+            if let Some((plane, _)) = plane {
+                let from = reference(key);
+                let from = match from.starts_with('@') {
+                    true => from,
+                    false => format!("${from}"),
+                };
+                return Err(ConfigError(format!(
+                    "models.backends.{name}.key: it is read from {from}, where the token of the \
+                     control-plane backend {plane} is read from, and a control plane's token is \
+                     sent only to its own url; give {name} a key of its own"
+                )));
+            }
+        }
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
             return fail(
                 "connectors.grants",
@@ -4080,6 +4087,95 @@ classes = { compensable = "allow" }
                  of its own"
             ),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_read_its_key_where_a_control_plane_reads_its_token() {
+        // Another secret's name for the same variable, and for the same
+        // file: what the configuration can see without reading a value.
+        let file = |secrets: &str, plain_key: &str| {
+            format!(
+                "version = 1\n\n[secrets]\n{secrets}\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"openai\"\n\
+                 key = \"{plain_key}\"\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
+                 backends = [\"ap\"]\n"
+            )
+        };
+        for (secrets, plain_key, from) in [
+            (
+                "aiplex = \"ZZ_AIPLEX_KEY\"\nother = \"ZZ_AIPLEX_KEY\"\n",
+                "other",
+                "$ZZ_AIPLEX_KEY",
+            ),
+            (
+                "aiplex = \"ZZ_AIPLEX_KEY\"\n",
+                "ZZ_AIPLEX_KEY",
+                "$ZZ_AIPLEX_KEY",
+            ),
+            (
+                "aiplex = \"@/run/aiplex\"\nother = \"@/run/aiplex\"\n",
+                "other",
+                "@/run/aiplex",
+            ),
+        ] {
+            let error = parse(&file(secrets, plain_key)).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "models.backends.direct.key: it is read from {from}, where the token of \
+                     the control-plane backend ap is read from, and a control plane's token is \
+                     sent only to its own url; give direct a key of its own"
+                )),
+                "{error}"
+            );
+        }
+        // A reference of its own is its own.
+        parse(&file(
+            "aiplex = \"ZZ_AIPLEX_KEY\"\nother = \"OPENAI_API_KEY\"\n",
+            "other",
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_aiplex_url_is_read_by_the_gateways_own_parser_when_the_file_is_read() {
+        let file = |url: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+                 key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n\n[[models.routes]]\n\
+                 model = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        // What the engine refused and the configuration check passed.
+        for (url, why) in [
+            (
+                "https://ann:p/secret-pw@host/ap",
+                "models.backends.ap.url: \"https://host/ap\" has an invalid port",
+            ),
+            (
+                "http://[fe80::1%25eth0]:7400/ap/ide",
+                "models.backends.ap.url: \"http://[fe80::1%25eth0]:7400/ap/ide\" has a \
+                 malformed IPv6 address",
+            ),
+            (
+                "https://ann:p#secret-pw@aiplex.example.com/ap/ide",
+                "models.backends.ap.url: \"https://aiplex.example.com/ap/ide\" has user \
+                 information (user:password@), which is not taken",
+            ),
+            (
+                "https://aiplex.example.com:port/ap/ide",
+                "has an invalid port",
+            ),
+        ] {
+            let error = parse(&file(url)).unwrap_err().to_string();
+            assert!(error.contains(why), "{url}: {error}");
+            assert!(!error.contains("secret-pw"), "{error}");
+        }
+        parse(&file("http://[fe80::1]:7400/ap/ide")).unwrap();
+        assert_eq!(
+            shown_url("https://ann:p/secret-pw@host/ap"),
+            "https://host/ap"
         );
     }
 

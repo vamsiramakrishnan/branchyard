@@ -1539,6 +1539,12 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
                 present: source.as_ref().map(|s| key_present(s, &|v| ctx.var_set(v))),
                 signed: backend.auth.as_deref() == Some("turn-token"),
                 plane: backend.control_plane.is_some(),
+                // What `by run`, `by models` and `by ls` say of it, when a
+                // variable children need holds the token too.
+                refused: source
+                    .as_ref()
+                    .filter(|_| backend.control_plane.is_some())
+                    .and_then(|source| branchyard::models::unhidable_copy(name, source)),
             }
         })
         .collect();
@@ -1631,6 +1637,10 @@ struct KeyRow {
     signed: bool,
     /// Whether it is a control plane's access point (`control_plane`).
     plane: bool,
+    /// Why the configuration is refused wherever the gateway is built: a
+    /// variable that child processes need holds this backend's token too
+    /// (`models::unhidable_copy`).
+    refused: Option<String>,
 }
 
 /// Whether `source` (`$VAR`) is a variable a provider's own key is read
@@ -1663,6 +1673,9 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     let mut status = Status::Ok;
     for row in rows {
         let (text, worst) = match (&row.source, row.present) {
+            (_, _) if row.refused.is_some() => {
+                (row.refused.clone().unwrap_or_default(), Status::Fail)
+            }
             // This is a repository's own configuration, for a local yard,
             // and a local yard cannot sign what AIPlex verifies: every turn
             // on the gateway says so, and so does this row.
@@ -1712,6 +1725,12 @@ fn keys_row(rows: &[KeyRow]) -> Check {
             NAME,
             detail,
             "name the secret holding its key under key in [models.backends.NAME]",
+        ),
+        Status::Fail if rows.iter().any(|row| row.refused.is_some()) => Check::fail(
+            NAME,
+            detail,
+            "take the token out of the variable named: by run, by models and by ls refuse this \
+             configuration until then (docs/model-gateway.md#the-credential)",
         ),
         Status::Fail if rows.iter().any(|row| row.signed) => Check::fail(
             NAME,
@@ -2283,6 +2302,7 @@ mod tests {
             present,
             signed: false,
             plane: false,
+            refused: None,
         };
         let all_set = keys_row(&[
             row("a", "anthropic", Some("$A_KEY"), Some(true)),
@@ -2343,6 +2363,23 @@ mod tests {
              hidden from every harness); ap-own key $AIPLEX_TOKEN is set; plain key \
              $OPENAI_API_KEY is set"
         );
+        // A variable children need that holds the token: the row says what
+        // every command that builds the gateway says.
+        let refusal = "models.backends.ap.key: the variable PATH holds the token too, and it \
+                       cannot be hidden from child processes, which need PATH (or Branchyard \
+                       reads it itself); take the token out of PATH";
+        let refused = keys_row(&[KeyRow {
+            plane: true,
+            refused: Some(refusal.to_owned()),
+            ..row("ap", "anthropic", Some("$AIPLEX_TOKEN"), Some(true))
+        }]);
+        assert_eq!(refused.status, Status::Fail);
+        assert_eq!(refused.detail, refusal);
+        assert!(refused
+            .fix
+            .as_deref()
+            .unwrap()
+            .starts_with("take the token out of the variable named"));
         for variable in [
             "$GEMINI_API_KEY",
             "$GOOGLE_API_KEY",

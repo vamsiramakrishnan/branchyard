@@ -1478,6 +1478,27 @@ fn a_control_planes_plain_http_url_off_loopback_is_one_warning_row() {
         report.detail("models.url"),
         "every control-plane backend's url is https, or http on this machine (one, two)"
     );
+    // A variable children need that holds the token: `by run`, `by models`
+    // and `by ls` refuse the configuration, and `models.keys` says what they
+    // say instead of ok.
+    let key = "doctor-aiplex-token-0123456789";
+    let report = repo.doctor_in(
+        &repo.root,
+        &[],
+        &[("DOCTOR_TEST_AIPLEX_TOKEN", key), ("LC_DOCTOR_TEST", key)],
+    );
+    assert_eq!(report.status("models.keys"), "fail", "{}", report.stdout);
+    assert!(
+        report.detail("models.keys").contains(
+            "the variable LC_DOCTOR_TEST holds the token too, and it cannot be hidden from \
+             child processes"
+        ),
+        "{}",
+        report.detail("models.keys")
+    );
+    assert!(!report.stdout.contains(key), "{}", report.stdout);
+    let report = repo.doctor_in(&repo.root, &[], &[("DOCTOR_TEST_AIPLEX_TOKEN", key)]);
+    assert_eq!(report.status("models.keys"), "ok", "{}", report.stdout);
     // No row without a control-plane backend.
     repo.project_file(
         "[models.backends.local]\napi = \"generic\"\nurl = \"http://10.0.0.5:7400\"\n",

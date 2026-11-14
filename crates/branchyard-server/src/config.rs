@@ -627,7 +627,9 @@ pub fn check_webhook_event_kind(name: &str) -> Result<(), String> {
 /// Refuse a webhook URL that is not `https://`, unless its host is a
 /// loopback literal (`localhost`, `127.0.0.1`, `::1`) or `insecure` is set.
 pub fn check_webhook_url(url: &str, insecure: bool) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("webhook url {url:?}: {e}"))?;
+    // The URL as a message may show it: never its user information.
+    let shown = branchyard_setup::config::shown_url(url);
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("webhook url {shown:?}: {e}"))?;
     match parsed.scheme() {
         "https" => Ok(()),
         "http" => {
@@ -635,13 +637,13 @@ pub fn check_webhook_url(url: &str, insecure: bool) -> Result<(), String> {
             match loopback || insecure {
                 true => Ok(()),
                 false => Err(format!(
-                    "webhook url {url:?} is not https and not loopback; pass \
+                    "webhook url {shown:?} is not https and not loopback; pass \
                      --webhook-insecure to allow it anyway"
                 )),
             }
         }
         other => Err(format!(
-            "webhook url {url:?} has scheme {other:?}; use https:// (or http:// on loopback)"
+            "webhook url {shown:?} has scheme {other:?}; use https:// (or http:// on loopback)"
         )),
     }
 }
@@ -1766,14 +1768,18 @@ impl Config {
         let mut ids: Vec<&str> = self.webhooks.iter().map(|w| w.id.as_str()).collect();
         ids.sort_unstable();
         if let Some(pair) = ids.windows(2).find(|w| w[0] == w[1]) {
-            return Err(format!("webhook {} is configured twice", pair[0]));
+            // (An id is the webhook's URL when none is given.)
+            return Err(format!(
+                "webhook {} is configured twice",
+                branchyard_setup::config::shown_url(pair[0])
+            ));
         }
         for webhook in &self.webhooks {
             check_webhook_url(&webhook.url, self.webhook_insecure)?;
             if webhook.secret.len() < 16 {
                 return Err(format!(
                     "webhook {} secret is shorter than 16 characters",
-                    webhook.id
+                    branchyard_setup::config::shown_url(&webhook.id)
                 ));
             }
             for kind in &webhook.events {
@@ -2959,7 +2965,7 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                         return Err(format!(
                             "config {}: webhook {} needs exactly one of secret and secret_file",
                             path.display(),
-                            w.url
+                            branchyard_setup::config::shown_url(&w.url)
                         ))
                     }
                 };
@@ -3417,6 +3423,27 @@ mod tests {
         assert!(!debug.contains("0123456789abcdef"), "{debug}");
     }
 
+    #[test]
+    fn a_webhooks_url_is_shown_without_its_user_information() {
+        for url in [
+            "http://ann:secret-pw@10.0.0.5/hook",
+            "ftp://ann:secret-pw@hooks.example.com/hook",
+            "https://ann:p#secret-pw@/hook",
+            "ann:secret-pw@hooks.example.com",
+        ] {
+            let error = check_webhook_url(url, false).unwrap_err();
+            assert!(
+                !error.contains("secret-pw") && !error.contains("ann:"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            check_webhook_url("http://ann:secret-pw@10.0.0.5/hook", false).unwrap_err(),
+            "webhook url \"http://10.0.0.5/hook\" is not https and not loopback; pass \
+             --webhook-insecure to allow it anyway"
+        );
+    }
+
     fn hook(id: &str, url: &str) -> WebhookConfig {
         WebhookConfig {
             id: id.into(),
@@ -3645,7 +3672,7 @@ mod tests {
                 r#"{"backends": {"a": {"api": "anthropic", "key": "k", "control_plane": "aiplex",
                                        "url": "https:///ap/coding"}}}"#,
                 "{}",
-                "models.backends.a.url: \"https:///ap/coding\" names no host",
+                "models.backends.a.url: \"https:///ap/coding\" has no usable host",
             ),
             (
                 r#"{"routes": [{"model": "*", "backends": ["x"]}]}"#,

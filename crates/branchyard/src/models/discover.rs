@@ -356,7 +356,12 @@ impl Source {
     /// Gemini's OpenAI-compatible endpoint, which the same key serves
     /// (chat completions; it rejects the OpenAI-only `store` field).
     pub fn openai_compatible(&self) -> Option<String> {
-        (self.kind == Kind::Gemini).then(|| format!("{}/v1beta/openai", self.base))
+        (self.kind == Kind::Gemini).then(|| {
+            format!(
+                "{}/v1beta/openai",
+                branchyard_wire::without_userinfo(&self.base)
+            )
+        })
     }
 
     /// The request headers, with `key` in the one this source reads it
@@ -556,7 +561,8 @@ impl Listing {
         Listing {
             source: source.id.clone(),
             kind: source.kind,
-            url: source.base.clone(),
+            // As an output may show it: never with user information.
+            url: branchyard_wire::without_userinfo(&source.base),
             status,
             reason: Some(reason),
             key: None,
@@ -595,7 +601,8 @@ pub fn list(source: &Source, transport: &Transport, now_ms: u64) -> Listing {
         Ok(models) => Listing {
             source: source.id.clone(),
             kind: source.kind,
-            url: source.base.clone(),
+            // As an output may show it: never with user information.
+            url: branchyard_wire::without_userinfo(&source.base),
             status: Status::Listed,
             reason: None,
             key: Some(credential.from),
@@ -620,7 +627,9 @@ pub fn resolve(
         .iter()
         .map(|source| {
             let cached = cache.iter().find(|c| {
-                c.source == source.id && c.url == source.base && c.status == Status::Listed
+                c.source == source.id
+                    && c.url == branchyard_wire::without_userinfo(&source.base)
+                    && c.status == Status::Listed
             });
             let usable = source.duplicate_of.is_none() && source.credential().is_ok();
             match (cached, refresh, usable) {
@@ -1199,6 +1208,40 @@ mod tests {
         assert_eq!(asked.len(), 5, "{asked:?}");
         aiplex.finish();
         provider.finish();
+    }
+
+    #[test]
+    fn a_listing_shows_no_urls_user_information() {
+        let dir = tempfile::tempdir().unwrap();
+        let listing = list(
+            &source(
+                "backend:local",
+                Kind::Generic,
+                "http://ann:secret-pw@127.0.0.1:1/g",
+                vec![key_file(&dir, "k", "local-key")],
+            ),
+            &transport(),
+            1,
+        );
+        // The source cannot be asked (the gateway takes no user information
+        // either), and neither its URL nor its reason shows it.
+        assert_eq!(listing.status, Status::Failed);
+        assert_eq!(listing.url, "http://127.0.0.1:1/g");
+        let said = format!("{listing:?}{}", serde_json::to_string(&listing).unwrap());
+        assert!(
+            !said.contains("secret-pw") && !said.contains("ann:"),
+            "{said}"
+        );
+        let gemini = source(
+            "gemini",
+            Kind::Gemini,
+            "https://ann:secret-pw@generativelanguage.googleapis.com",
+            vec![unset()],
+        );
+        assert_eq!(
+            gemini.openai_compatible().as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
     }
 
     #[test]

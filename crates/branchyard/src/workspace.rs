@@ -501,6 +501,9 @@ pub(crate) fn shell_env(
     for (name, value) in env {
         start.insert(name.clone(), value.clone());
     }
+    // Nor does the snippet start with a control plane's token, under a name
+    // this process has it or one the table gave it.
+    start.retain(|_, value| branchyard_support::child::guarded(value).is_none());
     let fail = |how: String, stderr: &[u8]| {
         let text = String::from_utf8_lossy(stderr);
         let text = text.trim();
@@ -629,7 +632,10 @@ pub(crate) fn shell_env(
         let ours = harness::is_branchyard_variable(name)
             || harness::is_parent_session_variable(name)
             || SHELL_IGNORED.contains(&name);
-        if !ours && start.get(name).map(String::as_str) != Some(value) {
+        // What the snippet exported with the token in it (read from a
+        // file, say) is passed on to nothing.
+        let guarded = branchyard_support::child::guarded(value).is_some();
+        if !ours && !guarded && start.get(name).map(String::as_str) != Some(value) {
             changed.push((name.to_owned(), value.to_owned()));
         }
     }
@@ -1673,8 +1679,12 @@ pub(crate) fn run_commands(
                     }
                 }
             }
+            // A value that holds a control plane's token is not given to a
+            // script, whoever put it in the table or exported it.
             for (name, value) in env {
-                sh.env(name, value);
+                if branchyard_support::child::guarded(value).is_none() {
+                    sh.env(name, value);
+                }
             }
             if let Some(marker) = marker {
                 sh.env(proc::ENV_SPAWN, marker);

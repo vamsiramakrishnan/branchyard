@@ -312,6 +312,11 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
     }
     let written = WrittenIssuer::read(issuer)?;
     let host = written.host();
+    if host.is_empty() {
+        return Err(format!(
+            "the issuer {issuer:?} names no host: its host is only a dot"
+        ));
+    }
     // A host that is a number in a form only some resolvers read as an
     // address (`0`, `127.1`, `0x7f.1`, `010.0.0.1`): to others it is a name.
     if numeric_host(&host) && host.parse::<Ipv4Addr>().is_err() {
@@ -959,6 +964,32 @@ impl Gateway {
         self.backends.iter().any(|b| b.control_plane.is_some())
     }
 
+    /// The control-plane backends that the first route whose pattern
+    /// matches `model` names, whatever API a request speaks: a model the
+    /// gateway read that such a route takes goes to one of them or nowhere.
+    /// Empty when no route's pattern matches `model`, or the first that
+    /// does names plain backends.
+    pub(crate) fn governed_by(&self, model: &str) -> Vec<&str> {
+        let Some(route) = self
+            .routes
+            .iter()
+            .find(|r| branchyard_provision::connectors::glob_match(&r.model, model))
+        else {
+            return Vec::new();
+        };
+        route
+            .backends
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&route.fallbacks)
+            .filter(|name| {
+                self.backend(name)
+                    .is_some_and(|b| b.control_plane.is_some())
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
     /// The tokens of the control-plane backends that are called with a
     /// stored key, each with the name of a backend it is the key of: what
     /// is sent to that backend's `url` and to nothing else. Read now, each
@@ -977,6 +1008,10 @@ impl Gateway {
             read.push(source);
             if let Ok(token) = source.read() {
                 if token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY {
+                    // From here on no child of this process is given it,
+                    // and no harness's environment holds it, whoever
+                    // would have put it there (`branchyard_support::child`).
+                    branchyard_support::child::guard(&backend.name, &token);
                     tokens.push((backend.name.clone(), token));
                 }
             }
@@ -1387,6 +1422,20 @@ fn copies(
     }
     names.sort();
     Ok(names)
+}
+
+/// Why the control-plane backend `backend`, whose key is at `source`, is
+/// refused in this process: a variable that child processes need, or
+/// Branchyard reads itself, holds the same value, and cannot be hidden from
+/// them. What [`Gateway::new`] and every turn say of it, for `by doctor` to
+/// say too. `None` when the key cannot be read, is too short to be a token,
+/// or no such variable holds it.
+pub fn unhidable_copy(backend: &str, source: &KeySource) -> Option<String> {
+    let token = source
+        .read()
+        .ok()
+        .filter(|token| token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY)?;
+    copies(std::env::vars_os(), &[(backend.to_owned(), token)]).err()
 }
 
 /// Refuse a plain backend whose key is read from where a control-plane
@@ -3414,6 +3463,16 @@ mod tests {
         for (issuer, message) in &refused {
             assert_eq!(federable_issuer(issuer).as_ref(), Err(message), "{issuer}");
             assert!(!message.contains("secret-pw") && !message.contains("ann:"));
+        }
+        // A host that is only a dot names nothing.
+        for issuer in ["https://.", "https://.:8443", "http://..."] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} names no host: its host is only a dot"
+                )),
+                "{issuer}"
+            );
         }
         // A host that is a number in a form only some resolvers read as an
         // address: each of these is 0.0.0.0 or loopback to `inet_aton`.

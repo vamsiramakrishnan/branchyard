@@ -980,12 +980,21 @@ fn run(
     }
     // What its parent assigned it: the paths it owns, the shared brief.
     let assignment = crate::assignment::for_turn(turn.yard, record);
-    // The yard's control planes' tokens, which no secret hands a harness.
-    let guarded = turn
-        .yard
-        .models()
-        .map(|gateway| gateway.control_plane_tokens())
-        .unwrap_or_default();
+    // The yard's control planes' tokens, read on every turn, on the gateway
+    // or not: no secret hands one to a harness, and the variables of this
+    // process are looked through with them now (a key file may have
+    // changed since the gateway was built). A variable children need that
+    // holds one refuses the turn, as it refuses the configuration.
+    let guarded = match turn.yard.models() {
+        Some(gateway) => {
+            if let Err(reason) = gateway.hide_copies() {
+                driven.end = End::failed(reason);
+                return Ok(driven);
+            }
+            gateway.control_plane_tokens()
+        }
+        None => Vec::new(),
+    };
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
@@ -1188,14 +1197,9 @@ fn run(
                 match crate::workspace::shell_env(snippet, &record.info.worktree, &start, &lost) {
                     Ok(changed) => {
                         for (name, value) in changed {
-                            // A control plane's token the snippet exported
-                            // under a name of its own is not the harness's.
                             let scrubbed = provisioned.scrub.contains(&name)
                                 || model_scrub.contains(&name)
-                                || !placement.admits(&name)
-                                || guarded
-                                    .iter()
-                                    .any(|(_, token)| crate::models::holds(&value, token));
+                                || !placement.admits(&name);
                             if !scrubbed {
                                 placement.set_env(&name, &value);
                             }
@@ -1380,6 +1384,15 @@ fn run(
                 return Ok(driven);
             }
         }
+    }
+    // What was not given to the harness because its value holds a control
+    // plane's token, whoever would have set it: said on the branch, by the
+    // variable's name and the backend's.
+    for (name, backend) in placement.take_withheld() {
+        recorder.record(Activity::Warning(format!(
+            "{name} was not given to the harness: its value holds the token of the \
+             control-plane backend {backend}, which no harness is given"
+        )))?;
     }
     let intent = json!({
         "command": turn.command,

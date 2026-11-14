@@ -552,15 +552,34 @@ fn a_url_in_a_message_never_shows_its_user_information() {
         ),
         ("ftp://ann:secret-pw@host/x", "ftp://host/x"),
         ("ann:secret-pw@host:80/x", "host:80/x"),
-        (
-            "https://by.example.com/p?to=a@b#c@d",
-            "https://by.example.com/p?to=a@b#c@d",
-        ),
         ("https://by.example.com", "https://by.example.com"),
         ("", ""),
         ("@", ""),
+        // A password with a `#`, a `?` or a `/` in it, and a scheme that is
+        // not written as one: conservative, so nothing of it is shown.
+        (
+            "https://ann:p#secret-pw@aiplex.example.com/ap/ide",
+            "https://aiplex.example.com/ap/ide",
+        ),
+        (
+            "https://ann:p?secret-pw@aiplex.example.com/ap/ide",
+            "https://aiplex.example.com/ap/ide",
+        ),
+        (
+            "https://ann:p/secret-pw@aiplex.example.com/ap/ide",
+            "https://aiplex.example.com/ap/ide",
+        ),
+        ("http:/ann:secret-pw@host/", "host/"),
+        ("http//ann:secret-pw@host", "host"),
+        ("//ann:secret-pw@host", "host"),
+        // A URL that parses is as it is: the `@` is its path's or query's.
+        ("https://host/path@x", "https://host/path@x"),
+        ("https://host/p?to=a@b", "https://host/p?to=a@b"),
+        // One that does not is cut at its last `@`, wherever that is.
+        ("https://by.example.com/p?to=a@b#c@d", "https://d"),
     ] {
         assert_eq!(without_userinfo(url), shown, "{url}");
+        assert!(!without_userinfo(url).contains("secret-pw"), "{url}");
     }
     // No refusal quotes it, whatever else is wrong with the URL.
     for url in [
@@ -571,6 +590,12 @@ fn a_url_in_a_message_never_shows_its_user_information() {
         "http://ann:secret-pw@h /p",
         "http://ann:secret-pw@",
         "http://ann:secret-pw@h/é",
+        "https://ann:p#secret-pw@aiplex.example.com/ap/ide",
+        "https://ann:p?secret-pw@aiplex.example.com/ap/ide",
+        "https://ann:p/secret-pw@aiplex.example.com/ap/ide",
+        "http:/ann:secret-pw@host/",
+        "http//ann:secret-pw@host",
+        "//ann:secret-pw@host",
     ] {
         let error = HttpUrl::parse(url).unwrap_err().to_string();
         assert!(

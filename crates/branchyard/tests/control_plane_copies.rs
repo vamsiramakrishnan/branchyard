@@ -12,7 +12,10 @@ mod common;
 use std::sync::Once;
 
 use aiplex_kit::*;
-use branchyard::{Activity, SecretSource, WorkspaceSpec};
+use branchyard::models::ModelAccess;
+use branchyard::{
+    Activity, McpServerSpec, Policy, Provisioning, SecretSource, TaskOptions, WorkspaceSpec,
+};
 use common::{text, Fixture};
 use serde_json::json;
 
@@ -215,6 +218,14 @@ fn a_plain_backend_whose_key_holds_a_control_planes_token_is_never_sent_it() {
         only.failed_over,
         only.reason
     );
+    // The harness is told the plain backend's name and not the control
+    // plane's, which the event has.
+    let told = read["only"]["body"].as_str().unwrap();
+    assert!(
+        told.contains("no backend answered: direct: its key is not one it may be sent"),
+        "{told}"
+    );
+    assert!(!told.contains("aiplex-anthropic"), "{told}");
     // A route's next plain backend, with a key of its own, takes the call.
     assert_eq!(read["then"]["status"], 200, "{}", read["then"]);
     let then = &calls["direct-then-ok"];
@@ -313,5 +324,180 @@ fn a_secret_that_holds_the_token_is_withheld_from_the_harness() {
     assert!(!real.iter().any(|n| n == "GEMINI_API_KEY"), "{said}");
     // The turn ran, on the gateway.
     assert_eq!(read["anthropic"]["status"], 200, "{}", read["anthropic"]);
+    access.finish();
+}
+
+#[test]
+fn the_workspace_table_expands_the_token_into_no_child() {
+    variables();
+    // On the gateway, with a private home, and on a turn that is not on the
+    // gateway at all: the table is the same writer in each.
+    for (name, isolated, on_gateway) in [
+        ("wslocal", false, true),
+        ("wsisolated", true, true),
+        ("wsdirect", false, false),
+    ] {
+        let f = Fixture::new();
+        let access = aiplex("one");
+        use_gateway(
+            &f,
+            json!({
+                "backends": {
+                    "aiplex-anthropic": {"api": "anthropic",
+                        "url": format!("{}/ap/ide", access.url()),
+                        "key": "BY_TEST_AIPLEX_TOKEN", "control_plane": "aiplex"}
+                },
+                "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]
+            }),
+        );
+        let plan = match on_gateway {
+            true => json!([call(
+                "anthropic",
+                "anthropic",
+                "/v1/messages",
+                "claude-ok-json",
+                false
+            )]),
+            false => json!([]),
+        };
+        let (setup, teardown, shell) = (
+            f.dir.join("setup.env"),
+            f.dir.join("teardown.env"),
+            f.dir.join("shell.seen"),
+        );
+        let names = [
+            "GOOGLE_GENERATIVE_AI_API_KEY",
+            "MY_TOKEN",
+            "GEMINI_API_KEY",
+            "MY_HEADER",
+        ];
+        let (events, read) = run_with(&f, name, None, &plan, |options| {
+            options.isolated = isolated;
+            if !on_gateway {
+                options.provision = None;
+            }
+            options.workspace = Some(WorkspaceSpec {
+                env: [
+                    // The provider's variable, the configured name, the
+                    // variable under its own name, and inside a value.
+                    ("GOOGLE_GENERATIVE_AI_API_KEY", "${GEMINI_API_KEY}"),
+                    ("MY_TOKEN", "$BY_TEST_AIPLEX_TOKEN"),
+                    ("GEMINI_API_KEY", "${GEMINI_API_KEY}"),
+                    ("MY_HEADER", "Bearer $BY_TEST_AIPLEX_TOKEN"),
+                    // Another variable, with another value: set as before.
+                    ("MY_OTHER", "${GOOGLE_API_KEY}"),
+                ]
+                .into_iter()
+                .map(|(n, v)| (n.to_owned(), v.to_owned()))
+                .collect(),
+                setup: vec![format!("env > '{}'", setup.display())],
+                teardown: vec![format!("env > '{}'", teardown.display())],
+                shell_setup: Some(format!(
+                    "printf '%s|%s|%s|%s|%s' \"${{GOOGLE_GENERATIVE_AI_API_KEY-unset}}\" \
+                     \"${{MY_TOKEN-unset}}\" \"${{GEMINI_API_KEY-unset}}\" \
+                     \"${{MY_HEADER-unset}}\" \"${{MY_OTHER-unset}}\" > '{}'",
+                    shell.display()
+                )),
+                ..WorkspaceSpec::default()
+            });
+        });
+        // The harness holds the token under none of the names, and the
+        // entry with another value is its own.
+        let said = text(&events);
+        assert!(!said.contains(ENV_TOKEN), "{name}: {said}");
+        let real = listed(&said, "real keys in env: ");
+        for entry in names {
+            assert!(!real.iter().any(|n| n == entry), "{name}: {entry}: {said}");
+        }
+        assert!(real.iter().any(|n| n == "MY_OTHER"), "{name}: {said}");
+        // The branch's log names each entry and the backend, never the value.
+        let warnings: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match &event.activity {
+                Activity::Warning(warning) => Some(warning.as_str()),
+                _ => None,
+            })
+            .collect();
+        for entry in names {
+            let warning = format!(
+                "{entry} was not given to the harness: its value holds the token of the \
+                 control-plane backend aiplex-anthropic, which no harness is given"
+            );
+            assert!(warnings.contains(&warning.as_str()), "{name}: {warnings:?}");
+        }
+        assert!(!warnings.iter().any(|w| w.contains(ENV_TOKEN)));
+        // The snippet, the setup command and the teardown command: the same.
+        assert_eq!(
+            std::fs::read_to_string(&shell).unwrap(),
+            format!("unset|unset|unset|unset|{OTHER}"),
+            "{name}"
+        );
+        f.yard
+            .remove_reporting(name, &Default::default())
+            .unwrap()
+            .expect("a teardown ran");
+        for file in [&setup, &teardown] {
+            let env = std::fs::read_to_string(file)
+                .unwrap_or_else(|e| format!("{} was not written: {e}", file.display()));
+            assert!(!env.contains(ENV_TOKEN), "{name}: {env}");
+            assert!(env.contains(&format!("MY_OTHER={OTHER}")), "{name}: {env}");
+        }
+        if on_gateway {
+            assert_eq!(read["anthropic"]["status"], 200, "{}", read["anthropic"]);
+        }
+        access.finish();
+    }
+}
+
+#[test]
+fn an_mcp_server_that_needs_a_withheld_secret_fails_the_turn_saying_why() {
+    variables();
+    let f = Fixture::new();
+    let access = aiplex("one");
+    use_gateway(
+        &f,
+        json!({
+            "backends": {
+                "aiplex-anthropic": {"api": "anthropic",
+                    "url": format!("{}/ap/ide", access.url()),
+                    "key": "BY_TEST_AIPLEX_TOKEN", "control_plane": "aiplex"}
+            },
+            "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]
+        }),
+    );
+    // A secret read from a variable that holds the token, which an MCP
+    // server takes as a variable of its own.
+    let mut docs = McpServerSpec::parse("docs=/usr/bin/false").unwrap();
+    docs.secret_env
+        .insert("DOCS_TOKEN".into(), "ZZ_COPY".into());
+    let options = TaskOptions {
+        isolated: true,
+        policy: Policy::allow_all(),
+        provision: Some(Provisioning {
+            models: Some(ModelAccess {
+                allow: vec!["*".into()],
+            }),
+            secrets: vec![SecretSource::parse("ZZ_COPY=GEMINI_API_KEY").unwrap()],
+            mcp_servers: vec![docs],
+            ..Provisioning::default()
+        }),
+        ..f.options()
+    };
+    let result = f.task("SH true").options(options).name("mcp").run();
+    let said = match &result {
+        Ok(branch) => format!("{:?} {:?}", branch.info(), branch.events()),
+        Err(error) => error.to_string(),
+    };
+    // It still fails closed, and says the secret was withheld and why.
+    assert!(
+        said.contains(
+            "MCP server docs needs the secret ZZ_COPY, which was withheld from the harness: it \
+             holds the token of the control-plane backend aiplex-anthropic, which no harness \
+             is given"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains(ENV_TOKEN), "{said}");
+    assert!(access.requests().is_empty());
     access.finish();
 }

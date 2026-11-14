@@ -1584,3 +1584,184 @@ fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
     access.finish();
     direct.finish();
 }
+
+#[test]
+fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
+    let f = Fixture::new();
+    let (access, direct) = (aiplex("one"), aiplex("direct"));
+    let at = format!("{}/ap/ide", access.url());
+    // Only the Anthropic API has an AIPlex backend. The OpenAI API has a
+    // plain one, and a generic backend is there for the pass-through path.
+    let backends = json!({
+        "ap-anthropic": {"api": "anthropic", "url": at, "key": "aiplex",
+            "control_plane": "aiplex"},
+        "openai": {"api": "openai", "url": direct.url(), "key": "anthropic"},
+        "gen": {"api": "generic", "url": direct.url(), "key": "anthropic"}
+    });
+    use_gateway(
+        &f,
+        json!({"backends": backends, "routes": [
+            {"model": "claude-*", "backends": ["ap-anthropic"]},
+            {"model": "gpt-*", "backends": ["openai"]}
+        ]}),
+    );
+    let through = |label: &str, model: &str| {
+        let mut call = call(label, "anthropic", "/v1/messages", model, false);
+        call["raw_path"] = json!("/backends/gen/v1/messages");
+        call
+    };
+    let plan = json!([
+        // A model whose route names AIPlex, asked for in the other API and
+        // by the pass-through path.
+        call(
+            "other api",
+            "openai",
+            "/chat/completions",
+            "claude-x",
+            false
+        ),
+        call(
+            "other api responses",
+            "openai",
+            "/responses",
+            "claude-y",
+            false
+        ),
+        through("pass-through", "claude-z"),
+        // Its own API: AIPlex.
+        call(
+            "own api",
+            "anthropic",
+            "/v1/messages",
+            "claude-ok-json",
+            false
+        ),
+        // A model with a plain route, and one with no route, as before.
+        call(
+            "plain route",
+            "openai",
+            "/chat/completions",
+            "gpt-ok",
+            false
+        ),
+        call("no route", "openai", "/chat/completions", "llama-3", false),
+        through("pass-through no route", "llama-4"),
+        // One reading of the model on any body the gateway parsed.
+        raw(
+            "twice elsewhere",
+            "openai",
+            "/embeddings",
+            br#"{"model":"llama-3","model":"claude-dup"}"#,
+            "application/json"
+        ),
+        raw(
+            "case elsewhere",
+            "openai",
+            "/embeddings",
+            br#"{"Model":"claude-x","input":"hi"}"#,
+            "application/json"
+        ),
+    ]);
+    let (events, read) = run(&f, "governed", None, &plan);
+    let calls = calls(&events);
+    for (label, model, how) in [
+        ("other api", "claude-x", "it speaks the openai API"),
+        (
+            "other api responses",
+            "claude-y",
+            "it speaks the openai API",
+        ),
+        (
+            "pass-through",
+            "claude-z",
+            "the pass-through path names a plain backend",
+        ),
+    ] {
+        let got = &read[label];
+        assert_eq!(got["status"], 404, "{label}: {got}");
+        let body = got["body"].as_str().unwrap();
+        assert!(
+            body.contains(&format!(
+                "the route for {model} has no backend that takes this request, and it is not \
+                 sent to another"
+            )),
+            "{label}: {body}"
+        );
+        // The harness is told no backend's name; the event has it.
+        assert!(!body.contains("ap-anthropic"), "{label}: {body}");
+        let event = &calls[model];
+        assert_eq!(
+            (event.decision.as_str(), event.status),
+            ("failed", 404),
+            "{label}"
+        );
+        assert_eq!(
+            event.reason.as_deref(),
+            Some(
+                format!(
+                    "the route for {model} names the control-plane backend ap-anthropic, and \
+                     none of them takes this request ({how}); it is not sent to a plain \
+                     backend instead"
+                )
+                .as_str()
+            ),
+            "{label}"
+        );
+    }
+    for label in ["twice elsewhere", "case elsewhere"] {
+        assert_eq!(read[label]["status"], 400, "{label}: {}", read[label]);
+    }
+    // The plain stand-in heard only the calls that were its own before.
+    let heard: Vec<String> = direct.requests().iter().map(model_of).collect();
+    assert_eq!(heard, ["gpt-ok", "llama-3", "llama-4"]);
+    for label in [
+        "own api",
+        "plain route",
+        "no route",
+        "pass-through no route",
+    ] {
+        assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
+    }
+    assert_eq!(access.requests().len(), 1);
+    access.finish();
+    direct.finish();
+
+    // The remedy that worked before still works: a route that names an
+    // AIPlex backend of each API takes the model in either.
+    let f = Fixture::new();
+    let (access, direct) = (aiplex("one"), aiplex("direct"));
+    let at = format!("{}/ap/ide", access.url());
+    use_gateway(
+        &f,
+        json!({"backends": {
+            "ap-anthropic": {"api": "anthropic", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"},
+            "ap-openai": {"api": "openai", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"},
+            "openai": {"api": "openai", "url": direct.url(), "key": "anthropic"}
+        }, "routes": [
+            {"model": "claude-*", "backends": ["ap-anthropic", "ap-openai"]},
+            {"model": "gpt-*", "backends": ["openai"]}
+        ]}),
+    );
+    let plan = json!([
+        call(
+            "either api",
+            "openai",
+            "/chat/completions",
+            "claude-ok-chat",
+            false
+        ),
+        call("plain", "openai", "/chat/completions", "gpt-ok", false),
+    ]);
+    let (_, read) = run(&f, "remedy", None, &plan);
+    for label in ["either api", "plain"] {
+        assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
+    }
+    let heard = access.requests();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(heard[0].path, "/ap/ide/v1/chat/completions");
+    assert_eq!(direct.requests().len(), 1);
+    access.finish();
+    direct.finish();
+}
