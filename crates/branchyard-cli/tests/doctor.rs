@@ -1365,7 +1365,11 @@ fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
         .filter_map(|c| c["name"].as_str())
         .collect();
     let at = names.iter().position(|n| *n == "models.audience").unwrap();
-    assert_eq!(names[at - 1], "models.keys", "{names:?}");
+    assert_eq!(
+        names[at - 2..at],
+        ["models.keys", "models.url"],
+        "{names:?}"
+    );
     assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
     assert_eq!(
         names.iter().filter(|n| **n == "models.audience").count(),
@@ -1399,6 +1403,69 @@ fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
     );
     let report = repo.doctor(&[]);
     assert!(!report.has("models.audience"), "{}", report.stdout);
+    assert!(report.has("models.keys"), "{}", report.stdout);
+}
+
+#[test]
+fn a_control_planes_plain_http_url_off_loopback_is_one_warning_row() {
+    let repo = Repo::used();
+    let backend = |name: &str, url: &str| {
+        format!(
+            "[models.backends.{name}]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+             control_plane = \"aiplex\"\nkey = \"DOCTOR_TEST_AIPLEX_TOKEN\"\n\n"
+        )
+    };
+    let routes = "[[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"one\", \"two\"]\n";
+    // The credential would cross the network as it is.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend("one", "http://aiplex.internal:8080/ap/coding"),
+        backend("two", "http://10.0.0.5:7400/ap/coding"),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.url"), "warn", "{}", report.stdout);
+    let detail = report.detail("models.url");
+    for needle in [
+        "models.backends.one: its url is plain http on aiplex.internal, which is not loopback, \
+         so the credential it is sent travels unencrypted unless the network between Branchyard \
+         and AIPlex encrypts it",
+        "models.backends.two: its url is plain http on 10.0.0.5, which is not loopback",
+    ] {
+        assert!(detail.contains(needle), "{needle:?} not in {detail}");
+    }
+    assert!(
+        report.fix("models.url").contains("use an https:// url"),
+        "{}",
+        report.fix("models.url")
+    );
+    // One row, after the keys; no audience row without a signed token.
+    let names: Vec<&str> = report.value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let at = names.iter().position(|n| *n == "models.url").unwrap();
+    assert_eq!(names[at - 1], "models.keys", "{names:?}");
+    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    // https, or http on this machine: ok, naming the backends.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend("one", "https://aiplex.example.com/ap/coding"),
+        backend("two", "http://127.0.0.1:7400/ap/coding"),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.url"), "ok", "{}", report.stdout);
+    assert_eq!(
+        report.detail("models.url"),
+        "every control-plane backend's url is https, or http on this machine (one, two)"
+    );
+    // No row without a control-plane backend.
+    repo.project_file(
+        "[models.backends.local]\napi = \"generic\"\nurl = \"http://10.0.0.5:7400\"\n",
+    );
+    let report = repo.doctor(&[]);
+    assert!(!report.has("models.url"), "{}", report.stdout);
     assert!(report.has("models.keys"), "{}", report.stdout);
 }
 

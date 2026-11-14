@@ -337,6 +337,11 @@ fn own_instructions(
 pub(crate) struct Access<'a> {
     pub policy: &'a crate::Policy,
     pub model_gateway: Option<branchyard_provision::models::ModelGateway>,
+    /// The tokens of the yard's control-plane backends, each with a backend
+    /// it is the key of (`models::Gateway::control_plane_tokens`): a secret
+    /// whose value holds one is withheld from the harness, whatever the
+    /// secret is named.
+    pub guarded: &'a [(String, String)],
 }
 
 /// What a turn is told beyond its prompt, for its instructions: the
@@ -386,6 +391,7 @@ pub(crate) fn prepare(
     let Access {
         policy,
         model_gateway,
+        guarded,
     } = access;
     let Standing {
         knowledge,
@@ -408,6 +414,25 @@ pub(crate) fn prepare(
     );
     let secrets = resolve(&spec.secrets)?;
     let secret_values: Vec<String> = secrets.iter().map(|s| s.value.clone()).collect();
+    // A secret that holds a control plane's token is not the harness's,
+    // under whatever name it is given: withheld, and said on the branch.
+    let mut withheld = Vec::new();
+    let secrets: Vec<Secret> = secrets
+        .into_iter()
+        .filter(|secret| {
+            let plane = guarded
+                .iter()
+                .find(|(_, token)| crate::models::holds(&secret.value, token));
+            if let Some((backend, _)) = plane {
+                withheld.push(format!(
+                    "the secret {} was not given to the harness: it holds the token of the \
+                     control-plane backend {backend}, which no harness is given",
+                    secret.name
+                ));
+            }
+            plane.is_none()
+        })
+        .collect();
     let capability_home = match &record.home {
         Some(home) => home.clone(),
         None => crate::capabilities::local_home(state, &record.info.name)?,
@@ -593,7 +618,7 @@ pub(crate) fn prepare(
         turn_file,
         scrub,
         activity,
-        warnings: plan.warnings,
+        warnings: plan.warnings.into_iter().chain(withheld).collect(),
         secret_values,
     })
 }

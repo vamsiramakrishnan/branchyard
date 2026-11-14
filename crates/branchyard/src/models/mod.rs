@@ -51,6 +51,7 @@ mod usage;
 
 use branchyard_support::LockExt as _;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ffi::OsString;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::PathBuf;
@@ -852,6 +853,7 @@ impl Gateway {
             });
         }
         check_unrouted(&backends, &routes)?;
+        check_shared_keys(&backends)?;
         let budget = config.budget.clone().unwrap_or_default();
         if budget.alert_at.is_some_and(|a| !(a > 0.0 && a <= 1.0)) {
             return Err("models.budget.alert_at: give a share above 0 and at most 1".into());
@@ -877,7 +879,7 @@ impl Gateway {
         let seed = config
             .seed
             .unwrap_or_else(branchyard_support::rng::fresh_seed);
-        Ok(Gateway {
+        let gateway = Gateway {
             backends,
             routes,
             budget,
@@ -894,7 +896,72 @@ impl Gateway {
             }),
             signatures: gemini::Signatures::default(),
             transport: upstream::Transport::from_env(upstream::QUIET),
-        })
+        };
+        // A control plane's token under another variable's name is hidden
+        // as the named one was above, from the children still to start.
+        gateway.hide_copies()?;
+        Ok(gateway)
+    }
+
+    /// The tokens of the control-plane backends that are called with a
+    /// stored key, each with the name of a backend it is the key of: what
+    /// is sent to that backend's `url` and to nothing else. Read now, each
+    /// source once. A key that cannot be read now, or is too short to be
+    /// used (`MIN_CONTROL_PLANE_KEY`), is not one.
+    pub(crate) fn control_plane_tokens(&self) -> Vec<(String, String)> {
+        let mut read: Vec<&KeySource> = Vec::new();
+        let mut tokens = Vec::new();
+        for backend in self.backends.iter().filter(|b| b.control_plane.is_some()) {
+            let Some(source) = &backend.key else {
+                continue;
+            };
+            if read.contains(&source) {
+                continue;
+            }
+            read.push(source);
+            if let Ok(token) = source.read() {
+                if token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY {
+                    tokens.push((backend.name.clone(), token));
+                }
+            }
+        }
+        tokens
+    }
+
+    /// The control-plane backend whose token `key` holds, when it holds
+    /// one: a plain backend's key that does is never sent, since it would
+    /// take the control plane's credential to a provider.
+    pub(crate) fn token_held_by(&self, key: &str) -> Option<String> {
+        self.control_plane_tokens()
+            .into_iter()
+            .find(|(_, token)| holds(key, token))
+            .map(|(backend, _)| backend)
+    }
+
+    /// Hide every variable of this process that holds a control-plane
+    /// backend's token under another name ([`copies`]) from every child the
+    /// process starts from now on (`branchyard_support::child`), and name
+    /// them, for a turn to take them out of its harness's environment. The
+    /// variable a backend names is hidden when the gateway is built; this
+    /// goes by the value, which is known once the key can be read, so it
+    /// runs when the gateway is built and again when each turn's gateway
+    /// starts (a key file may not have been there before). The process's
+    /// environment does not change, and what is hidden stays hidden.
+    ///
+    /// # Errors
+    ///
+    /// When a variable that holds the token cannot be hidden ([`copies`]):
+    /// nothing is hidden by this call then.
+    pub(crate) fn hide_copies(&self) -> Result<Vec<String>, String> {
+        let tokens = self.control_plane_tokens();
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        let names = copies(std::env::vars_os(), &tokens)?;
+        for name in &names {
+            branchyard_support::child::hide(name);
+        }
+        Ok(names)
     }
 
     /// The same gateway, giving up on a backend whose answer goes quiet
@@ -1218,6 +1285,78 @@ fn check_auth(name: &str, b: &BackendConfig, signer: &Signer) -> Result<Option<S
 /// Refuse a control-plane backend that no route names when a plain
 /// backend speaks its API: a call no route takes goes to the plain one
 /// ([`Gateway::confine`]), so it would never be used.
+/// Whether `value` holds the control plane's token `token`: it is the token,
+/// or has it inside, as `Bearer <token>` has. A token too short to be used
+/// (`MIN_CONTROL_PLANE_KEY`) is looked for only as the whole value, since
+/// a few characters are inside many values that do not hold them.
+pub(crate) fn holds(value: &str, token: &str) -> bool {
+    value == token
+        || (token.chars().count() >= gateway::MIN_CONTROL_PLANE_KEY && value.contains(token))
+}
+
+/// Of `environment` (a process's variables), the names of those whose value
+/// holds one of `tokens` (a control plane's token, with a backend it is the
+/// key of): equal to it, or with it inside, as `Bearer <token>` has. They
+/// are hidden from every child, as the variable the backend names is.
+///
+/// Refused, naming the variable and never the value, when one of them
+/// cannot be hidden: a variable child processes need or Branchyard reads
+/// itself ([`shared_variable`]), or one whose name is not UTF-8, which no
+/// rule can name.
+fn copies(
+    environment: impl Iterator<Item = (OsString, OsString)>,
+    tokens: &[(String, String)],
+) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for (name, value) in environment {
+        let value = value.to_string_lossy();
+        let Some((backend, _)) = tokens.iter().find(|(_, token)| holds(&value, token)) else {
+            continue;
+        };
+        let Some(name) = name.to_str() else {
+            return Err(format!(
+                "models.backends.{backend}.key: a variable whose name is not UTF-8 holds the \
+                 token too, and it cannot be hidden from child processes; take the token out \
+                 of it"
+            ));
+        };
+        if shared_variable(name) {
+            return Err(format!(
+                "models.backends.{backend}.key: the variable {name} holds the token too, and \
+                 it cannot be hidden from child processes, which need {name} (or Branchyard \
+                 reads it itself); take the token out of {name}"
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Refuse a plain backend whose key is read from where a control-plane
+/// backend's token is read: every call to it would carry the control
+/// plane's credential to a provider.
+fn check_shared_keys(backends: &[Backend]) -> Result<(), String> {
+    for plain in backends.iter().filter(|b| b.control_plane.is_none()) {
+        let Some(source) = &plain.key else {
+            continue;
+        };
+        let plane = backends
+            .iter()
+            .find(|b| b.control_plane.is_some() && b.key.as_ref() == Some(source));
+        if let Some(plane) = plane {
+            return Err(format!(
+                "models.backends.{plain}.key: it is read from {source}, where the token of the \
+                 control-plane backend {plane} is read from, and a control plane's token is \
+                 sent only to its own url; give {plain} a key of its own",
+                plain = plain.name,
+                plane = plane.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn check_unrouted(backends: &[Backend], routes: &[Route]) -> Result<(), String> {
     for backend in backends.iter().filter(|b| b.control_plane.is_some()) {
         let named = routes.iter().any(|r| {
@@ -1579,13 +1718,15 @@ const SCRUB: &[&str] = &[
 ];
 
 /// The variables taken out of a turn's harness's environment on the
-/// gateway: [`SCRUB`], and the variable each control-plane backend's key is
-/// read from, so a harness never holds a control plane's credential. A plain
-/// backend's key variable is left as it was: a harness may read its
-/// provider's own variable itself. This is a scrub of the environment, not a
+/// gateway: [`SCRUB`], the variable each control-plane backend's key is
+/// read from, and every variable that holds such a key under another name
+/// ([`Gateway::hide_copies`]), so a harness never holds a control plane's
+/// credential. A plain backend's key variable is left as it was, unless it
+/// holds that credential: a harness may read its provider's own variable
+/// itself. This is a scrub of the environment, not a
 /// boundary: a local harness runs as the same user, and can read a key file
 /// or its parent's environment (`docs/model-gateway.md`, "The credential").
-pub(crate) fn scrub(gateway: &Gateway) -> Vec<String> {
+pub(crate) fn scrub(gateway: &Gateway) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = SCRUB.iter().map(|n| (*n).to_owned()).collect();
     for backend in gateway
         .backends
@@ -1598,7 +1739,14 @@ pub(crate) fn scrub(gateway: &Gateway) -> Vec<String> {
             }
         }
     }
-    names
+    // And every variable that holds such a token under another name, by
+    // its value as it is now.
+    for name in gateway.hide_copies()? {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 /// The secrets that log `harness` in by subscription, which the gateway
@@ -1743,6 +1891,8 @@ pub(crate) fn prepare(
             hosts,
         }));
     }
+    // What the harness starts without, before anything is started for it.
+    let scrub = scrub(&gateway)?;
     let sandboxed = crate::placement::sandboxed(record.provider.as_ref());
     let host = match (sandboxed, &gateway.sandbox_host) {
         (false, _) => match gateway.listen {
@@ -1866,7 +2016,7 @@ pub(crate) fn prepare(
     Ok(Some(Prepared::Gateway {
         gateway: Box::new(running),
         env,
-        scrub: scrub(&gateway),
+        scrub,
         activity: ModelActivity::Gateway {
             url: url.clone(),
             models: access.allow.clone(),
@@ -2342,6 +2492,173 @@ mod tests {
 
     fn names(order: &[&Backend]) -> Vec<String> {
         order.iter().map(|b| b.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_variable_that_holds_a_control_planes_token_is_named_or_refused() {
+        const TOKEN: &str = "aiplex-token-0123456789";
+        let tokens = [("ap".to_owned(), TOKEN.to_owned())];
+        let environment = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .collect::<Vec<_>>()
+                .into_iter()
+        };
+        // As `aiplex dev env` leaves a shell: the token under the SDKs'
+        // names too. Equal to it or with it inside; in name order.
+        let bearer = format!("Bearer {TOKEN}");
+        let shell = [
+            ("GEMINI_API_KEY", TOKEN),
+            ("AIPLEX_TOKEN", TOKEN),
+            ("OPENAI_API_KEY", TOKEN),
+            ("CUSTOM_HEADERS", bearer.as_str()),
+            ("GOOGLE_GEMINI_BASE_URL", "http://127.0.0.1:7400/ap/ide"),
+            ("GOOGLE_API_KEY", "another-key-0123456789"),
+            ("ALMOST", "aiplex-token-012345678"),
+            ("EMPTY", ""),
+            ("PATH", "/usr/bin:/bin"),
+        ];
+        assert_eq!(
+            copies(environment(&shell), &tokens).unwrap(),
+            [
+                "AIPLEX_TOKEN",
+                "CUSTOM_HEADERS",
+                "GEMINI_API_KEY",
+                "OPENAI_API_KEY"
+            ]
+        );
+        // Nothing to look for: nothing is named, whatever the variables.
+        assert_eq!(
+            copies(environment(&shell), &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        // A value that is not UTF-8 is still read.
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = vec![0xff];
+        bytes.extend_from_slice(TOKEN.as_bytes());
+        let odd = vec![(OsString::from("ODD_VALUE"), OsString::from_vec(bytes))];
+        assert_eq!(copies(odd.into_iter(), &tokens).unwrap(), ["ODD_VALUE"]);
+        // A variable every child needs cannot be hidden: refused, hiding
+        // none, naming the variable and the backend and never the value.
+        let proxy = format!("http://user:{TOKEN}@proxy.example:3128");
+        for (name, value) in [
+            ("PATH", TOKEN),
+            ("HOME", TOKEN),
+            ("LC_ALL", TOKEN),
+            ("GIT_DIR", TOKEN),
+            ("HTTPS_PROXY", proxy.as_str()),
+            ("https_proxy", proxy.as_str()),
+            ("BRANCHYARD_ROOT", TOKEN),
+        ] {
+            let error = copies(
+                environment(&[("GEMINI_API_KEY", TOKEN), (name, value)]),
+                &tokens,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                format!(
+                    "models.backends.ap.key: the variable {name} holds the token too, and it \
+                     cannot be hidden from child processes, which need {name} (or Branchyard \
+                     reads it itself); take the token out of {name}"
+                )
+            );
+            assert!(!error.contains(TOKEN), "{error}");
+        }
+        // Nor can one whose name no rule can spell.
+        let unnamed = vec![(OsString::from_vec(vec![0xff, b'K']), OsString::from(TOKEN))];
+        let error = copies(unnamed.into_iter(), &tokens).unwrap_err();
+        assert_eq!(
+            error,
+            "models.backends.ap.key: a variable whose name is not UTF-8 holds the token too, \
+             and it cannot be hidden from child processes; take the token out of it"
+        );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_read_its_key_where_a_control_plane_reads_its_token() {
+        let config = |plain_key: &str| {
+            json!({
+                "backends": {
+                    "ap": {"api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+                        "key": "AIPLEX_TOKEN_OF_THE_TEST", "control_plane": "aiplex"},
+                    "ap-openai": {"api": "openai", "url": "https://aiplex.example.com/ap/ide",
+                        "key": "AIPLEX_TOKEN_OF_THE_TEST", "control_plane": "aiplex"},
+                    "plain": {"api": "anthropic", "key": plain_key}
+                },
+                "routes": [
+                    {"model": "claude-*", "backends": ["ap"]},
+                    {"model": "direct-*", "backends": ["plain"]}
+                ]
+            })
+        };
+        // Two control-plane backends share a token; a plain backend has
+        // its own key.
+        built(config("ANTHROPIC_KEY_OF_THE_TEST")).unwrap();
+        assert_eq!(
+            built(config("AIPLEX_TOKEN_OF_THE_TEST")).unwrap_err(),
+            "models.backends.plain.key: it is read from $AIPLEX_TOKEN_OF_THE_TEST, where the \
+             token of the control-plane backend ap is read from, and a control plane's token \
+             is sent only to its own url; give plain a key of its own"
+        );
+    }
+
+    #[test]
+    fn the_tokens_a_gateway_guards_are_its_control_planes_stored_keys() {
+        const TOKEN: &str = "aiplex-token-9876543210";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("aiplex"), format!("{TOKEN}\n")).unwrap();
+        std::fs::write(dir.path().join("short"), "fifteen-chars-x").unwrap();
+        std::fs::write(dir.path().join("provider"), "sk-provider-0123456789").unwrap();
+        let at = "https://aiplex.example.com/ap/ide";
+        let config: Config = serde_json::from_value(json!({
+            "backends": {
+                "ap-a": {"api": "anthropic", "url": at, "key": "aiplex", "control_plane": "aiplex"},
+                "ap-b": {"api": "openai", "url": at, "key": "aiplex", "control_plane": "aiplex"},
+                "ap-gone": {"api": "anthropic", "url": at, "key": "gone", "control_plane": "aiplex"},
+                "ap-short": {"api": "anthropic", "url": at, "key": "short", "control_plane": "aiplex"},
+                "plain": {"api": "anthropic", "key": "provider"}
+            },
+            "routes": [
+                {"model": "claude-*", "backends": ["ap-a", "ap-gone", "ap-short"]},
+                {"model": "gpt-*", "backends": ["ap-b"]},
+                {"model": "direct-*", "backends": ["plain"]}
+            ]
+        }))
+        .unwrap();
+        let root = dir.path().to_path_buf();
+        let gateway =
+            Gateway::new(&config, signer(), |name| KeySource::File(root.join(name))).unwrap();
+        // One source read once; a key that is missing, too short to be
+        // used, or a plain backend's is not a control plane's token.
+        assert_eq!(
+            gateway.control_plane_tokens(),
+            [("ap-a".to_owned(), TOKEN.to_owned())]
+        );
+        assert_eq!(gateway.token_held_by(TOKEN).as_deref(), Some("ap-a"));
+        assert_eq!(
+            gateway.token_held_by(&format!("Bearer {TOKEN}")).as_deref(),
+            Some("ap-a")
+        );
+        for key in [
+            "sk-provider-0123456789",
+            "fifteen-chars-x",
+            "",
+            "aiplex-token-987654321",
+        ] {
+            assert_eq!(gateway.token_held_by(key), None, "{key}");
+        }
+        // A gateway without a control plane reads nothing and guards nothing.
+        let plain: Config = serde_json::from_value(json!({
+            "backends": {"plain": {"api": "anthropic", "key": "aiplex"}}
+        }))
+        .unwrap();
+        let root = dir.path().to_path_buf();
+        let gateway =
+            Gateway::new(&plain, signer(), |name| KeySource::File(root.join(name))).unwrap();
+        assert!(gateway.control_plane_tokens().is_empty());
+        assert_eq!(gateway.token_held_by(TOKEN), None);
     }
 
     /// [`built`], as a yard whose tokens' issuer is `issuer`.

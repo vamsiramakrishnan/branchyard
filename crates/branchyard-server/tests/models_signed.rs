@@ -292,6 +292,63 @@ fn an_audience_on_another_host_than_the_url_is_a_warning_when_the_file_is_read()
     );
 }
 
+#[test]
+fn a_control_planes_plain_http_url_off_loopback_is_a_warning_when_the_file_is_read() {
+    let f = Fixture::new();
+    let path = f.dir.join("server.json");
+    let write = |url: &str, credential: serde_json::Value| {
+        let mut backend = json!({"api": "anthropic", "url": url, "control_plane": "aiplex"});
+        for (key, value) in credential.as_object().unwrap() {
+            backend[key] = value.clone();
+        }
+        fs::write(
+            &path,
+            json!({"listen": "127.0.0.1:7402", "data_dir": "data", "repos": {"app": "repo"},
+                "public_url": "https://by.example.com",
+                "models": {"backends": {"ap": backend},
+                    "routes": [{"model": "*", "backends": ["ap"]}]}})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    let noted = "models.backends.ap: its url is plain http on aiplex.internal, which is not \
+                 loopback, so the credential it is sent travels unencrypted unless the network \
+                 between Branchyard and AIPlex encrypts it; use https:// if it does not";
+    // A stored token and a signed one: read, not refused, and said.
+    for credential in [
+        json!({"key": "AIPLEX_TOKEN"}),
+        json!({"auth": "turn-token", "audience": "aiplex-production"}),
+    ] {
+        write("http://aiplex.internal:8080/ap/ide", credential.clone());
+        let partial = branchyard_server::config::load_file(&path).unwrap();
+        assert_eq!(
+            partial
+                .warnings
+                .iter()
+                .filter(|w| w.contains("plain http"))
+                .collect::<Vec<_>>(),
+            [noted],
+            "{:?}",
+            partial.warnings
+        );
+        // https, or http on this machine: nothing to say.
+        for url in [
+            "https://aiplex.internal:8443/ap/ide",
+            "http://127.0.0.1:7400/ap/ide",
+            "http://localhost:7400/ap/ide",
+            "http://[::1]:7400/ap/ide",
+        ] {
+            write(url, credential.clone());
+            let partial = branchyard_server::config::load_file(&path).unwrap();
+            assert!(
+                !partial.warnings.iter().any(|w| w.contains("plain http")),
+                "{url}: {:?}",
+                partial.warnings
+            );
+        }
+    }
+}
+
 /// A connector gateway with no issuer of its own.
 fn connectors(f: &Fixture) -> branchyard_server::config::ConnectorsConfig {
     branchyard_server::config::ConnectorsConfig {

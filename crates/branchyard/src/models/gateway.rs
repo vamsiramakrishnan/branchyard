@@ -1184,6 +1184,19 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 continue;
             }
         };
+        if backend.control_plane.is_none() {
+            // A plain backend is never sent a control plane's token: its
+            // key may be read from a variable that holds a copy of it. The
+            // message names the two backends, never the value.
+            if let Some(plane) = gateway.token_held_by(&key) {
+                call.failed_over.push(format!(
+                    "{}: its key holds the token of the control-plane backend {plane}, which \
+                     is sent only to that backend",
+                    backend.name
+                ));
+                continue;
+            }
+        }
         if backend.control_plane.is_some() {
             // A key this short would be found in answers that do not hold
             // it; the message names the backend, never the value.

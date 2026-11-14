@@ -980,6 +980,12 @@ fn run(
     }
     // What its parent assigned it: the paths it owns, the shared brief.
     let assignment = crate::assignment::for_turn(turn.yard, record);
+    // The yard's control planes' tokens, which no secret hands a harness.
+    let guarded = turn
+        .yard
+        .models()
+        .map(|gateway| gateway.control_plane_tokens())
+        .unwrap_or_default();
     let provisioned = match crate::provisioning::prepare(
         record,
         turn.profile,
@@ -1000,6 +1006,7 @@ fn run(
         crate::provisioning::Access {
             policy: &bounds.policy,
             model_gateway: provisioned_gateway,
+            guarded: &guarded,
         },
         store.dir(),
     ) {
@@ -1181,9 +1188,14 @@ fn run(
                 match crate::workspace::shell_env(snippet, &record.info.worktree, &start, &lost) {
                     Ok(changed) => {
                         for (name, value) in changed {
+                            // A control plane's token the snippet exported
+                            // under a name of its own is not the harness's.
                             let scrubbed = provisioned.scrub.contains(&name)
                                 || model_scrub.contains(&name)
-                                || !placement.admits(&name);
+                                || !placement.admits(&name)
+                                || guarded
+                                    .iter()
+                                    .any(|(_, token)| crate::models::holds(&value, token));
                             if !scrubbed {
                                 placement.set_env(&name, &value);
                             }

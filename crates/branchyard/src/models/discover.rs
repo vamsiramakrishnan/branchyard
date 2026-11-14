@@ -158,6 +158,12 @@ pub struct Source {
     /// (`auth = "turn-token"`), which outside a turn there is none of: it
     /// is skipped, saying so.
     pub turn_token: bool,
+    /// Why keys of its were taken out of `keys`, one reason each: a key
+    /// that holds a control-plane backend's token is sent only to that
+    /// backend, so it is skipped as a key here. The source is still asked
+    /// with another key of its own when it has one, and is skipped, saying
+    /// so, when it has none.
+    pub withheld: Vec<String>,
 }
 
 /// The base URLs of the providers' own sources; the public APIs unless a
@@ -203,6 +209,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
         versioned: false,
         control_plane: false,
         turn_token: false,
+        withheld: Vec::new(),
     };
     let mut found = vec![
         provider("gemini", Kind::Gemini, &bases.gemini, named(&GEMINI_KEYS)),
@@ -250,7 +257,34 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             versioned,
             control_plane: backend.control_plane.is_some(),
             turn_token: backend.auth.is_some(),
+            withheld: Vec::new(),
         });
+    }
+    // A control plane's token is sent only to a control plane's source. A
+    // provider's own variable may hold a copy of it (`aiplex dev env`
+    // exports the token as the SDKs' key variables too), and so may a plain
+    // backend's key: such a key is skipped as a key, whichever place in the
+    // source's list it has.
+    let tokens: Vec<(&String, String)> = config
+        .backends
+        .iter()
+        .filter(|(_, backend)| backend.control_plane.is_some())
+        .filter_map(|(name, backend)| Some((name, key(backend.key.as_deref()?).read().ok()?)))
+        .collect();
+    for source in found.iter_mut().filter(|s| !s.control_plane) {
+        for candidate in std::mem::take(&mut source.keys) {
+            let plane = candidate
+                .read()
+                .ok()
+                .and_then(|value| tokens.iter().find(|(_, token)| super::holds(&value, token)));
+            match plane {
+                Some((backend, _)) => source.withheld.push(format!(
+                    "its key {candidate} holds the token of the control-plane backend \
+                     {backend}, which is sent only to that backend"
+                )),
+                None => source.keys.push(candidate),
+            }
+        }
     }
     for i in 1..found.len() {
         let Ok(mine) = found[i].credential() else {
@@ -288,8 +322,9 @@ impl Source {
     ///
     /// # Errors
     ///
-    /// `no credential: ` and what each place said (a variable not set, a
-    /// file unreadable), never a key.
+    /// `no credential: ` and what each place said (a key taken out for
+    /// holding a control plane's token, [`Source::withheld`]; a variable
+    /// not set; a file unreadable), never a key.
     pub fn credential(&self) -> Result<Credential, String> {
         if self.turn_token {
             return Err(
@@ -310,6 +345,8 @@ impl Source {
                 Err(e) => why.push(e),
             }
         }
+        // A key taken out for holding a control plane's token, first.
+        let why: Vec<String> = self.withheld.iter().cloned().chain(why).collect();
         match why.is_empty() {
             true => Err("no credential: the backend names no key".to_owned()),
             false => Err(format!("no credential: {}", why.join("; "))),
@@ -780,6 +817,7 @@ mod tests {
             versioned: false,
             control_plane: false,
             turn_token: false,
+            withheld: Vec::new(),
         }
     }
 
@@ -1021,6 +1059,146 @@ mod tests {
             .iter()
             .any(|r| r.header("anthropic-version") == Some("2023-06-01")));
         server.finish();
+    }
+
+    #[test]
+    fn a_control_planes_token_is_sent_to_no_other_source() {
+        const TOKEN: &str = "aiplex-token-0123456789";
+        const REAL: &str = "sk-a-real-key-0123456789";
+        let dir = tempfile::tempdir().unwrap();
+        let aiplex = MockHttp::start(|_| {
+            Response::json(200, &json!({"data": [{"id": "claude-sonnet-4-6"}]}))
+        });
+        // One stand-in for the four providers: it answers every shape.
+        let provider = MockHttp::start(|_| {
+            Response::json(200, &json!({"data": [], "models": [], "has_more": false}))
+        });
+        let config: Config = serde_json::from_value(json!({"backends": {
+            "ap": {"api": "anthropic", "url": format!("{}/ap/ide", aiplex.url()),
+                "key": "aiplex", "control_plane": "aiplex"},
+            "inside": {"api": "generic", "url": format!("{}/inside", provider.url()),
+                "key": "inside"},
+            "own": {"api": "openai", "url": format!("{}/own", provider.url()), "key": "own"}
+        }}))
+        .unwrap();
+        let bases = Bases {
+            gemini: format!("{}/gemini", provider.url()),
+            openai: format!("{}/openai", provider.url()),
+            anthropic: format!("{}/anthropic", provider.url()),
+            zai: format!("{}/zai", provider.url()),
+        };
+        // A shell's variables as files: which names hold what.
+        let listed = |variables: &[(&str, &str)]| {
+            let held: Vec<(String, KeySource)> = [("aiplex", TOKEN), ("own", REAL)]
+                .iter()
+                .chain(variables)
+                .map(|(name, value)| ((*name).to_owned(), key_file(&dir, name, value)))
+                .collect();
+            let found = sources(&config, &bases, |name| {
+                held.iter()
+                    .find(|(held, _)| held == name)
+                    .map_or_else(unset, |(_, source)| source.clone())
+            });
+            let before = provider.requests().len();
+            let listings: Vec<Listing> = found
+                .iter()
+                .map(|source| list(source, &transport(), 1))
+                .collect();
+            let heard = provider.requests().split_off(before);
+            for request in &heard {
+                for (_, value) in &request.sent_headers {
+                    assert!(
+                        !value.contains(TOKEN),
+                        "{} was sent the token",
+                        request.path
+                    );
+                }
+            }
+            let asked: Vec<String> = heard
+                .iter()
+                .map(|r| r.path.split('?').next().unwrap_or_default().to_owned())
+                .collect();
+            (listings, asked)
+        };
+        let reason = |listings: &[Listing], id: &str| {
+            let listing = listings.iter().find(|l| l.source == id).unwrap();
+            assert_eq!(listing.status, Status::Skipped, "{id}: {listing:?}");
+            listing.reason.clone().unwrap()
+        };
+        let held = |variable: &str| {
+            format!(
+                "its key @{} holds the token of the control-plane backend ap, which is sent \
+                 only to that backend",
+                dir.path().join(variable).display()
+            )
+        };
+        // Each provider's variable in turn holds the token, alone: its
+        // source is not asked and says why; the access point still is.
+        for (variable, source) in [
+            ("GEMINI_API_KEY", "gemini"),
+            ("GOOGLE_API_KEY", "gemini"),
+            ("OPENAI_API_KEY", "openai"),
+            ("CODEX_API_KEY", "openai"),
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("ZAI_API_KEY", "zai"),
+        ] {
+            let (listings, asked) = listed(&[(variable, TOKEN)]);
+            let why = reason(&listings, source);
+            assert!(why.starts_with("no credential: "), "{why}");
+            assert!(why.contains(&held(variable)), "{variable}: {why}");
+            assert!(!why.contains(TOKEN), "{why}");
+            assert_eq!(asked, ["/own/v1/models"], "{variable}");
+            let plane = listings.iter().find(|l| l.source == "backend:ap").unwrap();
+            assert_eq!(models_of(plane), ["claude-sonnet-4-6"], "{variable}");
+        }
+        // As `eval "$(aiplex dev env)"` leaves a shell: the token under
+        // the three SDK names too. A plain backend whose key has it inside
+        // a value is not asked either.
+        let bearer = format!("Bearer {TOKEN}");
+        let (listings, asked) = listed(&[
+            ("OPENAI_API_KEY", TOKEN),
+            ("ANTHROPIC_API_KEY", TOKEN),
+            ("GEMINI_API_KEY", TOKEN),
+            ("inside", bearer.as_str()),
+        ]);
+        for (variable, source) in [
+            ("OPENAI_API_KEY", "openai"),
+            ("ANTHROPIC_API_KEY", "anthropic"),
+            ("GEMINI_API_KEY", "gemini"),
+            ("inside", "backend:inside"),
+        ] {
+            assert!(
+                reason(&listings, source).contains(&held(variable)),
+                "{variable}"
+            );
+        }
+        assert_eq!(asked, ["/own/v1/models"]);
+        // A key that holds it is skipped as a key, wherever it is in its
+        // source's list: the source is asked with the real one.
+        for variables in [
+            [("OPENAI_API_KEY", REAL), ("CODEX_API_KEY", TOKEN)],
+            [("OPENAI_API_KEY", TOKEN), ("CODEX_API_KEY", REAL)],
+        ] {
+            let (listings, asked) = listed(&variables);
+            let openai = listings.iter().find(|l| l.source == "openai").unwrap();
+            assert_eq!(openai.status, Status::Listed, "{openai:?}");
+            // (A base that ends in /openai lists at /models.)
+            assert_eq!(asked, ["/openai/models", "/own/v1/models"]);
+        }
+        // Another value in a provider's variable is asked as before.
+        let (listings, asked) = listed(&[
+            ("OPENAI_API_KEY", REAL),
+            ("ANTHROPIC_API_KEY", "sk-another-0123456789"),
+            ("GEMINI_API_KEY", "aiplex-token-012345678"),
+            ("ZAI_API_KEY", "zai-key-0123456789abc"),
+        ]);
+        for source in ["openai", "anthropic", "gemini", "zai"] {
+            let listing = listings.iter().find(|l| l.source == source).unwrap();
+            assert_eq!(listing.status, Status::Listed, "{listing:?}");
+        }
+        assert_eq!(asked.len(), 5, "{asked:?}");
+        aiplex.finish();
+        provider.finish();
     }
 
     #[test]

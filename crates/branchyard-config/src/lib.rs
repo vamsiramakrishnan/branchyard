@@ -1410,12 +1410,49 @@ impl ModelsConfig {
         Ok(Some(access))
     }
 
-    /// What an operator should look at that is not wrong: a backend called
-    /// with a signed token whose `audience` is an `http(s)` URL on another
-    /// host than its `url`. Whoever is at `url` receives a token that is
-    /// good at the audience for up to an hour, so the two normally share a
-    /// host.
+    /// What an operator should look at that is not wrong, as a server says
+    /// it when it reads its configuration file: the
+    /// [audience notes](ModelsConfig::audience_notes), then the
+    /// [transport notes](ModelsConfig::transport_notes).
     pub fn notes(&self) -> Vec<String> {
+        let mut notes = self.audience_notes();
+        notes.extend(self.transport_notes());
+        notes
+    }
+
+    /// A control-plane backend whose `url` is plain `http://` on a host
+    /// that is not loopback: the credential it is sent (a stored token, or
+    /// a token the server signs) travels unencrypted unless the network
+    /// between the two encrypts it. Not refused: a cluster's own transport
+    /// may encrypt what is `http://` between its services.
+    pub fn transport_notes(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .filter(|(_, b)| b.control_plane.is_some())
+            .filter_map(|(name, b)| {
+                let url = b.url.as_deref()?;
+                let host = url_host(url).filter(|_| url.starts_with("http://"))?;
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback());
+                (!loopback).then(|| {
+                    format!(
+                        "models.backends.{name}: its url is plain http on {host}, which is not \
+                         loopback, so the credential it is sent travels unencrypted unless the \
+                         network between Branchyard and AIPlex encrypts it; use https:// if it \
+                         does not"
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// A backend called with a signed token whose `audience` is an
+    /// `http(s)` URL on another host than its `url`. Whoever is at `url`
+    /// receives a token that is good at the audience for up to an hour, so
+    /// the two normally share a host.
+    pub fn audience_notes(&self) -> Vec<String> {
         self.backends
             .iter()
             .filter(|(_, b)| b.auth.as_deref() == Some("turn-token"))
@@ -1638,6 +1675,31 @@ impl ModelsConfig {
                          goes to the plain {} backend {plain}, so it would never be used; add a \
                          route that names it ([[models.routes]] with backends = [\"{name}\"])",
                         backend.api
+                    ),
+                );
+            }
+        }
+        // A plain backend that names a control-plane backend's key would be
+        // sent the control plane's token, at a provider's address.
+        for (name, backend) in &self.backends {
+            let Some(key) = backend
+                .key
+                .as_deref()
+                .filter(|_| backend.control_plane.is_none())
+            else {
+                continue;
+            };
+            let plane = self
+                .backends
+                .iter()
+                .find(|(_, b)| b.control_plane.is_some() && b.key.as_deref() == Some(key));
+            if let Some((plane, _)) = plane {
+                return fail(
+                    &format!("backends.{name}.key"),
+                    format!(
+                        "{key:?} is the key of the control-plane backend {plane}, and a \
+                         control plane's token is sent only to its own url; give {name} a key \
+                         of its own"
                     ),
                 );
             }
@@ -3955,6 +4017,95 @@ classes = { compensable = "allow" }
                 && notes[0].contains("aiplex.example.com"),
             "{notes:?}"
         );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_name_a_control_planes_key() {
+        let file = |plain_key: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.ap-openai]\napi = \"openai\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"anthropic\"\n\
+                 key = \"{plain_key}\"\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
+                 backends = [\"ap\"]\n\n[[models.routes]]\nmodel = \"gpt-*\"\n\
+                 backends = [\"ap-openai\"]\n"
+            )
+        };
+        // Two control-plane backends share a token; a plain one has its own.
+        parse(&file("ANTHROPIC_API_KEY")).unwrap();
+        let error = parse(&file("aiplex")).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "models.backends.direct.key: \"aiplex\" is the key of the control-plane backend \
+                 ap, and a control plane's token is sent only to its own url; give direct a key \
+                 of its own"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_control_planes_plain_http_url_off_loopback_is_noted_not_refused() {
+        let file = |url: &str, credential: &str, plane: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+                 {credential}{plane}\n[[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        let aiplex = "control_plane = \"aiplex\"\n";
+        let stored = "key = \"aiplex\"\n";
+        let signed = "auth = \"turn-token\"\naudience = \"aiplex-production\"\n";
+        let noted = |host: &str| {
+            vec![format!(
+                "models.backends.ap: its url is plain http on {host}, which is not loopback, so \
+                 the credential it is sent travels unencrypted unless the network between \
+                 Branchyard and AIPlex encrypts it; use https:// if it does not"
+            )]
+        };
+        // Accepted, with either credential, and noted.
+        for credential in [stored, signed] {
+            for (url, host) in [
+                ("http://aiplex.internal:8080/ap/ide", "aiplex.internal"),
+                ("http://AIPlex.Internal/ap/ide", "aiplex.internal"),
+                ("http://10.0.0.5:7400/ap/ide", "10.0.0.5"),
+                ("http://[2001:db8::1]:7400/ap/ide", "2001:db8::1"),
+                ("http://0.0.0.0:7400/ap/ide", "0.0.0.0"),
+            ] {
+                let config = parse(&file(url, credential, aiplex)).unwrap();
+                assert_eq!(config.models.transport_notes(), noted(host), "{url}");
+                assert_eq!(config.models.notes(), noted(host), "{url}");
+            }
+            // https anywhere, and http on this machine: nothing to say.
+            for url in [
+                "https://aiplex.example.com/ap/ide",
+                "https://10.0.0.5:7400/ap/ide",
+                "http://127.0.0.1:7400/ap/ide",
+                "http://127.8.9.10/ap/ide",
+                "http://localhost:7400/ap/ide",
+                "http://LOCALHOST./ap/ide",
+                "http://[::1]:7400/ap/ide",
+            ] {
+                let config = parse(&file(url, credential, aiplex)).unwrap();
+                assert!(config.models.transport_notes().is_empty(), "{url}");
+            }
+        }
+        // A plain backend's url is its provider's, as it always was.
+        let plain = parse(&file("http://10.0.0.5:7400", stored, "")).unwrap();
+        assert!(plain.models.notes().is_empty());
+        // Beside an audience on another host: both notes, the audience's first.
+        let both = parse(&file(
+            "http://aiplex.internal:8080/ap/ide",
+            "auth = \"turn-token\"\naudience = \"https://aiplex.example.com\"\n",
+            aiplex,
+        ))
+        .unwrap();
+        let notes = both.models.notes();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(notes[0], both.models.audience_notes()[0]);
+        assert!(notes[0].contains("its audience names the host aiplex.example.com"));
+        assert_eq!(notes[1..], noted("aiplex.internal"));
     }
 
     #[test]
