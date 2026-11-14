@@ -20,7 +20,7 @@ branchyard = { path = "../branchyard" }
 branchyard-client = { path = "../branchyard-client" }
 clap = { workspace = true }
 # The official Rust MCP SDK: only its server role and stdio transport.
-rmcp = { version = "3.4", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-io"] }
 serde_json = { workspace = true }
 # rmcp is asynchronous; the server runs on one current-thread runtime.
 tokio = { workspace = true, features = ["rt", "time"] }
