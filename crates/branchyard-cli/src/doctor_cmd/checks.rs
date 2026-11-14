@@ -1537,6 +1537,7 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
                 api: backend.api.clone(),
                 source: source.as_ref().map(ToString::to_string),
                 present: source.as_ref().map(|s| key_present(s, &|v| ctx.var_set(v))),
+                signed: backend.auth.as_deref() == Some("turn-token"),
             }
         })
         .collect();
@@ -1551,6 +1552,9 @@ struct KeyRow {
     source: Option<String>,
     /// Whether that source holds a key here; `None` without a source.
     present: Option<bool>,
+    /// Whether it is called with a token the server signs for each turn
+    /// (`auth = "turn-token"`), which needs no key.
+    signed: bool,
 }
 
 fn key_present(source: &branchyard::models::KeySource, var_set: &dyn Fn(&str) -> bool) -> bool {
@@ -1566,6 +1570,13 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     let mut status = Status::Ok;
     for row in rows {
         let (text, worst) = match (&row.source, row.present) {
+            _ if row.signed => (
+                format!(
+                    "{} is called with a token the server signs for each turn (auth = turn-token)",
+                    row.backend
+                ),
+                Status::Ok,
+            ),
             (Some(source), Some(true)) => {
                 (format!("{} key {source} is set", row.backend), Status::Ok)
             }
@@ -2155,6 +2166,7 @@ mod tests {
             api: api.into(),
             source: source.map(str::to_owned),
             present,
+            signed: false,
         };
         let all_set = keys_row(&[
             row("a", "anthropic", Some("$A_KEY"), Some(true)),
@@ -2172,6 +2184,16 @@ mod tests {
         let keyless = keys_row(&[row("a", "anthropic", None, None)]);
         assert_eq!(keyless.status, Status::Warn);
         assert!(keyless.detail.contains("a (anthropic) names no key"));
+        // A backend called with the server's signed token needs no key.
+        let signed = keys_row(&[KeyRow {
+            signed: true,
+            ..row("aiplex", "anthropic", None, None)
+        }]);
+        assert_eq!(signed.status, Status::Ok);
+        assert_eq!(
+            signed.detail,
+            "aiplex is called with a token the server signs for each turn (auth = turn-token)"
+        );
     }
 
     #[test]

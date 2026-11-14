@@ -162,10 +162,16 @@ pub fn sandbox_audience(config: &Config, c: &ConnectorsConfig) -> String {
 
 /// The public key set, made with the key on first use.
 pub fn jwks(config: &Config) -> Result<serde_json::Value, String> {
-    let c = config
-        .connectors
-        .as_ref()
-        .ok_or("this server has no connector gateway")?;
+    let Some(c) = config.connectors.as_ref() else {
+        // Without connectors, the model gateway's key file, which signs the
+        // tokens an AIPlex backend is called with.
+        if !crate::models::signs_for_aiplex(config) {
+            return Err("this server has no connector gateway".into());
+        }
+        return KeyRing::load_or_create(&dir(config).join("key"), Some(&jwks_file(config)))
+            .and_then(|ring| ring.jwks())
+            .map_err(|e| e.to_string());
+    };
     match token_signer(config, c) {
         Some(signer) => signer.jwks(),
         None => KeyRing::load_or_create(&key_file(config, c), Some(&jwks_file(config)))

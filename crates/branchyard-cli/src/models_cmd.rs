@@ -97,12 +97,13 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
             out.push_str(&style.paint(render::Tone::Bold, "backends"));
             out.push('\n');
             for b in &gateway.backends {
-                let key = match &b.key {
-                    Some(source) => match source.read() {
+                let key = match (&b.audience, &b.key) {
+                    (Some(audience), _) => format!("a token the server signs, for {audience}"),
+                    (None, Some(source)) => match source.read() {
                         Ok(_) => format!("key {source}"),
                         Err(why) => format!("key {source} ({why})"),
                     },
-                    None => "no key".to_owned(),
+                    (None, None) => "no key".to_owned(),
                 };
                 let plane = match b.control_plane {
                     Some(plane) => format!("  control plane {plane}"),
@@ -265,6 +266,7 @@ fn backends_json(gateway: &Gateway) -> Value {
                     "key": b.key.as_ref().map(ToString::to_string),
                     "key_set": b.key.as_ref().is_some_and(|k| k.read().is_ok()),
                     "control_plane": b.control_plane,
+                    "audience": b.audience,
                 })
             })
             .collect(),

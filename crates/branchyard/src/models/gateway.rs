@@ -17,6 +17,7 @@
 
 use branchyard_support::best_effort;
 use branchyard_support::{CondvarExt as _, LockExt as _};
+use std::collections::HashMap;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -75,6 +76,136 @@ pub(crate) struct TurnState {
     pub held: f64,
     /// What this turn's calls cost so far.
     pub metered: Mutex<f64>,
+    /// What signs the turn's tokens, and the token an AIPlex backend with
+    /// a signed token is presented ([`super::BackendAuth::TurnToken`]).
+    pub signer: Arc<dyn keys::TokenSigner>,
+    /// The issuer of the turn's tokens.
+    pub issuer: String,
+    /// The tenant the branch acts in: `by_tenant`, and the subject
+    /// `branchyard:<tenant>` of a signed token.
+    pub tenant: String,
+    /// The turn's deadline, which no token outlives.
+    pub deadline_ms: Option<u64>,
+    /// The signed tokens presented so far, by audience.
+    pub signed: SignedTokens,
+}
+
+/// How long before it expires a signed token is replaced, so no call is
+/// sent with one that expires on the way.
+pub(crate) const RENEW_BEFORE_SECS: u64 = 120;
+
+/// The longest a signed token lives: AIPlex refuses one whose `exp - iat`
+/// is more than an hour.
+pub(crate) const SIGNED_TOKEN_SECS: u64 = 3600;
+
+/// The tokens a turn's gateway presents to AIPlex backends with a signed
+/// token, by audience: signed once, and again only when close to expiry,
+/// since signing may be a network call (Cloud KMS).
+#[derive(Default)]
+pub(crate) struct SignedTokens {
+    held: Mutex<HashMap<String, Minted>>,
+}
+
+/// A signed token, its `exp`, and whether the turn's deadline set that
+/// `exp` (then a new token would expire no later, so it is kept until it
+/// expires).
+pub(crate) type Minted = (String, u64, bool);
+
+impl SignedTokens {
+    /// The token for `audience` at `now` (seconds), made by `mint` when
+    /// there is none, it has expired, or it expires within
+    /// [`RENEW_BEFORE_SECS`] and a new one would live longer.
+    pub(crate) fn get(
+        &self,
+        audience: &str,
+        now: u64,
+        mint: impl FnOnce() -> Result<Minted, String>,
+    ) -> Result<String, String> {
+        let mut held = self.held.lock_recovering("signed tokens");
+        if let Some((token, exp, capped)) = held.get(audience) {
+            let fresh = now.saturating_add(RENEW_BEFORE_SECS) < *exp;
+            if fresh || (*capped && now < *exp) {
+                return Ok(token.clone());
+            }
+        }
+        let minted = mint()?;
+        let token = minted.0.clone();
+        held.insert(audience.to_owned(), minted);
+        Ok(token)
+    }
+}
+
+/// Who a signed token speaks for: the turn's issuer, tenant, branch (as
+/// usage names it), turn and deadline.
+pub(crate) struct Signing<'a> {
+    pub issuer: &'a str,
+    pub tenant: &'a str,
+    pub by_branch: &'a str,
+    pub turn: u32,
+    pub deadline_ms: Option<u64>,
+}
+
+/// What a turn's signed token for `audience` says, minted at `now`
+/// (seconds): contract section 7. It carries none of the turn's scopes
+/// (`by_grants` is empty: the claims type has no way to leave it out), and
+/// expires an hour after `now` at most, and not after the deadline.
+pub(crate) fn signed_claims(
+    turn: &Signing<'_>,
+    audience: &str,
+    now: u64,
+) -> Result<keys::Claims, String> {
+    if !super::federable_tenant(turn.tenant) {
+        return Err(format!(
+            "the tenant {:?} cannot be named in the token's subject (branchyard:<tenant>, 1 to \
+             128 of A-Z a-z 0-9 . _ @ + -)",
+            turn.tenant
+        ));
+    }
+    let mut exp = now + SIGNED_TOKEN_SECS;
+    if let Some(deadline) = turn.deadline_ms {
+        exp = exp.min((deadline / 1000).max(now + 1));
+    }
+    Ok(keys::Claims {
+        iss: turn.issuer.to_owned(),
+        aud: audience.to_owned(),
+        sub: format!("branchyard:{}", turn.tenant),
+        iat: now,
+        exp,
+        jti: keys::random_id().map_err(|e| e.to_string())?,
+        by_tenant: turn.tenant.to_owned(),
+        by_branch: turn.by_branch.to_owned(),
+        by_turn: turn.turn.to_string(),
+        by_grants: Vec::new(),
+        by_purpose: Some(super::AIPLEX_PURPOSE.to_owned()),
+        by_models: None,
+        by_network: None,
+        by_delegation: None,
+        by_manifest: None,
+    })
+}
+
+impl TurnState {
+    /// The signed token for an AIPlex backend whose audience is
+    /// `audience`, made or reused ([`SignedTokens`]).
+    pub(crate) fn signed_token(&self, audience: &str) -> Result<String, String> {
+        let now = now_ms() / 1000;
+        self.signed.get(audience, now, || {
+            let signing = Signing {
+                issuer: &self.issuer,
+                tenant: &self.tenant,
+                by_branch: &self.by_branch,
+                turn: self.turn,
+                deadline_ms: self.deadline_ms,
+            };
+            let claims = signed_claims(&signing, audience, now)?;
+            let token = self
+                .signer
+                .sign(&claims)
+                .map_err(|e| format!("the signer refused: {e}"))?;
+            let capped = claims.exp < now + SIGNED_TOKEN_SECS;
+            Ok((token, claims.exp, capped))
+        })
+    }
 }
 
 /// A running turn gateway; stopped when dropped.
@@ -944,8 +1075,29 @@ fn handle(stream: TcpStream, state: &TurnState) {
     let mut last: Option<Failed<'_>> = None;
     let mut answered: Option<Answered<'_>> = None;
     for backend in order {
-        let key = match &backend.key {
-            Some(source) => match source.read() {
+        let key = match (&backend.audience, &backend.key) {
+            // A token the yard signs: made, or reused, for this call; if it
+            // cannot be, the call fails here, sent nowhere.
+            (Some(audience), _) => match state.signed_token(audience) {
+                Ok(token) => token,
+                Err(why) => {
+                    let why = format!(
+                        "{}: could not sign the token it is called with: {why}",
+                        backend.name
+                    );
+                    done(&mut call, "failed", 502, Some(why.clone()));
+                    refuse(
+                        &mut out,
+                        api,
+                        502,
+                        "failed",
+                        &format!("Branchyard's model gateway: {why}"),
+                        &[],
+                    );
+                    return;
+                }
+            },
+            (None, Some(source)) => match source.read() {
                 Ok(key) => key,
                 Err(why) => {
                     call.failed_over
@@ -953,7 +1105,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                     continue;
                 }
             },
-            None => {
+            (None, None) => {
                 call.failed_over
                     .push(format!("{}: no key configured", backend.name));
                 continue;
@@ -2309,6 +2461,7 @@ mod tests {
             header: header.map(str::to_owned),
             compat: Compat::Off,
             control_plane: None,
+            audience: None,
         }
     }
 
@@ -2833,6 +2986,87 @@ mod tests {
         ]);
         hide_control_plane(&mut answer, "aiplex-token-123456", "aiplex.test").unwrap();
         assert_eq!(pairs(&answer), [("Retry-After", "30")]);
+    }
+
+    #[test]
+    fn a_signed_token_lives_an_hour_at_most_and_never_past_the_deadline() {
+        let now = 1_800_000_000;
+        let turn = |deadline_ms: Option<u64>| Signing {
+            issuer: "https://by.example.com",
+            tenant: "acme",
+            by_branch: "app/fix",
+            turn: 3,
+            deadline_ms,
+        };
+        for deadline in [None, Some((now + 10 * 3600) * 1000)] {
+            let claims = signed_claims(&turn(deadline), "https://aiplex.example.com", now).unwrap();
+            assert_eq!(claims.exp - claims.iat, SIGNED_TOKEN_SECS);
+        }
+        let claims = signed_claims(&turn(Some((now + 600) * 1000)), "a", now).unwrap();
+        assert_eq!(claims.exp, now + 600);
+        // A deadline already past: the shortest token there is, never one
+        // that has expired before it is made.
+        let claims = signed_claims(&turn(Some((now - 5) * 1000)), "a", now).unwrap();
+        assert_eq!(claims.exp, now + 1);
+        let claims = signed_claims(&turn(None), "https://aiplex.example.com", now).unwrap();
+        assert_eq!(claims.sub, "branchyard:acme");
+        assert_eq!(claims.by_tenant, "acme");
+        assert_eq!(claims.by_branch, "app/fix");
+        assert_eq!(claims.by_turn, "3");
+        assert_eq!(claims.by_purpose.as_deref(), Some("aiplex"));
+        assert!(claims.by_grants.is_empty() && claims.by_models.is_none());
+        assert!(claims.by_network.is_none() && claims.by_delegation.is_none());
+        assert!(claims.by_manifest.is_none());
+        // Two tokens, two ids.
+        let again = signed_claims(&turn(None), "https://aiplex.example.com", now).unwrap();
+        assert_ne!(claims.jti, again.jti);
+        // A tenant AIPlex cannot name: no token.
+        let odd = Signing {
+            tenant: "acme corp",
+            ..turn(None)
+        };
+        let why = signed_claims(&odd, "a", now).unwrap_err();
+        assert!(why.contains("cannot be named"), "{why}");
+    }
+
+    #[test]
+    fn a_signed_token_is_reused_until_it_is_close_to_expiry() {
+        let tokens = SignedTokens::default();
+        let mut minted = 0;
+        let mut mint = |exp: u64| {
+            minted += 1;
+            let token = format!("token-{minted}");
+            move || -> Result<Minted, String> { Ok((token, exp, false)) }
+        };
+        let now = 1_000;
+        assert_eq!(tokens.get("aud", now, mint(now + 3600)).unwrap(), "token-1");
+        // Reused while more than RENEW_BEFORE_SECS is left.
+        assert_eq!(tokens.get("aud", now + 10, mint(0)).unwrap(), "token-1");
+        let last = now + 3600 - RENEW_BEFORE_SECS - 1;
+        assert_eq!(tokens.get("aud", last, mint(0)).unwrap(), "token-1");
+        // Then replaced, before it expires.
+        let renew = now + 3600 - RENEW_BEFORE_SECS;
+        assert_eq!(
+            tokens.get("aud", renew, mint(renew + 3600)).unwrap(),
+            "token-4"
+        );
+        // Another audience has its own.
+        assert_eq!(
+            tokens.get("other", renew, mint(renew + 3600)).unwrap(),
+            "token-5"
+        );
+        // A signer that fails gives no token, and keeps none.
+        let failed = tokens.get("third", renew, || Err("kms down".to_owned()));
+        assert_eq!(failed.unwrap_err(), "kms down");
+        // A token the turn's deadline cut short is kept until it expires
+        // (a new one would expire no later), then replaced.
+        let capped = SignedTokens::default();
+        let short = || -> Result<Minted, String> { Ok(("short-1".into(), 1_100, true)) };
+        assert_eq!(capped.get("aud", 1_000, short).unwrap(), "short-1");
+        let again = || -> Result<Minted, String> { Ok(("short-2".into(), 1_200, true)) };
+        assert_eq!(capped.get("aud", 1_099, again).unwrap(), "short-1");
+        let after = || -> Result<Minted, String> { Ok(("short-3".into(), 1_200, true)) };
+        assert_eq!(capped.get("aud", 1_100, after).unwrap(), "short-3");
     }
 
     #[test]

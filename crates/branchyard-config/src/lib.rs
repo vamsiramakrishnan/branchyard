@@ -1279,6 +1279,16 @@ pub struct ModelBackendConfig {
     /// `anthropic` or `openai` backend with a key and no `compat`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<String>,
+    /// `turn-token`: instead of a `key`, the gateway presents a token the
+    /// server signs for each turn, which AIPlex verifies against the
+    /// server's published keys; only on an AIPlex backend, with
+    /// `audience`, on a server whose issuer is a URL AIPlex can fetch keys
+    /// from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// The `aud` of that token: the audience the AIPlex binding expects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
 }
 
 /// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
@@ -1409,11 +1419,11 @@ impl ModelsConfig {
                             .into(),
                     )
                 }
-                Some("aiplex") if backend.key.is_none() => {
+                Some("aiplex") if backend.key.is_none() && backend.auth.is_none() => {
                     return fail(
                         &format!("backends.{name}.key"),
-                        "a control-plane backend (aiplex) needs a key: the token it is called \
-                         with"
+                        "a control-plane backend (aiplex) needs a key (the token it is called \
+                         with), or auth = \"turn-token\" with an audience on a server"
                             .into(),
                     )
                 }
@@ -1428,6 +1438,52 @@ impl ModelsConfig {
                     return fail(
                         &format!("backends.{name}.control_plane"),
                         format!("{other:?} is not a control plane; the one there is is \"aiplex\""),
+                    )
+                }
+            }
+            match (backend.auth.as_deref(), backend.audience.as_deref()) {
+                (None, None) => {}
+                (Some("turn-token"), _) if backend.control_plane.is_none() => {
+                    return fail(
+                        &format!("backends.{name}.auth"),
+                        "a token Branchyard signs goes only to an AIPlex backend: add \
+                         control_plane = \"aiplex\", or use key"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), None) => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "auth = \"turn-token\" needs audience = \"...\": the audience the AIPlex \
+                         binding expects"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), Some(audience)) if audience.trim().is_empty() => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "is empty; write the audience the AIPlex binding expects".into(),
+                    )
+                }
+                (Some("turn-token"), Some(_)) if backend.key.is_some() => {
+                    return fail(
+                        &format!("backends.{name}"),
+                        "names both key and auth = \"turn-token\": one credential, not two; \
+                         remove one"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), Some(_)) => {}
+                (Some(other), _) => {
+                    return fail(
+                        &format!("backends.{name}.auth"),
+                        format!("{other:?} is not an auth; the one there is is \"turn-token\""),
+                    )
+                }
+                (None, Some(_)) => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "is only for auth = \"turn-token\"; add it, or remove audience".into(),
                     )
                 }
             }
@@ -3787,6 +3843,66 @@ classes = { compensable = "allow" }
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_signed_token_backend_is_read_rendered_back_and_refused_by_name() {
+        let backend = |extra: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\n{extra}\n\
+                 [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        let good = backend(
+            "control_plane = \"aiplex\"\nauth = \"turn-token\"\n\
+             audience = \"https://aiplex.example.com\"\n",
+        );
+        let config = parse(&good).unwrap();
+        let ap = &config.models.backends["ap"];
+        assert_eq!(ap.auth.as_deref(), Some("turn-token"));
+        assert_eq!(ap.audience.as_deref(), Some("https://aiplex.example.com"));
+        assert_eq!(ap.key, None);
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        for (extra, needles) in [
+            (
+                "control_plane = \"aiplex\"\nauth = \"oidc\"\naudience = \"a\"\n",
+                vec!["models.backends.ap.auth", "\"oidc\"", "\"turn-token\""],
+            ),
+            (
+                "key = \"k\"\nauth = \"turn-token\"\naudience = \"a\"\n",
+                vec!["models.backends.ap.auth", "control_plane = \"aiplex\""],
+            ),
+            (
+                "control_plane = \"aiplex\"\nauth = \"turn-token\"\n",
+                vec!["models.backends.ap.audience", "needs audience"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nauth = \"turn-token\"\naudience = \" \"\n",
+                vec!["models.backends.ap.audience", "is empty"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nkey = \"aiplex\"\nauth = \"turn-token\"\n\
+                 audience = \"a\"\n",
+                vec!["models.backends.ap", "one credential, not two"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nkey = \"aiplex\"\naudience = \"a\"\n",
+                vec![
+                    "models.backends.ap.audience",
+                    "only for auth = \"turn-token\"",
+                ],
+            ),
+            (
+                "control_plane = \"aiplex\"\n",
+                vec!["models.backends.ap.key", "or auth = \"turn-token\""],
+            ),
+        ] {
+            let error = parse(&backend(extra)).unwrap_err().to_string();
+            for needle in needles {
+                assert!(error.contains(needle), "{needle:?} not in {error}\n{extra}");
+            }
         }
     }
 

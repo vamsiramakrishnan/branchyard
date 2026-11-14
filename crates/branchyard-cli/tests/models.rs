@@ -365,7 +365,8 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
         ),
         "{log}"
     );
-    assert!(log.contains("aiplex request req-1)"), "{log}");
+    // AIPlex's id, then the call's own (AIPlex's `client_request_id`).
+    assert!(log.contains("aiplex request req-1, call "), "{log}");
     assert!(
         log.contains(
             "model: claude-refuse-429 refused via aiplex-anthropic \
@@ -373,7 +374,7 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
         ),
         "{log}"
     );
-    assert!(log.contains("aiplex request req-2)"), "{log}");
+    assert!(log.contains("aiplex request req-2, call "), "{log}");
     let json_log = repo.text(&["log", "cp", "--json"]);
     assert!(json_log.contains(r#""request_id": "req-2""#), "{json_log}");
     assert!(

@@ -33,7 +33,9 @@ pub const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 /// `X-Aiplex-Error-Code`, `WWW-Authenticate` and body the harness read. It
 /// prints the variables of its environment holding a real key, and those
 /// named `BY_TEST_*`. A call with `close_early` reads the status and closes
-/// without reading the body, as a harness that goes away.
+/// without reading the body, as a harness that goes away; `key` presents
+/// that key instead of the turn's token (Anthropic's API); an entry
+/// `{"dump_token": FILE}` writes the harness's token to `FILE`.
 pub const HARNESS: &str = r#"import http.client, json, os, sys, urllib.parse
 plan = json.load(open(sys.argv[1]))
 real = sorted(k for k, v in os.environ.items() if "sk-real" in v or "aiplex-real" in v)
@@ -41,8 +43,12 @@ print("real keys in env:", ",".join(real) or "none")
 print("test variables in env:", ",".join(sorted(k for k in os.environ if k.startswith("BY_TEST_"))) or "none")
 out = {}
 for call in plan:
+    if call.get("dump_token"):
+        with open(call["dump_token"], "w") as f:
+            f.write(os.environ.get("ANTHROPIC_API_KEY", ""))
+        continue
     if call["api"] == "anthropic":
-        base, token = os.environ["ANTHROPIC_BASE_URL"], os.environ["ANTHROPIC_API_KEY"]
+        base, token = os.environ["ANTHROPIC_BASE_URL"], call.get("key") or os.environ["ANTHROPIC_API_KEY"]
         headers = [("x-api-key", token), ("anthropic-version", "2023-06-01")]
         body = {"model": call["model"], "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
     else:

@@ -1963,6 +1963,20 @@
             "null"
           ],
           "description": "`aiplex` when this backend is an AIPlex access point\n(`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told\nwhich branch, turn and harness is calling, its own refusals are\nfinal, and a route that names it names only such backends. An\n`anthropic` or `openai` backend with a key and no `compat`."
+        },
+        "auth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`turn-token`: instead of a `key`, the gateway presents a token the\nserver signs for each turn, which AIPlex verifies against the\nserver's published keys; only on an AIPlex backend, with\n`audience`, on a server whose issuer is a URL AIPlex can fetch keys\nfrom."
+        },
+        "audience": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The `aud` of that token: the audience the AIPlex binding expects."
         }
       },
       "required": [

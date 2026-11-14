@@ -154,6 +154,10 @@ pub struct Source {
     /// (`control_plane`), which takes its key as a bearer token whatever
     /// its API, as the gateway sends it.
     pub control_plane: bool,
+    /// Whether it is called with a token the yard signs for a turn
+    /// (`auth = "turn-token"`), which outside a turn there is none of: it
+    /// is skipped, saying so.
+    pub turn_token: bool,
 }
 
 /// The base URLs of the providers' own sources; the public APIs unless a
@@ -198,6 +202,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
         duplicate_of: None,
         versioned: false,
         control_plane: false,
+        turn_token: false,
     };
     let mut found = vec![
         provider("gemini", Kind::Gemini, &bases.gemini, named(&GEMINI_KEYS)),
@@ -241,6 +246,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             duplicate_of: None,
             versioned,
             control_plane: backend.control_plane.is_some(),
+            turn_token: backend.auth.is_some(),
         });
     }
     for i in 1..found.len() {
@@ -282,6 +288,13 @@ impl Source {
     /// `no credential: ` and what each place said (a variable not set, a
     /// file unreadable), never a key.
     pub fn credential(&self) -> Result<Credential, String> {
+        if self.turn_token {
+            return Err(
+                "no credential: it is called with a token the server signs for a turn \
+                        (auth = \"turn-token\"), and outside a turn there is none"
+                    .to_owned(),
+            );
+        }
         let mut why = Vec::new();
         for source in &self.keys {
             match source.read() {
@@ -763,6 +776,7 @@ mod tests {
             duplicate_of: None,
             versioned: false,
             control_plane: false,
+            turn_token: false,
         }
     }
 
@@ -918,6 +932,21 @@ mod tests {
             assert_eq!(request.header("authorization"), None);
         }
         server.finish();
+    }
+
+    #[test]
+    fn a_backend_called_with_a_signed_token_is_skipped_outside_a_turn() {
+        let config: Config = serde_json::from_value(json!({"backends": {
+            "aiplex": {"api": "openai", "url": "https://aiplex.example.com/ap/ide",
+                "control_plane": "aiplex", "auth": "turn-token",
+                "audience": "https://aiplex.example.com"}
+        }}))
+        .unwrap();
+        let found = sources(&config, &Bases::default(), |n| KeySource::Env(n.into()));
+        let source = found.iter().find(|s| s.id == "backend:aiplex").unwrap();
+        assert!(source.turn_token);
+        let why = source.credential().unwrap_err();
+        assert!(why.contains("outside a turn there is none"), "{why}");
     }
 
     #[test]

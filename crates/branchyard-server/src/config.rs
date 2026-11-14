@@ -1474,6 +1474,9 @@ impl Config {
                 "no repositories to serve; enable managed_knowledge for knowledge projects".into(),
             );
         }
+        // A backend called with a token this server signs needs an issuer
+        // AIPlex can fetch the keys from (docs/model-gateway.md).
+        crate::models::check_signed(self)?;
         if self.managed_knowledge.enabled {
             let knowledge = &self.managed_knowledge;
             if knowledge

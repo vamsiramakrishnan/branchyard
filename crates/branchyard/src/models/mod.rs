@@ -242,6 +242,70 @@ pub struct BackendConfig {
     /// planes (`docs/model-gateway.md`, "AIPlex as the backend").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<ControlPlane>,
+    /// How an AIPlex backend is called when not with a `key`
+    /// ([`BackendAuth`]); absent, with its `key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<BackendAuth>,
+    /// The `aud` of the token [`BackendAuth::TurnToken`] presents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
+/// How a control-plane backend is called instead of with a stored key
+/// (`[models.backends.NAME] auth`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BackendAuth {
+    /// A token the yard signs for each turn (`turn-token`), which AIPlex
+    /// verifies against the yard's published keys
+    /// (`docs/model-gateway.md`, "A token Branchyard signs").
+    #[serde(rename = "turn-token")]
+    TurnToken,
+}
+
+/// The `by_purpose` of the token a turn's gateway presents to an AIPlex
+/// backend with [`BackendAuth::TurnToken`]: the model gateway and the
+/// connector gateway refuse a token that carries one.
+pub const AIPLEX_PURPOSE: &str = "aiplex";
+
+/// Why `issuer` cannot sign tokens AIPlex verifies, if it cannot: it must
+/// be `https://host[:port]`, or `http://` on a loopback host (`127.0.0.1`,
+/// `[::1]`, `localhost`), with no path and no trailing slash, since AIPlex
+/// compares it byte for byte and fetches `{issuer}/.well-known/jwks.json`.
+pub fn federable_issuer(issuer: &str) -> Result<(), String> {
+    if issuer.starts_with("branchyard:local:") {
+        return Err(format!(
+            "this is a local yard (its tokens' issuer is {issuer}), which AIPlex cannot fetch keys \
+             from, so it cannot be federated; use key = \"...\" (an AIPlex token) instead"
+        ));
+    }
+    let target = upstream::Target::parse(issuer).map_err(|e| {
+        format!("the issuer {issuer:?} is not a URL AIPlex can fetch keys from: {e}")
+    })?;
+    if !target.prefix.is_empty() || issuer.ends_with('/') {
+        return Err(format!(
+            "the issuer {issuer:?} has a path; AIPlex wants scheme://host[:port] and nothing after"
+        ));
+    }
+    let loopback = matches!(
+        target.host.as_str(),
+        "127.0.0.1" | "::1" | "[::1]" | "localhost"
+    );
+    match (target.tls, loopback) {
+        (true, _) | (false, true) => Ok(()),
+        (false, false) => Err(format!(
+            "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex fetches \
+             keys over https (http only from this machine, for a development AIPlex)"
+        )),
+    }
+}
+
+/// Whether `tenant` can be named in `sub = branchyard:<tenant>`: 1 to 128
+/// of `A-Z a-z 0-9 . _ @ + -`, which AIPlex's `branchyard` preset takes.
+pub fn federable_tenant(tenant: &str) -> bool {
+    (1..=128).contains(&tenant.len())
+        && tenant
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._@+-".contains(&b))
 }
 
 /// What a backend is an access point of (`[models.backends.NAME]
@@ -390,6 +454,9 @@ pub struct Backend {
     /// The control plane it is an access point of; `None` for a plain
     /// backend.
     pub control_plane: Option<ControlPlane>,
+    /// With [`BackendAuth::TurnToken`], the audience of the token the
+    /// gateway signs for each turn and presents instead of a key.
+    pub audience: Option<String>,
 }
 
 /// A route, resolved.
@@ -550,7 +617,13 @@ impl Gateway {
                 ));
             }
             if let Some(plane) = b.control_plane {
-                check_control_plane(name, plane, b.api, b.key.is_some(), compat)?;
+                check_control_plane(
+                    name,
+                    plane,
+                    b.api,
+                    b.key.is_some() || b.auth.is_some(),
+                    compat,
+                )?;
             }
             let source = b.key.as_deref().map(&key);
             // A control plane's token in a variable of this process: no
@@ -567,10 +640,12 @@ impl Gateway {
                 }
                 branchyard_support::child::hide(var);
             }
+            let audience = check_auth(name, b, &signer)?;
             backends.push(Backend {
                 name: name.clone(),
                 api: b.api,
                 url,
+                audience,
                 key: source,
                 header: b.header.clone(),
                 compat,
@@ -913,7 +988,8 @@ fn check_control_plane(
     }
     if !has_key {
         return Err(format!(
-            "{at}.key: a control-plane backend ({plane}) needs a key: the token it is called with"
+            "{at}.key: a control-plane backend ({plane}) needs a key (the token it is called \
+             with), or auth = \"turn-token\" with an audience on a server"
         ));
     }
     if compat != Compat::Off {
@@ -924,6 +1000,46 @@ fn check_control_plane(
         ));
     }
     Ok(())
+}
+
+/// The audience of backend `name`'s signed token, when it is called with
+/// one, or why its `auth` and `audience` are refused: a signed token goes
+/// only to an AIPlex backend, needs an audience and no `key`, and a yard
+/// whose tokens' issuer AIPlex cannot fetch keys from, or whose tenant it
+/// cannot name, cannot sign one.
+fn check_auth(name: &str, b: &BackendConfig, signer: &Signer) -> Result<Option<String>, String> {
+    let at = format!("models.backends.{name}");
+    match (b.auth, &b.audience) {
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(format!(
+            "{at}.audience: is only for auth = \"turn-token\"; add it, or remove audience"
+        )),
+        (Some(BackendAuth::TurnToken), _) if b.control_plane.is_none() => Err(format!(
+            "{at}.auth: a token Branchyard signs goes only to an AIPlex backend: add \
+             control_plane = \"aiplex\", or use key"
+        )),
+        (Some(BackendAuth::TurnToken), None) => Err(format!(
+            "{at}.audience: auth = \"turn-token\" needs audience = \"...\": the audience the \
+             AIPlex binding expects"
+        )),
+        (Some(BackendAuth::TurnToken), Some(audience)) if audience.trim().is_empty() => Err(
+            format!("{at}.audience: is empty; write the audience the AIPlex binding expects"),
+        ),
+        (Some(BackendAuth::TurnToken), Some(_)) if b.key.is_some() => Err(format!(
+            "{at}: names both key and auth = \"turn-token\": one credential, not two; remove one"
+        )),
+        (Some(BackendAuth::TurnToken), Some(audience)) => {
+            federable_issuer(&signer.issuer).map_err(|why| format!("{at}.auth: {why}"))?;
+            if !federable_tenant(&signer.tenant) {
+                return Err(format!(
+                    "{at}.auth: the tenant {:?} cannot be named in the token's subject \
+                     (branchyard:<tenant>, 1 to 128 of A-Z a-z 0-9 . _ @ + -); use key instead",
+                    signer.tenant
+                ));
+            }
+            Ok(Some(audience.clone()))
+        }
+    }
 }
 
 /// Refuse a control-plane backend that no route names when a plain
@@ -1250,6 +1366,8 @@ impl ModelCall {
             if let Some(id) = &plane.request_id {
                 detail.push(format!("{} request {id}", plane.plane));
             }
+            // The id AIPlex's ledger holds as `client_request_id`.
+            detail.push(format!("call {}", plane.call_id));
         }
         out.push_str(&format!(" ({})", detail.join(", ")));
         out
@@ -1527,6 +1645,14 @@ pub(crate) fn prepare(
         subject,
         harness: record.info.harness.clone(),
         trace_parent: trace_parent.map(str::to_owned),
+        signer: Arc::clone(&keys),
+        issuer: gateway.signer.issuer.clone(),
+        tenant: record
+            .actor
+            .as_ref()
+            .map_or_else(|| gateway.signer.tenant.clone(), |a| a.tenant.clone()),
+        deadline_ms,
+        signed: gateway::SignedTokens::default(),
         max_usd: budget.max_usd,
         cost_before: record.info.cost_usd.unwrap_or(0.0),
         held: reserved,
@@ -2281,7 +2407,8 @@ mod tests {
         assert_eq!(
             call.describe(),
             "claude-sonnet-4-6 refused via aiplex-anthropic \
-             (429, refused by aiplex (QUOTA_BUDGET_EXHAUSTED), 4 ms, aiplex request req-17)"
+             (429, refused by aiplex (QUOTA_BUDGET_EXHAUSTED), 4 ms, aiplex request req-17, \
+             call AAECAwQFBgcICQoLDA0ODw)"
         );
         let value = serde_json::to_value(&call).unwrap();
         assert_eq!(
@@ -2334,6 +2461,109 @@ mod tests {
         }
         // A plain backend's key is not hidden, whatever its name.
         assert!(built(json!({"backends": {"p": {"api": "openai", "key": "HOME"}}})).is_ok());
+    }
+
+    #[test]
+    fn a_signed_token_needs_an_aiplex_backend_an_audience_and_an_issuer_aiplex_can_reach() {
+        let signed = |issuer: &str, tenant: &str, backend: Value| {
+            let config: Config = serde_json::from_value(json!({"backends": {"ap": backend}}))
+                .map_err(|e| e.to_string())?;
+            let signer = Signer {
+                issuer: issuer.into(),
+                tenant: tenant.into(),
+                ..signer()
+            };
+            Gateway::new(&config, signer, |n| KeySource::Env(n.into()))
+        };
+        let plane = json!({"api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+            "control_plane": "aiplex", "auth": "turn-token",
+            "audience": "https://aiplex.example.com"});
+        // A public https issuer, and plain http on loopback only.
+        for issuer in [
+            "https://by.example.com",
+            "https://by.example.com:8443",
+            "http://127.0.0.1:7400",
+            "http://[::1]:7400",
+            "http://localhost:7400",
+        ] {
+            let gateway = signed(issuer, "local", plane.clone()).unwrap();
+            assert_eq!(
+                gateway.backends[0].audience.as_deref(),
+                Some("https://aiplex.example.com")
+            );
+            assert_eq!(gateway.backends[0].key, None);
+        }
+        for (issuer, needle) in [
+            ("branchyard:local:abc", "a local yard"),
+            ("http://10.0.0.5:7400", "not loopback"),
+            ("https://by.example.com/", "has a path"),
+            ("https://by.example.com/branchyard", "has a path"),
+            ("by.example.com", "not a URL"),
+        ] {
+            let error = signed(issuer, "local", plane.clone()).unwrap_err();
+            assert!(
+                error.contains("models.backends.ap.auth") && error.contains(needle),
+                "{issuer}: {error}"
+            );
+        }
+        let error = signed(issuer_ok(), "acme corp", plane.clone()).unwrap_err();
+        assert!(
+            error.contains("tenant") && error.contains("use key"),
+            "{error}"
+        );
+        let local = signed("branchyard:local:abc", "local", plane.clone()).unwrap_err();
+        assert!(local.contains("use key"), "{local}");
+        // The shape of the backend, by name.
+        let with = |extra: Value| {
+            let mut backend = json!({"api": "anthropic", "url": "https://aiplex.example.com/ap/x"});
+            for (k, v) in extra.as_object().unwrap() {
+                backend[k] = v.clone();
+            }
+            signed(issuer_ok(), "local", backend)
+        };
+        for (extra, needles) in [
+            (
+                json!({"auth": "turn-token", "audience": "a", "key": "k"}),
+                vec!["models.backends.ap.auth", "control_plane"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token"}),
+                vec!["models.backends.ap.audience", "needs audience"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token", "audience": ""}),
+                vec!["models.backends.ap.audience", "is empty"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "turn-token", "audience": "a",
+                    "key": "AIPLEX_TOKEN"}),
+                vec!["one credential, not two"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "key": "AIPLEX_TOKEN", "audience": "a"}),
+                vec!["models.backends.ap.audience", "only for auth"],
+            ),
+            (
+                json!({"control_plane": "aiplex", "auth": "oidc"}),
+                vec!["`oidc`", "`turn-token`"],
+            ),
+        ] {
+            let error = with(extra.clone()).unwrap_err();
+            for needle in needles {
+                assert!(
+                    error.contains(needle),
+                    "{needle:?} not in {error} ({extra})"
+                );
+            }
+        }
+        assert!(federable_tenant("acme.eu_1@x+y-z"));
+        assert!(!federable_tenant(""));
+        assert!(!federable_tenant(&"a".repeat(129)));
+        assert!(!federable_tenant("a/b"));
+    }
+
+    fn issuer_ok() -> &'static str {
+        "https://by.example.com"
     }
 
     #[test]
