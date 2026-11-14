@@ -86,7 +86,7 @@ fn fixture() -> Fixture {
         .prefix("by-providers-")
         .tempdir()
         .unwrap();
-    std::process::Command::new("git")
+    branchyard_support::child::command("git")
         .args(["init", "-q"])
         .arg(dir.path())
         .status()

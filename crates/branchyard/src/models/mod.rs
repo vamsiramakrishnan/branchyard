@@ -552,11 +552,17 @@ impl Gateway {
             if let Some(plane) = b.control_plane {
                 check_control_plane(name, plane, b.api, b.key.is_some(), compat)?;
             }
+            let source = b.key.as_deref().map(&key);
+            // A control plane's token in a variable of this process: no
+            // child this process starts inherits it (`branchyard_support::child`).
+            if let (Some(_), Some(KeySource::Env(var))) = (b.control_plane, &source) {
+                branchyard_support::child::hide(var);
+            }
             backends.push(Backend {
                 name: name.clone(),
                 api: b.api,
                 url,
-                key: b.key.as_deref().map(&key),
+                key: source,
                 header: b.header.clone(),
                 compat,
                 control_plane: b.control_plane,

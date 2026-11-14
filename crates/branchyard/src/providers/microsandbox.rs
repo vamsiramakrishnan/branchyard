@@ -365,7 +365,7 @@ pub(super) mod tests {
             .prefix("by-placement-")
             .tempdir()
             .unwrap();
-        std::process::Command::new("git")
+        branchyard_support::child::command("git")
             .args(["init", "-q"])
             .arg(dir.path())
             .status()

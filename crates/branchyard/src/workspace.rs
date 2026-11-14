@@ -45,7 +45,7 @@ use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -509,7 +509,7 @@ pub(crate) fn shell_env(
             tail => format!("shell_setup `{snippet}` {how}: {tail}"),
         }
     };
-    let mut child = Command::new("/bin/sh")
+    let mut child = branchyard_support::child::command("/bin/sh")
         .arg("-c")
         .arg(SHELL_CAPTURE)
         .arg("by-shell-setup")
@@ -1167,7 +1167,7 @@ fn prepared(
 /// Every path in `worktree` git does not track, ignored or not, a wholly
 /// untracked directory once (with a trailing `/` removed).
 pub(crate) fn untracked(worktree: &Path) -> BTreeSet<String> {
-    let output = Command::new("git")
+    let output = branchyard_support::child::command("git")
         .arg("-C")
         .arg(worktree)
         .args(["ls-files", "-z", "--others", "--directory"])
@@ -1261,7 +1261,7 @@ pub(crate) fn replicate(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let status = Command::new("cp")
+        let status = branchyard_support::child::command("cp")
             .arg("-a")
             .arg(&source)
             .arg(&target)
@@ -1575,7 +1575,7 @@ fn tracked(root: &Path, paths: &BTreeSet<String>) -> BTreeSet<String> {
     let mut tracked = BTreeSet::new();
     let paths: Vec<&String> = paths.iter().collect();
     for chunk in paths.chunks(500) {
-        let out = Command::new("git")
+        let out = branchyard_support::child::command("git")
             .args(["ls-files", "-z", "--cached", "--"])
             .args(chunk.iter().map(|p| format!(":(literal){p}")))
             .current_dir(root)
@@ -1593,7 +1593,7 @@ fn tracked(root: &Path, paths: &BTreeSet<String>) -> BTreeSet<String> {
 
 /// Whether the worktree's branch tracks no file under `dir`.
 fn tracks_nothing(worktree: &Path, dir: &str) -> bool {
-    Command::new("git")
+    branchyard_support::child::command("git")
         .args(["ls-files", "-z", "--cached", "--"])
         .arg(format!(":(literal){dir}"))
         .current_dir(worktree)
@@ -1653,7 +1653,7 @@ pub(crate) fn run_commands(
             }
         };
         let spawned = {
-            let mut sh = Command::new("sh");
+            let mut sh = branchyard_support::child::command("sh");
             sh.arg("-c")
                 .arg(command)
                 .current_dir(cwd)

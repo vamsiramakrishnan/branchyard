@@ -32,7 +32,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use branchyard_controls::catalog;
 use branchyard_support::best_effort;
@@ -413,7 +413,7 @@ impl Machine for LocalMachine {
              it or on PATH; `by gateway start` starts it"
                 .to_owned()
         })?;
-        let output = Command::new(&by)
+        let output = branchyard_support::child::command(&by)
             .args(["gateway", "start", "--json"])
             .current_dir(yard.root())
             .stdin(Stdio::null())
@@ -1265,7 +1265,7 @@ mod tests {
 
     fn repository() -> tempfile::TempDir {
         let dir = tempfile::Builder::new().prefix("by-up-").tempdir().unwrap();
-        let status = std::process::Command::new("git")
+        let status = branchyard_support::child::command("git")
             .args(["init", "-q"])
             .arg(dir.path())
             .status()

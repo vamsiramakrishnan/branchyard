@@ -32,6 +32,9 @@ for model in sys.argv[1:]:
             response.read()
             print(f"call {model}: {response.status}")
     except urllib.error.HTTPError as error:
+        # Read the error to its end, as an SDK does: a test about a harness
+        # that goes away says so.
+        error.read()
         print(f"call {model}: {error.code}")
 "#;
 

@@ -4,7 +4,7 @@ use branchyard_support::LockExt as _;
 use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,7 +51,7 @@ pub(crate) fn run_until(
         ));
     };
     let (reader, writer) = io::pipe()?;
-    let mut cmd = Command::new(program);
+    let mut cmd = branchyard_support::child::command(program);
     cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())

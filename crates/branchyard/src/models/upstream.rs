@@ -84,6 +84,18 @@ pub enum Stream {
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
 }
 
+impl Stream {
+    /// Another handle on the TCP socket under this stream, which shares its
+    /// options: a read timeout set on it holds for this stream's reads.
+    fn socket(&self) -> Option<TcpStream> {
+        let tcp = match self {
+            Stream::Plain(s) => s,
+            Stream::Tls(s) => &s.sock,
+        };
+        tcp.try_clone().ok()
+    }
+}
+
 impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -185,9 +197,22 @@ pub struct Response {
     pub reason: String,
     pub headers: Vec<(String, String)>,
     pub body: Body,
+    /// The socket the body is read from, to bound how long a read of it
+    /// waits ([`Response::wait_at_most`]); `None` when it could not be
+    /// cloned.
+    socket: Option<TcpStream>,
 }
 
 impl Response {
+    /// Make each later read of the body wait at most `wait` (at least a
+    /// millisecond), so a caller can hold the whole body to a deadline.
+    pub(crate) fn wait_at_most(&self, wait: Duration) -> io::Result<()> {
+        match &self.socket {
+            Some(socket) => socket.set_read_timeout(Some(wait.max(Duration::from_millis(1)))),
+            None => Err(io::Error::other("the backend's socket could not be cloned")),
+        }
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -221,19 +246,28 @@ pub fn send_within(
     body: &[u8],
     quiet: Duration,
 ) -> Result<Response, Failure> {
-    exchange(connect(target, quiet)?, target, method, path, headers, body)
+    exchange(
+        connect(target, quiet)?,
+        target,
+        (method, path, headers, body),
+        quiet,
+    )
 }
 
 /// Write the request on `stream`, and read the response head.
+/// The request [`exchange`] writes: its method, path, headers and body.
+type Outgoing<'a> = (&'a str, &'a str, &'a [(String, String)], &'a [u8]);
+
 fn exchange(
     mut stream: Stream,
     target: &Target,
-    method: &str,
-    path: &str,
-    headers: &[(String, String)],
-    body: &[u8],
+    (method, path, headers, body): Outgoing<'_>,
+    quiet: Duration,
 ) -> Result<Response, Failure> {
-    let exchange = |e: io::Error| Failure::Exchange(e.to_string());
+    let exchange = |e: io::Error| match quiet_for(e.kind()) {
+        true => timed_out(quiet),
+        false => Failure::Exchange(e.to_string()),
+    };
     let authority = target.authority();
     let line = format!("{}{path}", target.prefix);
     let content_length = (!body.is_empty()
@@ -251,16 +285,35 @@ fn exchange(
     stream.write_all(&head).map_err(exchange)?;
     stream.write_all(body).map_err(exchange)?;
     stream.flush().map_err(exchange)?;
-    read_response(BufReader::new(stream), method == "HEAD")
+    read_response(BufReader::new(stream), method == "HEAD", quiet)
 }
 
-fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> Result<Response, Failure> {
+/// Whether a read that failed with `kind` waited out its timeout.
+fn quiet_for(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
+/// The failure of a backend that sent nothing for `quiet`.
+fn timed_out(quiet: Duration) -> Failure {
+    Failure::Exchange(format!(
+        "timed out: no answer for {}",
+        branchyard_support::time::human_duration(quiet)
+    ))
+}
+
+fn read_response(
+    mut reader: BufReader<Stream>,
+    head_only: bool,
+    quiet: Duration,
+) -> Result<Response, Failure> {
     let bad = |e: wire::WireError| match e {
         wire::WireError::ConnectionClosed => {
             Failure::Exchange("the backend closed the connection before responding".into())
         }
+        wire::WireError::Io { kind, .. } if quiet_for(kind) => timed_out(quiet),
         e => Failure::Exchange(format!("the backend's response is malformed: {e}")),
     };
+    let socket = reader.get_ref().socket();
     let head = wire::read_response_head(&mut reader, MAX_HEAD).map_err(bad)?;
     let framing = wire::response_framing(head.status, &head.headers, head_only).map_err(bad)?;
     Ok(Response {
@@ -268,6 +321,7 @@ fn read_response(mut reader: BufReader<Stream>, head_only: bool) -> Result<Respo
         reason: head.reason,
         headers: head.headers,
         body: Body::new(reader, framing),
+        socket,
     })
 }
 
@@ -432,6 +486,11 @@ pub struct Transport {
 }
 
 impl Transport {
+    /// How long one read from a backend may wait.
+    pub(crate) fn quiet(&self) -> Duration {
+        self.timeout
+    }
+
     /// A transport through `proxy` (an `http://` URL), not using it for
     /// the hosts `no_proxy` lists (comma separated), trusting the
     /// certificates in `roots_pem` too.
@@ -538,7 +597,12 @@ impl Transport {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Result<Response, Failure> {
-        exchange(self.open(target)?, target, method, path, headers, body)
+        exchange(
+            self.open(target)?,
+            target,
+            (method, path, headers, body),
+            self.timeout,
+        )
     }
 }
 
@@ -584,8 +648,12 @@ mod tests {
             .unwrap();
         backend.write_all(bytes).unwrap();
         drop(backend);
-        let mut response = read_response(BufReader::new(Stream::Plain(client)), head_only)
-            .map_err(|e| e.to_string())?;
+        let mut response = read_response(
+            BufReader::new(Stream::Plain(client)),
+            head_only,
+            Duration::from_secs(10),
+        )
+        .map_err(|e| e.to_string())?;
         let mut body = Vec::new();
         response
             .body

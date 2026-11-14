@@ -24,7 +24,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use branchyard_provision::skills::Skill;
 use serde::{Deserialize, Serialize};
@@ -372,7 +372,7 @@ pub fn missing(store: &Path, index: &Index) -> Vec<Entry> {
 /// Run `program` with `args` in `dir` (this process's directory when
 /// `None`) and fail with its last line of stderr.
 fn run(program: &str, args: &[String], dir: Option<&Path>, hint: &str) -> Result<(), String> {
-    let mut command = Command::new(program);
+    let mut command = branchyard_support::child::command(program);
     command.args(args).stdin(Stdio::null());
     if let Some(dir) = dir {
         command.current_dir(dir);

@@ -390,7 +390,7 @@ fn dropped(name: &str) -> bool {
 }
 
 /// Of what the harness sent, the request headers a control-plane backend
-/// is sent: the body's content headers, `Accept`, the user agent, the
+/// is sent: the body's content type, `Accept`, the user agent, the
 /// APIs' own version, beta and idempotency headers. Nothing else of the
 /// harness's reaches a control plane, which reads some headers as who is
 /// calling (an IAP assertion, `X-Forwarded-For`, a cookie, its own
@@ -398,7 +398,6 @@ fn dropped(name: &str) -> bool {
 /// (`docs/model-gateway.md`, "What is sent").
 pub(crate) const CONTROL_PLANE_REQUEST_HEADERS: &[&str] = &[
     "content-type",
-    "content-encoding",
     "accept",
     "user-agent",
     "anthropic-version",
@@ -415,13 +414,12 @@ fn to_control_plane(name: &str) -> bool {
 }
 
 /// Of a control-plane backend's answer, the response headers the harness
-/// gets: what its SDK reads from an answer (the body's content headers,
+/// gets: what its SDK reads from an answer (the body's content type,
 /// cache control, when and whether to retry, the provider's request id
 /// and rate-limit headers). Nothing else is relayed: no cookie, location,
 /// link, server or the control plane's own headers.
 pub(crate) const CONTROL_PLANE_RESPONSE_HEADERS: &[&str] = &[
     "content-type",
-    "content-encoding",
     "cache-control",
     "retry-after",
     "retry-after-ms",
@@ -585,8 +583,8 @@ fn upstream_headers(
     let mut headers: Vec<(String, String)> = request
         .headers
         .iter()
-        .filter(|(n, _)| match governed {
-            true => to_control_plane(n),
+        .filter(|(n, v)| match governed {
+            true => to_control_plane(n) && v.len() <= MAX_RELAYED_VALUE,
             false => !dropped(n),
         })
         .cloned()
@@ -618,14 +616,14 @@ fn upstream_headers(
 
 /// The last backend that failed a call: its answer, the body kept of it,
 /// the backend, the model it was asked for when translated, its verdict,
-/// and the key it was sent.
+/// and, for a control-plane backend, why its answer is withheld if it is.
 type Failed<'a> = (
     upstream::Response,
     Vec<u8>,
     &'a Backend,
     Option<String>,
     Verdict,
-    String,
+    Option<String>,
 );
 
 /// The backend that answered a call: its answer, the backend, the model it
@@ -961,6 +959,36 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 continue;
             }
         };
+        if backend.control_plane.is_some() {
+            // A key this short would be found in answers that do not hold
+            // it; the message names the backend, never the value.
+            if key.chars().count() < MIN_CONTROL_PLANE_KEY {
+                call.failed_over.push(format!(
+                    "{}: its key is shorter than {MIN_CONTROL_PLANE_KEY} characters, too short \
+                     for a control plane's token",
+                    backend.name
+                ));
+                continue;
+            }
+            // A body the gateway did not read (it must read the model) is
+            // never sent to a control plane.
+            if let Some(coding) = encoded(&request.headers) {
+                let why = format!(
+                    "the request body is encoded ({coding}); a control-plane backend is sent \
+                     only a body the gateway read"
+                );
+                done(&mut call, "failed", 400, Some(why.clone()));
+                refuse(
+                    &mut out,
+                    api,
+                    400,
+                    "bad_request",
+                    &format!("Branchyard's model gateway: {why}"),
+                    &[],
+                );
+                return;
+            }
+        }
         let target = match Target::parse(&backend.url) {
             Ok(target) => target,
             Err(why) => {
@@ -1097,14 +1125,25 @@ fn handle(stream: TcpStream, state: &TurnState) {
                     ),
                     None => format!("{}: {}", backend.name, response.status),
                 });
-                let mut kept = Vec::new();
-                best_effort(
-                    "read the backend's error body",
-                    (&mut response.body)
-                        .take(MAX_ERROR_BODY as u64)
-                        .read_to_end(&mut kept),
-                );
-                last = Some((response, kept, backend, as_model, verdict, key));
+                // A control plane's answer is read whole and checked, within
+                // a time bound; a plain backend's as it always was.
+                let (kept, withheld) = match backend.control_plane {
+                    Some(_) => match encoded(&response.headers) {
+                        Some(coding) => (Vec::new(), Some(encoded_why(&coding))),
+                        None => read_checked(&mut response, &key, gateway.transport.quiet()),
+                    },
+                    None => {
+                        let mut kept = Vec::new();
+                        best_effort(
+                            "read the backend's error body",
+                            (&mut response.body)
+                                .take(MAX_ERROR_BODY as u64)
+                                .read_to_end(&mut kept),
+                        );
+                        (kept, None)
+                    }
+                };
+                last = Some((response, kept, backend, as_model, verdict, withheld));
             }
             Ok(response) => {
                 answered = Some((response, backend, as_model, recording, verdict, key));
@@ -1116,15 +1155,25 @@ fn handle(stream: TcpStream, state: &TurnState) {
         match last {
             // Every backend failed: the harness gets the last one's
             // answer, as it would have from the provider, in its own API.
-            Some((mut response, kept, backend, as_model, verdict, key)) => {
+            Some((mut response, kept, backend, as_model, verdict, mut withheld)) => {
                 call.failed_over.pop();
                 call.backend = Some(backend.name.clone());
                 call.translated = as_model.clone();
-                let mut withheld = None;
                 if let Some(plane) = backend.control_plane {
                     call.control_plane = Some(verdict.record(plane, &attribution));
-                    hide_control_plane(&mut response.headers);
-                    withheld = withhold(&kept, &key, kept.len() >= MAX_ERROR_BODY);
+                    let host = Target::parse(&backend.url)
+                        .map(|t| t.host)
+                        .unwrap_or_default();
+                    // Without its key the headers cannot be checked for it:
+                    // every one is then dropped.
+                    let key = backend
+                        .key
+                        .as_ref()
+                        .and_then(|k| k.read().ok())
+                        .unwrap_or_default();
+                    if let Err(why) = hide_control_plane(&mut response.headers, &key, &host) {
+                        withheld = withheld.or(Some(why));
+                    }
                 }
                 let status = response.status;
                 if let Some(why) = withheld {
@@ -1132,7 +1181,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                     // own error, with the status.
                     let reason = with_note(
                         (!call.failed_over.is_empty()).then(|| call.failed_over.join("; ")),
-                        Some(why.to_owned()),
+                        Some(why.clone()),
                     );
                     done(&mut call, "failed", status, reason);
                     refuse(
@@ -1195,31 +1244,39 @@ fn handle(stream: TcpStream, state: &TurnState) {
     call.backend = Some(backend.clone());
     call.translated = as_model.clone();
     call.status = response.status;
+    let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
+    // A control plane's answer: its headers by allow-list and checked; a
+    // body in a coding the gateway did not ask for is not relayed, whatever
+    // the status (it cannot be checked or metered); one that is not a
+    // success is read whole, within MAX_ERROR_BODY and ERROR_BODY_TIME, and
+    // checked for the credential before the harness sees a byte of it.
+    // Withheld, it is neither shown nor kept.
+    let mut prefetched: Option<std::io::Cursor<Vec<u8>>> = None;
+    let mut withheld: Option<String> = None;
     if let Some(plane) = chosen.control_plane {
         call.control_plane = Some(verdict.record(plane, &attribution));
-        hide_control_plane(&mut response.headers);
+        // The coding first: the allow-list below drops its header.
+        if let Some(coding) = encoded(&response.headers) {
+            withheld = Some(encoded_why(&coding));
+        }
+        let host = Target::parse(&chosen.url)
+            .map(|t| t.host)
+            .unwrap_or_default();
+        if let Err(why) = hide_control_plane(&mut response.headers, &key, &host) {
+            withheld = withheld.or(Some(why));
+        }
+        if withheld.is_none() && !response_ok(response.status) && !no_body {
+            let (whole, why) = read_checked(&mut response, &key, gateway.transport.quiet());
+            withheld = why;
+            prefetched = Some(std::io::Cursor::new(whole));
+        }
+        // A success that cannot be relayed is a failure of the call.
+        if withheld.is_some() && response_ok(response.status) {
+            call.status = 502;
+        }
     }
     let sse = is_sse(&response);
     call.streamed = sse;
-    let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
-    // A control plane's answer that is not a success is read whole, up to
-    // MAX_ERROR_BODY, and checked for the credential the gateway sent before
-    // the harness sees a byte of it; withheld, it is neither shown nor kept.
-    let mut prefetched: Option<std::io::Cursor<Vec<u8>>> = None;
-    let mut withheld: Option<String> = None;
-    if chosen.control_plane.is_some() && !response_ok(response.status) && !no_body {
-        let mut whole = Vec::new();
-        withheld = match (&mut response.body)
-            .take(MAX_ERROR_BODY as u64 + 1)
-            .read_to_end(&mut whole)
-        {
-            Ok(_) => withhold(&whole, &key, whole.len() > MAX_ERROR_BODY).map(str::to_owned),
-            Err(e) => Some(format!(
-                "the control plane's answer broke off before it could be checked: {e}"
-            )),
-        };
-        prefetched = Some(std::io::Cursor::new(whole));
-    }
     // Usage and tool calls are read in the backend's shape: the harness's
     // own, unless the request was translated.
     let backend_api = chosen.api;
@@ -1230,7 +1287,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
     let mut buf = vec![0u8; 16 * 1024];
     let mut broken: Option<String> = None;
     let mut client_gone = false;
-    let status = response.status;
+    let status = call.status;
     let source: &mut dyn Read = match prefetched.as_mut() {
         Some(bytes) => bytes,
         None => &mut response.body,
@@ -1274,7 +1331,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                             }
                         }
                         Err(e) => {
-                            broken = Some(format!("the backend's response broke off: {e}"));
+                            broken = Some(broke_off(&e, gateway.transport.quiet()));
                             break;
                         }
                     }
@@ -1303,7 +1360,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
                         }
                     }
                     Err(e) => {
-                        broken = Some(format!("the backend's response broke off: {e}"));
+                        broken = Some(broke_off(&e, gateway.transport.quiet()));
                         break;
                     }
                 }
@@ -1321,7 +1378,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         (Some(_), false, None) => {
             let mut whole = Vec::new();
             match source.take(MAX_BODY as u64 + 1).read_to_end(&mut whole) {
-                Err(e) => broken = Some(format!("the backend's response broke off: {e}")),
+                Err(e) => broken = Some(broke_off(&e, gateway.transport.quiet())),
                 Ok(_) if whole.len() > MAX_BODY => {
                     broken = Some("the backend's response is too large to translate".into())
                 }
@@ -1457,13 +1514,192 @@ fn for_gemini_backend(state: &TurnState, backend: &Backend, model: &str, body: V
     }
 }
 
+/// The longest value of a header the gateway relays between the harness and
+/// a control-plane backend, in bytes; a longer one is dropped.
+pub(crate) const MAX_RELAYED_VALUE: usize = 256;
+
+/// The shortest key a control-plane backend may be called with: a token,
+/// long enough that finding it in an answer means the answer holds it.
+pub(crate) const MIN_CONTROL_PLANE_KEY: usize = 16;
+
+/// How long a control-plane backend's answer that is not a success may take
+/// to arrive whole, so it can be checked before the harness sees it.
+pub(crate) const ERROR_BODY_TIME: Duration = Duration::from_secs(30);
+
+/// The content coding an answer or a request says its body is in, when it
+/// is not `identity`.
+fn encoded(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
+        .find(|v| !v.is_empty() && v != "identity")
+}
+
+/// Whether `value` is a delay in seconds (at most a day) or an HTTP date.
+fn retry_after_ok(value: &str) -> bool {
+    match value.bytes().all(|b| b.is_ascii_digit()) {
+        true => value.len() <= 6 && value.parse::<u32>().is_ok_and(|s| s <= 86_400),
+        false => branchyard_support::time::parse_http_date(value).is_ok(),
+    }
+}
+
+/// Whether `value` is a `type/subtype` media type, with parameters.
+fn media_type_ok(value: &str) -> bool {
+    let token = |t: &str| {
+        !t.is_empty()
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$&^_.+-".contains(&b))
+    };
+    let essence = value.split(';').next().unwrap_or("").trim();
+    matches!(essence.split_once('/'), Some((kind, sub)) if token(kind) && token(sub))
+}
+
+/// Whether a control-plane backend's response header `name: value` may
+/// reach the harness: its name on the allow-list, neither name nor value
+/// holding `key`, the value short, printable, naming no URL and not the
+/// backend's `host`, and of its header's grammar where that is known.
+fn relayable(name: &str, value: &str, key: &str, host: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let held = |text: &str| !key.is_empty() && text.contains(key);
+    from_control_plane(name)
+        && !held(name)
+        && !held(value)
+        && value.len() <= MAX_RELAYED_VALUE
+        && value.bytes().all(|b| (0x20..0x7f).contains(&b))
+        && !value.contains("://")
+        && (host.is_empty()
+            || !value
+                .to_ascii_lowercase()
+                .contains(&host.to_ascii_lowercase()))
+        && match lower.as_str() {
+            "retry-after" => retry_after_ok(value.trim()),
+            "retry-after-ms" => value
+                .trim()
+                .parse::<f64>()
+                .is_ok_and(|ms| (0.0..=86_400_000.0).contains(&ms)),
+            "x-should-retry" => matches!(value.trim(), "true" | "false"),
+            "content-type" => media_type_ok(value),
+            _ => true,
+        }
+}
+
 /// Keep of a control-plane backend's answer only the headers a harness's
-/// SDK reads ([`CONTROL_PLANE_RESPONSE_HEADERS`]): nothing that would point
-/// the harness at the control plane (a `WWW-Authenticate` challenge naming
-/// its URL, a `Location`, a `Link`, a cookie) reaches it. Status, body and
-/// `Retry-After` reach the harness as they are.
-fn hide_control_plane(headers: &mut Vec<(String, String)>) {
-    headers.retain(|(name, _)| from_control_plane(name));
+/// SDK reads ([`CONTROL_PLANE_RESPONSE_HEADERS`]) whose values pass
+/// [`relayable`], one of each name: a name the answer sends twice is
+/// dropped. `Err` when the content type was dropped, which leaves the
+/// answer unusable: then it is a failure of that backend.
+fn hide_control_plane(
+    headers: &mut Vec<(String, String)>,
+    key: &str,
+    host: &str,
+) -> Result<(), String> {
+    let typed = headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
+    let count = |name: &str| {
+        headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .count()
+    };
+    let once: Vec<bool> = headers.iter().map(|(n, _)| count(n) == 1).collect();
+    let mut kept = once.into_iter();
+    headers.retain(|(n, v)| kept.next().unwrap_or(false) && relayable(n, v, key, host));
+    let still = headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case("content-type"));
+    match typed && !still {
+        true => Err("the control plane's answer was withheld: its Content-Type \
+                     could not be relayed"
+            .to_owned()),
+        false => Ok(()),
+    }
+}
+
+/// Read a control-plane backend's answer that is not a success, whole: at
+/// most one byte past [`MAX_ERROR_BODY`] and within [`ERROR_BODY_TIME`]
+/// in all. The bytes, and why the answer is withheld if it is: it holds
+/// `key`, it is longer than the bound, it did not arrive in time, or it
+/// broke off.
+fn read_checked(
+    response: &mut upstream::Response,
+    key: &str,
+    quiet: Duration,
+) -> (Vec<u8>, Option<String>) {
+    let deadline = Instant::now() + ERROR_BODY_TIME;
+    let mut whole = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    let late = || {
+        format!(
+            "the control plane's answer was withheld: it could not be read in time \
+             (within {})",
+            branchyard_support::time::human_duration(ERROR_BODY_TIME)
+        )
+    };
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return (whole, Some(late()));
+        }
+        if let Err(e) = response.wait_at_most(left.min(quiet)) {
+            return (
+                whole,
+                Some(format!(
+                    "the control plane's answer was withheld: its read could not be bounded: {e}"
+                )),
+            );
+        }
+        match response.body.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                whole.extend_from_slice(&buf[..n]);
+                if whole.len() > MAX_ERROR_BODY {
+                    break;
+                }
+            }
+            Err(e) if quiet_read(&e) && Instant::now() >= deadline => return (whole, Some(late())),
+            Err(e) => {
+                return (
+                    whole,
+                    Some(format!(
+                        "the control plane's answer was withheld: {}",
+                        broke_off(&e, quiet)
+                    )),
+                )
+            }
+        }
+    }
+    let why = withhold(&whole, key, whole.len() > MAX_ERROR_BODY).map(str::to_owned);
+    (whole, why)
+}
+
+/// Why an answer in a content coding the gateway did not ask for is withheld.
+fn encoded_why(coding: &str) -> String {
+    format!(
+        "the control plane's answer was withheld: it was encoded ({coding}), which the gateway \
+         did not ask for, so it could not be checked"
+    )
+}
+
+/// Whether a read failed because it waited out its timeout.
+fn quiet_read(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
+}
+
+/// What went wrong reading a backend's answer, saying so when it went
+/// quiet for `quiet`.
+fn broke_off(e: &io::Error, quiet: Duration) -> String {
+    match quiet_read(e) {
+        true => format!(
+            "the backend's response timed out: nothing for {}",
+            branchyard_support::time::human_duration(quiet)
+        ),
+        false => format!("the backend's response broke off: {e}"),
+    }
 }
 
 /// The `Retry-After` of an answer, for an error the gateway writes itself.
@@ -2222,7 +2458,6 @@ mod tests {
                 "openai-beta",
                 "idempotency-key",
                 "accept",
-                "content-encoding",
                 "accept-encoding",
                 "authorization",
                 "x-client-request-id",
@@ -2248,7 +2483,6 @@ mod tests {
     fn only_what_an_sdk_reads_of_a_control_planes_answer_reaches_the_harness() {
         for name in [
             "Content-Type",
-            "content-encoding",
             "Cache-Control",
             "Retry-After",
             "retry-after-ms",
@@ -2282,6 +2516,99 @@ mod tests {
         for status in [200, 204, 304, 400, 429, 503] {
             assert!(!redirect(status), "{status}");
         }
+    }
+
+    #[test]
+    fn a_relayed_header_is_checked_for_the_key_a_url_its_length_and_its_grammar() {
+        let key = "aiplex-token-123456";
+        let host = "aiplex.example";
+        for (name, value) in [
+            ("Content-Type", "text/event-stream"),
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Cache-Control", "no-cache"),
+            ("Retry-After", "30"),
+            ("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+            ("retry-after-ms", "2500"),
+            ("retry-after-ms", "2500.5"),
+            ("x-should-retry", "false"),
+            ("request-id", "req_011CS"),
+            ("x-ratelimit-remaining-tokens", "1000"),
+        ] {
+            assert!(relayable(name, value, key, host), "{name}: {value}");
+        }
+        let long = "r".repeat(MAX_RELAYED_VALUE + 1);
+        for (name, value) in [
+            ("X-Request-Id", "https://elsewhere.example/x?t=1"),
+            ("X-Request-Id", "aiplex-token-123456"),
+            (
+                "Content-Type",
+                "application/json; boundary=aiplex-token-123456",
+            ),
+            ("x-ratelimit-aiplex-token-123456", "1"),
+            (
+                "anthropic-ratelimit-requests-reset",
+                "https://aiplex.example/reset",
+            ),
+            ("request-id", "at AIPLEX.EXAMPLE"),
+            ("request-id", long.as_str()),
+            ("request-id", "tab\there"),
+            ("Retry-After", "1000000000000"),
+            ("Retry-After", "86401"),
+            ("Retry-After", "soon"),
+            ("retry-after-ms", "-1"),
+            ("retry-after-ms", "1e12"),
+            ("x-should-retry", "maybe"),
+            ("Content-Type", "json"),
+            ("Server", "aiplex"),
+        ] {
+            assert!(!relayable(name, value, key, host), "{name}: {value}");
+        }
+        // One of each name: a name sent twice is dropped, and a content type
+        // dropped makes the answer a failure.
+        let mut twice = vec![
+            ("Content-Type".to_owned(), "application/json".to_owned()),
+            ("content-type".to_owned(), "text/event-stream".to_owned()),
+            ("Retry-After".to_owned(), "3".to_owned()),
+        ];
+        let why = hide_control_plane(&mut twice, key, host).unwrap_err();
+        assert!(why.contains("Content-Type"), "{why}");
+        assert_eq!(pairs(&twice), [("Retry-After", "3")]);
+        let mut fine = vec![("Content-Type".to_owned(), "text/event-stream".to_owned())];
+        assert_eq!(hide_control_plane(&mut fine, key, host), Ok(()));
+        let mut untyped = vec![("Retry-After".to_owned(), "3".to_owned())];
+        assert_eq!(hide_control_plane(&mut untyped, key, host), Ok(()));
+        // A coding other than identity is named; identity and none are not.
+        let coded = |v: &str| encoded(&[("Content-Encoding".to_owned(), v.to_owned())]);
+        assert_eq!(coded("gzip").as_deref(), Some("gzip"));
+        assert_eq!(coded(" Deflate ").as_deref(), Some("deflate"));
+        assert_eq!(coded("identity"), None);
+        assert_eq!(encoded(&[]), None);
+        assert!(!from_control_plane("content-encoding"));
+        assert!(!to_control_plane("content-encoding"));
+    }
+
+    #[test]
+    fn a_harness_header_value_over_the_cap_is_not_sent_to_a_control_plane() {
+        let mut request = harness_request();
+        request
+            .headers
+            .push(("Idempotency-Key".into(), "k".repeat(5_000)));
+        request.headers.retain(|(n, _)| n != "User-Agent");
+        request
+            .headers
+            .push(("User-Agent".into(), "u".repeat(20_000)));
+        let sent = upstream_headers(&request, &governed(Api::Openai), "k", &attribution());
+        for name in ["idempotency-key", "user-agent"] {
+            assert!(
+                !sent.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)),
+                "{name}"
+            );
+        }
+        // A plain backend is sent them as before.
+        let sent = upstream_headers(&request, &plain(Api::Openai, None), "k", &attribution());
+        assert!(sent
+            .iter()
+            .any(|(n, v)| n == "User-Agent" && v.len() == 20_000));
     }
 
     #[test]
@@ -2469,7 +2796,7 @@ mod tests {
             ),
             ("X-Aiplex-Request-Id", "req-19"),
         ]);
-        hide_control_plane(&mut answer);
+        hide_control_plane(&mut answer, "aiplex-token-123456", "aiplex.test").unwrap();
         assert_eq!(pairs(&answer), [("Retry-After", "30")]);
     }
 

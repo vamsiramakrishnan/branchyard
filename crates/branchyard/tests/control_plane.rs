@@ -821,3 +821,269 @@ fn a_call_sent_to_aiplex_names_its_id_whatever_came_back() {
     second.finish();
     raw.finish();
 }
+
+#[test]
+fn an_answer_that_could_hide_the_token_or_hold_the_harness_is_not_relayed() {
+    let f = Fixture::new();
+    let (first, second, direct) = (aiplex("one"), aiplex("two"), aiplex("direct"));
+    // A key file holding one character.
+    std::fs::write(f.dir.join("short"), "e").unwrap();
+    let mut config = config(&first, &second, &direct);
+    config["backends"]["short-key"] = json!({"api": "anthropic",
+        "url": format!("{}/ap/ide", first.url()), "key": "short", "control_plane": "aiplex"});
+    let routes = config["routes"].as_array_mut().unwrap();
+    routes.insert(0, json!({"model": "*-plain", "backends": ["direct"]}));
+    routes.insert(0, json!({"model": "short-*", "backends": ["short-key"]}));
+    routes.push(json!({"model": "*", "backends": ["aiplex-anthropic"]}));
+    use_gateway_quiet(&f, config, Some(Duration::from_secs(3)));
+    let plan = json!([
+        call("gzip", "anthropic", "/v1/messages", "encoded-gzip", false),
+        call(
+            "deflate",
+            "anthropic",
+            "/v1/messages",
+            "encoded-deflate",
+            false
+        ),
+        call(
+            "gzip openai",
+            "openai",
+            "/chat/completions",
+            "encoded-gzip-o",
+            false
+        ),
+        call(
+            "deflate openai",
+            "openai",
+            "/chat/completions",
+            "encoded-deflate-o",
+            false
+        ),
+        call(
+            "gzip success",
+            "anthropic",
+            "/v1/messages",
+            "gzipped-ok",
+            false
+        ),
+        call(
+            "gzip plain",
+            "anthropic",
+            "/v1/messages",
+            "encoded-gzip-plain",
+            false
+        ),
+        call("hostile", "anthropic", "/v1/messages", "hostile-ok", false),
+        call(
+            "typed twice",
+            "anthropic",
+            "/v1/messages",
+            "typed-twice",
+            false
+        ),
+        call(
+            "boundary",
+            "anthropic",
+            "/v1/messages",
+            "boundary-ok",
+            false
+        ),
+        call(
+            "stream",
+            "anthropic",
+            "/v1/messages",
+            "claude-stream-ok",
+            true
+        ),
+        call(
+            "exact refusal",
+            "anthropic",
+            "/v1/messages",
+            "exact-refuse",
+            false
+        ),
+        call(
+            "over refusal",
+            "anthropic",
+            "/v1/messages",
+            "over-refuse",
+            false
+        ),
+        call(
+            "exact relay",
+            "anthropic",
+            "/v1/messages",
+            "exact-relay",
+            false
+        ),
+        call("stall", "anthropic", "/v1/messages", "stall-1", false),
+        call("short key", "anthropic", "/v1/messages", "short-1", false),
+        call("timeout", "anthropic", "/v1/messages", "hang-1", false),
+    ]);
+    let (events, read) = run(&f, "hidden", None, &plan);
+    let calls = calls(&events);
+    let seen = [first.requests(), second.requests()].concat();
+    // A refusal in a coding the gateway did not ask for: withheld, whatever
+    // it holds, on both wires and both codings.
+    for (label, model) in [
+        ("gzip", "encoded-gzip"),
+        ("deflate", "encoded-deflate"),
+        ("gzip openai", "encoded-gzip-o"),
+        ("deflate openai", "encoded-deflate-o"),
+    ] {
+        let got = &read[label];
+        assert_eq!(got["status"], 401, "{label}: {got}");
+        assert!(
+            got_header(got, "content-encoding").is_empty(),
+            "{label}: {got}"
+        );
+        assert!(
+            got["body"].as_str().unwrap().contains("withheld"),
+            "{label}: {got}"
+        );
+        let reason = calls[model].reason.as_deref().unwrap();
+        assert!(reason.contains("encoded"), "{label}: {reason}");
+        assert_eq!(asked(&seen, model).len(), 1);
+    }
+    // A success in such a coding is not relayed either: a failure, 502.
+    let got = &read["gzip success"];
+    assert_eq!(got["status"], 502, "{got}");
+    assert_eq!(calls["gzipped-ok"].decision, "failed");
+    // A plain backend's encoded answer is relayed with its coding, as before.
+    let got = &read["gzip plain"];
+    assert_eq!(got["status"], 401, "{got}");
+    assert_eq!(got_header(got, "content-encoding"), ["gzip"], "{got}");
+    // Header values that are a channel: dropped; the answer still arrives.
+    let got = &read["hostile"];
+    assert_eq!(got["status"], 200, "{got}");
+    let text = got["headers"].to_string();
+    assert!(!text.contains(AIPLEX_TOKEN), "{text}");
+    assert!(!text.contains("aiplex.example"), "{text}");
+    for name in [
+        "x-request-id",
+        "request-id",
+        "retry-after",
+        "x-should-retry",
+        "retry-after-ms",
+        "x-ratelimit-limit-tokens",
+        "anthropic-ratelimit-requests-reset",
+    ] {
+        assert!(got_header(got, name).is_empty(), "{name}: {got}");
+    }
+    assert_eq!(got_header(got, "content-type"), ["application/json"]);
+    // A content type that cannot be relayed (twice, or holding the token):
+    // the answer is a failure of that backend, not relayed unchecked.
+    for (label, model) in [("typed twice", "typed-twice"), ("boundary", "boundary-ok")] {
+        let got = &read[label];
+        assert_eq!(got["status"], 502, "{label}: {got}");
+        assert!(!got.to_string().contains(AIPLEX_TOKEN), "{label}");
+        let reason = calls[model].reason.as_deref().unwrap();
+        assert!(reason.contains("Content-Type"), "{label}: {reason}");
+    }
+    // An ordinary stream still arrives with its content type.
+    let got = &read["stream"];
+    assert_eq!(got["status"], 200, "{got}");
+    assert_eq!(
+        got_header(got, "content-type"),
+        ["text/event-stream"],
+        "{got}"
+    );
+    // Exactly 1 MiB is checked and relayed on both paths; one byte more is
+    // withheld.
+    for label in ["exact refusal", "exact relay"] {
+        let got = &read[label];
+        assert_eq!(got["status"], 503, "{label}");
+        assert_eq!(got["body"].as_str().unwrap().len(), 1024 * 1024, "{label}");
+    }
+    let got = &read["over refusal"];
+    assert_eq!(got["status"], 503);
+    assert!(got["body"].as_str().unwrap().contains("too large"), "{got}");
+    // A refusal whose body stops coming: withheld once the backend has been
+    // quiet for the quiet period, within the total bound.
+    let got = &read["stall"];
+    assert_eq!(got["status"], 429, "{got}");
+    let reason = calls["stall-1"].reason.as_deref().unwrap();
+    assert!(
+        reason.contains("withheld") && reason.contains("timed out"),
+        "{reason}"
+    );
+    // A one-character key is never used, and never shown.
+    let got = &read["short key"];
+    assert_eq!(got["status"], 502, "{got}");
+    let reason = calls["short-1"].reason.as_deref().unwrap();
+    assert!(
+        reason.contains("short-key: its key is shorter than 16"),
+        "{reason}"
+    );
+    assert!(asked(&seen, "short-1").is_empty());
+    // A timeout says so, how long, and which backend.
+    let reason = calls["hang-1"].reason.as_deref().unwrap();
+    assert!(
+        reason.contains("aiplex-anthropic: timed out: no answer for 3s"),
+        "{reason}"
+    );
+    first.finish();
+    second.finish();
+    direct.finish();
+}
+
+#[test]
+fn a_harness_that_goes_away_during_a_refusal_leaves_it_a_refusal() {
+    let f = Fixture::new();
+    let (first, second, direct) = (aiplex("one"), aiplex("two"), aiplex("direct"));
+    let mut config = config(&first, &second, &direct);
+    config["routes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"model": "exact-*", "backends": ["aiplex-anthropic"],
+            "fallbacks": ["spare-anthropic"]}));
+    use_gateway(&f, config);
+    let early = |label: &str, model: &str| {
+        let mut call = call(label, "anthropic", "/v1/messages", model, false);
+        call["close_early"] = json!(true);
+        call
+    };
+    // A small refusal, and one of 1 MiB, which the gateway is still writing
+    // when the harness has gone.
+    let plan = json!([
+        early("small", "refuse-429"),
+        early("large", "exact-refuse"),
+        call("stayed", "anthropic", "/v1/messages", "refuse-403", false),
+    ]);
+    let (events, read) = run(&f, "gone", None, &plan);
+    let calls = calls(&events);
+    let seen = [first.requests(), second.requests()].concat();
+    let rows = f.yard.model_usage(0).unwrap();
+    for (label, model, status, code) in [
+        ("small", "refuse-429", 429, "QUOTA_BUDGET_EXHAUSTED"),
+        ("large", "exact-refuse", 503, "QUOTA_UNAVAILABLE"),
+        ("stayed", "refuse-403", 403, "CALLER_NOT_ALLOWED"),
+    ] {
+        assert_eq!(read[label]["status"], status, "{label}");
+        let call = &calls[model];
+        // Still AIPlex's refusal: its decision, code and id, never `failed`.
+        assert_eq!(call.decision, "refused", "{label}: {call:?}");
+        assert_eq!(call.status, status, "{label}");
+        let plane = call.control_plane.as_deref().unwrap();
+        assert_eq!(plane.error_code.as_deref(), Some(code), "{label}");
+        assert!(plane.request_id.is_some(), "{label}");
+        let reason = call.reason.as_deref().unwrap();
+        assert!(
+            reason.starts_with(&format!("refused by aiplex ({code})")),
+            "{label}: {reason}"
+        );
+        // Sent once: neither retried nor moved because the harness left.
+        assert_eq!(asked(&seen, model).len(), 1, "{label}");
+        // Stored as a call that stayed is: one row, its id, its status, no
+        // cost (a refusal is not metered).
+        let row: Vec<_> = rows.iter().filter(|r| r.model == model).collect();
+        assert_eq!(row.len(), 1, "{label}");
+        assert_eq!(row[0].id, plane.call_id, "{label}");
+        assert_eq!(row[0].status, status, "{label}");
+        assert_eq!(row[0].cost_usd, None, "{label}");
+        println!("{label}: {reason}");
+    }
+    first.finish();
+    second.finish();
+    direct.finish();
+}

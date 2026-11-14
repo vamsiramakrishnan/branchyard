@@ -1,7 +1,7 @@
 //! A control-plane backend's key read from a variable of the process that
 //! runs the turn never reaches the harness, whose environment is otherwise
-//! inherited; a plain backend's key variable reaches it as before. A file
-//! of its own: it sets variables of this test process, once.
+//! inherited, nor any other child of the engine (the repository's setup
+//! commands); a plain backend's key variable reaches them as before. A file of its own: it sets variables of this test process, once.
 
 #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
 mod aiplex_kit;
@@ -10,6 +10,7 @@ mod common;
 use std::sync::Once;
 
 use aiplex_kit::*;
+use branchyard::WorkspaceSpec;
 use common::{text, Fixture};
 use serde_json::json;
 
@@ -48,18 +49,38 @@ fn a_control_planes_key_variable_never_reaches_the_harness() {
         ),
         call("direct", "anthropic", "/v1/messages", "direct-ok", false),
     ]);
-    let (events, read) = run(&f, "env", None, &plan);
+    // The repository's own code on this host: a setup command. (Its git
+    // hooks do not run: Branchyard runs its own git with hooks off.)
+    let setup = f.dir.join("setup.env");
+    let (events, read) = run_with(&f, "env", None, &plan, |options| {
+        options.workspace = Some(WorkspaceSpec {
+            setup: vec![format!("env > '{}'", setup.display())],
+            ..WorkspaceSpec::default()
+        });
+    });
+    let env = std::fs::read_to_string(&setup)
+        .unwrap_or_else(|e| format!("the setup command wrote nothing: {e}"));
+    assert!(
+        env.contains("BY_TEST_PLAIN_KEY="),
+        "the setup command ran without the environment: {env}"
+    );
+    assert!(!env.contains("BY_TEST_AIPLEX_TOKEN"), "{env}");
+    assert!(!env.contains(ENV_TOKEN), "{env}");
     let said = text(&events);
     // Neither the token's variable nor its value is in the harness's
     // environment; the plain backend's variable is, as it always was.
-    assert!(
-        said.contains("real keys in env: BY_TEST_PLAIN_KEY\n"),
-        "{said}"
-    );
-    assert!(
-        said.contains("test variables in env: BY_TEST_PLAIN_KEY,BY_TEST_VISIBLE"),
-        "{said}"
-    );
+    // Name by name: the machine may set other variables of its own (CI sets
+    // BY_TEST_POSTGRES_URL), which are not this test's to judge.
+    let line = |prefix: &str| -> Vec<String> {
+        said.lines()
+            .find_map(|l| l.strip_prefix(prefix))
+            .map(|names| names.split(',').map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    for names in [line("real keys in env: "), line("test variables in env: ")] {
+        assert!(names.iter().any(|n| n == "BY_TEST_PLAIN_KEY"), "{said}");
+        assert!(!names.iter().any(|n| n == "BY_TEST_AIPLEX_TOKEN"), "{said}");
+    }
     assert!(!said.contains(ENV_TOKEN), "{said}");
     // And the gateway still read it for AIPlex.
     assert_eq!(read["aiplex"]["status"], 200, "{}", read["aiplex"]);

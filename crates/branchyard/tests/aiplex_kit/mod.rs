@@ -32,10 +32,11 @@ pub const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 /// by label, the status, every response header, `Retry-After`,
 /// `X-Aiplex-Error-Code`, `WWW-Authenticate` and body the harness read. It
 /// prints the variables of its environment holding a real key, and those
-/// named `BY_TEST_*`.
+/// named `BY_TEST_*`. A call with `close_early` reads the status and closes
+/// without reading the body, as a harness that goes away.
 pub const HARNESS: &str = r#"import http.client, json, os, sys, urllib.parse
 plan = json.load(open(sys.argv[1]))
-real = sorted(k for k, v in os.environ.items() if "real" in v and ("sk-" in v or "aiplex" in v))
+real = sorted(k for k, v in os.environ.items() if "sk-real" in v or "aiplex-real" in v)
 print("real keys in env:", ",".join(real) or "none")
 print("test variables in env:", ",".join(sorted(k for k in os.environ if k.startswith("BY_TEST_"))) or "none")
 out = {}
@@ -70,6 +71,15 @@ for call in plan:
         conn.putheader("Content-Length", str(len(payload)))
     conn.endheaders(payload or None)
     response = conn.getresponse()
+    if call.get("close_early"):
+        # A harness that goes away: the status read, the body not.
+        status = response.status
+        response.close()
+        conn.close()
+        out[call["label"]] = {"status": status, "body": "", "headers": [],
+            "retry_after": None, "error_code": None, "www_authenticate": None}
+        print(f"call {call['label']}: {status} (closed early)")
+        continue
     data = response.read().decode(errors="replace")
     out[call["label"]] = {"status": response.status, "body": data,
         "headers": [[n.lower(), v] for n, v in response.getheaders()],
@@ -136,6 +146,38 @@ pub const SDK_HEADERS: &[(&str, &str)] = &[
     ("Cache-Control", "no-cache"),
 ];
 
+/// An error body that echoes `Bearer` [`AIPLEX_TOKEN`], compressed, so the
+/// token is not in its bytes: by API (Anthropic's shape, then OpenAI's) and
+/// coding. Made with Python's `gzip.compress(mtime=0)` and `zlib.compress`.
+const COMPRESSED: [(&str, &str, &str); 4] = [
+    ("anthropic", "gzip", "H4sIAAAAAAAC/z3KMQqAMAxG4auEzHZw7ehFJMiPFmsraQSl9O6KoNuD91W2awd7Yqhm5e4LT/VfctiCZGESCzmNv9xQiswvufJB5TE0QBRKEvaI0ykkOssrkuu5tRueAkzHbgAAAA=="),
+    ("anthropic", "deflate", "eJw9yjEKgDAMRuGrhMx2cO3oRSTIjxZrK2kEpfTuiqDbg/dVtmsHe2KoZuXuC0/1X3LYgmRhEgs5jb/cUIrML7nyQeUxNEAUShL2iNMpJDrLK5LrubUbAioluw=="),
+    ("openai", "gzip", "H4sIAAAAAAAC/x3KQQqAIBBG4asMs04oaNWymwz1U5GpjApJePey3fvgPQxVrzzRwxdilA1fc/GZIlyiGaJQkiNY3EYh1iR/wpmBO+JUwr9LTnvz4tfmsR9qfQHrZ88KWgAAAA=="),
+    ("openai", "deflate", "eJwdykEKgCAQRuGrDLNOKGjVspsM9VORqYwKSXj3st374D0MVa880cMXYpQNX3PxmSJcohmiUJIjWNxGIdYkf8KZgTviVMK/S0578+LX5rEfan0BX4QdBA=="),
+];
+
+/// Headers that would carry the token or point at AIPlex in their values,
+/// or break their grammar, each a case the gateway drops: by name.
+pub fn hostile_headers(host: &str) -> Vec<(String, String)> {
+    let token = AIPLEX_TOKEN;
+    vec![
+        (
+            "X-Request-Id".into(),
+            format!("https://aiplex.example/x?t={token}"),
+        ),
+        (format!("x-ratelimit-{token}"), "1".into()),
+        (
+            "anthropic-ratelimit-requests-reset".into(),
+            "https://aiplex.example/reset".into(),
+        ),
+        ("Request-Id".into(), "r".repeat(60_000)),
+        ("Retry-After".into(), "1000000000000".into()),
+        ("X-Should-Retry".into(), "maybe".into()),
+        ("Retry-After-Ms".into(), host.to_owned()),
+        ("x-ratelimit-limit-tokens".into(), format!("at {host}")),
+    ]
+}
+
 /// The chunked body of a streamed error whose text holds `secret` split
 /// across two chunks.
 fn split_across_chunks(secret: &str) -> Vec<u8> {
@@ -201,6 +243,80 @@ pub fn access_point(name: &'static str, redirect_to: String) -> MockHttp {
                 answer = answer.header(name, value);
             }
             return answer;
+        }
+        // A refusal whose compressed body echoes the token.
+        if let Some(coding) = model.strip_prefix("encoded-") {
+            use base64::Engine as _;
+            let wire = match request.path.ends_with("/v1/messages") {
+                true => "anthropic",
+                false => "openai",
+            };
+            let coding = coding.split('-').next().unwrap_or("");
+            let body = COMPRESSED
+                .iter()
+                .find(|(w, c, _)| *w == wire && *c == coding)
+                .map(|(_, _, b)| base64::engine::general_purpose::STANDARD.decode(b).unwrap())
+                .unwrap_or_default();
+            return Response::new(401, body)
+                .header("Content-Type", "application/json")
+                .header("Content-Encoding", coding)
+                .header("X-Aiplex-Request-Id", &id)
+                .header("X-Aiplex-Error-Code", "UNAUTHENTICATED");
+        }
+        // A success in a coding the gateway did not ask for.
+        if model.starts_with("gzipped-ok") {
+            return answer(request, &model)
+                .header("Content-Encoding", "gzip")
+                .header("X-Aiplex-Request-Id", &id);
+        }
+        // Headers whose values are a channel, then a duplicate content type.
+        if model.starts_with("hostile-") {
+            let host = request
+                .header("host")
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_owned();
+            let mut answer = answer(request, &model).header("X-Aiplex-Request-Id", &id);
+            for (name, value) in hostile_headers(&host) {
+                answer = answer.header(&name, &value);
+            }
+            return answer;
+        }
+        if model.starts_with("typed-twice") {
+            return answer(request, &model)
+                .header("Content-Type", "application/json")
+                .header("X-Aiplex-Request-Id", &id);
+        }
+        if model.starts_with("boundary-") {
+            let typed = format!("application/json; boundary={AIPLEX_TOKEN}");
+            let answer = answer(request, &model);
+            let mut bare = Response::new(answer.status, answer.body.clone());
+            bare = bare
+                .header("Content-Type", &typed)
+                .header("X-Aiplex-Request-Id", &id);
+            return bare;
+        }
+        // An error body of exactly `MAX_ERROR_BODY` (1 MiB) bytes, or one
+        // more: refused by AIPlex (`exact-refuse`, `over-refuse`) or the
+        // provider's, relayed (`exact-relay`).
+        if let Some(rest) = model.strip_prefix("exact-").or(model.strip_prefix("over-")) {
+            let size = 1024 * 1024 + usize::from(model.starts_with("over-"));
+            let answer = Response::new(503, "e".repeat(size))
+                .header("Content-Type", "text/plain")
+                .header("X-Aiplex-Request-Id", &id);
+            return match rest.starts_with("refuse") {
+                true => answer.header("X-Aiplex-Error-Code", "QUOTA_UNAVAILABLE"),
+                false => answer,
+            };
+        }
+        // A refusal whose body never ends: its head, then silence.
+        if model.starts_with("stall-") {
+            return Response::new(429, "4\r\n{\"er\r\n")
+                .header("Transfer-Encoding", "chunked")
+                .header("X-Aiplex-Error-Code", "QUOTA_BUDGET_EXHAUSTED")
+                .keep_alive();
         }
         if model.starts_with("close-") {
             return Response::close();
@@ -423,6 +539,17 @@ pub fn run(
     trace: Option<&str>,
     plan: &Value,
 ) -> (Vec<RecordedEvent>, BTreeMap<String, Value>) {
+    run_with(f, name, trace, plan, |_| {})
+}
+
+/// [`run`], with `adjust` changing the task's options first.
+pub fn run_with(
+    f: &Fixture,
+    name: &str,
+    trace: Option<&str>,
+    plan: &Value,
+    adjust: impl FnOnce(&mut TaskOptions),
+) -> (Vec<RecordedEvent>, BTreeMap<String, Value>) {
     let script = f.dir.join("harness.py");
     std::fs::write(&script, HARNESS).unwrap();
     let plan_file = f.dir.join(format!("{name}.plan.json"));
@@ -449,6 +576,8 @@ pub fn run(
         trace_parent: trace.map(str::to_owned),
         ..f.options()
     };
+    let mut options = options;
+    adjust(&mut options);
     let branch = f.task(&prompt).options(options).name(name).run().unwrap();
     let events = branch.events().unwrap();
     let read = std::fs::read_to_string(&out_file);
