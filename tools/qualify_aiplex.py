@@ -32,6 +32,7 @@ tests/test_qualify_aiplex.py covers the pure parts, with the mutations each chec
 """
 
 import argparse
+import base64
 import contextlib
 import ctypes
 import datetime
@@ -50,6 +51,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
@@ -182,7 +185,7 @@ def window_hits(value: str, digests: Iterable[tuple[str, str]]) -> bool:
 HARNESS = (
     r"""
 from collections.abc import Iterable
-import hashlib, json, os, re, sys, urllib.error, urllib.request
+import base64, hashlib, json, os, re, sys, urllib.error, urllib.request
 
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 digests = [tuple(p.split(":", 1)) for p in os.environ.get("QUALIFY_TOKEN_DIGESTS", "").split(",") if ":" in p]
@@ -194,10 +197,28 @@ names_aiplex = re.compile(hosts + ":" + re.escape(port) + r"(?!\d)") if port els
     + r"""
 
 mine = {k: v for k, v in os.environ.items() if not k.startswith("QUALIFY_")}
+
+
+def jwt_variables():
+    # names of the variables that hold a JWT-shaped value, and whether its claims carry by_purpose (the
+    # server's signed token does, the gateway's own turn token does not); values are never reported
+    found = []
+    for name, value in sorted(mine.items()):
+        for match in re.finditer(r"eyJ[A-Za-z0-9_-]{8,}\.(eyJ[A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*", value):
+            segment = match.group(1) + "=" * (-len(match.group(1)) % 4)
+            try:
+                claims = json.loads(base64.urlsafe_b64decode(segment))
+                found.append({"name": name, "by_purpose": isinstance(claims, dict) and "by_purpose" in claims})
+            except ValueError:
+                found.append({"name": name, "by_purpose": None})
+    return found
+
+
 env = {
     "helpers_received": {"token_digests": len(digests), "aiplex_port": bool(port)},
     "aiplex_token_variable_set": "AIPLEX_TOKEN" in os.environ,
     "variables_holding_the_token": sorted(k for k, v in mine.items() if window_hits(v, digests)),
+    "jwt_variables": jwt_variables(),
     "variables_naming_aiplex": sorted(k for k, v in mine.items() if names_aiplex and names_aiplex.search(v)),
     "anthropic_base_url": os.environ.get("ANTHROPIC_BASE_URL"),
     "openai_base_url": os.environ.get("OPENAI_BASE_URL"),
@@ -257,6 +278,46 @@ for spec in sys.argv[2:]:
 with open(sys.argv[1], "w") as out:
     json.dump({"env": env, "calls": calls}, out)
 """
+)
+
+
+# -- scenario 2: a token the Branchyard server signs ---------------------------------------------
+AGENT = "qualify-branchyard"
+BINDING = "by"
+AUDIENCE = "qualify-aiplex"
+TENANT = "default"
+REPO = "qr"
+SERVER_BACKENDS = ("aiplex-local-anthropic", "aiplex-local-openai")
+WRONG_AUDIENCE_BACKEND = "aiplex-wrong-audience"
+MODEL_WRONG_AUDIENCE = "mock-claude-wrong-audience"
+SERVER_SCOPES = (
+    "llm:model:mock-claude",
+    "llm:model:mock-gpt",
+    "llm:surface:local-messages:*",
+    "llm:surface:local-models:*",
+)
+# What scenario 2's turn calls: the same calls as scenario 1 minus the stand-in's and the forged ones.
+CALLS2: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
+    ("a", "anthropic", "mock-claude", (), "allowed"),
+    ("b", "openai", "mock-gpt", (), "allowed"),
+    ("c", "anthropic", "mock-claude", ("stream",), "allowed"),
+    ("d", "anthropic", MODEL_ABSENT, (), "refused"),
+)
+SCOPE2 = (
+    "real `by serve` (no TLS, no connectors, loopback) with the real `by` client, and real `aiplex dev` with an agent "
+    "bound to the server by the `branchyard` preset, over loopback; AIPlex's built-in mock providers, Branchyard's "
+    "fake agent running a Python harness as the server's harness command; no model, no real coding agent, no cloud call"
+)
+NOT_DONE2 = (
+    "a Cloud KMS signer, a Branchyard worker or sandbox (the harness ran as the server's own user), TLS, and a "
+    "Branchyard tenant other than the server's default",
+    "a real model or a real coding agent: the providers are AIPlex's mock providers and the harness is a script",
+    "`traceparent`: nothing sent one, so AIPlex made its own trace ids",
+    "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, an issuer on `https`)",
+    "a token with an expired or too-long lifetime, another `by_purpose`, `sub` or `iss`: only the audience was changed "
+    "as a negative control",
+    "a run on another operating system",
+    "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified",
 )
 
 
@@ -659,6 +720,173 @@ def cleanup_problems(report: Mapping[str, Any]) -> list[str]:
     return problems
 
 
+def server_config_problems(config: Mapping[str, Any]) -> list[str]:
+    """Why a server configuration cannot be called free of any AIPlex secret: every model backend must be an AIPlex
+    backend signed with the server's token, with no `key` and no `secrets` table."""
+    problems = []
+    models = config.get("models") or {}
+    backends = models.get("backends") or {}
+    if not backends:
+        problems.append("the configuration has no model backends")
+    for name, backend in backends.items():
+        if backend.get("control_plane") != "aiplex" or backend.get("auth") != "turn-token":
+            problems.append(f"backend {name} is not an AIPlex backend with auth = turn-token")
+        if "key" in backend or not backend.get("audience"):
+            problems.append(f"backend {name} has a key, or no audience")
+    if "secrets" in models or "secrets" in config:
+        problems.append("the configuration has a secrets table")
+    return problems
+
+
+def server_secret_problems(
+    environ: bytes, cmdline: bytes, config_text: str, token: Secret, files_with_the_token: list[str]
+) -> list[str]:
+    """Where the AIPlex developer token is, among what a server holds: its environment (the name and the value),
+    its command line, its configuration, and the files under the scratch directory."""
+    problems = []
+    value = token.reveal().encode()
+    names = [entry.split(b"=", 1)[0] for entry in environ.split(b"\0") if entry]
+    if not names:
+        problems.append("the server's environment could not be read")
+    if b"AIPLEX_TOKEN" in names:
+        problems.append("AIPLEX_TOKEN is in the server's environment")
+    if value and value in environ:
+        problems.append("the token's value is in the server's environment")
+    if value and value in cmdline:
+        problems.append("the token's value is on the server's command line")
+    if token.reveal() and token.reveal() in config_text:
+        problems.append("the token's value is in the server's configuration")
+    problems += [f"the token's value is in {name}" for name in files_with_the_token]
+    return problems
+
+
+def plan_problems(plan: str, server: str, audience: str) -> list[str]:
+    """Why `aiplex agents identity plan` cannot be called the binding this run needs."""
+    problems = []
+    for label, wanted in (("Issuer", server), ("Subject", f"branchyard:{TENANT}"), ("Audience", audience)):
+        if not re.search(rf"^\s*{label}:\s+{re.escape(wanted)}\s*$", plan, re.MULTILINE):
+            problems.append(f"the plan's {label} is not {wanted}")
+    return problems
+
+
+def jwks_problems(status: int, body: str) -> list[str]:
+    """Why a server's key set cannot be called what the contract says: one OKP Ed25519 key, no private member."""
+    problems = []
+    if status != 200:
+        problems.append(f"the key set answered {status}")
+        return problems
+    try:
+        keys = json.loads(body).get("keys")
+    except (ValueError, AttributeError):
+        return ["the key set is not JSON"]
+    if not isinstance(keys, list) or len(keys) != 1:
+        return [f"the key set has {len(keys) if isinstance(keys, list) else 'no'} keys, not 1"]
+    key = keys[0]
+    if key.get("kty") != "OKP" or key.get("crv") != "Ed25519" or not key.get("x") or not key.get("kid"):
+        problems.append("the key is not an OKP Ed25519 key with x and kid")
+    if key.get("alg") not in (None, "EdDSA"):
+        problems.append(f"the key's alg is {key.get('alg')!r}")
+    private = [m for m in ("d", "p", "q", "dp", "dq", "qi", "k") if m in key]
+    if private:
+        problems.append(f"the key set has private members: {', '.join(private)}")
+    return problems
+
+
+def jwks_fetches(log: str) -> int:
+    """How many times the server's log says its key set was served with 200."""
+    return sum(1 for line in log.splitlines() if "path=/.well-known/jwks.json" in line and "status=200" in line)
+
+
+def jwt_variable_problems(env: Mapping[str, Any]) -> list[str]:
+    """Why the harness cannot be said to be free of the server's signed token: it must have reported its JWT-shaped
+    variables, and none may carry `by_purpose` (the gateway's own turn token, which the harness holds, has none)."""
+    found = env.get("jwt_variables")
+    if not isinstance(found, list):
+        return ["the harness did not report its JWT-shaped variables"]
+    problems = [f"{v.get('name')} holds a token with by_purpose" for v in found if v.get("by_purpose")]
+    problems += [
+        f"{v.get('name')} holds a JWT-shaped value that could not be read" for v in found if v.get("by_purpose") is None
+    ]
+    return problems
+
+
+def signed_token_files(root: Path) -> list[str]:
+    """Files under `root` that hold a JWT whose claims carry `by_purpose` (a token the server signed for AIPlex)."""
+    pattern = re.compile(rb"eyJ[A-Za-z0-9_-]{8,}\.(eyJ[A-Za-z0-9_-]{4,})\.[A-Za-z0-9_-]*")
+    hits = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        for match in pattern.finditer(data):
+            segment = match.group(1) + b"=" * (-len(match.group(1)) % 4)
+            try:
+                claims = json.loads(base64.urlsafe_b64decode(segment))
+            except ValueError:
+                continue
+            if isinstance(claims, dict) and "by_purpose" in claims:
+                hits.append(str(path.relative_to(root)))
+                break
+    return hits
+
+
+def probe_problems(event: Mapping[str, Any], seen: Mapping[str, Any], record: Mapping[str, Any]) -> list[str]:
+    """Why the first call cannot be said to show that AIPlex verified the signed token yet had not granted the agent:
+    AIPlex refused it for the grant (ACTION_DENIED, 403), not for the credential, and its record names the agent."""
+    problems = []
+    plane = event.get("control_plane") or {}
+    if seen.get("status") != 403 or plane.get("error_code") != "ACTION_DENIED":
+        problems.append(f"the call was {seen.get('status')} {plane.get('error_code')!r}, not 403 ACTION_DENIED")
+    if record.get("caller_kind") != "agent" or record.get("client_id") != AGENT:
+        problems.append(f"the record's caller is {record.get('caller_kind')!r} {record.get('client_id')!r}")
+    if not str(record.get("principal_id") or "").startswith("principal-"):
+        problems.append("the record has no principal id to grant")
+    return problems
+
+
+def agent_record_problems(label: str, record: Mapping[str, Any]) -> list[str]:
+    """Why a record cannot be called the bound agent's: its caller kind and the agent that `client_id` names."""
+    problems = []
+    if record.get("caller_kind") != "agent":
+        problems.append(f"{label}: caller_kind is {record.get('caller_kind')!r}, not 'agent'")
+    if record.get("client_id") != AGENT:
+        problems.append(f"{label}: client_id is {record.get('client_id')!r}, not the bound agent")
+    if record.get("principal_display") != f"branchyard:{TENANT}":
+        problems.append(f"{label}: principal_display is {record.get('principal_display')!r}")
+    return problems
+
+
+def negative_problems(
+    event: Mapping[str, Any],
+    seen: Mapping[str, Any],
+    records_for_the_call_id: Sequence[Mapping[str, Any]],
+    others_accepted: bool = False,
+) -> list[str]:
+    """Why the wrong-audience call cannot be called a refusal by AIPlex for the credential, and final: 401 with
+    UNAUTHENTICATED on the event, one backend and none tried before it, and no ledger record (AIPlex writes none
+    for a call refused before admission)."""
+    problems = []
+    plane = event.get("control_plane") or {}
+    if not others_accepted:
+        problems.append("the server's calls with the binding's audience were not all accepted, so a 401 shows nothing")
+    if seen.get("status") != 401 or event.get("status") != 401:
+        problems.append(f"the status is {seen.get('status')} (event {event.get('status')}), not 401")
+    if event.get("decision") != "refused" or plane.get("error_code") != "UNAUTHENTICATED":
+        problems.append(
+            f"the event is {event.get('decision')!r} {plane.get('error_code')!r}, not refused UNAUTHENTICATED"
+        )
+    if event.get("backend") != WRONG_AUDIENCE_BACKEND or event.get("failed_over"):
+        problems.append("the event names another backend, or backends tried before the answer")
+    if records_for_the_call_id:
+        problems.append(f"AIPlex holds {len(records_for_the_call_id)} record(s) for a call it refused before admission")
+    if "www-authenticate" in (seen.get("response_header_names") or []):
+        problems.append("a WWW-Authenticate challenge reached the harness")
+    return problems
+
+
 def scan_for_secret(root: Path, secret: Secret) -> list[str]:
     """The files under `root` (relative paths) whose bytes hold the secret or its signature segment, as plain text."""
     value = secret.reveal()
@@ -890,11 +1118,17 @@ class Run:
         self.captured_leaks = 0
         self.dev_started = False
         self.cleaned = False
+        self.server_port = 0
         self.stop_exits: list[int] = []
         self.groups: set[int] = set()
         self.stand_in: StandIn | None = None
         self.url = ""
         self.port = 0
+        self.server: subprocess.Popen[bytes] | None = None
+        self.server_url = ""
+        self.server_env: dict[str, str] = {}
+        self.server_log = scratch / "server.log"
+        self.token_file = scratch / "server-token"
 
     # -- output -----------------------------------------------------------------------------
 
@@ -1347,6 +1581,380 @@ class Run:
             captured_outputs_holding_it=self.captured_leaks,
         )
 
+    # -- scenario 2: a Branchyard server --------------------------------------------------------
+
+    def http_get(self, url: str) -> tuple[int, str]:
+        """A plain GET with no proxy: the status (0 when nothing answered) and the body."""
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(url, timeout=10) as response:
+                return int(response.status), response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            return int(error.code), error.read().decode("utf-8", "replace")
+        except OSError:
+            return 0, ""
+
+    def server_config(self, port: int) -> dict[str, Any]:
+        """The server's configuration: one served repository, a static credential, the fake agent as the harness
+        command, and only AIPlex backends signed with the server's token (no key, no secrets, no AIPlex token)."""
+        url = f"http://127.0.0.1:{self.port}/ap/local"
+
+        def backend(api: str, audience: str) -> dict[str, str]:
+            return {"api": api, "url": url, "control_plane": "aiplex", "auth": "turn-token", "audience": audience}
+
+        return {
+            "listen": f"127.0.0.1:{port}",
+            "public_url": f"http://127.0.0.1:{port}",
+            "data_dir": str(self.scratch / "data"),
+            "repos": {REPO: str(self.repo)},
+            "tokens": [{"name": "ci", "token": self.token_file.read_text()}],
+            "harness_commands": {HARNESS_ID: [self.args.fake_agent]},
+            "allow_unapproved_tools": True,
+            "inventory": False,
+            "models": {
+                "allow": ["*"],
+                "backends": {
+                    SERVER_BACKENDS[0]: backend("anthropic", AUDIENCE),
+                    SERVER_BACKENDS[1]: backend("openai", AUDIENCE),
+                    WRONG_AUDIENCE_BACKEND: backend("anthropic", "an-audience-the-binding-does-not-have"),
+                },
+                "routes": [
+                    {"model": "mock-claude", "backends": [SERVER_BACKENDS[0]]},
+                    {"model": "mock-gpt", "backends": [SERVER_BACKENDS[1]]},
+                    {"model": MODEL_ABSENT, "backends": [SERVER_BACKENDS[0]]},
+                    {"model": MODEL_WRONG_AUDIENCE, "backends": [WRONG_AUDIENCE_BACKEND]},
+                ],
+            },
+        }
+
+    def make_server_yard(self) -> None:
+        """A git repository with one commit, to be served."""
+        self.repo.mkdir(parents=True)
+        for argv in (
+            ["git", "init", "-q", "-b", "main"],
+            ["git", "config", "user.name", "Test"],
+            ["git", "config", "user.email", "test@localhost"],
+        ):
+            self.exec(argv, cwd=self.repo)
+        (self.repo / "a.txt").write_text("one\n")
+        self.exec(["git", "add", "."], cwd=self.repo)
+        self.exec(["git", "commit", "-q", "-m", "initial"], cwd=self.repo)
+        (self.scratch / "harness.py").write_text(HARNESS)
+        self.token_file.write_text(f"static-{os.urandom(12).hex()}")
+        self.token_file.chmod(0o600)
+
+    def bind_agent(self) -> None:
+        """Register the agent, bind it to the server with the `branchyard` preset, and record the plan."""
+        self.server_url = f"http://127.0.0.1:{self.server_port}"
+        register = self.aiplex(
+            "agents", "register", AGENT, "--name", "Branchyard: qualify", "--scopes", ",".join(SERVER_SCOPES)
+        )
+        bind = self.aiplex(
+            "agents", "identity", "bind", AGENT, BINDING, "--preset", "branchyard",
+            "--input", f"server={self.server_url}", "--input", f"tenant={TENANT}", "--input", f"audience={AUDIENCE}",
+        )  # fmt: skip
+        plan = self.aiplex("agents", "identity", "plan", AGENT, BINDING)
+        problems = plan_problems(plan.out, self.server_url, AUDIENCE)
+        self.observations["identity_plan"] = [line.rstrip() for line in plan.out.splitlines()[:6]]
+        self.check(
+            "aiplex-binding",
+            f"an AIPlex agent is registered and bound with the `branchyard` preset to the server's URL (the issuer), "
+            f"tenant `{TENANT}` and the backends' audience, and `aiplex agents identity plan` shows that issuer, the "
+            f"subject branchyard:{TENANT} and that audience",
+            register.code == 0 and bind.code == 0 and plan.code == 0 and not problems,
+            register_exit=register.code,
+            bind_exit=bind.code,
+            plan_exit=plan.code,
+            problems=problems,
+        )
+
+    def start_server(self) -> None:
+        """Validate the configuration with `by serve --check`, start the server and wait for /healthz."""
+        self.server_port = free_port()
+        self.bind_agent()
+        config = self.server_config(self.server_port)
+        path = self.scratch / "server.json"
+        path.write_text(json.dumps(config, indent=2))
+        path.chmod(0o600)
+        self.server_env = {
+            **self.env,
+            "QUALIFY_TOKEN_DIGESTS": token_digests(self.secrets[0].reveal()),
+            "QUALIFY_AIPLEX_PORT": str(self.port),
+        }
+        checked = self.exec([self.args.by, "serve", "-c", str(path), "--check"], env=self.server_env)
+        self.observations["serve_check_output"] = (checked.out + checked.err).strip().splitlines()[-2:]
+        if checked.code != 0:
+            self.check(
+                "server-config", "`by serve --check` accepts the configuration", False, output=checked.err[-300:]
+            )
+            raise StepError("by serve --check refused the configuration")
+        with self.server_log.open("wb") as log:
+            self.server = subprocess.Popen(
+                [self.args.by, "serve", "-c", str(path), "--no-inventory"],
+                cwd=self.scratch,
+                env=self.server_env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self.groups.add(self.server.pid)
+
+        def healthy() -> bool:
+            if self.server is None or self.server.poll() is not None:
+                raise SetupError(f"by serve exited: {self.log_tail()}")
+            return self.http_get(f"{self.server_url}/healthz")[0] == 200
+
+        if not wait_until(healthy, 30):
+            raise SetupError(f"by serve did not answer /healthz within 30 seconds: {self.log_tail()}")
+        pid = self.server.pid
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        held = server_secret_problems(
+            environ, cmdline, path.read_text(), self.secrets[0], scan_for_secret(self.scratch, self.secrets[0])
+        )
+        problems = server_config_problems(config) + held
+        self.check(
+            "server-config",
+            "`by serve --check` accepts the configuration (exit 0), whose only model backends are AIPlex backends "
+            "signed with the server's token (no `key`, no `secrets`); the AIPlex developer token is not in the "
+            "running server's environment (name or value), command line, configuration, or any file under the run's "
+            "scratch directory, as plain text",
+            checked.code == 0 and not problems,
+            problems=problems,
+            serve_check_exit=checked.code,
+            environment_names_checked=len([e for e in environ.split(b"\0") if e]),
+        )
+
+    def log_tail(self) -> str:
+        """The end of the server's log, scrubbed."""
+        try:
+            return redact(self.server_log.read_text(errors="replace")[-300:], self.secrets)
+        except OSError:
+            return ""
+
+    def stop_server(self) -> None:
+        """Stop the server with SIGTERM; kill it only if it does not go."""
+        server = self.server
+        if server is None:
+            return
+        if server.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(server.pid, signal.SIGTERM)
+            try:
+                server.wait(15)
+            except subprocess.TimeoutExpired:
+                self.observations["server_needed_kill"] = True
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(server.pid, signal.SIGKILL)
+                server.wait()
+        self.observations.setdefault("server_exit_code", server.returncode)
+        self.server = None
+
+    def remote(self, *args: str, timeout: float = STEP_TIMEOUT) -> Result:
+        """Run the `by` client against the server (it holds the static credential's file, never an AIPlex token)."""
+        return self.exec(
+            [self.args.by, "--remote", self.server_url, "--token-file", str(self.token_file), "--repo", REPO, *args],
+            timeout=timeout,
+        )
+
+    def remote_turn(
+        self, name: str, calls: Sequence[tuple[str, str, str, tuple[str, ...], str]]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        """One turn on the server; returns what the harness saw, the call events and `by show`."""
+        results = self.scratch / f"results-{name}.json"
+        results.unlink(missing_ok=True)
+        run = self.remote(
+            "run", self.harness_command(results, calls), "--name", name, "--harness", HARNESS_ID,
+            "--model-gateway", "--yes", "--allow-unapproved-tools", "--json", timeout=TURN_TIMEOUT,
+        )  # fmt: skip
+        if run.code != 0:
+            raise StepError(f"`by run` exited {run.code}: {(run.err or run.out)[-400:]}")
+        harness = self.read_results(results)
+        events = call_events(parse_events(self.remote("log", name, "--json").out))
+        show: dict[str, Any] = json.loads(self.remote("show", name, "--json").out)
+        self.observations.setdefault("by_log_text", {})[name] = [
+            line for line in self.remote("log", name).out.splitlines() if "model:" in line
+        ]
+        return harness, events, show
+
+    def probe(self) -> None:
+        """A first call, before the agent is granted anything: AIPlex must refuse it for the grant, not the
+        credential, which shows the signed token was verified and the agent resolved. Then grant the agent."""
+        harness, events, _show = self.remote_turn("probe", (("p", "anthropic", "mock-claude", (), "allowed"),))
+        seen, event = harness["calls"][0], events[0] if events else {}
+        call_id = str((event.get("control_plane") or {}).get("call_id"))
+        records = wait_until(partial(self.find, "--client-request-id", call_id), RECORD_WAIT)
+        record = records[0] if records else {}
+        problems = probe_problems(event, seen, record)
+        self.check(
+            "signed-token-verified",
+            f"before any grant, the first call is refused by AIPlex with 403 ACTION_DENIED (the credential was "
+            f"accepted, the grant missing) and its record has caller_kind agent and client_id `{AGENT}`",
+            not problems,
+            problems=problems,
+            status=seen.get("status"),
+            error_code=(event.get("control_plane") or {}).get("error_code"),
+            caller_kind=record.get("caller_kind"),
+            client_id=record.get("client_id"),
+            principal_display=record.get("principal_display"),
+        )
+        principal = str(record.get("principal_id") or "")
+        if not principal.startswith("principal-"):
+            raise StepError("no principal id to grant")
+        grant = self.aiplex("agents", "user-scopes", "set", principal, "--scopes", ",".join(SERVER_SCOPES))
+        self.check(
+            "agent-granted",
+            "the agent's principal is granted the models and surfaces the calls need",
+            grant.code == 0,
+            exit=grant.code,
+            scopes=list(SERVER_SCOPES),
+        )
+
+    def check_turn2(self, harness: Mapping[str, Any], events: list[dict[str, Any]], show: Mapping[str, Any]) -> None:
+        """Scenario 2's turn: the harness's view, Branchyard's events, and AIPlex's records of the agent's calls."""
+        env, calls = harness["env"], harness["calls"]
+        self.observations["harness_env"] = env
+        self.check(
+            "harness-ran",
+            f"the harness made {len(CALLS2)} calls through the turn's gateway on the server and each got an answer; "
+            "the streamed answer ran to its end",
+            len(calls) == len(CALLS2)
+            and all(c.get("status") for c in calls)
+            and all(c.get("stream_complete") for c in calls if c.get("stream")),
+            statuses=[c.get("status") for c in calls],
+        )
+        self.check(
+            "branch-record",
+            f"`by show` names the branch `{BRANCH}` and the harness `{HARNESS_ID}` that `by run` was given",
+            show.get("name") == BRANCH and show.get("harness") == HARNESS_ID,
+            name=show.get("name"),
+            harness=show.get("harness"),
+        )
+        problems = gateway_only_problems(env)
+        self.check(
+            "harness-sees-gateway-only",
+            "the harness's base URLs are the turn's gateway on loopback, and no variable of its environment names "
+            "AIPlex's loopback address and port",
+            not problems,
+            problems=problems,
+        )
+        problems = harness_token_problems(env) + jwt_variable_problems(env)
+        self.check(
+            "harness-holds-no-token",
+            "the harness's environment holds no AIPlex developer token (whole or signature segment, as a substring "
+            "of any value), no `AIPLEX_TOKEN`, and no JWT-shaped value whose claims carry `by_purpose` (the server's "
+            "signed token; the gateway's own turn token, which the harness holds, has none)",
+            not problems,
+            problems=problems,
+            jwt_variables=env.get("jwt_variables"),
+            helpers_received=env.get("helpers_received"),
+            cannot_see=list(TOKEN_CHECK_BLIND),
+        )
+        problems = response_header_problems(calls)
+        self.check(
+            "harness-response-headers",
+            "every response header the harness received on an answer that came from AIPlex is on the gateway's "
+            "allow-list or is the server's own framing",
+            not problems,
+            problems=problems,
+            header_names_by_call={c["label"]: c.get("response_header_names") for c in calls},
+        )
+        problems = event_problems(CALLS2, calls, events)
+        self.check(
+            "branchyard-events",
+            "`by log --json` has one `model` event per call with AIPlex's request id and Branchyard's call id; "
+            "exactly call d refused, as refused by aiplex with MODEL_NOT_FOUND",
+            not problems,
+            problems=problems,
+        )
+        tags = {
+            "by_branch": f"{REPO}/{show.get('name')}",
+            "by_harness": str(show.get("harness")),
+            "by_turn": str(show.get("turns")),
+        }
+        callers = set()
+        for call, event in zip(calls, events, strict=False):
+            label, kind = call["label"], KIND[call["label"]]
+            plane = event.get("control_plane") or {}
+            request_id, call_id = str(plane.get("request_id")), str(plane.get("call_id"))
+            by_request = wait_until(partial(self.find, "--request-id", request_id), RECORD_WAIT)
+            by_client = self.find("--client-request-id", call_id)
+            problems = []
+            if len(by_request) != 1 or len(by_client) != 1 or by_request[0].get("id") != by_client[0].get("id"):
+                problems.append(f"{len(by_request)} records by request id, {len(by_client)} by client request id")
+            record = by_request[0] if by_request else {}
+            if record:
+                problems += compare_record(label, record, event, call, kind)
+                problems += agent_record_problems(label, record)
+            callers.add((record.get("caller_kind"), record.get("client_id"), record.get("principal_display")))
+            self.check(
+                f"record-join-{label}",
+                f"call {label} ({call['api']} {call['model']}): AIPlex has one record, found by the request id and "
+                "by the client request id, whose client_request_id is Branchyard's call id, with caller_kind agent, "
+                f"client_id `{AGENT}` and principal branchyard:{TENANT}",
+                not problems,
+                problems=problems,
+                http_status=record.get("http_status"),
+                caller_kind=record.get("caller_kind"),
+                client_id=record.get("client_id"),
+            )
+            self.check(
+                f"record-tags-{label}",
+                f"call {label}: the record's tags are by_branch (`{REPO}/<branch>`, as a server names it), by_turn "
+                "and by_harness with the values Branchyard's own records give",
+                tags_of(record) == tags,
+                expected=tags,
+                observed_tags=tags_of(record),
+            )
+        self.observations["callers_seen"] = sorted(map(list, callers), key=str)
+
+    def check_keys_and_negative(self, fetches_before: int, main_turn: Mapping[str, Any]) -> None:
+        """The key set, and a call with a changed audience that AIPlex must refuse as unauthenticated."""
+        status, body = self.http_get(f"{self.server_url}/.well-known/jwks.json")
+        problems = jwks_problems(status, body)
+        if fetches_before < 1:
+            problems.append("the server's log shows its key set was never served before this script asked for it")
+        self.check(
+            "jwks-served-and-fetched",
+            "the server's `/.well-known/jwks.json` answers 200 with one OKP Ed25519 key and no private member, and "
+            "its log shows the key set was served (200) before this script fetched it, which is AIPlex verifying",
+            not problems,
+            problems=problems,
+            served_before_this_script_asked=fetches_before,
+        )
+        harness, events, _show = self.remote_turn("neg", (("n", "anthropic", MODEL_WRONG_AUDIENCE, (), "allowed"),))
+        seen, event = harness["calls"][0], events[0] if events else {}
+        call_id = str((event.get("control_plane") or {}).get("call_id"))
+        found = self.find("--client-request-id", call_id)
+        accepted = all(c.get("status") == 200 for c in main_turn["calls"] if KIND[c["label"]] == "allowed")
+        problems = negative_problems(event, seen, found, accepted)
+        self.check(
+            "negative-control-audience",
+            "negative control: one backend of the same server names an audience the binding does not have; the call "
+            "through it is refused by AIPlex with 401 UNAUTHENTICATED (as the event shows it), is final (one backend, "
+            "none tried before it) and leaves no AIPlex record, while the same server's other calls were accepted",
+            not problems,
+            problems=problems,
+            status=seen.get("status"),
+            error_code=(event.get("control_plane") or {}).get("error_code"),
+            backend=event.get("backend"),
+            failed_over=event.get("failed_over"),
+            records_for_the_call_id=len(found),
+            event_text=self.observations.get("by_log_text", {}).get("neg"),
+        )
+
+    def check_signed_tokens_not_kept(self) -> None:
+        """No file of the run holds a token the server signed for AIPlex."""
+        hits = signed_token_files(self.scratch)
+        self.check(
+            "signed-token-not-kept",
+            "no file under the run's scratch directory (server data directory, server log, repository, events, "
+            "results) holds a JWT whose claims carry `by_purpose`, as plain text",
+            not hits,
+            files_with_a_signed_token=hits,
+        )
+
     # -- cleanup ----------------------------------------------------------------------------
 
     def live(self) -> list[dict[str, Any]]:
@@ -1356,6 +1964,7 @@ class Run:
     def cleanup(self) -> dict[str, Any]:
         """Stop `aiplex dev`, give what it started time to go, then stop and name what is left. Safe to call twice."""
         report: dict[str, Any] = {}
+        self.stop_server()
         if self.dev_started:
             try:
                 self.stop_exits.append(self.aiplex("dev", "stop", timeout=30).code)
@@ -1456,13 +2065,36 @@ def scenario_one(run: Run) -> None:
     step(run, "outage", lambda: run.check_outage(len(events)))
 
 
+def scenario_two(run: Run) -> None:
+    """The signed-token scenario (contract section 7): a Branchyard server, an agent bound to it in AIPlex."""
+    record_versions(run)
+    run.say(f"versions: {run.versions['by']}; {run.versions['aiplex']}")
+    run.start_aiplex()
+    run.make_server_yard()
+    step(run, "server", run.start_server)
+    if run.server is None:
+        return
+    step(run, "probe", run.probe)
+    outcome = step(run, "turn", lambda: run.remote_turn(BRANCH, CALLS2))
+    if outcome is None:
+        return
+    harness, events, show = outcome
+    step(run, "turn-checks", lambda: run.check_turn2(harness, events, show))
+    log = run.server_log.read_text(errors="replace") if run.server_log.exists() else ""
+    step(run, "keys", lambda: run.check_keys_and_negative(jwks_fetches(log), harness))
+    run.stop_server()
+    step(run, "signed-token-kept", run.check_signed_tokens_not_kept)
+
+
 def write_record(run: Run, path: Path, command: list[str]) -> None:
     """Write the evidence record, after making sure it holds no token and no path of this machine."""
     failed = [c for c in run.checks if not c.passed]
     record = {
         "date": datetime.datetime.now(datetime.UTC).date().isoformat(),
-        "scope": SCOPE,
-        "scenario": "1: a stored AIPlex token (contract sections 1 to 6 and 8)",
+        "scope": SCOPE2 if run.args.federated else SCOPE,
+        "scenario": "2: a token the Branchyard server signs (contract sections 1 to 6, 7 and 8)"
+        if run.args.federated
+        else "1: a stored AIPlex token (contract sections 1 to 6 and 8)",
         "outcome": "passed" if not failed else f"failed: {len(failed)} of {len(run.checks)} checks",
         "command": command,
         "versions": run.versions,
@@ -1477,7 +2109,7 @@ def write_record(run: Run, path: Path, command: list[str]) -> None:
             for c in run.checks
         ],
         "observations": run.observations,
-        "not_done": list(NOT_DONE),
+        "not_done": list(NOT_DONE2 if run.args.federated else NOT_DONE),
     }
     replacements = {
         str(run.scratch): "<scratch>",
@@ -1501,10 +2133,12 @@ written); 130 interrupted. `aiplex dev stop` always runs.
 Covers (scenario 1, a stored token, contract sections 1 to 6 and 8): the configuration `aiplex connect` writes
 and the real `by` parser; both wires, streamed, refused, forged headers; Branchyard's events and AIPlex's records
 joined by id; the refusal's finality; a plain backend beside the AIPlex ones; an AIPlex outage; the token's
-whereabouts. Does not cover: scenario 2 (a Branchyard-signed token, --federated); a real model or coding agent;
-traceparent; a cloud AIPlex; a Branchyard server; other operating systems. The Branchyard commit is recorded as
-stated, not verified (`by --version` prints none); the AIPlex commit is read from the binary and must match
---aiplex-commit when that is given.
+whereabouts. With --federated, scenario 2 instead (contract section 7): a `by serve` server whose AIPlex
+backends are signed with the server's own token, an agent bound to it in AIPlex, a turn run on the server, the
+key set, and a wrong-audience negative control. Does not cover: a real model or coding agent;
+traceparent; a cloud AIPlex; a Branchyard worker, sandbox or TLS; other operating systems.
+The Branchyard commit is recorded as stated, not verified (`by --version` prints none);
+the AIPlex commit is read from the binary and must match --aiplex-commit when that is given.
 """
 
 
@@ -1519,17 +2153,24 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--aiplex", required=True, help="the `aiplex` binary (`aiplex-api` must be beside it)")
     parser.add_argument("--by", required=True, help="the `by` binary")
     parser.add_argument("--fake-agent", required=True, help="the `fake-acp-agent` binary")
-    parser.add_argument("--out", default=f"docs/evidence/aiplex-control-plane-{today}.json", help="the evidence record")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="the evidence record (default docs/evidence/aiplex-control-plane-DATE.json, "
+        "or aiplex-signed-token-DATE.json with --federated)",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the scratch directory for inspection")
     parser.add_argument("--port", type=int, default=0, help="the port for `aiplex dev` (default: a free one)")
     parser.add_argument("--aiplex-commit", default=None, help="checked against the commit `aiplex version` reports")
     parser.add_argument("--branchyard-commit", default="unknown", help="the Branchyard commit of the binaries (stated)")
     parser.add_argument(
-        "--federated", action="store_true", help="scenario 2, a Branchyard-signed token: not implemented yet"
+        "--federated",
+        action="store_true",
+        help="run scenario 2, a token the Branchyard server signs, instead of scenario 1",
     )
     args = parser.parse_args(argv)
-    if args.federated:
-        parser.error("--federated (scenario 2, a Branchyard-signed token) is not implemented yet")
+    if args.out is None:
+        args.out = f"docs/evidence/aiplex-{'signed-token' if args.federated else 'control-plane'}-{today}.json"
     for name in ("aiplex", "by", "fake_agent"):
         path = Path(getattr(args, name)).resolve()
         if not (path.is_file() and os.access(path, os.X_OK)):
@@ -1578,7 +2219,7 @@ def main(argv: list[str] | None = None) -> int:
     code = 0
     try:
         run.say("scratch directory <scratch>")
-        scenario_one(run)
+        (scenario_two if args.federated else scenario_one)(run)
         step(run, "secret-hygiene", run.check_secret_hygiene)
         report = run.cleanup()
         problems = cleanup_problems(report)

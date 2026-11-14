@@ -7,6 +7,7 @@ and a leftover process is told by its HOME. It starts no process and needs neith
 
 import contextlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -277,11 +278,6 @@ class Command(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         return err.getvalue()
 
-    def test_scenario_two_is_refused_as_not_implemented(self):
-        binary = sys.executable
-        message = self.refuses("--aiplex", binary, "--by", binary, "--fake-agent", binary, "--federated")
-        self.assertIn("not implemented yet", message)
-
     def test_a_path_that_is_not_an_executable_file_is_a_usage_error(self):
         binary = sys.executable
         message = self.refuses("--aiplex", binary, "--by", "/nonexistent/by", "--fake-agent", binary)
@@ -296,7 +292,7 @@ class Command(unittest.TestCase):
 
     def test_the_harness_is_valid_python_and_holds_no_token(self):
         compile(q.HARNESS, "harness", "exec")
-        self.assertNotIn("eyJ", q.HARNESS)
+        self.assertNotIn("Bearer eyJ", q.HARNESS)
         self.assertNotIn('AIPLEX_TOKEN"]', q.HARNESS)
 
     def test_the_known_findings_name_checks_the_script_makes(self):
@@ -534,7 +530,7 @@ class Recording(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             scratch = Path(tmp) / "scratch"
             scratch.mkdir()
-            args = Namespace(aiplex="/opt/bin/aiplex", by="/opt/by/by", fake_agent="/opt/by/fake")
+            args = Namespace(aiplex="/opt/bin/aiplex", by="/opt/by/by", fake_agent="/opt/by/fake", federated=False)
             run = q.Run(args, scratch)
             run.secrets.append(q.Secret(TOKEN))
             run.versions = {"v": f"{scratch}/x"}
@@ -551,7 +547,7 @@ class Recording(unittest.TestCase):
 
     def test_the_record_is_not_written_when_it_would_hold_the_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            args = Namespace(aiplex="/a/aiplex", by="/a/by", fake_agent="/a/f")
+            args = Namespace(aiplex="/a/aiplex", by="/a/by", fake_agent="/a/f", federated=False)
             run = q.Run(args, Path(tmp))
             run.secrets.append(q.Secret("plain-secret-value"))
             run.observations["oops"] = "plain-secret-value"
@@ -559,6 +555,151 @@ class Recording(unittest.TestCase):
             with self.assertRaises(q.SetupError):
                 q.write_record(run, out, [])
             self.assertFalse(out.exists())
+
+
+def b64(obj):
+    import base64
+    import json
+
+    return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+
+def jwt_of(claims):
+    return f"{b64({'alg': 'EdDSA'})}.{b64(claims)}.c2lnbmF0dXJl"
+
+
+class SignedToken(unittest.TestCase):
+    """Scenario 2: each check's condition on observations made false the way a reviewer's shim would."""
+
+    CONFIG: ClassVar[dict] = {
+        "models": {
+            "backends": {
+                "a": {"api": "anthropic", "url": "u", "control_plane": "aiplex", "auth": "turn-token", "audience": "x"}
+            }
+        }
+    }
+
+    def test_item_1_a_server_configuration_with_a_key_a_plain_backend_or_secrets_is_refused(self):
+        self.assertEqual(q.server_config_problems(self.CONFIG), [])
+        backend = self.CONFIG["models"]["backends"]["a"]
+        for mutated in (
+            {"models": {"backends": {"a": backend | {"key": "k"}}}},
+            {"models": {"backends": {"a": {k: v for k, v in backend.items() if k != "control_plane"}}}},
+            {"models": {"backends": {"a": backend | {"auth": None}}}},
+            {"models": {"backends": {"a": backend | {"audience": ""}}}},
+            {"models": {"backends": {}}},
+            {"models": {"backends": {"a": backend}}, "secrets": {"aiplex": "AIPLEX_TOKEN"}},
+        ):
+            self.assertTrue(q.server_config_problems(mutated), mutated)
+
+    def test_item_1_the_token_anywhere_in_the_server_is_found(self):
+        token = q.Secret("tok-value-0123456789")
+        environ = b"PATH=/bin\0HOME=/h\0"
+        self.assertEqual(q.server_secret_problems(environ, b"by\0serve\0", "{}", token, []), [])
+        named = q.server_secret_problems(environ + b"AIPLEX_TOKEN=other\0", b"", "{}", token, [])
+        self.assertEqual(named, ["AIPLEX_TOKEN is in the server's environment"])
+        self.assertTrue(q.server_secret_problems(environ + b"X=tok-value-0123456789\0", b"", "{}", token, []))
+        self.assertTrue(q.server_secret_problems(environ, b"--token\0tok-value-0123456789", "{}", token, []))
+        self.assertTrue(q.server_secret_problems(environ, b"", '{"k": "tok-value-0123456789"}', token, []))
+        self.assertEqual(len(q.server_secret_problems(environ, b"", "{}", token, ["data/x.db"])), 1)
+        self.assertTrue(q.server_secret_problems(b"", b"", "{}", token, []))  # an unreadable environment never passes
+
+    def test_item_2_the_plan_must_show_the_issuer_subject_and_audience(self):
+        plan = (
+            "Identity plan: agent a\n  Issuer:   http://127.0.0.1:9\n  Subject:  branchyard:default\n  Audience: aud\n"
+        )
+        self.assertEqual(q.plan_problems(plan, "http://127.0.0.1:9", "aud"), [])
+        self.assertEqual(len(q.plan_problems(plan, "http://127.0.0.1:99", "aud")), 1)
+        self.assertEqual(len(q.plan_problems(plan, "http://127.0.0.1:9", "other")), 1)
+        self.assertEqual(len(q.plan_problems("", "http://127.0.0.1:9", "aud")), 3)
+
+    def test_item_3_a_record_must_name_the_agent_as_its_caller(self):
+        record = {"caller_kind": "agent", "client_id": q.AGENT, "principal_display": "branchyard:default"}
+        self.assertEqual(q.agent_record_problems("a", record), [])
+        for mutated in ({"caller_kind": "user"}, {"client_id": "someone-else"}, {"principal_display": "dev@localhost"}):
+            self.assertEqual(len(q.agent_record_problems("a", record | mutated)), 1)
+
+    def test_item_3_the_probe_needs_the_grant_refusal_not_a_credential_refusal(self):
+        event = {"control_plane": {"error_code": "ACTION_DENIED"}}
+        record = {"caller_kind": "agent", "client_id": q.AGENT, "principal_id": "principal-abc"}
+        self.assertEqual(q.probe_problems(event, {"status": 403}, record), [])
+        unauthenticated = {"control_plane": {"error_code": "UNAUTHENTICATED"}}
+        self.assertTrue(q.probe_problems(unauthenticated, {"status": 401}, {}))
+        self.assertTrue(q.probe_problems(event, {"status": 403}, record | {"caller_kind": "user"}))
+        self.assertTrue(q.probe_problems(event, {"status": 403}, record | {"principal_id": ""}))
+
+    def test_item_4_the_key_set_must_be_one_public_ed25519_key_and_have_been_fetched(self):
+        key = {"kty": "OKP", "crv": "Ed25519", "x": "abc", "kid": "by-1", "alg": "EdDSA", "use": "sig"}
+        body = json.dumps({"keys": [key]})
+        self.assertEqual(q.jwks_problems(200, body), [])
+        self.assertTrue(q.jwks_problems(404, ""))
+        self.assertTrue(q.jwks_problems(200, "not json"))
+        self.assertTrue(q.jwks_problems(200, json.dumps({"keys": []})))
+        self.assertTrue(q.jwks_problems(200, json.dumps({"keys": [key, key]})))
+        self.assertTrue(q.jwks_problems(200, json.dumps({"keys": [key | {"d": "secret"}]})))
+        self.assertTrue(q.jwks_problems(200, json.dumps({"keys": [key | {"crv": "P-256"}]})))
+        self.assertTrue(q.jwks_problems(200, json.dumps({"keys": [key | {"alg": "RS256"}]})))
+        log = "INFO request{path=/.well-known/jwks.json status=200 latency_ms=3}: x\nINFO path=/healthz status=200\n"
+        self.assertEqual(q.jwks_fetches(log), 1)
+        self.assertEqual(q.jwks_fetches("INFO path=/.well-known/jwks.json status=404"), 0)
+        self.assertEqual(q.jwks_fetches(""), 0)
+
+    def test_item_4_the_negative_control_must_be_a_final_401_unauthenticated_with_no_record(self):
+        event = {
+            "decision": "refused",
+            "status": 401,
+            "backend": q.WRONG_AUDIENCE_BACKEND,
+            "control_plane": {"error_code": "UNAUTHENTICATED"},
+        }
+        seen = {"status": 401, "response_header_names": ["content-type"]}
+        self.assertEqual(q.negative_problems(event, seen, [], True), [])
+        # every call is refused 401 (the binding is wrong everywhere): a 401 then shows nothing
+        self.assertEqual(len(q.negative_problems(event, seen, [], False)), 1)
+        # the call is waved through: AIPlex answers 200 and holds a record
+        waved = event | {"decision": "allowed", "status": 200, "control_plane": {}}
+        self.assertTrue(q.negative_problems(waved, {"status": 200}, [{"id": "ul"}], True))
+        # refused for another reason, or retried on another backend, or a challenge leaks
+        self.assertTrue(q.negative_problems(event | {"control_plane": {"error_code": "ACTION_DENIED"}}, seen, [], True))
+        self.assertTrue(q.negative_problems(event | {"failed_over": ["x: 401"]}, seen, [], True))
+        self.assertTrue(q.negative_problems(event | {"backend": q.BACKEND_ANTHROPIC}, seen, [], True))
+        self.assertTrue(q.negative_problems(event, seen | {"response_header_names": ["www-authenticate"]}, [], True))
+
+    def test_item_5_a_jwt_with_by_purpose_in_the_harness_fails_and_the_gateways_own_does_not(self):
+        env = {"jwt_variables": [{"name": "ANTHROPIC_API_KEY", "by_purpose": False}]}
+        self.assertEqual(q.jwt_variable_problems(env), [])
+        self.assertEqual(q.jwt_variable_problems({"jwt_variables": []}), [])
+        mutated = {"jwt_variables": [*env["jwt_variables"], {"name": "AIPLEX_JWT", "by_purpose": True}]}
+        self.assertEqual(q.jwt_variable_problems(mutated), ["AIPLEX_JWT holds a token with by_purpose"])
+        self.assertTrue(q.jwt_variable_problems({"jwt_variables": [{"name": "X", "by_purpose": None}]}))
+        self.assertTrue(q.jwt_variable_problems({}))  # a harness that did not report never passes
+
+    def test_item_5_the_scan_finds_a_signed_token_and_not_the_gateways_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gw.log").write_text("x " + jwt_of({"sub": "t", "by_tenant": "default"}))
+            self.assertEqual(q.signed_token_files(root), [])
+            (root / "sub").mkdir()
+            (root / "sub" / "signed.bin").write_bytes(b"\0" + jwt_of({"by_purpose": "aiplex"}).encode() + b"\0")
+            self.assertEqual(q.signed_token_files(root), ["sub/signed.bin"])
+
+    def test_the_harness_reports_its_jwt_variables_by_name_only(self):
+        source = q.HARNESS
+        self.assertIn("jwt_variables", source)
+        compile(source, "harness", "exec")
+        self.assertNotIn('"value"', source)
+
+    def test_scenario_two_is_selected_by_federated_and_names_its_record(self):
+        binary = sys.executable
+        args = q.parse_args(["--aiplex", binary, "--by", binary, "--fake-agent", binary, "--federated"])
+        self.assertTrue(args.federated)
+        self.assertIn("aiplex-signed-token-", args.out)
+        plain = q.parse_args(["--aiplex", binary, "--by", binary, "--fake-agent", binary])
+        self.assertFalse(plain.federated)
+        self.assertIn("aiplex-control-plane-", plain.out)
+
+    def test_the_calls_of_scenario_two_have_the_same_kinds_as_scenario_one(self):
+        for label, _api, _model, _flags, kind in q.CALLS2:
+            self.assertEqual(q.KIND[label], kind)
 
 
 if __name__ == "__main__":
