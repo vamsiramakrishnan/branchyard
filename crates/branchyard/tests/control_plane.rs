@@ -1664,17 +1664,20 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
     ]);
     let (events, read) = run(&f, "governed", None, &plan);
     let calls = calls(&events);
-    for (label, model, how) in [
-        ("other api", "claude-x", "it speaks the openai API"),
+    let other = ", or give that route an AIPlex backend of the openai API";
+    for (label, model, how, remedy) in [
+        ("other api", "claude-x", "it speaks the openai API", other),
         (
             "other api responses",
             "claude-y",
             "it speaks the openai API",
+            other,
         ),
         (
             "pass-through",
             "claude-z",
             "the pass-through path names a plain backend",
+            "",
         ),
     ] {
         let got = &read[label];
@@ -1699,9 +1702,10 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
             event.reason.as_deref(),
             Some(
                 format!(
-                    "the route for {model} names the control-plane backend ap-anthropic, and \
-                     none of them takes this request ({how}); it is not sent to a plain \
-                     backend instead"
+                    "the route \"claude-*\" matches {model} and names the control-plane \
+                     backend ap-anthropic, and none of them takes this request ({how}); it is \
+                     not sent to a plain backend instead: put a route for {model} before that \
+                     one{remedy}"
                 )
                 .as_str()
             ),
@@ -1725,6 +1729,46 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
     assert_eq!(access.requests().len(), 1);
     access.finish();
     direct.finish();
+
+    // The order of the routes decides, across APIs: a wider AIPlex route
+    // before a narrower plain one takes its models, and the event names the
+    // route that decided; the plain route first, it is as before.
+    for (plain_first, status) in [(false, 404), (true, 200)] {
+        let f = Fixture::new();
+        let (access, direct) = (aiplex("one"), aiplex("direct"));
+        let wide = json!({"model": "*", "backends": ["ap-anthropic"]});
+        let narrow = json!({"model": "gpt-*", "backends": ["openai"]});
+        let routes = match plain_first {
+            true => json!([narrow, wide]),
+            false => json!([wide, narrow]),
+        };
+        use_gateway(
+            &f,
+            json!({"backends": {
+                "ap-anthropic": {"api": "anthropic",
+                    "url": format!("{}/ap/ide", access.url()), "key": "aiplex",
+                    "control_plane": "aiplex"},
+                "openai": {"api": "openai", "url": direct.url(), "key": "anthropic"}
+            }, "routes": routes}),
+        );
+        let plan = json!([call("order", "openai", "/chat/completions", "gpt-4", false)]);
+        let (events, read) = run(&f, "order", None, &plan);
+        assert_eq!(read["order"]["status"], status, "{}", read["order"]);
+        assert_eq!(direct.requests().len(), usize::from(plain_first));
+        if !plain_first {
+            assert_eq!(
+                aiplex_kit::calls(&events)["gpt-4"].reason.as_deref(),
+                Some(
+                    "the route \"*\" matches gpt-4 and names the control-plane backend \
+                     ap-anthropic, and none of them takes this request (it speaks the openai \
+                     API); it is not sent to a plain backend instead: put a route for gpt-4 \
+                     before that one, or give that route an AIPlex backend of the openai API"
+                )
+            );
+        }
+        access.finish();
+        direct.finish();
+    }
 
     // The remedy that worked before still works: a route that names an
     // AIPlex backend of each API takes the model in either.

@@ -109,18 +109,25 @@ fn a_copy_of_the_token_under_another_name_reaches_no_child() {
     // A setup command: no variable holds the value, under any name.
     let env = std::fs::read_to_string(&setup)
         .unwrap_or_else(|e| format!("the setup command wrote nothing: {e}"));
-    assert!(!env.contains(ENV_TOKEN), "{env}");
+    // A failure shows the variables' names, never the environment
+    // itself, which is the machine's that runs this test.
+    let names = env
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(!env.contains(ENV_TOKEN), "{names}");
     for copy in [
         "BY_TEST_AIPLEX_TOKEN=",
         "GEMINI_API_KEY=",
         "BY_TEST_COPY_IN_A_HEADER=",
     ] {
-        assert!(!env.contains(copy), "{copy} in {env}");
+        assert!(!env.contains(copy), "{copy} in {names}");
     }
-    assert!(env.contains(&format!("GOOGLE_API_KEY={OTHER}")), "{env}");
+    assert!(env.contains(&format!("GOOGLE_API_KEY={OTHER}")), "{names}");
     assert!(
         env.contains(&format!("GOOGLE_GEMINI_BASE_URL={AIPLEX_URL}")),
-        "{env}"
+        "{names}"
     );
     // The harness: the same, and the gateway's own variables are still its
     // turn's token, since both calls were let through.
@@ -439,8 +446,18 @@ fn the_workspace_table_expands_the_token_into_no_child() {
         for file in [&setup, &teardown] {
             let env = std::fs::read_to_string(file)
                 .unwrap_or_else(|e| format!("{} was not written: {e}", file.display()));
-            assert!(!env.contains(ENV_TOKEN), "{name}: {env}");
-            assert!(env.contains(&format!("MY_OTHER={OTHER}")), "{name}: {env}");
+            // A failure shows the variables' names, never the environment
+            // itself, which is the machine's that runs this test.
+            let names = env
+                .lines()
+                .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+                .collect::<Vec<_>>()
+                .join(",");
+            assert!(!env.contains(ENV_TOKEN), "{name}: {names}");
+            assert!(
+                env.contains(&format!("MY_OTHER={OTHER}")),
+                "{name}: {names}"
+            );
         }
         if on_gateway {
             assert_eq!(read["anthropic"]["status"], 200, "{}", read["anthropic"]);

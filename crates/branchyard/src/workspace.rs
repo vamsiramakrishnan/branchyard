@@ -1809,7 +1809,15 @@ pub(crate) fn run_in_sandbox(report: &mut WorkspaceReport, commands: &[String], 
         let spec = branchyard_sandbox::ExecSpec {
             argv: vec!["sh".into(), "-c".into(), command.clone()],
             cwd: PathBuf::from(cwd),
-            env: env.iter().map(|(n, v)| (n.into(), v.into())).collect(),
+            // As for a script on this host (`run_commands`): a value that
+            // holds a control plane's token is not given to it, whoever put
+            // it in the table. The provider's exec inherits nothing here,
+            // so this is the whole of what the script is handed.
+            env: env
+                .iter()
+                .filter(|(_, value)| branchyard_support::child::guarded(value).is_none())
+                .map(|(n, v)| (n.into(), v.into()))
+                .collect(),
             writable: None,
         };
         let mut process = match provider.exec(sandbox, &spec) {
@@ -1904,6 +1912,98 @@ impl Tail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs nothing: every exec is refused after its environment is kept.
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<Vec<(String, String)>>>);
+
+    impl branchyard_sandbox::SandboxProvider for Recording {
+        fn capabilities(&self) -> branchyard_sandbox::Capabilities {
+            branchyard_sandbox::Capabilities::default()
+        }
+        fn ensure(
+            &self,
+            spec: &branchyard_sandbox::SandboxSpec,
+        ) -> Result<branchyard_sandbox::SandboxInfo, branchyard_sandbox::ProviderError> {
+            Ok(branchyard_sandbox::SandboxInfo {
+                name: spec.name.clone(),
+                state: branchyard_sandbox::SandboxState::Running,
+            })
+        }
+        fn inspect(
+            &self,
+            _: &str,
+        ) -> Result<Option<branchyard_sandbox::SandboxInfo>, branchyard_sandbox::ProviderError>
+        {
+            Ok(None)
+        }
+        fn exec(
+            &self,
+            _: &str,
+            spec: &branchyard_sandbox::ExecSpec,
+        ) -> Result<Box<dyn branchyard_sandbox::Process>, branchyard_sandbox::ProviderError>
+        {
+            let env = spec
+                .env
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect();
+            self.0.lock_recovering("recorded").push(env);
+            Err(branchyard_sandbox::ProviderError::Runtime(
+                "recorded, not run".into(),
+            ))
+        }
+        fn stop(&self, _: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            Ok(())
+        }
+        fn destroy(&self, _: &str) -> Result<(), branchyard_sandbox::ProviderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_script_in_a_sandbox_is_given_no_entry_that_holds_a_guarded_token() {
+        // What `[workspace.env]` expanded from this process, as
+        // `with_spec_env` hands it over for setup and for teardown.
+        const TOKEN: &str = "sandbox-script-token-0123456789";
+        branchyard_support::child::guard("ap", TOKEN);
+        let env: Vec<(String, String)> = [
+            ("GOOGLE_GENERATIVE_AI_API_KEY", TOKEN.to_owned()),
+            ("MY_TOKEN", TOKEN.to_owned()),
+            ("MY_BEARER", format!("Bearer {TOKEN}")),
+            ("MY_OTHER", "harmless".to_owned()),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect();
+        let provider = Recording::default();
+        for phase in [WorkspacePhase::Setup, WorkspacePhase::Teardown] {
+            let mut report = WorkspaceReport::new(phase, None);
+            run_in_sandbox(
+                &mut report,
+                &["env".to_owned()],
+                InSandbox {
+                    provider: &provider,
+                    sandbox: "box",
+                    cwd: "/workspace",
+                    env: &env,
+                    timeout: Duration::from_secs(5),
+                    cancel: &|| None,
+                },
+            );
+            // (The stand-in runs nothing, so the phase reports that.)
+            assert!(!report.ok);
+            assert!(!format!("{report:?}").contains(TOKEN));
+        }
+        let given = provider.0.lock_recovering("recorded").clone();
+        let harmless = vec![("MY_OTHER".to_owned(), "harmless".to_owned())];
+        assert_eq!(given, [harmless.clone(), harmless]);
+    }
 
     #[test]
     fn env_values_expand_from_the_branch_then_the_process() {

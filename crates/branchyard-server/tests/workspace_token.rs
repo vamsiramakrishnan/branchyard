@@ -66,8 +66,15 @@ fn a_served_repositorys_table_cannot_expand_the_servers_token() {
     for file in [&setup, &harness] {
         let env = fs::read_to_string(file)
             .unwrap_or_else(|e| format!("{} was not written: {e}", file.display()));
-        assert!(!env.contains(AIPLEX_TOKEN), "{}: {env}", file.display());
-        assert!(env.contains("MY_OTHER=fine"), "{}: {env}", file.display());
+        // A failure shows the variables' names, never the environment
+        // itself, which is the machine's that runs this test.
+        let names = env
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(!env.contains(AIPLEX_TOKEN), "{}: {names}", file.display());
+        assert!(env.contains("MY_OTHER=fine"), "{}: {names}", file.display());
     }
     // The branch's log names the entries and the backend, never the value.
     let events = client.repo("app").events("table", 0).unwrap();

@@ -1209,16 +1209,25 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // request speaks another API than those backends, nor by the
     // pass-through path.
     if let Some(model) = model {
-        let planes = gateway.governed_by(model);
-        if !planes.is_empty() && !order.iter().any(|b| b.control_plane.is_some()) {
+        let governed = gateway
+            .governed_by(model)
+            .filter(|_| !order.iter().any(|b| b.control_plane.is_some()));
+        if let Some((pattern, planes)) = governed {
+            // The event names the route that decided, by its pattern, and
+            // what an operator can change.
             let why = format!(
-                "the route for {model} names the control-plane backend{} {}, and none of them \
-                 takes this request ({}); it is not sent to a plain backend instead",
+                "the route {pattern:?} matches {model} and names the control-plane backend{} \
+                 {}, and none of them takes this request ({}); it is not sent to a plain \
+                 backend instead: put a route for {model} before that one{}",
                 if planes.len() == 1 { "" } else { "s" },
                 planes.join(", "),
                 match &named {
                     Some(_) => "the pass-through path names a plain backend".to_owned(),
                     None => format!("it speaks the {api} API"),
+                },
+                match &named {
+                    Some(_) => String::new(),
+                    None => format!(", or give that route an AIPlex backend of the {api} API"),
                 }
             );
             // The harness is told no backend's name.

@@ -1424,7 +1424,45 @@ impl ModelsConfig {
     pub fn notes(&self) -> Vec<String> {
         let mut notes = self.audience_notes();
         notes.extend(self.transport_notes());
+        notes.extend(self.route_notes());
         notes
+    }
+
+    /// A route of plain backends that no request reaches: an earlier route
+    /// that names control-plane backends has a pattern that covers its own
+    /// (`*` before `gpt-*`), and the first route whose pattern matches a
+    /// model decides, whatever API the request speaks, so the models the
+    /// later route was written for are held to the earlier one's backends.
+    pub fn route_notes(&self) -> Vec<String> {
+        let governed = |route: &ModelRouteConfig| {
+            route.backends.iter().chain(&route.fallbacks).any(|name| {
+                self.backends
+                    .get(name)
+                    .is_some_and(|backend| backend.control_plane.is_some())
+            })
+        };
+        self.routes
+            .iter()
+            .enumerate()
+            .filter(|(_, later)| !governed(later))
+            .filter_map(|(at, later)| {
+                let (before, earlier) =
+                    self.routes[..at].iter().enumerate().find(|(_, earlier)| {
+                        governed(earlier)
+                            && branchyard_provision::connectors::glob_match(
+                                &earlier.model,
+                                &later.model,
+                            )
+                    })?;
+                Some(format!(
+                    "models.routes[{at}]: no request reaches this route for {:?}: the earlier \
+                     route for {:?} (models.routes[{before}]) covers its pattern and names \
+                     AIPlex backends, and the first route whose pattern matches a model decides, \
+                     whatever API the request speaks; put this route before that one",
+                    later.model, earlier.model
+                ))
+            })
+            .collect()
     }
 
     /// A control-plane backend whose `url` is plain `http://` on a host
@@ -4177,6 +4215,48 @@ classes = { compensable = "allow" }
             shown_url("https://ann:p/secret-pw@host/ap"),
             "https://host/ap"
         );
+    }
+
+    #[test]
+    fn a_plain_route_behind_an_aiplex_route_that_covers_it_is_noted() {
+        let file = |routes: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"openai\"\n\
+                 key = \"OPENAI_API_KEY\"\n\n{routes}"
+            )
+        };
+        let route = |model: &str, backend: &str| {
+            format!("[[models.routes]]\nmodel = \"{model}\"\nbackends = [\"{backend}\"]\n\n")
+        };
+        // `*` before `gpt-*`: read, not refused, and said.
+        let shadowed = parse(&file(&format!(
+            "{}{}",
+            route("*", "ap"),
+            route("gpt-*", "direct")
+        )))
+        .unwrap();
+        let noted = vec![
+            "models.routes[1]: no request reaches this route for \"gpt-*\": the earlier route \
+             for \"*\" (models.routes[0]) covers its pattern and names AIPlex backends, and \
+             the first route whose pattern matches a model decides, whatever API the request \
+             speaks; put this route before that one"
+                .to_owned(),
+        ];
+        assert_eq!(shadowed.models.route_notes(), noted);
+        assert_eq!(shadowed.models.notes(), noted);
+        // The plain route first, a pattern the earlier one does not cover,
+        // and two routes of one kind: nothing to say.
+        for routes in [
+            format!("{}{}", route("gpt-*", "direct"), route("*", "ap")),
+            format!("{}{}", route("claude-*", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-4*", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("*", "direct"), route("gpt-*", "direct")),
+        ] {
+            let config = parse(&file(&routes)).unwrap();
+            assert!(config.models.route_notes().is_empty(), "{routes}");
+        }
     }
 
     #[test]

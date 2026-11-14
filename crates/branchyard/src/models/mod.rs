@@ -964,20 +964,19 @@ impl Gateway {
         self.backends.iter().any(|b| b.control_plane.is_some())
     }
 
-    /// The control-plane backends that the first route whose pattern
-    /// matches `model` names, whatever API a request speaks: a model the
-    /// gateway read that such a route takes goes to one of them or nowhere.
-    /// Empty when no route's pattern matches `model`, or the first that
-    /// does names plain backends.
-    pub(crate) fn governed_by(&self, model: &str) -> Vec<&str> {
-        let Some(route) = self
+    /// The first route whose pattern matches `model`, whatever API a
+    /// request speaks, when it names control-plane backends: its pattern and
+    /// those backends. A model the gateway read that such a route takes
+    /// goes to one of them or nowhere, so the order of the routes decides:
+    /// a wider pattern before a narrower one takes the narrower one's
+    /// models. `None` when no route's pattern matches `model`, or the first
+    /// that does names plain backends.
+    pub(crate) fn governed_by(&self, model: &str) -> Option<(&str, Vec<&str>)> {
+        let route = self
             .routes
             .iter()
-            .find(|r| branchyard_provision::connectors::glob_match(&r.model, model))
-        else {
-            return Vec::new();
-        };
-        route
+            .find(|r| branchyard_provision::connectors::glob_match(&r.model, model))?;
+        let planes: Vec<&str> = route
             .backends
             .iter()
             .map(|(name, _)| name)
@@ -987,7 +986,8 @@ impl Gateway {
                     .is_some_and(|b| b.control_plane.is_some())
             })
             .map(String::as_str)
-            .collect()
+            .collect();
+        (!planes.is_empty()).then_some((route.model.as_str(), planes))
     }
 
     /// The tokens of the control-plane backends that are called with a

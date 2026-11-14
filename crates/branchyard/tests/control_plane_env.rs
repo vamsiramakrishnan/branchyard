@@ -73,12 +73,19 @@ fn a_control_planes_key_variable_never_reaches_the_harness() {
     );
     let env = std::fs::read_to_string(&setup)
         .unwrap_or_else(|e| format!("the setup command wrote nothing: {e}"));
+    // A failure shows the variables' names, never the environment
+    // itself, which is the machine's that runs this test.
+    let names = env
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+        .collect::<Vec<_>>()
+        .join(",");
     assert!(
         env.contains("BY_TEST_PLAIN_KEY="),
-        "the setup command ran without the environment: {env}"
+        "the setup command ran without the environment: {names}"
     );
-    assert!(!env.contains("BY_TEST_AIPLEX_TOKEN"), "{env}");
-    assert!(!env.contains(ENV_TOKEN), "{env}");
+    assert!(!env.contains("BY_TEST_AIPLEX_TOKEN"), "{names}");
+    assert!(!env.contains(ENV_TOKEN), "{names}");
     let said = text(&events);
     // Neither the token's variable nor its value is in the harness's
     // environment; the plain backend's variable is, as it always was.
