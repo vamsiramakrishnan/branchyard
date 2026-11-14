@@ -8,7 +8,7 @@
 //! it is `ps -o lstart=` (one-second resolution) and `sysctl -n
 //! kern.boottime`.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 
 /// The variable every local harness is started with, naming its turn's
@@ -39,7 +39,7 @@ pub(crate) fn own_start() -> &'static str {
 }
 
 fn output(program: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(program)
+    let out = branchyard_support::child::command(program)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn a_group_is_killed_only_while_its_start_matches() {
         use std::os::unix::process::CommandExt;
-        let mut child = Command::new("sleep")
+        let mut child = branchyard_support::child::command("sleep")
             .arg("30")
             .process_group(0)
             .spawn()
@@ -276,7 +276,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         let marker = format!("proc-test-{}", std::process::id());
         let spawn = |marker: &str| {
-            Command::new("sleep")
+            branchyard_support::child::command("sleep")
                 .arg("30")
                 .env(ENV_SPAWN, marker)
                 .process_group(0)

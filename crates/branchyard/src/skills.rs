@@ -726,10 +726,9 @@ pub(crate) fn user_for_turn(dir: &Path, repository: &ForTurn) -> UserSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
+        let out = branchyard_support::child::command("git")
             .current_dir(dir)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

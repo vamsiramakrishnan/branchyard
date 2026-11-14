@@ -1249,8 +1249,10 @@ impl ModelAudit {
 pub struct ModelBackendConfig {
     /// `anthropic`, `openai` or `generic`.
     pub api: String,
-    /// Its base URL (default: the provider's public API; a generic
-    /// backend needs one).
+    /// Its base URL, where its calls and its credential go. Default: the
+    /// provider's public API, for a plain `anthropic` or `openai` backend
+    /// only; a generic backend and a `control_plane` backend must name one
+    /// (for AIPlex, `https://<aiplex>/ap/<access point>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The secret holding its key, by name: an entry of `[secrets]`, else
@@ -1272,6 +1274,59 @@ pub struct ModelBackendConfig {
     /// for one whose host is `api.z.ai`, else `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<String>,
+    /// `aiplex` when this backend is an AIPlex access point
+    /// (`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told
+    /// which branch, turn and harness is calling, its own refusals are
+    /// final, and a route that names it names only such backends. An
+    /// `anthropic` or `openai` backend with a key and no `compat`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<String>,
+    /// `turn-token`: instead of a `key`, the gateway presents a token the
+    /// server signs for each turn, which AIPlex verifies against the
+    /// server's published keys; only on an AIPlex backend, with
+    /// `audience`, on a server whose issuer is a URL AIPlex can fetch keys
+    /// from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// The `aud` of that token: the audience the AIPlex binding expects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
+/// `url` as a message or an output may show it: without its user
+/// information (`user:password@`), conservatively. One function for every
+/// URL that comes from configuration: the gateway's own parser shows a URL
+/// it refuses the same way (`branchyard_wire::without_userinfo`).
+pub fn shown_url(url: &str) -> String {
+    branchyard_wire::without_userinfo(url)
+}
+
+/// Why `url` is no address for a control-plane backend, where its
+/// credential is sent, in the words of the gateway's own URL parser, which
+/// refuses the same when the gateway is built: a base URL with a host, no
+/// user information, no query and no fragment, a numeric port, and no
+/// whitespace, control or non-ASCII characters. The reason shows the URL
+/// as [`shown_url`] does.
+fn access_point_address(url: &str) -> Result<(), String> {
+    branchyard_wire::HttpUrl::parse(url)
+        .and_then(branchyard_wire::HttpUrl::without_query)
+        .map(|_| ())
+        .map_err(|why| why.to_string())
+}
+
+/// The host of an `http(s)` URL, lower-cased and without its port; `None`
+/// for anything else (an audience need not be a URL).
+fn url_host(text: &str) -> Option<String> {
+    let rest = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => authority.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.trim_end_matches('.').to_ascii_lowercase())
 }
 
 /// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
@@ -1362,6 +1417,107 @@ impl ModelsConfig {
         Ok(Some(access))
     }
 
+    /// What an operator should look at that is not wrong, as a server says
+    /// it when it reads its configuration file: the
+    /// [audience notes](ModelsConfig::audience_notes), then the
+    /// [transport notes](ModelsConfig::transport_notes).
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = self.audience_notes();
+        notes.extend(self.transport_notes());
+        notes.extend(self.route_notes());
+        notes
+    }
+
+    /// A route of plain backends that no request reaches: an earlier route
+    /// that names control-plane backends has a pattern that covers its own
+    /// (`*` before `gpt-*`), and the first route whose pattern matches a
+    /// model decides, whatever API the request speaks, so the models the
+    /// later route was written for are held to the earlier one's backends.
+    pub fn route_notes(&self) -> Vec<String> {
+        let governed = |route: &ModelRouteConfig| {
+            route.backends.iter().chain(&route.fallbacks).any(|name| {
+                self.backends
+                    .get(name)
+                    .is_some_and(|backend| backend.control_plane.is_some())
+            })
+        };
+        self.routes
+            .iter()
+            .enumerate()
+            .filter(|(_, later)| !governed(later))
+            .filter_map(|(at, later)| {
+                let (before, earlier) =
+                    self.routes[..at].iter().enumerate().find(|(_, earlier)| {
+                        // Every model the later pattern matches, the
+                        // earlier one matches too: sound and not complete,
+                        // so a pattern it cannot tell about is not noted.
+                        governed(earlier)
+                            && branchyard_provision::connectors::glob_covers(
+                                &earlier.model,
+                                &later.model,
+                            )
+                    })?;
+                Some(format!(
+                    "models.routes[{at}]: no request reaches this route for {:?}: the earlier \
+                     route for {:?} (models.routes[{before}]) covers its pattern and names \
+                     AIPlex backends, and the first route whose pattern matches a model decides, \
+                     whatever API the request speaks; put this route before that one",
+                    later.model, earlier.model
+                ))
+            })
+            .collect()
+    }
+
+    /// A control-plane backend whose `url` is plain `http://` on a host
+    /// that is not loopback: the credential it is sent (a stored token, or
+    /// a token the server signs) travels unencrypted unless the network
+    /// between the two encrypts it. Not refused: a cluster's own transport
+    /// may encrypt what is `http://` between its services.
+    pub fn transport_notes(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .filter(|(_, b)| b.control_plane.is_some())
+            .filter_map(|(name, b)| {
+                let url = b.url.as_deref()?;
+                let host = url_host(url).filter(|_| url.starts_with("http://"))?;
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback());
+                (!loopback).then(|| {
+                    format!(
+                        "models.backends.{name}: its url is plain http on {host}, which is not \
+                         loopback, so the credential it is sent travels unencrypted unless the \
+                         network between Branchyard and AIPlex encrypts it; use https:// if it \
+                         does not"
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// A backend called with a signed token whose `audience` is an
+    /// `http(s)` URL on another host than its `url`. Whoever is at `url`
+    /// receives a token that is good at the audience for up to an hour, so
+    /// the two normally share a host.
+    pub fn audience_notes(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .filter(|(_, b)| b.auth.as_deref() == Some("turn-token"))
+            .filter_map(|(name, b)| {
+                let audience = url_host(b.audience.as_deref()?)?;
+                let url = url_host(b.url.as_deref()?)?;
+                (audience != url).then(|| {
+                    format!(
+                        "models.backends.{name}: its audience names the host {audience} and its \
+                         url the host {url}; the token it is sent is good at the audience for up \
+                         to an hour, so check the url is the audience's AIPlex"
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// The checks beyond the file's shape. The gateway checks the rest
     /// when `by` builds it.
     pub fn check(&self) -> Result<(), ConfigError> {
@@ -1388,8 +1544,113 @@ impl ModelsConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         &format!("backends.{name}.url"),
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
+                }
+            }
+            // An AIPlex backend has no default address: the provider's public
+            // API would be sent its credential. Its url is where that goes.
+            if backend.control_plane.as_deref() == Some("aiplex") && backend.api != "generic" {
+                let looks = "url = \"https://<aiplex>/ap/<access point>\"";
+                match backend.url.as_deref().map(access_point_address) {
+                    None => {
+                        return fail(
+                            &format!("backends.{name}.url"),
+                            format!(
+                                "a control-plane backend (aiplex) has no default address: \
+                                 without a url its calls, and the credential they carry, would \
+                                 go to the provider's public API; write its access point, {looks}"
+                            ),
+                        )
+                    }
+                    Some(Err(why)) => {
+                        return fail(
+                            &format!("backends.{name}.url"),
+                            format!("{why}; write the access point, {looks}"),
+                        )
+                    }
+                    Some(Ok(())) => {}
+                }
+            }
+            match backend.control_plane.as_deref() {
+                None => {}
+                Some("aiplex") if backend.api == "generic" => {
+                    return fail(
+                        &format!("backends.{name}.control_plane"),
+                        "aiplex is for an anthropic or openai backend (an access point serves \
+                         those APIs), not generic"
+                            .into(),
+                    )
+                }
+                Some("aiplex") if backend.key.is_none() && backend.auth.is_none() => {
+                    return fail(
+                        &format!("backends.{name}.key"),
+                        "a control-plane backend (aiplex) needs a key (the token it is called \
+                         with), or auth = \"turn-token\" with an audience on a server"
+                            .into(),
+                    )
+                }
+                Some("aiplex") if backend.compat.as_deref().is_some_and(|c| c != "none") => {
+                    return fail(
+                        &format!("backends.{name}.compat"),
+                        "a control-plane backend (aiplex) takes no compatibility layer".into(),
+                    )
+                }
+                Some("aiplex") => {}
+                Some(other) => {
+                    return fail(
+                        &format!("backends.{name}.control_plane"),
+                        format!("{other:?} is not a control plane; the one there is is \"aiplex\""),
+                    )
+                }
+            }
+            match (backend.auth.as_deref(), backend.audience.as_deref()) {
+                (None, None) => {}
+                (Some("turn-token"), _) if backend.control_plane.is_none() => {
+                    return fail(
+                        &format!("backends.{name}.auth"),
+                        "a token Branchyard signs goes only to an AIPlex backend: add \
+                         control_plane = \"aiplex\", or use key"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), None) => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "auth = \"turn-token\" needs audience = \"...\": the audience the AIPlex \
+                         binding expects"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), Some(audience)) if audience.trim().is_empty() => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "is empty; write the audience the AIPlex binding expects".into(),
+                    )
+                }
+                (Some("turn-token"), Some(_)) if backend.key.is_some() => {
+                    return fail(
+                        &format!("backends.{name}"),
+                        "names both key and auth = \"turn-token\": one credential, not two; \
+                         remove one"
+                            .into(),
+                    )
+                }
+                (Some("turn-token"), Some(_)) => {}
+                (Some(other), _) => {
+                    return fail(
+                        &format!("backends.{name}.auth"),
+                        format!("{other:?} is not an auth; the one there is is \"turn-token\""),
+                    )
+                }
+                (None, Some(_)) => {
+                    return fail(
+                        &format!("backends.{name}.audience"),
+                        "is only for auth = \"turn-token\"; add it, or remove audience".into(),
+                    )
                 }
             }
             match backend.compat.as_deref() {
@@ -1422,6 +1683,73 @@ impl ModelsConfig {
                 if !self.backends.contains_key(name) {
                     return fail(&format!("routes[{i}]"), format!("no backend {name}"));
                 }
+            }
+            let plane = |name: &&String| {
+                self.backends
+                    .get(*name)
+                    .is_some_and(|b| b.control_plane.is_some())
+            };
+            let named = || route.backends.iter().chain(&route.fallbacks);
+            if let (Some(plane), Some(plain)) = (named().find(plane), named().find(|n| !plane(n))) {
+                return fail(
+                    &format!("routes[{i}]"),
+                    format!(
+                        "({}) names the control-plane backend {plane} and the plain backend \
+                         {plain}; a route that names a control-plane backend names only \
+                         control-plane backends, or a refusal or an outage of the control plane \
+                         would send its call to {plain} directly",
+                        route.model
+                    ),
+                );
+            }
+        }
+        for (name, backend) in &self.backends {
+            if backend.control_plane.is_none() {
+                continue;
+            }
+            let named = self
+                .routes
+                .iter()
+                .any(|r| r.backends.contains(name) || r.fallbacks.contains(name));
+            let plain = self
+                .backends
+                .iter()
+                .find(|(_, b)| b.api == backend.api && b.control_plane.is_none());
+            if let (false, Some((plain, _))) = (named, plain) {
+                return fail(
+                    &format!("backends.{name}"),
+                    format!(
+                        "no route names this control-plane backend, and a call no route takes \
+                         goes to the plain {} backend {plain}, so it would never be used; add a \
+                         route that names it ([[models.routes]] with backends = [\"{name}\"])",
+                        backend.api
+                    ),
+                );
+            }
+        }
+        // A plain backend that names a control-plane backend's key would be
+        // sent the control plane's token, at a provider's address.
+        for (name, backend) in &self.backends {
+            let Some(key) = backend
+                .key
+                .as_deref()
+                .filter(|_| backend.control_plane.is_none())
+            else {
+                continue;
+            };
+            let plane = self
+                .backends
+                .iter()
+                .find(|(_, b)| b.control_plane.is_some() && b.key.as_deref() == Some(key));
+            if let Some((plane, _)) = plane {
+                return fail(
+                    &format!("backends.{name}.key"),
+                    format!(
+                        "{key:?} is the key of the control-plane backend {plane}, and a \
+                         control plane's token is sent only to its own url; give {name} a key \
+                         of its own"
+                    ),
+                );
             }
         }
         for model in self.prices.keys() {
@@ -2514,7 +2842,10 @@ impl ProjectConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         key,
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
                 }
             }
@@ -2550,6 +2881,37 @@ impl ProjectConfig {
         self.network.policy()?;
         self.network.mirror_rules()?;
         self.models.check()?;
+        // A plain backend that reads its key from where a control-plane
+        // backend reads its token (the same variable or file, under another
+        // secret's name) would be sent the token at a provider's address.
+        let reference = |key: &str| self.secrets.get(key).map_or(key, String::as_str).to_owned();
+        for (name, backend) in &self.models.backends {
+            let Some(key) = backend
+                .key
+                .as_deref()
+                .filter(|_| backend.control_plane.is_none())
+            else {
+                continue;
+            };
+            let plane = self.models.backends.iter().find(|(_, b)| {
+                b.control_plane.is_some()
+                    && b.key
+                        .as_deref()
+                        .is_some_and(|k| reference(k) == reference(key))
+            });
+            if let Some((plane, _)) = plane {
+                let from = reference(key);
+                let from = match from.starts_with('@') {
+                    true => from,
+                    false => format!("${from}"),
+                };
+                return Err(ConfigError(format!(
+                    "models.backends.{name}.key: it is read from {from}, where the token of the \
+                     control-plane backend {plane} is read from, and a control plane's token is \
+                     sent only to its own url; give {name} a key of its own"
+                )));
+            }
+        }
         if !self.connectors.grants.is_empty() && self.connectors.gateway.is_none() {
             return fail(
                 "connectors.grants",
@@ -2596,7 +2958,10 @@ impl ProjectConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         &format!("trackers.{name}.url"),
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
                 }
             }
@@ -3706,6 +4071,524 @@ classes = { compensable = "allow" }
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_audience_on_another_host_than_the_url_is_noted_not_refused() {
+        let models = |audience: &str| {
+            parse(&format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\ncontrol_plane = \"aiplex\"\n\
+                 auth = \"turn-token\"\naudience = \"{audience}\"\n\n\
+                 [[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            ))
+            .unwrap()
+            .models
+        };
+        for same in [
+            "https://aiplex.example.com",
+            "https://AIPLEX.example.com:8443/x",
+            "aiplex-ide",
+            "urn:aiplex:ide",
+        ] {
+            assert!(models(same).notes().is_empty(), "{same}");
+        }
+        let notes = models("https://aiplex.other.example").notes();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("models.backends.ap")
+                && notes[0].contains("aiplex.other.example")
+                && notes[0].contains("aiplex.example.com"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_name_a_control_planes_key() {
+        let file = |plain_key: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.ap-openai]\napi = \"openai\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"anthropic\"\n\
+                 key = \"{plain_key}\"\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
+                 backends = [\"ap\"]\n\n[[models.routes]]\nmodel = \"gpt-*\"\n\
+                 backends = [\"ap-openai\"]\n"
+            )
+        };
+        // Two control-plane backends share a token; a plain one has its own.
+        parse(&file("ANTHROPIC_API_KEY")).unwrap();
+        let error = parse(&file("aiplex")).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "models.backends.direct.key: \"aiplex\" is the key of the control-plane backend \
+                 ap, and a control plane's token is sent only to its own url; give direct a key \
+                 of its own"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_plain_backend_may_not_read_its_key_where_a_control_plane_reads_its_token() {
+        // Another secret's name for the same variable, and for the same
+        // file: what the configuration can see without reading a value.
+        let file = |secrets: &str, plain_key: &str| {
+            format!(
+                "version = 1\n\n[secrets]\n{secrets}\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"openai\"\n\
+                 key = \"{plain_key}\"\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
+                 backends = [\"ap\"]\n"
+            )
+        };
+        for (secrets, plain_key, from) in [
+            (
+                "aiplex = \"ZZ_AIPLEX_KEY\"\nother = \"ZZ_AIPLEX_KEY\"\n",
+                "other",
+                "$ZZ_AIPLEX_KEY",
+            ),
+            (
+                "aiplex = \"ZZ_AIPLEX_KEY\"\n",
+                "ZZ_AIPLEX_KEY",
+                "$ZZ_AIPLEX_KEY",
+            ),
+            (
+                "aiplex = \"@/run/aiplex\"\nother = \"@/run/aiplex\"\n",
+                "other",
+                "@/run/aiplex",
+            ),
+        ] {
+            let error = parse(&file(secrets, plain_key)).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "models.backends.direct.key: it is read from {from}, where the token of \
+                     the control-plane backend ap is read from, and a control plane's token is \
+                     sent only to its own url; give direct a key of its own"
+                )),
+                "{error}"
+            );
+        }
+        // A reference of its own is its own.
+        parse(&file(
+            "aiplex = \"ZZ_AIPLEX_KEY\"\nother = \"OPENAI_API_KEY\"\n",
+            "other",
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_aiplex_url_is_read_by_the_gateways_own_parser_when_the_file_is_read() {
+        let file = |url: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+                 key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n\n[[models.routes]]\n\
+                 model = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        // What the engine refused and the configuration check passed.
+        for (url, why) in [
+            (
+                "https://ann:p/secret-pw@host/ap",
+                "models.backends.ap.url: \"https://host/ap\" has an invalid port",
+            ),
+            (
+                "http://[fe80::1%25eth0]:7400/ap/ide",
+                "models.backends.ap.url: \"http://[fe80::1%25eth0]:7400/ap/ide\" has a \
+                 malformed IPv6 address",
+            ),
+            (
+                "https://ann:p#secret-pw@aiplex.example.com/ap/ide",
+                "models.backends.ap.url: \"https://aiplex.example.com/ap/ide\" has user \
+                 information (user:password@), which is not taken",
+            ),
+            (
+                "https://aiplex.example.com:port/ap/ide",
+                "has an invalid port",
+            ),
+        ] {
+            let error = parse(&file(url)).unwrap_err().to_string();
+            assert!(error.contains(why), "{url}: {error}");
+            assert!(!error.contains("secret-pw"), "{error}");
+        }
+        parse(&file("http://[fe80::1]:7400/ap/ide")).unwrap();
+        assert_eq!(
+            shown_url("https://ann:p/secret-pw@host/ap"),
+            "https://host/ap"
+        );
+    }
+
+    #[test]
+    fn a_plain_route_behind_an_aiplex_route_that_covers_it_is_noted() {
+        let file = |routes: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+                 control_plane = \"aiplex\"\n\n[models.backends.direct]\napi = \"openai\"\n\
+                 key = \"OPENAI_API_KEY\"\n\n{routes}"
+            )
+        };
+        let route = |model: &str, backend: &str| {
+            format!("[[models.routes]]\nmodel = \"{model}\"\nbackends = [\"{backend}\"]\n\n")
+        };
+        // `*` before `gpt-*`: read, not refused, and said.
+        let shadowed = parse(&file(&format!(
+            "{}{}",
+            route("*", "ap"),
+            route("gpt-*", "direct")
+        )))
+        .unwrap();
+        let noted = vec![
+            "models.routes[1]: no request reaches this route for \"gpt-*\": the earlier route \
+             for \"*\" (models.routes[0]) covers its pattern and names AIPlex backends, and \
+             the first route whose pattern matches a model decides, whatever API the request \
+             speaks; put this route before that one"
+                .to_owned(),
+        ];
+        assert_eq!(shadowed.models.route_notes(), noted);
+        assert_eq!(shadowed.models.notes(), noted);
+        // A prefix that covers a longer one is said the same way.
+        let prefix = parse(&file(&format!(
+            "{}{}",
+            route("gpt-*", "ap"),
+            route("gpt-4*", "direct")
+        )))
+        .unwrap();
+        assert_eq!(prefix.models.route_notes().len(), 1);
+        assert!(prefix.models.route_notes()[0].starts_with(
+            "models.routes[1]: no request reaches this route for \"gpt-4*\": the earlier route \
+             for \"gpt-*\" (models.routes[0]) covers its pattern"
+        ));
+        // The plain route first, a pattern the earlier one does not cover
+        // (`gpt-?` matches the text `gpt-*` and not the model `gpt-4o`,
+        // which the plain route still gets), and two routes of one kind:
+        // nothing to say.
+        for routes in [
+            format!("{}{}", route("gpt-*", "direct"), route("*", "ap")),
+            format!("{}{}", route("claude-*", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-4*", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-?", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-??", "ap"), route("gpt-4*", "direct")),
+            format!("{}{}", route("*", "direct"), route("gpt-*", "direct")),
+        ] {
+            let config = parse(&file(&routes)).unwrap();
+            assert!(config.models.route_notes().is_empty(), "{routes}");
+        }
+    }
+
+    #[test]
+    fn a_control_planes_plain_http_url_off_loopback_is_noted_not_refused() {
+        let file = |url: &str, credential: &str, plane: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+                 {credential}{plane}\n[[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        let aiplex = "control_plane = \"aiplex\"\n";
+        let stored = "key = \"aiplex\"\n";
+        let signed = "auth = \"turn-token\"\naudience = \"aiplex-production\"\n";
+        let noted = |host: &str| {
+            vec![format!(
+                "models.backends.ap: its url is plain http on {host}, which is not loopback, so \
+                 the credential it is sent travels unencrypted unless the network between \
+                 Branchyard and AIPlex encrypts it; use https:// if it does not"
+            )]
+        };
+        // Accepted, with either credential, and noted.
+        for credential in [stored, signed] {
+            for (url, host) in [
+                ("http://aiplex.internal:8080/ap/ide", "aiplex.internal"),
+                ("http://AIPlex.Internal/ap/ide", "aiplex.internal"),
+                ("http://10.0.0.5:7400/ap/ide", "10.0.0.5"),
+                ("http://[2001:db8::1]:7400/ap/ide", "2001:db8::1"),
+                ("http://0.0.0.0:7400/ap/ide", "0.0.0.0"),
+            ] {
+                let config = parse(&file(url, credential, aiplex)).unwrap();
+                assert_eq!(config.models.transport_notes(), noted(host), "{url}");
+                assert_eq!(config.models.notes(), noted(host), "{url}");
+            }
+            // https anywhere, and http on this machine: nothing to say.
+            for url in [
+                "https://aiplex.example.com/ap/ide",
+                "https://10.0.0.5:7400/ap/ide",
+                "http://127.0.0.1:7400/ap/ide",
+                "http://127.8.9.10/ap/ide",
+                "http://localhost:7400/ap/ide",
+                "http://LOCALHOST./ap/ide",
+                "http://[::1]:7400/ap/ide",
+            ] {
+                let config = parse(&file(url, credential, aiplex)).unwrap();
+                assert!(config.models.transport_notes().is_empty(), "{url}");
+            }
+        }
+        // A plain backend's url is its provider's, as it always was.
+        let plain = parse(&file("http://10.0.0.5:7400", stored, "")).unwrap();
+        assert!(plain.models.notes().is_empty());
+        // Beside an audience on another host: both notes, the audience's first.
+        let both = parse(&file(
+            "http://aiplex.internal:8080/ap/ide",
+            "auth = \"turn-token\"\naudience = \"https://aiplex.example.com\"\n",
+            aiplex,
+        ))
+        .unwrap();
+        let notes = both.models.notes();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert_eq!(notes[0], both.models.audience_notes()[0]);
+        assert!(notes[0].contains("its audience names the host aiplex.example.com"));
+        assert_eq!(notes[1..], noted("aiplex.internal"));
+    }
+
+    #[test]
+    fn an_aiplex_backend_names_its_url() {
+        let credentials = [
+            "key = \"aiplex\"\n",
+            "auth = \"turn-token\"\naudience = \"https://aiplex.example.com\"\n",
+        ];
+        let file = |api: &str, credential: &str, url: Option<&str>| {
+            let url = url.map_or(String::new(), |u| format!("url = \"{u}\"\n"));
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"{api}\"\n{url}\
+                 control_plane = \"aiplex\"\n{credential}\n\
+                 [[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        for api in ["anthropic", "openai"] {
+            for credential in credentials {
+                // Without a url its calls would go to the provider's public
+                // API, with the credential.
+                let error = parse(&file(api, credential, None)).unwrap_err().to_string();
+                for needle in [
+                    "models.backends.ap.url",
+                    "has no default address",
+                    "url = \"https://<aiplex>/ap/<access point>\"",
+                ] {
+                    assert!(error.contains(needle), "{needle:?} not in {error}");
+                }
+                // Nor is a url that is empty, blank or names no host one.
+                for url in [
+                    "",
+                    " ",
+                    "https://",
+                    "https:///ap/ide",
+                    "https://:8443/ap/ide",
+                    "https://aiplex.example.com/ap/ide ",
+                ] {
+                    let error = parse(&file(api, credential, Some(url)))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains("models.backends.ap.url"), "{url:?}: {error}");
+                }
+                // Nor one the gateway's own parser refuses, in its words;
+                // user information is never shown.
+                for (url, why) in [
+                    (
+                        "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+                        "models.backends.ap.url: \"http://127.0.0.1:1/ap/ide\" has user \
+                         information (user:password@), which is not taken; it is left out of \
+                         this message",
+                    ),
+                    (
+                        "https://aiplex.example.com/ap/ide?x=1",
+                        "must be a base URL: a host and a path, no query",
+                    ),
+                    (
+                        "https://aiplex.example.com/ap/ide#x",
+                        "must not have a fragment",
+                    ),
+                ] {
+                    let error = parse(&file(api, credential, Some(url)))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(why), "{url:?}: {error}");
+                    assert!(
+                        !error.contains("secret-pw") && !error.contains("ann:"),
+                        "{error}"
+                    );
+                }
+                // Written out, it is the operator's choice.
+                for url in [
+                    "https://aiplex.example.com/ap/ide",
+                    "https://api.anthropic.com",
+                ] {
+                    let config = parse(&file(api, credential, Some(url))).unwrap();
+                    assert_eq!(config.models.backends["ap"].url.as_deref(), Some(url));
+                }
+            }
+        }
+        // A plain backend still needs none.
+        parse("version = 1\n\n[models.backends.p]\napi = \"anthropic\"\nkey = \"k\"\n").unwrap();
+        // No backend's refused url is shown with its user information.
+        let error = parse(
+            "version = 1\n\n[models.backends.p]\napi = \"generic\"\n\
+             url = \"ftp://ann:secret-pw@host/x\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("must be an http:// or https:// URL, not \"ftp://host/x\""),
+            "{error}"
+        );
+        for (url, shown) in [
+            (
+                "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+                "http://127.0.0.1:1/ap/ide",
+            ),
+            (
+                "https://a@b@by.example.com/p@q",
+                "https://by.example.com/p@q",
+            ),
+            ("ann:secret-pw@host:80/x", "host:80/x"),
+            (
+                "https://by.example.com/p?to=a@b",
+                "https://by.example.com/p?to=a@b",
+            ),
+            ("", ""),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_signed_token_backend_is_read_rendered_back_and_refused_by_name() {
+        let backend = |extra: &str| {
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\n{extra}\n\
+                 [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        let good = backend(
+            "control_plane = \"aiplex\"\nauth = \"turn-token\"\n\
+             audience = \"https://aiplex.example.com\"\n",
+        );
+        let config = parse(&good).unwrap();
+        let ap = &config.models.backends["ap"];
+        assert_eq!(ap.auth.as_deref(), Some("turn-token"));
+        assert_eq!(ap.audience.as_deref(), Some("https://aiplex.example.com"));
+        assert_eq!(ap.key, None);
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        for (extra, needles) in [
+            (
+                "control_plane = \"aiplex\"\nauth = \"oidc\"\naudience = \"a\"\n",
+                vec!["models.backends.ap.auth", "\"oidc\"", "\"turn-token\""],
+            ),
+            (
+                "key = \"k\"\nauth = \"turn-token\"\naudience = \"a\"\n",
+                vec!["models.backends.ap.auth", "control_plane = \"aiplex\""],
+            ),
+            (
+                "control_plane = \"aiplex\"\nauth = \"turn-token\"\n",
+                vec!["models.backends.ap.audience", "needs audience"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nauth = \"turn-token\"\naudience = \" \"\n",
+                vec!["models.backends.ap.audience", "is empty"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nkey = \"aiplex\"\nauth = \"turn-token\"\n\
+                 audience = \"a\"\n",
+                vec!["models.backends.ap", "one credential, not two"],
+            ),
+            (
+                "control_plane = \"aiplex\"\nkey = \"aiplex\"\naudience = \"a\"\n",
+                vec![
+                    "models.backends.ap.audience",
+                    "only for auth = \"turn-token\"",
+                ],
+            ),
+            (
+                "control_plane = \"aiplex\"\n",
+                vec!["models.backends.ap.key", "or auth = \"turn-token\""],
+            ),
+        ] {
+            let error = parse(&backend(extra)).unwrap_err().to_string();
+            for needle in needles {
+                assert!(error.contains(needle), "{needle:?} not in {error}\n{extra}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_control_plane_backend_is_read_rendered_back_and_refused_where_it_could_be_bypassed() {
+        let plane = |name: &str, api: &str| {
+            format!(
+                "[models.backends.{name}]\napi = \"{api}\"\nurl = \"https://aiplex.example.com/ap/ide\"\n\
+                 key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n\n"
+            )
+        };
+        // The contract's example.
+        let text = format!(
+            "version = 1\n\n[secrets]\naiplex = \"AIPLEX_TOKEN\"\n\n{}{}\
+             [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"aiplex-anthropic\"]\n\n\
+             [[models.routes]]\nmodel = \"gpt-*\"\nbackends = [\"aiplex-openai\"]\n",
+            plane("aiplex-anthropic", "anthropic"),
+            plane("aiplex-openai", "openai")
+        );
+        let config = parse(&text).unwrap();
+        assert_eq!(
+            config.models.backends["aiplex-openai"]
+                .control_plane
+                .as_deref(),
+            Some("aiplex")
+        );
+        assert!(render(&config, "test").contains("control_plane = \"aiplex\""));
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        let plain = "[models.backends.direct]\napi = \"anthropic\"\nkey = \"k\"\n\n";
+        for (text, needles) in [
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"k\"\ncontrol_plane = \"anvil\"\n"
+                    .to_owned(),
+                vec!["models.backends.a.control_plane", "\"anvil\"", "\"aiplex\""],
+            ),
+            (
+                "[models.backends.g]\napi = \"generic\"\nurl = \"https://x.example\"\n\
+                 key = \"k\"\ncontrol_plane = \"aiplex\"\n"
+                    .to_owned(),
+                vec!["models.backends.g.control_plane", "not generic"],
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nurl = \"https://aiplex.example.com/ap/x\"\n\
+                 control_plane = \"aiplex\"\n"
+                    .to_owned(),
+                vec!["models.backends.a.key", "needs a key"],
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nurl = \"https://aiplex.example.com/ap/x\"\n\
+                 key = \"k\"\ncompat = \"versioned\"\ncontrol_plane = \"aiplex\"\n"
+                    .to_owned(),
+                vec!["models.backends.a.compat", "no compatibility layer"],
+            ),
+            (
+                format!(
+                    "{}{plain}[[models.routes]]\nmodel = \"claude-*\"\n\
+                     backends = [\"ap\"]\nfallbacks = [\"direct\"]\n",
+                    plane("ap", "anthropic")
+                ),
+                vec![
+                    "models.routes[0]",
+                    "(claude-*)",
+                    "control-plane backend ap",
+                    "plain backend direct",
+                ],
+            ),
+            (
+                format!("{}{plain}", plane("ap", "anthropic")),
+                vec![
+                    "models.backends.ap",
+                    "no route names",
+                    "plain anthropic backend direct",
+                    "add a route that names it",
+                ],
+            ),
+        ] {
+            let error = parse(&format!("version = 1\n\n{text}"))
+                .unwrap_err()
+                .to_string();
+            for needle in needles {
+                assert!(error.contains(needle), "{needle:?} not in {error}\n{text}");
+            }
         }
     }
 

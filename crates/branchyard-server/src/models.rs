@@ -19,6 +19,100 @@ fn key_source(config: &Config, name: &str) -> KeySource {
     }
 }
 
+/// Whether a model backend of this server is called with a token the
+/// server signs (`auth = "turn-token"`): then its public keys are served at
+/// `GET /.well-known/jwks.json`, with or without `connectors`.
+pub fn signs_for_aiplex(config: &Config) -> bool {
+    config.models.as_ref().is_some_and(|m| {
+        m.backends
+            .values()
+            .any(|b| b.auth.as_deref() == Some("turn-token"))
+    })
+}
+
+/// The issuer of the model gateway's tokens: with `connectors`, the
+/// connector gateway's (`connectors.issuer`, else the listen address),
+/// which its own tokens are verified against; without, when a backend is
+/// called with a signed token, the server's `public_url` (its URL as AIPlex
+/// reaches it) when set; else `{scheme}://{listen}`, as it has always been.
+pub fn issuer(config: &Config) -> String {
+    if let Some(c) = config.connectors.as_ref() {
+        return crate::connectors::issuer(config, c);
+    }
+    let public = config
+        .triggers
+        .public_url
+        .as_deref()
+        .filter(|_| signs_for_aiplex(config));
+    match public {
+        Some(url) => url.trim_end_matches('/').to_owned(),
+        None => {
+            let scheme = match config.tls {
+                Some(_) => "https",
+                None => "http",
+            };
+            format!("{scheme}://{}", config.listen)
+        }
+    }
+}
+
+/// Why this server cannot sign tokens AIPlex verifies, when a backend asks
+/// for them: its issuer must be a URL AIPlex can fetch its keys from
+/// ([`branchyard::models::federable_issuer`]), and a `listen` port of 0 is
+/// chosen only when the server starts, so it cannot be the issuer's. The
+/// refusal names the setting that gives the issuer: the one whose value is
+/// wrong, or, when the issuer is the address the server listens on, the one
+/// to set and the value where only the spelling was wrong.
+pub fn check_signed(config: &Config) -> Result<(), String> {
+    let Some(models) = config.models.as_ref() else {
+        return Ok(());
+    };
+    let Some(name) = models
+        .backends
+        .iter()
+        .find(|(_, b)| b.auth.as_deref() == Some("turn-token"))
+        .map(|(name, _)| name)
+    else {
+        return Ok(());
+    };
+    // The setting that names the issuer here: the connector gateway's,
+    // which its own tokens are verified against, when there is one.
+    let (explicit, setting) = match config.connectors.as_ref() {
+        Some(c) => (c.issuer.is_some(), "connectors.issuer"),
+        None => (config.triggers.public_url.is_some(), "public_url"),
+    };
+    if !explicit && config.listen.port() == 0 {
+        return Err(format!(
+            "models.backends.{name}.auth: a token AIPlex verifies names this server's URL as \
+             its issuer, and listen names port 0, which is chosen only when the server starts; \
+             set {setting} (the server's URL as AIPlex reaches it) or listen on a fixed port"
+        ));
+    }
+    let issuer = issuer(config);
+    branchyard::models::federable_issuer(&issuer).map_err(|why| {
+        let remedy = match explicit {
+            true => format!("it is {setting}'s value: change it there"),
+            false => {
+                // The issuer is the address the server listens on. Where
+                // only its spelling is wrong the value to set is known;
+                // otherwise it is the server's URL as AIPlex reaches it,
+                // which only the operator knows.
+                let value = branchyard::models::canonical_issuer(&issuer)
+                    .filter(|url| branchyard::models::federable_issuer(url).is_ok())
+                    .map_or_else(
+                        || "the URL AIPlex reaches this server at".to_owned(),
+                        |url| format!("{url:?}"),
+                    );
+                format!(
+                    "this issuer comes from listen ({}): set {setting} to {value}",
+                    config.listen
+                )
+            }
+        };
+        format!("models.backends.{name}.auth: {why}; {remedy}")
+    })
+}
+
 /// The gateway for the served repository `repo`; `None` when `models`
 /// names no backend.
 pub fn gateway_for(config: &Config, repo: &str) -> Result<Option<Gateway>, String> {
@@ -36,13 +130,7 @@ pub fn gateway_for(config: &Config, repo: &str) -> Result<Option<Gateway>, Strin
             tenant: DEFAULT_TENANT.to_owned(),
         },
         None => Signer {
-            issuer: {
-                let scheme = match config.tls {
-                    Some(_) => "https",
-                    None => "http",
-                };
-                format!("{scheme}://{}", config.listen)
-            },
+            issuer: issuer(config),
             key_file: config.data_dir.join("gateway").join("key"),
             jwks_file: Some(crate::connectors::jwks_file(config)),
             signer: None,

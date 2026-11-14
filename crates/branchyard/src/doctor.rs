@@ -314,7 +314,7 @@ mod tests {
             .prefix("by-doctor-")
             .tempdir()
             .unwrap();
-        let status = std::process::Command::new("git")
+        let status = branchyard_support::child::command("git")
             .args(["init", "-q"])
             .arg(dir.path())
             .status()

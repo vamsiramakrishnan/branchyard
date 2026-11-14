@@ -1032,10 +1032,11 @@ fn layered(app: Shared, routes: Router<Shared>) -> Router {
         .with_state(app)
 }
 
-/// `GET /.well-known/jwks.json`: the public keys the connector gateway
-/// verifies this server's tokens against; `404` without connectors.
+/// `GET /.well-known/jwks.json`: the public keys the connector gateway, and
+/// an AIPlex that a model backend is called with a signed token by, verify
+/// this server's tokens against; `404` with neither.
 async fn jwks(State(app): State<Shared>) -> Response {
-    if app.config.connectors.is_none() {
+    if app.config.connectors.is_none() && !crate::models::signs_for_aiplex(&app.config) {
         return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such route").into_response();
     }
     let app = app.clone();

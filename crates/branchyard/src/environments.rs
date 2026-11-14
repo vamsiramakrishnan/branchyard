@@ -686,7 +686,7 @@ fn tracked<'a>(worktree: &Path, paths: impl Iterator<Item = &'a String>) -> BTre
     if args.is_empty() {
         return BTreeSet::new();
     }
-    let out = std::process::Command::new("git")
+    let out = branchyard_support::child::command("git")
         .args(["ls-files", "-z", "--cached", "--"])
         .args(&args)
         .current_dir(worktree)

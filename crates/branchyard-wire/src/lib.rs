@@ -40,4 +40,4 @@ pub use head::{
     read_response_head, request_framing, response_framing, Framing, Headers, RequestHead,
     ResponseHead,
 };
-pub use url::{host_header, HttpUrl};
+pub use url::{host_header, without_userinfo, HttpUrl};

@@ -411,7 +411,7 @@ fn first_line(text: &str) -> String {
 
 /// `<bin> --version` reports exactly the version asked for.
 fn check_version(candidate: &Candidate<'_>) -> Check {
-    let mut command = Command::new(candidate.bin);
+    let mut command = branchyard_support::child::command(candidate.bin);
     command.args(inventory::version_command_args(candidate.harness));
     candidate.environment().apply(&mut command);
     command.current_dir(candidate.workspace());
@@ -559,7 +559,7 @@ fn check_flags(candidate: &Candidate<'_>, profile: &Profile) -> Check {
             format!("{} passes no long flags on launch", profile.id),
         );
     }
-    let mut command = Command::new(candidate.bin);
+    let mut command = branchyard_support::child::command(candidate.bin);
     command.args(&subcommand).arg("--help");
     candidate.environment().apply(&mut command);
     command.current_dir(candidate.workspace());

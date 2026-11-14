@@ -1311,6 +1311,204 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
 }
 
 #[test]
+fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
+    let repo = Repo::used();
+    let backend = |name: &str, url: &str, audience: &str| {
+        format!(
+            "[models.backends.{name}]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+             control_plane = \"aiplex\"\nauth = \"turn-token\"\naudience = \"{audience}\"\n\n"
+        )
+    };
+    let routes = "[[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"one\", \"two\"]\n";
+    // Whoever is at the url is sent a token that is good at the audience.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend(
+            "one",
+            "https://gateway.example.net/ap/coding",
+            "https://aiplex.example.com"
+        ),
+        backend(
+            "two",
+            "https://other.example.net/ap/coding",
+            "https://aiplex.example.com"
+        ),
+    ));
+    let report = repo.doctor(&[]);
+    // A repository's own yard is local, which cannot be federated: the row
+    // says what every turn on the gateway would say.
+    assert_eq!(report.status("models.keys"), "fail", "{}", report.stdout);
+    assert!(
+        report.detail("models.keys").contains(
+            "one is called with a token a server signs for each turn (auth = turn-token), which \
+             a local yard cannot be"
+        ),
+        "{}",
+        report.detail("models.keys")
+    );
+    assert!(
+        report
+            .fix("models.keys")
+            .contains("give the backend a key here"),
+        "{}",
+        report.fix("models.keys")
+    );
+    assert_eq!(
+        report.status("models.audience"),
+        "warn",
+        "{}",
+        report.stdout
+    );
+    let detail = report.detail("models.audience");
+    for needle in [
+        "models.backends.one: its audience names the host aiplex.example.com and its url the \
+         host gateway.example.net",
+        "models.backends.two: its audience names the host aiplex.example.com and its url the \
+         host other.example.net",
+    ] {
+        assert!(detail.contains(needle), "{needle:?} not in {detail}");
+    }
+    assert!(
+        report
+            .fix("models.audience")
+            .contains("make url the audience's AIPlex access point"),
+        "{}",
+        report.fix("models.audience")
+    );
+    // One row however many backends, between the keys and the prices.
+    let names: Vec<&str> = report.value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let at = names.iter().position(|n| *n == "models.audience").unwrap();
+    assert_eq!(
+        names[at - 2..at],
+        ["models.keys", "models.url"],
+        "{names:?}"
+    );
+    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    assert_eq!(
+        names.iter().filter(|n| **n == "models.audience").count(),
+        1,
+        "{names:?}"
+    );
+    // On the url's host it is ok, and says which backends it looked at.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend(
+            "one",
+            "https://aiplex.example.com/ap/coding",
+            "https://aiplex.example.com"
+        ),
+        backend(
+            "two",
+            "https://AIPLEX.example.com:8443/ap/review",
+            "https://aiplex.example.com"
+        ),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.audience"), "ok", "{}", report.stdout);
+    assert_eq!(
+        report.detail("models.audience"),
+        "no signed token's audience names another host than its backend's url (one, two)"
+    );
+    // No row without a backend called with a signed token.
+    repo.project_file(
+        "[models.backends.one]\napi = \"anthropic\"\nkey = \"DOCTOR_TEST_MODEL_KEY\"\n\
+         url = \"https://aiplex.example.com/ap/coding\"\ncontrol_plane = \"aiplex\"\n",
+    );
+    let report = repo.doctor(&[]);
+    assert!(!report.has("models.audience"), "{}", report.stdout);
+    assert!(report.has("models.keys"), "{}", report.stdout);
+}
+
+#[test]
+fn a_control_planes_plain_http_url_off_loopback_is_one_warning_row() {
+    let repo = Repo::used();
+    let backend = |name: &str, url: &str| {
+        format!(
+            "[models.backends.{name}]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+             control_plane = \"aiplex\"\nkey = \"DOCTOR_TEST_AIPLEX_TOKEN\"\n\n"
+        )
+    };
+    let routes = "[[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"one\", \"two\"]\n";
+    // The credential would cross the network as it is.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend("one", "http://aiplex.internal:8080/ap/coding"),
+        backend("two", "http://10.0.0.5:7400/ap/coding"),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.url"), "warn", "{}", report.stdout);
+    let detail = report.detail("models.url");
+    for needle in [
+        "models.backends.one: its url is plain http on aiplex.internal, which is not loopback, \
+         so the credential it is sent travels unencrypted unless the network between Branchyard \
+         and AIPlex encrypts it",
+        "models.backends.two: its url is plain http on 10.0.0.5, which is not loopback",
+    ] {
+        assert!(detail.contains(needle), "{needle:?} not in {detail}");
+    }
+    assert!(
+        report.fix("models.url").contains("use an https:// url"),
+        "{}",
+        report.fix("models.url")
+    );
+    // One row, after the keys; no audience row without a signed token.
+    let names: Vec<&str> = report.value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let at = names.iter().position(|n| *n == "models.url").unwrap();
+    assert_eq!(names[at - 1], "models.keys", "{names:?}");
+    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    // https, or http on this machine: ok, naming the backends.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend("one", "https://aiplex.example.com/ap/coding"),
+        backend("two", "http://127.0.0.1:7400/ap/coding"),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.url"), "ok", "{}", report.stdout);
+    assert_eq!(
+        report.detail("models.url"),
+        "every control-plane backend's url is https, or http on this machine (one, two)"
+    );
+    // A variable children need that holds the token: `by run`, `by models`
+    // and `by ls` refuse the configuration, and `models.keys` says what they
+    // say instead of ok.
+    let key = "doctor-aiplex-token-0123456789";
+    let report = repo.doctor_in(
+        &repo.root,
+        &[],
+        &[("DOCTOR_TEST_AIPLEX_TOKEN", key), ("LC_DOCTOR_TEST", key)],
+    );
+    assert_eq!(report.status("models.keys"), "fail", "{}", report.stdout);
+    assert!(
+        report.detail("models.keys").contains(
+            "the variable LC_DOCTOR_TEST holds the token too, and it cannot be hidden from \
+             child processes"
+        ),
+        "{}",
+        report.detail("models.keys")
+    );
+    assert!(!report.stdout.contains(key), "{}", report.stdout);
+    let report = repo.doctor_in(&repo.root, &[], &[("DOCTOR_TEST_AIPLEX_TOKEN", key)]);
+    assert_eq!(report.status("models.keys"), "ok", "{}", report.stdout);
+    // No row without a control-plane backend.
+    repo.project_file(
+        "[models.backends.local]\napi = \"generic\"\nurl = \"http://10.0.0.5:7400\"\n",
+    );
+    let report = repo.doctor(&[]);
+    assert!(!report.has("models.url"), "{}", report.stdout);
+    assert!(report.has("models.keys"), "{}", report.stdout);
+}
+
+#[test]
 fn remote_harness_readiness_does_not_depend_on_workstation_login() {
     let repo = Repo::used().without_keys();
     repo.project_file(

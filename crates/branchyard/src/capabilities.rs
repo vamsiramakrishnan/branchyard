@@ -529,7 +529,7 @@ mod tests {
             .path()
             .join(DIRECTORY)
             .join("artifact-tools/scripts/run.py");
-        let output = std::process::Command::new("python3")
+        let output = branchyard_support::child::command("python3")
             .arg(helper)
             .arg("doctor")
             .env("HOME", host.path())

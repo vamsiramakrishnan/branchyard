@@ -124,7 +124,11 @@ pub fn run(
     env: &[(String, String)],
 ) -> PrecheckResult {
     let started = Instant::now();
-    let mut cmd = Command::new("sh");
+    // A repository's command, started by the server: through the one
+    // constructor of children, so it is given no variable the server hides
+    // and none whose value holds a control plane's token, inherited or
+    // among `env` (`branchyard_support::child`).
+    let mut cmd = branchyard_support::child::command("sh");
     cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
@@ -132,6 +136,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .envs(env.iter().map(|(k, v)| (k, v)));
+    branchyard_support::child::scrub(&mut cmd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

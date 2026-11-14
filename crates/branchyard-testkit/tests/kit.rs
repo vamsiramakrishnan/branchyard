@@ -135,6 +135,31 @@ fn the_mock_answers_and_records_a_request() {
 }
 
 #[test]
+fn a_header_sent_twice_or_in_another_case_is_kept_as_sent() {
+    let mock = MockHttp::start(|_| Response::new(200, "fine"));
+    let reply = send(
+        mock.addr(),
+        "GET / HTTP/1.1\r\nHost: x\r\nX-Tag: one\r\nx-tag: two\r\nX-Other: o\r\n\r\n",
+    );
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    let seen = mock.await_requests(1);
+    // The map keeps the last; the list keeps both, in order and case.
+    assert_eq!(seen[0].header("X-TAG"), Some("two"));
+    assert_eq!(seen[0].header_values("X-TAG"), ["one", "two"]);
+    assert_eq!(
+        seen[0].sent_headers,
+        [
+            ("Host".to_owned(), "x".to_owned()),
+            ("X-Tag".to_owned(), "one".to_owned()),
+            ("x-tag".to_owned(), "two".to_owned()),
+            ("X-Other".to_owned(), "o".to_owned()),
+        ]
+    );
+    assert!(seen[0].header_values("missing").is_empty());
+    mock.finish();
+}
+
+#[test]
 fn a_client_that_leaves_with_part_of_a_response_unread_does_not_fail_the_test() {
     const BODY: usize = 16 * 1024;
     let mock = MockHttp::start(|_| Response::new(200, vec![b'x'; BODY]).keep_alive());

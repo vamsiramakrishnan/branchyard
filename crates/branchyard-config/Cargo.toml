@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 branchyard-harness = { version = "0.5.0", path = "../branchyard-harness" }
 branchyard-provision = { version = "0.5.0", path = "../branchyard-provision" }
+# The one strict URL parser, and how a URL is shown in a message.
+branchyard-wire = { version = "0.5.0", path = "../branchyard-wire" }
 dirs = { workspace = true }
 glob = { workspace = true }
 hex = { workspace = true }

@@ -248,6 +248,8 @@ STEPS = (
     Step("test_check_workspace_deps", "controls", (PY, "tests/test_check_workspace_deps.py")),
     # The delegation battery's evaluator.
     Step("test_qualify_score", "controls", (PY, "tests/test_qualify_score.py")),
+    # The AIPlex qualification script's pure parts; the run itself needs both real binaries and is not in CI.
+    Step("test_qualify_aiplex", "controls", (PY, "tests/test_qualify_aiplex.py")),
     Step("test_scion", "controls", (PY, "tools/test_scion.py", "--qualified")),
     Step("check_scion_compatibility", "controls", (PY, "tools/check_scion_compatibility.py")),
     Step("test_distribution", "controls", (PY, "tests/test_distribution.py")),

@@ -1048,7 +1048,7 @@ pub fn parse_version(line: &str) -> Option<String> {
 /// Run the detection script on this machine with `/bin/sh -s`.
 pub fn detect_local(options: &DetectOptions) -> Result<Inventory, String> {
     detect_with(options, true, |_| {
-        let mut command = Command::new("/bin/sh");
+        let mut command = branchyard_support::child::command("/bin/sh");
         command.arg("-s");
         command
     })
@@ -1607,7 +1607,7 @@ pub fn install(
 /// Run a shell command on this machine, its output (stdout and stderr
 /// together) captured.
 pub fn run_local(command: &str) -> RunResult {
-    let output = Command::new("/bin/sh")
+    let output = branchyard_support::child::command("/bin/sh")
         .arg("-c")
         .arg(format!("exec 2>&1; {command}"))
         .stdin(Stdio::null())

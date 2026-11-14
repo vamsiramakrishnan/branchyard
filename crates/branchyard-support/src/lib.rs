@@ -23,6 +23,8 @@
 //!   runs a callback that is not ours and reports a panic in it instead of
 //!   being ended by it.
 //!
+//! - [`child::command`] makes a child process without the variables this
+//!   process holds a secret in ([`child::hide`]).
 //! - [`time`] is the one clock and the one set of date formats (on `jiff`),
 //!   [`rng`] the one seedable generator and the system entropy (on
 //!   `getrandom`), and [`new_ulid`] mints ids from both.
@@ -32,6 +34,7 @@
 #![warn(missing_docs)]
 
 mod best_effort;
+pub mod child;
 mod id;
 mod locks;
 mod process;

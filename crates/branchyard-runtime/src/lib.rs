@@ -219,19 +219,32 @@ impl Environment {
     /// environment now. Variables whose names are not UTF-8 are kept as
     /// inherited; no rule can name them.
     pub fn resolve(&self) -> BTreeMap<OsString, OsString> {
+        // What this process hides from its children
+        // (`branchyard_support::child`) is not inherited here either.
+        // Nor is a value it guards, under whatever name: inherited from
+        // this process, or set here by any writer.
+        let guarded = |value: &OsString| {
+            branchyard_support::child::guarded(&value.to_string_lossy()).is_some()
+        };
+        let hidden = branchyard_support::child::hidden();
         let mut env: BTreeMap<OsString, OsString> = std::env::vars_os()
-            .filter(|(name, _)| {
+            .filter(|(name, value)| {
+                if guarded(value) {
+                    return false;
+                }
                 let Some(name) = name.to_str() else {
                     return true;
                 };
-                self.admits(name)
+                self.admits(name) && !hidden.iter().any(|h| h == name)
             })
             .collect();
         if !self.inherit_home {
             env.insert("HOME".into(), self.home.clone().into_os_string());
         }
         for (name, value) in &self.set {
-            env.insert(name.into(), value.into());
+            if branchyard_support::child::guarded(value).is_none() {
+                env.insert(name.into(), value.into());
+            }
         }
         env
     }

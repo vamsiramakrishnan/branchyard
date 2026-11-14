@@ -1,0 +1,443 @@
+{
+  "date": "2026-11-14",
+  "scope": "real `by serve` (no TLS, no connectors, loopback) with the real `by` client, and real `aiplex dev` with an agent bound to the server by the `branchyard` preset, over loopback; AIPlex's built-in mock providers, Branchyard's fake agent running a Python harness as the server's harness command; no model, no real coding agent, no cloud call",
+  "scenario": "2: a token the Branchyard server signs (contract sections 1 to 6, 7 and 8)",
+  "outcome": "passed",
+  "command": [
+    "qualify_aiplex.py",
+    "--federated",
+    "--aiplex",
+    "aiplex",
+    "--by",
+    "by",
+    "--fake-agent",
+    "fake-acp-agent",
+    "--aiplex-commit",
+    "f4e3991",
+    "--branchyard-commit",
+    "be423a2",
+    "--out",
+    "docs/evidence/aiplex-signed-token-2026-11-14.json"
+  ],
+  "versions": {
+    "by": "by 0.5.0",
+    "aiplex": "aiplex version f4e3991",
+    "aiplex_version_output": [
+      "aiplex version f4e3991",
+      "  commit:   f4e3991",
+      "  console:  embedded",
+      "  api:      <aiplex-bin>/aiplex-api",
+      "  go:       go1.25.0",
+      "  os/arch:  linux/amd64"
+    ],
+    "aiplex_commit": {
+      "value": "f4e3991",
+      "verified": true,
+      "from": "`aiplex version`"
+    },
+    "branchyard_commit": {
+      "value": "be423a2",
+      "verified": false,
+      "note": "stated on the command line; `by --version` prints no commit"
+    },
+    "binary_sha256": {
+      "by": "1b68fdc32eab7e032c4cd999c9adb228bb63aa937f239ef30576d408cf5c65d1",
+      "fake-acp-agent": "b056ef14b4656c5a64d7f0621f65670b0a315c4913c814c26c43a1633c4d1053",
+      "aiplex": "8cf5752b9baf0ff49a1ce3bd4b38414e75ec1c0954e15dbd2cd243a7822a1e0d",
+      "aiplex-api": "31eb87e696883b0dff09cf9b25f8289bbe974ec4800451ccc279a034a8f21017"
+    },
+    "python": "3.13.18",
+    "platform": "Linux-6.18.44-fc-v470-x86_64-with-glibc2.39"
+  },
+  "checks": [
+    {
+      "id": "aiplex-binding",
+      "claim": "an AIPlex agent is registered and bound with the `branchyard` preset to the server's URL (the issuer), tenant `default` and the backends' audience, and `aiplex agents identity plan` shows that issuer, the subject branchyard:default and that audience",
+      "result": "pass",
+      "observed": {
+        "register_exit": 0,
+        "bind_exit": 0,
+        "plan_exit": 0,
+        "problems": []
+      }
+    },
+    {
+      "id": "server-config",
+      "claim": "`by serve --check` accepts the configuration (exit 0), whose only model backends are AIPlex backends signed with the server's token (no `key`, no `secrets`); the AIPlex developer token is not in the running server's environment (name or value), command line, configuration, or any file under the run's scratch directory, as plain text",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "serve_check_exit": 0,
+        "environment_names_checked": 186
+      }
+    },
+    {
+      "id": "signed-token-verified",
+      "claim": "before any grant, the first call is refused by AIPlex with 403 ACTION_DENIED (the credential was accepted, the grant missing) and its record has caller_kind agent and client_id `qualify-branchyard`",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "status": 403,
+        "error_code": "ACTION_DENIED",
+        "caller_kind": "agent",
+        "client_id": "qualify-branchyard",
+        "principal_display": "branchyard:default"
+      }
+    },
+    {
+      "id": "agent-granted",
+      "claim": "the agent's principal is granted the models and surfaces the calls need",
+      "result": "pass",
+      "observed": {
+        "exit": 0,
+        "scopes": [
+          "llm:model:mock-claude",
+          "llm:model:mock-gpt",
+          "llm:surface:local-messages:*",
+          "llm:surface:local-models:*"
+        ]
+      }
+    },
+    {
+      "id": "harness-ran",
+      "claim": "the harness made 4 calls through the turn's gateway on the server and each got an answer; the streamed answer ran to its end",
+      "result": "pass",
+      "observed": {
+        "statuses": [
+          200,
+          200,
+          200,
+          404
+        ]
+      }
+    },
+    {
+      "id": "branch-record",
+      "claim": "`by show` names the branch `qualify` and the harness `gemini-cli` that `by run` was given",
+      "result": "pass",
+      "observed": {
+        "name": "qualify",
+        "harness": "gemini-cli"
+      }
+    },
+    {
+      "id": "harness-sees-gateway-only",
+      "claim": "the harness's base URLs are the turn's gateway on loopback, and no variable of its environment names AIPlex's loopback address and port",
+      "result": "pass",
+      "observed": {
+        "problems": []
+      }
+    },
+    {
+      "id": "harness-holds-no-token",
+      "claim": "the harness's environment holds no AIPlex developer token (whole or signature segment, as a substring of any value), no `AIPLEX_TOKEN`, and no JWT-shaped value whose claims carry `by_purpose` (the server's signed token; the gateway's own turn token, which the harness holds, has none)",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "jwt_variables": [
+          {
+            "name": "ANTHROPIC_API_KEY",
+            "by_purpose": false
+          },
+          {
+            "name": "OPENAI_API_KEY",
+            "by_purpose": false
+          }
+        ],
+        "helpers_received": {
+          "token_digests": 2,
+          "aiplex_port": true
+        },
+        "cannot_see": [
+          "an encoded or otherwise transformed copy of the token (base64, percent-encoding, reversed, split)",
+          "a copy held somewhere other than a variable of the harness's environment (a file, a socket, a child's memory)"
+        ]
+      }
+    },
+    {
+      "id": "harness-response-headers",
+      "claim": "every response header the harness received on an answer that came from AIPlex is on the gateway's allow-list or is the server's own framing",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "header_names_by_call": {
+          "a": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "b": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "c": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ],
+          "d": [
+            "cache-control",
+            "connection",
+            "content-type",
+            "transfer-encoding",
+            "x-request-id"
+          ]
+        }
+      }
+    },
+    {
+      "id": "branchyard-events",
+      "claim": "`by log --json` has one `model` event per call with AIPlex's request id and Branchyard's call id; exactly call d refused, as refused by aiplex with MODEL_NOT_FOUND",
+      "result": "pass",
+      "observed": {
+        "problems": []
+      }
+    },
+    {
+      "id": "record-join-a",
+      "claim": "call a (anthropic mock-claude): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id, with caller_kind agent, client_id `qualify-branchyard` and principal branchyard:default",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "http_status": 200,
+        "caller_kind": "agent",
+        "client_id": "qualify-branchyard"
+      }
+    },
+    {
+      "id": "record-tags-a",
+      "claim": "call a: the record's tags are by_branch (`qr/<branch>`, as a server names it), by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-b",
+      "claim": "call b (openai mock-gpt): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id, with caller_kind agent, client_id `qualify-branchyard` and principal branchyard:default",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "http_status": 200,
+        "caller_kind": "agent",
+        "client_id": "qualify-branchyard"
+      }
+    },
+    {
+      "id": "record-tags-b",
+      "claim": "call b: the record's tags are by_branch (`qr/<branch>`, as a server names it), by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-c",
+      "claim": "call c (anthropic mock-claude): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id, with caller_kind agent, client_id `qualify-branchyard` and principal branchyard:default",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "http_status": 200,
+        "caller_kind": "agent",
+        "client_id": "qualify-branchyard"
+      }
+    },
+    {
+      "id": "record-tags-c",
+      "claim": "call c: the record's tags are by_branch (`qr/<branch>`, as a server names it), by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "record-join-d",
+      "claim": "call d (anthropic mock-absent): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id, with caller_kind agent, client_id `qualify-branchyard` and principal branchyard:default",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "http_status": 404,
+        "caller_kind": "agent",
+        "client_id": "qualify-branchyard"
+      }
+    },
+    {
+      "id": "record-tags-d",
+      "claim": "call d: the record's tags are by_branch (`qr/<branch>`, as a server names it), by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qr/qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "jwks-served-and-fetched",
+      "claim": "the server's `/.well-known/jwks.json` answers 200 with one OKP Ed25519 key and no private member, and its log shows the key set was served (200) before this script fetched it, which is AIPlex verifying",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "served_before_this_script_asked": 1
+      }
+    },
+    {
+      "id": "negative-control-audience",
+      "claim": "negative control: one backend of the same server names an audience the binding does not have; the call through it is refused by AIPlex with 401 UNAUTHENTICATED (as the event shows it), is final (one backend, none tried before it) and leaves no AIPlex record, while the same server's other calls were accepted",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "status": 401,
+        "error_code": "UNAUTHENTICATED",
+        "backend": "aiplex-wrong-audience",
+        "failed_over": null,
+        "records_for_the_call_id": 0,
+        "event_text": [
+          "2026-11-14T14:39:35.661Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-e29256af32e7b845-39, call zR1inxSuuKOg1qoLV1kKQw)"
+        ]
+      }
+    },
+    {
+      "id": "signed-token-not-kept",
+      "claim": "no file under the run's scratch directory (server data directory, server log, repository, events, results) holds a JWT whose claims carry `by_purpose`, as plain text",
+      "result": "pass",
+      "observed": {
+        "files_with_a_signed_token": []
+      }
+    },
+    {
+      "id": "secret-hygiene-files",
+      "claim": "the token's value (whole, or its signature segment) is in no file under the run's scratch directory (repository, .branchyard, private HOME, logs), as plain text",
+      "result": "pass",
+      "observed": {
+        "files_with_the_token": []
+      }
+    },
+    {
+      "id": "secret-hygiene-output",
+      "claim": "the token's value is in no output the script captured from `aiplex`, `by`, git or the harness",
+      "result": "pass",
+      "observed": {
+        "captured_outputs_holding_it": 0
+      }
+    },
+    {
+      "id": "cleanup",
+      "claim": "`aiplex dev stop` ran and exited 0, and no process of the run (found by its HOME, by descent from the script and by process group) was left for the sweep to kill",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "aiplex_dev_stop_exits": [
+          0
+        ],
+        "killed_by_the_sweep": [],
+        "processes_left": 0
+      }
+    }
+  ],
+  "observations": {
+    "identity_plan": [
+      "Identity plan: agent qualify-branchyard, binding by (branchyard)",
+      "  Issuer:   http://127.0.0.1:40523",
+      "  Subject:  branchyard:default",
+      "  Audience: qualify-aiplex",
+      "",
+      "In the other cloud"
+    ],
+    "serve_check_output": [
+      "configuration ok"
+    ],
+    "by_log_text": {
+      "probe": [
+        "2026-11-14T14:39:34.393Z  model: mock-claude refused via aiplex-local-anthropic (403, refused by aiplex (ACTION_DENIED), 5 ms, aiplex request req-e29256af32e7b845-22, call -7qcmnpUVQAymTSHvbSTUw)"
+      ],
+      "qualify": [
+        "2026-11-14T14:39:34.887Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 7 ms, aiplex request req-e29256af32e7b845-27, call aaeHCTVzmMb-W69Kglmu4Q)",
+        "2026-11-14T14:39:34.892Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 4 ms, aiplex request req-e29256af32e7b845-28, call zRsbaibTorNy5bzCSlGDmA)",
+        "2026-11-14T14:39:34.895Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 3 ms, aiplex request req-e29256af32e7b845-29, call RvEbQvj_xRAQ3zrnvan0uA)",
+        "2026-11-14T14:39:34.898Z  model: mock-absent refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 1 ms, aiplex request req-e29256af32e7b845-30, call dfPkDlKNcdg-XgJswiPcug)"
+      ],
+      "neg": [
+        "2026-11-14T14:39:35.661Z  model: mock-claude-wrong-audience refused via aiplex-wrong-audience (401, refused by aiplex (UNAUTHENTICATED), 2 ms, aiplex request req-e29256af32e7b845-39, call zR1inxSuuKOg1qoLV1kKQw)"
+      ]
+    },
+    "harness_env": {
+      "helpers_received": {
+        "token_digests": 2,
+        "aiplex_port": true
+      },
+      "aiplex_token_variable_set": false,
+      "variables_holding_the_token": [],
+      "jwt_variables": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "by_purpose": false
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "by_purpose": false
+        }
+      ],
+      "variables_naming_aiplex": [],
+      "anthropic_base_url": "http://127.0.0.1:46351/anthropic",
+      "openai_base_url": "http://127.0.0.1:46351/openai/v1"
+    },
+    "callers_seen": [
+      [
+        "agent",
+        "qualify-branchyard",
+        "branchyard:default"
+      ]
+    ],
+    "server_exit_code": 0
+  },
+  "not_done": [
+    "a Cloud KMS signer, a Branchyard worker or sandbox (the harness ran as the server's own user), TLS, and a Branchyard tenant other than the server's default",
+    "a real model or a real coding agent: the providers are AIPlex's mock providers and the harness is a script",
+    "`traceparent`: nothing sent one, so AIPlex made its own trace ids",
+    "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, an issuer on `https`)",
+    "a token with an expired or too-long lifetime, another `by_purpose`, `sub` or `iss`: only the audience was changed as a negative control",
+    "a run on another operating system",
+    "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified"
+  ]
+}

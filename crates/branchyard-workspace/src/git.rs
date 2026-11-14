@@ -160,7 +160,7 @@ pub struct Git {
 
 impl Git {
     pub fn new(dir: &Path) -> Self {
-        let mut cmd = Command::new("git");
+        let mut cmd = branchyard_support::child::command("git");
         cmd.current_dir(dir)
             .stdin(Stdio::null())
             .env("GIT_TERMINAL_PROMPT", "0")

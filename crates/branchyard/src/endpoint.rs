@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -185,7 +185,7 @@ struct Session {
 
 impl Session {
     fn start(server: &McpServer) -> Result<Session, String> {
-        let mut command = Command::new(&server.command);
+        let mut command = branchyard_support::child::command(&server.command);
         // Only this turn's variables, never an outer turn's.
         for (name, _) in std::env::vars_os() {
             if name.to_string_lossy().starts_with("BRANCHYARD_") {
