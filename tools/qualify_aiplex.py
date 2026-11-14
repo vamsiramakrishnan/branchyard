@@ -13,8 +13,11 @@ agent runs a Python harness that calls the turn's gateway (both wires, one strea
 AIPlex, one with forged attribution headers, one for the stand-in's model, one for a model no route
 takes); the script reads `by log --json`, the stand-in's request count and AIPlex's usage records and
 checks that the two systems' records join; and finally stops AIPlex and makes one more call.
-There is no model, no real coding agent and no cloud call. Scenario 2 (a Branchyard-signed token,
-`--federated`) is not implemented here yet.
+There is no model, no real coding agent and no cloud call. Scenario 2 (`--federated`; a token the
+Branchyard server signs; same section, "A token Branchyard signs") runs a real `by serve` with no
+AIPlex token anywhere, binds its tenant to an AIPlex agent through the `branchyard` preset, and
+checks that AIPlex verified the server's token and recorded the calls as that agent's; it writes its
+own record (docs/evidence/aiplex-signed-token-2026-11-14.json).
 
 Both programs run with a private HOME in a scratch directory and the hermetic variables the test kit
 sets. The developer token is held in a `Secret` that prints as `<redacted>`. It is given to `by` (and
@@ -121,15 +124,19 @@ SCOPE = (
     "no model, no real coding agent, no cloud call"
 )
 NOT_DONE = (
-    'scenario 2, a Branchyard-signed token (`auth = "turn-token"`, contract section 7, `--federated`): '
-    "the Branchyard side of the signed token does not exist yet",
+    'a Branchyard-signed token (`auth = "turn-token"`): that is scenario 2, a separate run of this script with '
+    "`--federated` and a record of its own",
     "a real model or a real coding agent: the providers are AIPlex's mock providers and the harness is a script",
     "`traceparent`: a local turn has no trace context, so none was sent and AIPlex made its own trace ids",
     "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, a person's token, an agent's token)",
-    "a Branchyard server (`by serve`): only a local yard ran",
+    "a Branchyard server (`by serve`): only a local yard ran here; scenario 2 runs one",
     "a run on another operating system",
     "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified",
 )
+# A second variable of `by`'s own environment that holds the stored token (scenario 1), under a name nothing
+# knows: the gateway has to hide the credential by its value, not only by the name the configuration gives.
+# The harness leaves `QUALIFY_*` variables out of its search, so the name must not start with that.
+TOKEN_COPY_VARIABLE = "SAME_TOKEN_OTHER_NAME"
 # What the token check cannot see, said in the record next to the check.
 TOKEN_CHECK_BLIND = (
     "an encoded or otherwise transformed copy of the token (base64, percent-encoding, reversed, split)",
@@ -138,9 +145,9 @@ TOKEN_CHECK_BLIND = (
 # What a failing check means, attached to the record only when the check fails.
 FINDINGS = {
     "harness-holds-no-token": (
-        "Branchyard: the harness inherits the environment of the `by` process and the gateway removes only a "
-        "fixed list of variables, so the variable that holds an AIPlex backend's key reaches the harness; "
-        "the contract says the harness never holds an AIPlex credential"
+        "Branchyard: the harness inherits the environment of the `by` process, and a variable of it that holds "
+        "an AIPlex backend's key (under the name the configuration gives, or the same value under another "
+        "name) reached the harness; the contract says the harness never holds an AIPlex credential"
     ),
     "harness-response-headers": (
         "Branchyard: the gateway relays response headers of AIPlex's answer that name AIPlex or redirect the "
@@ -1297,11 +1304,16 @@ class Run:
         return ok
 
     def turn_env(self) -> None:
-        """The environment of `by`: the hermetic one, the token, the stand-in's key, what the harness checks with."""
+        """The environment of `by`: the hermetic one, the token, the stand-in's key, what the harness checks with.
+
+        The token is there twice: under the name the configuration gives and under `TOKEN_COPY_VARIABLE`, a name
+        no configuration and no list knows, as a shell that ran `eval "$(aiplex dev env)"` holds it under several.
+        """
         token = self.secrets[0].reveal()
         self.by_env = {
             **self.env,
             "AIPLEX_TOKEN": token,
+            TOKEN_COPY_VARIABLE: token,
             "QUALIFY_TOKEN_DIGESTS": token_digests(token),
             "QUALIFY_AIPLEX_PORT": str(self.port),
             "QUALIFY_DIRECT_KEY": "stand-in-key",
@@ -1375,10 +1387,12 @@ class Run:
         self.check(
             "harness-holds-no-token",
             "no variable of the harness's environment holds the AIPlex token (the whole token or its signature "
-            "segment, as a substring of any value), and `AIPLEX_TOKEN` is not set; the harness was given the "
+            "segment, as a substring of any value), and `AIPLEX_TOKEN` is not set, although `by` was started "
+            f"with the token in `AIPLEX_TOKEN` and again in `{TOKEN_COPY_VARIABLE}`; the harness was given the "
             "digests it needs to look",
             not problems,
             problems=problems,
+            token_also_given_to_by_as=TOKEN_COPY_VARIABLE,
             aiplex_token_variable_set=env.get("aiplex_token_variable_set"),
             variables_holding_the_token=env.get("variables_holding_the_token"),
             helpers_received=env.get("helpers_received"),

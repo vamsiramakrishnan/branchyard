@@ -440,6 +440,13 @@ class Mutations(unittest.TestCase):
         self.assertTrue(q.harness_token_problems({}))
         self.assertTrue(q.harness_token_problems(env | {"aiplex_token_variable_set": True}))
         self.assertTrue(q.harness_token_problems(env | {"variables_holding_the_token": ["X"]}))
+        # The copy `by` is started with, under a name no list knows: a gateway that hides the credential only by
+        # the configured name leaves it in the harness's environment, and the check names it.
+        self.assertFalse(q.TOKEN_COPY_VARIABLE.startswith("QUALIFY_"))
+        self.assertEqual(
+            q.harness_token_problems(env | {"variables_holding_the_token": [q.TOKEN_COPY_VARIABLE]}),
+            [f"the token is in {q.TOKEN_COPY_VARIABLE}"],
+        )
         self.assertTrue(q.gateway_only_problems(env | {"variables_naming_aiplex": ["URL"]}))
 
     def test_item_4_the_window_search_finds_a_glued_copy_and_not_an_absent_one(self):
