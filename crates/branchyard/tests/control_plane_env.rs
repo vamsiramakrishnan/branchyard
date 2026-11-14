@@ -52,12 +52,25 @@ fn a_control_planes_key_variable_never_reaches_the_harness() {
     // The repository's own code on this host: a setup command. (Its git
     // hooks do not run: Branchyard runs its own git with hooks off.)
     let setup = f.dir.join("setup.env");
+    // And a shell snippet whose environment is captured and replayed onto
+    // the setup commands and the harness.
+    let shell = f.dir.join("shell.key");
     let (events, read) = run_with(&f, "env", None, &plan, |options| {
         options.workspace = Some(WorkspaceSpec {
             setup: vec![format!("env > '{}'", setup.display())],
+            shell_setup: Some(format!(
+                "printf '%s|%s' \"${{BY_TEST_AIPLEX_TOKEN-unset}}\" \"${{BY_TEST_PLAIN_KEY-unset}}\" > '{}'",
+                shell.display()
+            )),
             ..WorkspaceSpec::default()
         });
     });
+    let seen = std::fs::read_to_string(&shell).unwrap();
+    assert_eq!(
+        seen,
+        format!("unset|{PLAIN_KEY}"),
+        "shell_setup saw: {seen}"
+    );
     let env = std::fs::read_to_string(&setup)
         .unwrap_or_else(|e| format!("the setup command wrote nothing: {e}"));
     assert!(

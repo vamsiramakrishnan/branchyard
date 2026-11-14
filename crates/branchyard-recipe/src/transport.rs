@@ -39,7 +39,7 @@ impl Transport {
     pub fn command(&self, script: &str, args: &[&str]) -> Command {
         match self {
             Transport::Ssh { program, target } => {
-                let mut command = Command::new(program);
+                let mut command = branchyard_support::child::command(program);
                 command.args(["-T", "-o", "BatchMode=yes"]);
                 if let Some(identity) = &target.identity_file {
                     command.arg("-i").arg(identity);
@@ -69,7 +69,7 @@ impl Transport {
                 command
             }
             Transport::Exec { argv } => {
-                let mut command = Command::new(&argv[0]);
+                let mut command = branchyard_support::child::command(&argv[0]);
                 command
                     .args(&argv[1..])
                     .args(["sh", "-c", script, "sh"])

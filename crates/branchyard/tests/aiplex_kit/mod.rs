@@ -232,6 +232,13 @@ pub fn access_point(name: &'static str, redirect_to: String) -> MockHttp {
             return Response::json(status, &error_body(&request.path, status, &echo))
                 .header("X-Aiplex-Request-Id", &id);
         }
+        // A refusal of AIPlex's own, carried by a redirect.
+        if let Some(status) = model.strip_prefix("refusing-redirect-").and_then(status) {
+            return Response::new(status, "")
+                .header("Location", &redirect_to)
+                .header("X-Aiplex-Request-Id", &id)
+                .header("X-Aiplex-Error-Code", "CALLER_NOT_ALLOWED");
+        }
         if let Some(status) = model.strip_prefix("redirect-").and_then(status) {
             return Response::new(status, "")
                 .header("Location", &redirect_to)

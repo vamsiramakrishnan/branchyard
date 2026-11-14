@@ -579,6 +579,8 @@ fn an_answer_holding_the_credential_or_pointing_at_aiplex_never_reaches_the_harn
         json!({"model": "gpt-echo-*", "backends": ["aiplex-openai"]}),
         json!({"model": "redirect-*", "backends": ["aiplex-anthropic"],
                 "fallbacks": ["spare-anthropic"]}),
+        json!({"model": "refusing-redirect-*", "backends": ["aiplex-anthropic"],
+                "fallbacks": ["spare-anthropic"]}),
         json!({"model": "headers-*", "backends": ["aiplex-anthropic"]}),
     ]);
     use_gateway(&f, config);
@@ -609,6 +611,13 @@ fn an_answer_holding_the_credential_or_pointing_at_aiplex_never_reaches_the_harn
             "anthropic",
             "/v1/messages",
             "redirect-302",
+            false
+        ),
+        call(
+            "refusing redirect",
+            "anthropic",
+            "/v1/messages",
+            "refusing-redirect-302",
             false
         ),
     ]);
@@ -663,6 +672,26 @@ fn an_answer_holding_the_credential_or_pointing_at_aiplex_never_reaches_the_harn
         reason.contains("answered with a redirect (302), not followed"),
         "{reason}"
     );
+    // A redirect carrying AIPlex's code is its refusal: final, the second
+    // AIPlex backend never asked, the redirect never relayed.
+    let got = &read["refusing redirect"];
+    assert_eq!(got["status"], 502, "{got}");
+    assert!(got_header(got, "location").is_empty(), "{got}");
+    assert!(
+        got["body"]
+            .as_str()
+            .unwrap()
+            .contains("refused with a redirect"),
+        "{got}"
+    );
+    assert_eq!(asked(&first.requests(), "refusing-redirect-302").len(), 1);
+    assert!(asked(&second.requests(), "refusing-redirect-302").is_empty());
+    let call = &calls["refusing-redirect-302"];
+    assert_eq!(call.decision, "refused", "{call:?}");
+    let plane = call.control_plane.as_deref().unwrap();
+    assert_eq!(plane.error_code.as_deref(), Some("CALLER_NOT_ALLOWED"));
+    assert!(plane.request_id.is_some());
+    assert!(call.failed_over.is_empty(), "{:?}", call.failed_over);
     // Neither the token nor an echo of it is in the events or the audit.
     let recorded = serde_json::to_string(&events).unwrap();
     assert!(!recorded.contains(AIPLEX_TOKEN));

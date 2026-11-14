@@ -487,10 +487,15 @@ pub(crate) fn shell_env(
     cancel: &dyn Fn() -> Option<String>,
 ) -> Result<Vec<(String, String)>, String> {
     use std::os::unix::process::CommandExt;
+    // Captured from this process and replayed onto a cleared environment:
+    // what the process hides from its children is left out here too.
+    let hidden = branchyard_support::child::hidden();
     let mut start: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| {
-            !harness::is_branchyard_variable(name) && !harness::is_parent_session_variable(name)
+            !harness::is_branchyard_variable(name)
+                && !harness::is_parent_session_variable(name)
+                && !hidden.contains(name)
         })
         .collect();
     for (name, value) in env {

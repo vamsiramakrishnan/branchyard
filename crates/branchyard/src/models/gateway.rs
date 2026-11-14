@@ -1101,6 +1101,16 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 );
                 return;
             }
+            // A redirect carrying the control plane's code is its decision:
+            // final, though it is not relayed (below).
+            Ok(response)
+                if backend.control_plane.is_some()
+                    && redirect(response.status)
+                    && verdict.decided =>
+            {
+                answered = Some((response, backend, as_model, recording, verdict, key));
+                break;
+            }
             // A control plane's redirect is neither followed (it would carry
             // the credential elsewhere) nor relayed: that backend failed.
             Ok(response) if backend.control_plane.is_some() && redirect(response.status) => {
@@ -1255,6 +1265,13 @@ fn handle(stream: TcpStream, state: &TurnState) {
     let mut withheld: Option<String> = None;
     if let Some(plane) = chosen.control_plane {
         call.control_plane = Some(verdict.record(plane, &attribution));
+        // A refusal by redirect: final, never relayed.
+        if redirect(response.status) {
+            withheld = Some(format!(
+                "the control plane refused with a redirect ({}), which is not relayed",
+                response.status
+            ));
+        }
         // The coding first: the allow-list below drops its header.
         if let Some(coding) = encoded(&response.headers) {
             withheld = Some(encoded_why(&coding));
@@ -1540,7 +1557,8 @@ fn encoded(headers: &[(String, String)]) -> Option<String> {
 fn retry_after_ok(value: &str) -> bool {
     match value.bytes().all(|b| b.is_ascii_digit()) {
         true => value.len() <= 6 && value.parse::<u32>().is_ok_and(|s| s <= 86_400),
-        false => branchyard_support::time::parse_http_date(value).is_ok(),
+        // A date already past says nothing: dropped.
+        false => branchyard_support::time::parse_http_date(value).is_ok_and(|at| at > now_ms()),
     }
 }
 
@@ -1574,10 +1592,19 @@ fn relayable(name: &str, value: &str, key: &str, host: &str) -> bool {
                 .contains(&host.to_ascii_lowercase()))
         && match lower.as_str() {
             "retry-after" => retry_after_ok(value.trim()),
-            "retry-after-ms" => value
-                .trim()
-                .parse::<f64>()
-                .is_ok_and(|ms| (0.0..=86_400_000.0).contains(&ms)),
+            "retry-after-ms" => {
+                let ms = value.trim();
+                !ms.is_empty()
+                    && ms.len() <= 8
+                    && ms.bytes().all(|b| b.is_ascii_digit())
+                    && ms.parse::<u32>().is_ok_and(|ms| ms <= 86_400_000)
+            }
+            // An id, and nothing that reads as an address.
+            "request-id" | "x-request-id" => {
+                request_id_ok(value)
+                    && value.parse::<std::net::IpAddr>().is_err()
+                    && value.parse::<std::net::SocketAddr>().is_err()
+            }
             "x-should-retry" => matches!(value.trim(), "true" | "false"),
             "content-type" => media_type_ok(value),
             _ => true,
@@ -2527,9 +2554,9 @@ mod tests {
             ("Content-Type", "application/json; charset=utf-8"),
             ("Cache-Control", "no-cache"),
             ("Retry-After", "30"),
-            ("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+            ("Retry-After", "Wed, 21 Oct 2099 07:28:00 GMT"),
             ("retry-after-ms", "2500"),
-            ("retry-after-ms", "2500.5"),
+            ("x-request-id", "req-17:a_b.C"),
             ("x-should-retry", "false"),
             ("request-id", "req_011CS"),
             ("x-ratelimit-remaining-tokens", "1000"),
@@ -2557,6 +2584,14 @@ mod tests {
             ("Retry-After", "soon"),
             ("retry-after-ms", "-1"),
             ("retry-after-ms", "1e12"),
+            ("retry-after-ms", "1500.5"),
+            ("Retry-After", "Wed, 21 Oct 2015 07:28:00 GMT"),
+            ("x-request-id", "//console.other-aiplex.example/path"),
+            ("x-request-id", "data:text/html,secret"),
+            ("x-request-id", "10.1.2.3:8080"),
+            ("request-id", "10.1.2.3"),
+            ("request-id", "[::1]:443"),
+            ("request-id", "a b"),
             ("x-should-retry", "maybe"),
             ("Content-Type", "json"),
             ("Server", "aiplex"),

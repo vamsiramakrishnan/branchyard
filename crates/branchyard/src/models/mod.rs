@@ -555,7 +555,16 @@ impl Gateway {
             let source = b.key.as_deref().map(&key);
             // A control plane's token in a variable of this process: no
             // child this process starts inherits it (`branchyard_support::child`).
+            // So it may not be a variable children need, or Branchyard reads.
             if let (Some(_), Some(KeySource::Env(var))) = (b.control_plane, &source) {
+                if shared_variable(var) {
+                    return Err(format!(
+                        "models.backends.{name}.key: the token would be read from {var}, a \
+                         variable that child processes need or Branchyard reads itself, and it \
+                         is hidden from every child; give the token a variable of its own, such \
+                         as AIPLEX_TOKEN"
+                    ));
+                }
                 branchyard_support::child::hide(var);
             }
             backends.push(Backend {
@@ -849,6 +858,39 @@ impl Gateway {
         }
         pricing::cost(api, model, tokens)
     }
+}
+
+/// Whether variable `name` is one child processes need or Branchyard reads
+/// itself, so it cannot hold a control plane's token, which is hidden from
+/// every child: the shell's (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+/// `PWD`, `TMPDIR`, `TMP`, `TEMP`, `TERM`, `LANG`, `LANGUAGE`, `LC_*`),
+/// `SSH_AUTH_SOCK`, git's (`GIT_*`), the proxies' (`*_PROXY`, `NO_PROXY`),
+/// the trust bundles' (`SSL_CERT_*`, `CURL_CA_BUNDLE`,
+/// `REQUESTS_CA_BUNDLE`) and Branchyard's (`BRANCHYARD_*`), in any case.
+pub fn shared_variable(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "LOGNAME"
+            | "SHELL"
+            | "PWD"
+            | "TMPDIR"
+            | "TMP"
+            | "TEMP"
+            | "TERM"
+            | "LANG"
+            | "LANGUAGE"
+            | "SSH_AUTH_SOCK"
+            | "NO_PROXY"
+            | "CURL_CA_BUNDLE"
+            | "REQUESTS_CA_BUNDLE"
+    ) || ["LC_", "GIT_", "SSL_CERT_", "BRANCHYARD_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_PROXY")
 }
 
 /// Refuse what a control-plane backend cannot be: one of a generic API
@@ -2251,6 +2293,47 @@ mod tests {
         // A call of a plain backend writes neither, and reads back without.
         let value = serde_json::to_value(answered()).unwrap();
         assert_eq!(value.get("control_plane"), None);
+    }
+
+    #[test]
+    fn a_control_planes_token_may_not_be_a_variable_children_need() {
+        let plane = |var: &str| {
+            json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                "key": var, "control_plane": "aiplex"}}})
+        };
+        for var in [
+            "PATH",
+            "path",
+            "HOME",
+            "LC_ALL",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "NO_PROXY",
+            "GIT_DIR",
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "SSH_AUTH_SOCK",
+            "BRANCHYARD_TOKEN",
+        ] {
+            let error = built(plane(var)).unwrap_err();
+            assert!(
+                error.contains("models.backends.ap.key")
+                    && error.contains(var)
+                    && error.contains("a variable of its own"),
+                "{var}: {error}"
+            );
+            assert!(shared_variable(var), "{var}");
+        }
+        // An ordinary name works, and is hidden from children from then on.
+        assert!(built(plane("BY_TEST_UNIT_AIPLEX_TOKEN")).is_ok());
+        assert!(
+            branchyard_support::child::hidden().contains(&"BY_TEST_UNIT_AIPLEX_TOKEN".to_owned())
+        );
+        for var in ["AIPLEX_TOKEN", "MY_PATH_TOKEN", "PROXY_TOKEN"] {
+            assert!(!shared_variable(var), "{var}");
+        }
+        // A plain backend's key is not hidden, whatever its name.
+        assert!(built(json!({"backends": {"p": {"api": "openai", "key": "HOME"}}})).is_ok());
     }
 
     #[test]
