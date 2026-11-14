@@ -96,7 +96,9 @@ impl Api {
         self == Api::Anthropic && backend == Api::Openai
     }
 
-    /// The provider's public API, for a backend that names no URL.
+    /// The provider's public API, for a plain backend that names no URL
+    /// ([`backend_url`], the one caller: a control-plane backend has no
+    /// default).
     fn default_url(&self) -> Option<&'static str> {
         match self {
             Api::Anthropic => Some("https://api.anthropic.com"),
@@ -218,7 +220,9 @@ impl fmt::Display for Audit {
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     pub api: Api,
-    /// Its base URL (default: the provider's public API).
+    /// Its base URL, where its calls and its credential go. Default: the
+    /// provider's public API, for a plain `anthropic` or `openai` backend
+    /// only; a generic backend and a control-plane backend must name one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The secret holding its key, by name (`[secrets]`, else a variable
@@ -267,10 +271,14 @@ pub enum BackendAuth {
 /// connector gateway refuse a token that carries one.
 pub const AIPLEX_PURPOSE: &str = "aiplex";
 
-/// Why `issuer` cannot sign tokens AIPlex verifies, if it cannot: it must
-/// be `https://host[:port]`, or `http://` on a loopback host (`127.0.0.1`,
-/// `[::1]`, `localhost`), with no path and no trailing slash, since AIPlex
-/// compares it byte for byte and fetches `{issuer}/.well-known/jwks.json`.
+/// Why `issuer` cannot sign tokens AIPlex verifies, if it cannot. AIPlex
+/// fetches `{issuer}/.well-known/jwks.json` and compares the issuer byte
+/// for byte with the one it was bound to, so it must be `https://host[:port]`,
+/// or `http://` on a loopback host (`127.0.0.1`, `[::1]`, `localhost`), with
+/// nothing after; an address something can be reached at (not `0.0.0.0` or
+/// `[::]`); and in the one spelling Branchyard takes
+/// ([`canonical_issuer`]), so the two sides cannot differ by a dot. Each
+/// refusal says what is wrong, and what to write where Branchyard can tell.
 pub fn federable_issuer(issuer: &str) -> Result<(), String> {
     if issuer.starts_with("branchyard:local:") {
         return Err(format!(
@@ -278,69 +286,170 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
              from, so it cannot be federated; use key = \"...\" (an AIPlex token) instead"
         ));
     }
-    let target = upstream::Target::parse(issuer).map_err(|e| {
-        format!("the issuer {issuer:?} is not a URL AIPlex can fetch keys from: {e}")
-    })?;
-    if !target.prefix.is_empty() || issuer.ends_with('/') {
+    let written = WrittenIssuer::read(issuer)?;
+    let host = written.host();
+    if host
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_unspecified())
+    {
         return Err(format!(
-            "the issuer {issuer:?} has a path; AIPlex wants scheme://host[:port] and nothing after"
+            "the issuer {issuer:?} names an unspecified address, which a server listens on and \
+             nothing can be reached at, so AIPlex cannot fetch keys from it"
         ));
     }
-    issuer_as_written(issuer)?;
-    let loopback = matches!(
-        target.host.as_str(),
-        "127.0.0.1" | "::1" | "[::1]" | "localhost"
-    );
-    match (target.tls, loopback) {
-        (true, _) | (false, true) => Ok(()),
-        (false, false) => Err(format!(
+    let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    if !written.tls && !loopback {
+        return Err(format!(
             "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex fetches \
              keys over https (http only from this machine, for a development AIPlex)"
+        ));
+    }
+    let canonical = written.canonical();
+    match canonical == issuer {
+        true => Ok(()),
+        false => Err(format!(
+            "the issuer {issuer:?} {}; the issuer must be spelled the same in Branchyard and in \
+             AIPlex, so Branchyard takes one spelling (a lower-case host, no trailing dot, no \
+             default port): write {canonical:?}",
+            written.misspelled()
         )),
     }
 }
 
-/// Refuse an issuer whose authority AIPlex's bind would not match as an
-/// operator writes it: a host ending in a dot, a host with an upper-case
-/// letter, an IPv6 address without brackets, an empty port, or the
-/// scheme's default port written out (AIPlex compares byte for byte).
-fn issuer_as_written(issuer: &str) -> Result<(), String> {
-    let (scheme, authority) = issuer
-        .split_once("://")
-        .ok_or_else(|| format!("the issuer {issuer:?} is not a URL"))?;
-    let (host, port) = match authority.strip_prefix('[') {
-        Some(rest) => {
-            let (host, after) = rest
-                .split_once(']')
-                .ok_or_else(|| format!("the issuer {issuer:?} has an unclosed ["))?;
-            (host, after.strip_prefix(':'))
+/// The one spelling Branchyard takes of the issuer `issuer`: its scheme, its
+/// host in lower case without a trailing dot (an IPv6 address in brackets),
+/// and its port unless it is the scheme's default. `None` when `issuer` is
+/// not `scheme://host[:port]` at all. An issuer is spelled the same in
+/// Branchyard and in AIPlex, which compares byte for byte, so one spelling
+/// leaves nothing to differ.
+pub fn canonical_issuer(issuer: &str) -> Option<String> {
+    WrittenIssuer::read(issuer).ok().map(|w| w.canonical())
+}
+
+/// An issuer of the form `scheme://host[:port]`, as it was written.
+struct WrittenIssuer {
+    tls: bool,
+    /// The host as written, without an IPv6 literal's brackets.
+    host: String,
+    port: u16,
+    /// The port as written, when one was.
+    port_written: Option<String>,
+}
+
+impl WrittenIssuer {
+    /// Take `issuer` apart, or say what an operator wrote that is not
+    /// `scheme://host[:port]`: the mistakes one makes by hand are named,
+    /// and the rest is the URL parser's to say.
+    fn read(issuer: &str) -> Result<WrittenIssuer, String> {
+        let rest = issuer
+            .strip_prefix("https://")
+            .or_else(|| issuer.strip_prefix("http://"))
+            .ok_or_else(|| {
+                format!(
+                    "the issuer {issuer:?} is not an http:// or https:// URL, so AIPlex cannot \
+                     fetch keys from it"
+                )
+            })?;
+        let nothing_after = "AIPlex wants scheme://host[:port] and nothing after";
+        if rest.contains('/') {
+            return Err(format!("the issuer {issuer:?} has a path; {nothing_after}"));
         }
-        None if authority.matches(':').count() > 1 => {
+        if rest.contains(['?', '#']) {
             return Err(format!(
-                "the issuer {issuer:?} names an IPv6 address without brackets; write [address]"
-            ))
+                "the issuer {issuer:?} has a query or a fragment; {nothing_after}"
+            ));
         }
-        None => match authority.split_once(':') {
-            Some((host, port)) => (host, Some(port)),
-            None => (authority, None),
-        },
-    };
-    let bad = |what: &str| {
-        Err(format!(
-            "the issuer {issuer:?} {what}; AIPlex matches it byte for byte, so write it as it \
-             will be bound in AIPlex"
-        ))
-    };
-    if host.ends_with('.') {
-        return bad("ends its host with a dot");
+        // What is left is the authority. An IPv6 address is hex digits and
+        // more than one colon; outside brackets its last group would be
+        // read as a port.
+        let bare_v6 = !rest.starts_with('[')
+            && rest.matches(':').count() > 1
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b":.%".contains(&b));
+        if bare_v6 {
+            return Err(format!(
+                "the issuer {issuer:?} names an IPv6 address without brackets; write the address \
+                 in brackets, scheme://[address]:port"
+            ));
+        }
+        let port_written = match rest.strip_prefix('[') {
+            Some(v6) => v6
+                .split_once(']')
+                .and_then(|(_, after)| after.strip_prefix(':')),
+            None => rest.split_once(':').map(|(_, port)| port),
+        };
+        if port_written == Some("") {
+            return Err(format!(
+                "the issuer {issuer:?} has an empty port; write the port after the colon, or \
+                 leave the colon out"
+            ));
+        }
+        let target = upstream::Target::parse(issuer).map_err(|e| {
+            format!("the issuer {issuer:?} is not a URL AIPlex can fetch keys from: {e}")
+        })?;
+        Ok(WrittenIssuer {
+            tls: target.tls,
+            host: target.host,
+            port: target.port,
+            port_written: port_written.map(str::to_owned),
+        })
     }
-    if host.bytes().any(|b| b.is_ascii_uppercase()) {
-        return bad("has an upper-case letter in its host");
+
+    /// The host in the one spelling: lower case, no trailing dot.
+    fn host(&self) -> String {
+        self.host.trim_end_matches('.').to_ascii_lowercase()
     }
-    match (scheme, port) {
-        (_, Some("")) => bad("has an empty port"),
-        ("https", Some("443")) | ("http", Some("80")) => bad("writes out the default port"),
-        _ => Ok(()),
+
+    fn scheme(&self) -> &'static str {
+        match self.tls {
+            true => "https",
+            false => "http",
+        }
+    }
+
+    fn default_port(&self) -> u16 {
+        match self.tls {
+            true => 443,
+            false => 80,
+        }
+    }
+
+    /// The issuer in the one spelling ([`canonical_issuer`]).
+    fn canonical(&self) -> String {
+        let host = self.host();
+        let host = match host.contains(':') {
+            true => format!("[{host}]"),
+            false => host,
+        };
+        match self.port == self.default_port() {
+            true => format!("{}://{host}", self.scheme()),
+            false => format!("{}://{host}:{}", self.scheme(), self.port),
+        }
+    }
+
+    /// How the issuer as written differs from the one spelling.
+    fn misspelled(&self) -> String {
+        let mut how = Vec::new();
+        if self.host.ends_with('.') {
+            how.push("ends its host with a dot".to_owned());
+        }
+        if self.host.bytes().any(|b| b.is_ascii_uppercase()) {
+            how.push("has an upper-case letter in its host".to_owned());
+        }
+        match &self.port_written {
+            Some(_) if self.port == self.default_port() => {
+                how.push(format!("writes out the default port of {}", self.scheme()))
+            }
+            Some(port) if *port != self.port.to_string() => {
+                how.push("writes its port with a leading zero".to_owned())
+            }
+            _ => {}
+        }
+        match how.is_empty() {
+            true => "is not in the one spelling Branchyard takes".to_owned(),
+            false => how.join(" and "),
+        }
     }
 }
 
@@ -631,15 +740,7 @@ impl Gateway {
         let mut backends = Vec::new();
         for (name, b) in &config.backends {
             check_name(name).map_err(|e| format!("models.backends: {e}"))?;
-            let url = match (&b.url, b.api.default_url()) {
-                (Some(url), _) => url.trim_end_matches('/').to_owned(),
-                (None, Some(url)) => url.to_owned(),
-                (None, None) => {
-                    return Err(format!(
-                        "models.backends.{name}: a generic backend needs a url"
-                    ))
-                }
-            };
+            let url = backend_url(name, b)?;
             let target = upstream::Target::parse(&url)
                 .map_err(|e| format!("models.backends.{name}.url: {e}"))?;
             if b.header.is_some() && b.api != Api::Generic {
@@ -977,6 +1078,33 @@ impl Gateway {
             );
         }
         pricing::cost(api, model, tokens)
+    }
+}
+
+/// Where backend `name`'s calls go, and with them its credential: its `url`
+/// as written (a trailing `/` dropped), else, for a plain backend, its API's
+/// public address. The one place a backend's address is decided, for the
+/// gateway ([`Gateway::new`]) and for listing models
+/// ([`discover::sources`]).
+///
+/// A control-plane backend has no default: without a `url` its calls would
+/// go to the provider's public API carrying the control plane's credential
+/// (a stored token, or a token the yard signs that is good at the control
+/// plane for up to an hour), so it must name its access point. A `url`
+/// written out is the operator's choice, whatever it names.
+pub(crate) fn backend_url(name: &str, b: &BackendConfig) -> Result<String, String> {
+    match (&b.url, b.control_plane, b.api.default_url()) {
+        (Some(url), _, _) => Ok(url.trim_end_matches('/').to_owned()),
+        (None, Some(plane), _) => Err(format!(
+            "models.backends.{name}.url: a control-plane backend ({plane}) has no default \
+             address: without a url its calls, and the credential they carry, would go to the \
+             provider's public API; write its access point, \
+             url = \"https://<aiplex>/ap/<access point>\""
+        )),
+        (None, None, Some(url)) => Ok(url.to_owned()),
+        (None, None, None) => Err(format!(
+            "models.backends.{name}: a generic backend needs a url"
+        )),
     }
 }
 
@@ -2216,6 +2344,95 @@ mod tests {
         order.iter().map(|b| b.name.clone()).collect()
     }
 
+    /// [`built`], as a yard whose tokens' issuer is `issuer`.
+    fn built_as(issuer: &str, config: Value) -> Result<Gateway, String> {
+        let config: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
+        let signer = Signer {
+            issuer: issuer.into(),
+            tenant: "local".into(),
+            ..signer()
+        };
+        Gateway::new(&config, signer, |n| KeySource::Env(n.into()))
+    }
+
+    #[test]
+    fn a_control_plane_backend_has_no_default_address() {
+        let credentials = [
+            json!({"key": "AIPLEX_TOKEN"}),
+            json!({"auth": "turn-token", "audience": "https://aiplex.example.com"}),
+        ];
+        let backend = |api: &str, credential: &Value, url: Option<&str>| {
+            let mut backend = json!({"api": api, "control_plane": "aiplex"});
+            for (key, value) in credential.as_object().unwrap() {
+                backend[key] = value.clone();
+            }
+            if let Some(url) = url {
+                backend["url"] = json!(url);
+            }
+            json!({"backends": {"ap": backend}})
+        };
+        for api in ["anthropic", "openai"] {
+            for credential in &credentials {
+                // Without a url the provider's public API would be sent the
+                // credential: refused, saying what a url looks like.
+                let error =
+                    built_as("https://by.example.com", backend(api, credential, None)).unwrap_err();
+                assert_eq!(
+                    error,
+                    "models.backends.ap.url: a control-plane backend (aiplex) has no default \
+                     address: without a url its calls, and the credential they carry, would go \
+                     to the provider's public API; write its access point, \
+                     url = \"https://<aiplex>/ap/<access point>\"",
+                    "{api} {credential}"
+                );
+                // A url that is empty, blank or names no host is no address
+                // either.
+                for url in [
+                    "",
+                    " ",
+                    "/",
+                    "https://",
+                    "https:///ap/ide",
+                    "https://:8443/ap/ide",
+                    "aiplex.example.com/ap/ide",
+                    "https://aiplex.example.com/ap/ide ",
+                    "https://token@aiplex.example.com/ap/ide",
+                ] {
+                    let error = built_as(
+                        "https://by.example.com",
+                        backend(api, credential, Some(url)),
+                    )
+                    .unwrap_err();
+                    assert!(
+                        error.starts_with("models.backends.ap.url: "),
+                        "{url:?}: {error}"
+                    );
+                }
+                // Written out, the url is the operator's choice, and it is
+                // where the credential goes.
+                for url in [
+                    "https://aiplex.example.com/ap/ide",
+                    "https://api.anthropic.com",
+                ] {
+                    let gateway = built_as(
+                        "https://by.example.com",
+                        backend(api, credential, Some(url)),
+                    )
+                    .unwrap();
+                    assert_eq!(gateway.backends[0].url, url, "{api} {credential}");
+                }
+            }
+        }
+        // A plain backend keeps its API's public address.
+        for (api, url) in [
+            ("anthropic", "https://api.anthropic.com"),
+            ("openai", "https://api.openai.com"),
+        ] {
+            let gateway = built(json!({"backends": {"p": {"api": api, "key": "K"}}})).unwrap();
+            assert_eq!(gateway.backends[0].url, url);
+        }
+    }
+
     #[test]
     fn a_control_plane_backend_is_refused_where_it_could_be_bypassed() {
         let plane = |api: &str| {
@@ -2543,12 +2760,13 @@ mod tests {
             ("http://10.0.0.5:7400", "not loopback"),
             ("https://by.example.com/", "has a path"),
             ("https://by.example.com/branchyard", "has a path"),
-            ("by.example.com", "not a URL"),
+            ("by.example.com", "not an http:// or https:// URL"),
             ("https://by.example.com.", "dot"),
             ("https://By.example.com", "upper-case"),
             ("https://by.example.com:443", "default port"),
             ("http://127.0.0.1:80", "default port"),
-            ("https://by.example.com:", "port"),
+            ("https://by.example.com:", "empty port"),
+            ("https://0.0.0.0:8443", "unspecified address"),
         ] {
             let error = signed(issuer, "local", plane.clone()).unwrap_err();
             assert!(
@@ -2606,13 +2824,219 @@ mod tests {
                 );
             }
         }
-        // An IPv6 address must be in brackets.
-        assert!(federable_issuer("http://::1:7400").is_err());
-        assert!(federable_issuer("http://[::1]").is_ok());
         assert!(federable_tenant("acme.eu_1@x+y-z"));
         assert!(!federable_tenant(""));
         assert!(!federable_tenant(&"a".repeat(129)));
         assert!(!federable_tenant("a/b"));
+    }
+
+    #[test]
+    fn an_issuer_is_refused_for_what_is_wrong_with_it_saying_what_to_write() {
+        for issuer in [
+            "https://by.example.com",
+            "https://by.example.com:8443",
+            "https://127.0.0.1",
+            "http://127.0.0.1",
+            "http://127.0.0.1:7400",
+            "http://[::1]:7400",
+            "http://[::1]",
+            "http://localhost:7400",
+            "https://[2001:db8::1]:8443",
+        ] {
+            assert_eq!(federable_issuer(issuer), Ok(()), "{issuer}");
+        }
+        let spelled = |issuer: &str, how: &str, write: &str| {
+            (
+                issuer.to_owned(),
+                format!(
+                    "the issuer {issuer:?} {how}; the issuer must be spelled the same in \
+                     Branchyard and in AIPlex, so Branchyard takes one spelling (a lower-case \
+                     host, no trailing dot, no default port): write {write:?}"
+                ),
+            )
+        };
+        let refused = [
+            (
+                "branchyard:local:abc".to_owned(),
+                "this is a local yard (its tokens' issuer is branchyard:local:abc), which AIPlex \
+                 cannot fetch keys from, so it cannot be federated; use key = \"...\" (an AIPlex \
+                 token) instead"
+                    .to_owned(),
+            ),
+            (
+                "by.example.com".to_owned(),
+                "the issuer \"by.example.com\" is not an http:// or https:// URL, so AIPlex \
+                 cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "HTTPS://by.example.com".to_owned(),
+                "the issuer \"HTTPS://by.example.com\" is not an http:// or https:// URL, so \
+                 AIPlex cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com/".to_owned(),
+                "the issuer \"https://by.example.com/\" has a path; AIPlex wants \
+                 scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com/branchyard".to_owned(),
+                "the issuer \"https://by.example.com/branchyard\" has a path; AIPlex wants \
+                 scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com?x=1".to_owned(),
+                "the issuer \"https://by.example.com?x=1\" has a query or a fragment; AIPlex \
+                 wants scheme://host[:port] and nothing after"
+                    .to_owned(),
+            ),
+            // The two an operator may type: named, not left to the URL
+            // parser's "has an invalid port".
+            (
+                "http://::1:7400".to_owned(),
+                "the issuer \"http://::1:7400\" names an IPv6 address without brackets; write \
+                 the address in brackets, scheme://[address]:port"
+                    .to_owned(),
+            ),
+            (
+                "https://2001:db8::1".to_owned(),
+                "the issuer \"https://2001:db8::1\" names an IPv6 address without brackets; \
+                 write the address in brackets, scheme://[address]:port"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com:".to_owned(),
+                "the issuer \"https://by.example.com:\" has an empty port; write the port \
+                 after the colon, or leave the colon out"
+                    .to_owned(),
+            ),
+            (
+                "http://[::1]:".to_owned(),
+                "the issuer \"http://[::1]:\" has an empty port; write the port after the \
+                 colon, or leave the colon out"
+                    .to_owned(),
+            ),
+            (
+                "https://by.example.com:port".to_owned(),
+                "the issuer \"https://by.example.com:port\" is not a URL AIPlex can fetch keys \
+                 from: \"https://by.example.com:port\" has an invalid port"
+                    .to_owned(),
+            ),
+            (
+                "https://user@by.example.com".to_owned(),
+                "the issuer \"https://user@by.example.com\" is not a URL AIPlex can fetch keys \
+                 from: \"https://user@by.example.com\" has no usable host"
+                    .to_owned(),
+            ),
+            // An address a server listens on, which nothing reaches.
+            (
+                "https://0.0.0.0:8443".to_owned(),
+                "the issuer \"https://0.0.0.0:8443\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::]:8443".to_owned(),
+                "the issuer \"https://[::]:8443\" names an unspecified address, which a server \
+                 listens on and nothing can be reached at, so AIPlex cannot fetch keys from it"
+                    .to_owned(),
+            ),
+            (
+                "http://0.0.0.0:7400".to_owned(),
+                "the issuer \"http://0.0.0.0:7400\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::ffff:0.0.0.0]".to_owned(),
+                "the issuer \"https://[::ffff:0.0.0.0]\" names an unspecified address, which a \
+                 server listens on and nothing can be reached at, so AIPlex cannot fetch keys \
+                 from it"
+                    .to_owned(),
+            ),
+            (
+                "http://10.0.0.5:7400".to_owned(),
+                "the issuer \"http://10.0.0.5:7400\" is plain http on a host that is not \
+                 loopback; AIPlex fetches keys over https (http only from this machine, for a \
+                 development AIPlex)"
+                    .to_owned(),
+            ),
+            // One spelling, so the two sides cannot differ by a dot.
+            spelled(
+                "https://by.example.com.",
+                "ends its host with a dot",
+                "https://by.example.com",
+            ),
+            spelled(
+                "https://By.Example.com:8443",
+                "has an upper-case letter in its host",
+                "https://by.example.com:8443",
+            ),
+            spelled(
+                "https://by.example.com:443",
+                "writes out the default port of https",
+                "https://by.example.com",
+            ),
+            spelled(
+                "http://127.0.0.1:80",
+                "writes out the default port of http",
+                "http://127.0.0.1",
+            ),
+            spelled(
+                "http://LOCALHOST:7400",
+                "has an upper-case letter in its host",
+                "http://localhost:7400",
+            ),
+            spelled(
+                "https://by.example.com:08443",
+                "writes its port with a leading zero",
+                "https://by.example.com:8443",
+            ),
+            spelled(
+                "https://BY.example.com.:443",
+                "ends its host with a dot and has an upper-case letter in its host and writes \
+                 out the default port of https",
+                "https://by.example.com",
+            ),
+            spelled(
+                "https://[2001:DB8::1]",
+                "has an upper-case letter in its host",
+                "https://[2001:db8::1]",
+            ),
+        ];
+        for (issuer, message) in &refused {
+            assert_eq!(federable_issuer(issuer).as_ref(), Err(message), "{issuer}");
+        }
+        // The one spelling, for whoever has to say what to write: the
+        // spelling alone, whatever else is wrong with the issuer.
+        for (issuer, canonical) in [
+            ("https://by.example.com", Some("https://by.example.com")),
+            (
+                "https://BY.example.com.:443",
+                Some("https://by.example.com"),
+            ),
+            ("http://127.0.0.1:80", Some("http://127.0.0.1")),
+            ("http://127.0.0.1:7400", Some("http://127.0.0.1:7400")),
+            ("https://[2001:DB8::1]:443", Some("https://[2001:db8::1]")),
+            ("https://0.0.0.0:8443", Some("https://0.0.0.0:8443")),
+            ("https://by.example.com/", None),
+            ("https://by.example.com:", None),
+            ("http://::1:7400", None),
+            ("branchyard:local:abc", None),
+            ("", None),
+        ] {
+            assert_eq!(canonical_issuer(issuer).as_deref(), canonical, "{issuer}");
+        }
+        // What is written the one way and is refused is refused for
+        // something else, and what is accepted is its own spelling.
+        for issuer in ["https://by.example.com", "http://[::1]:7400"] {
+            assert_eq!(canonical_issuer(issuer).as_deref(), Some(issuer));
+        }
     }
 
     fn issuer_ok() -> &'static str {

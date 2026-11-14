@@ -59,7 +59,10 @@ pub fn issuer(config: &Config) -> String {
 /// Why this server cannot sign tokens AIPlex verifies, when a backend asks
 /// for them: its issuer must be a URL AIPlex can fetch its keys from
 /// ([`branchyard::models::federable_issuer`]), and a `listen` port of 0 is
-/// chosen only when the server starts, so it cannot be the issuer's.
+/// chosen only when the server starts, so it cannot be the issuer's. The
+/// refusal names the setting that gives the issuer: the one whose value is
+/// wrong, or, when the issuer is the address the server listens on, the one
+/// to set and the value where only the spelling was wrong.
 pub fn check_signed(config: &Config) -> Result<(), String> {
     let Some(models) = config.models.as_ref() else {
         return Ok(());
@@ -85,8 +88,28 @@ pub fn check_signed(config: &Config) -> Result<(), String> {
              set {setting} (the server's URL as AIPlex reaches it) or listen on a fixed port"
         ));
     }
-    branchyard::models::federable_issuer(&issuer(config)).map_err(|why| {
-        format!("models.backends.{name}.auth: {why}; set {setting} to its https URL")
+    let issuer = issuer(config);
+    branchyard::models::federable_issuer(&issuer).map_err(|why| {
+        let remedy = match explicit {
+            true => format!("it is {setting}'s value: change it there"),
+            false => {
+                // The issuer is the address the server listens on. Where
+                // only its spelling is wrong the value to set is known;
+                // otherwise it is the server's URL as AIPlex reaches it,
+                // which only the operator knows.
+                let value = branchyard::models::canonical_issuer(&issuer)
+                    .filter(|url| branchyard::models::federable_issuer(url).is_ok())
+                    .map_or_else(
+                        || "the URL AIPlex reaches this server at".to_owned(),
+                        |url| format!("{url:?}"),
+                    );
+                format!(
+                    "this issuer comes from listen ({}): set {setting} to {value}",
+                    config.listen
+                )
+            }
+        };
+        format!("models.backends.{name}.auth: {why}; {remedy}")
     })
 }
 

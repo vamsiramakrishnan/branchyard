@@ -1249,8 +1249,10 @@ impl ModelAudit {
 pub struct ModelBackendConfig {
     /// `anthropic`, `openai` or `generic`.
     pub api: String,
-    /// Its base URL (default: the provider's public API; a generic
-    /// backend needs one).
+    /// Its base URL, where its calls and its credential go. Default: the
+    /// provider's public API, for a plain `anthropic` or `openai` backend
+    /// only; a generic backend and a `control_plane` backend must name one
+    /// (for AIPlex, `https://<aiplex>/ap/<access point>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The secret holding its key, by name: an entry of `[secrets]`, else
@@ -1289,6 +1291,20 @@ pub struct ModelBackendConfig {
     /// The `aud` of that token: the audience the AIPlex binding expects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
+}
+
+/// Why `url` is no address for a control-plane backend, where its
+/// credential is sent: it must be plain text with a host. The gateway
+/// parses it in full when it is built; this is what `by config validate`
+/// can say without it.
+fn access_point_address(url: &str) -> Result<(), &'static str> {
+    if url.bytes().any(|b| b <= b' ' || b >= 0x7f) {
+        return Err("has whitespace, control or non-ASCII characters");
+    }
+    match url_host(url) {
+        Some(_) => Ok(()),
+        None => Err("names no host"),
+    }
 }
 
 /// The host of an `http(s)` URL, lower-cased and without its port; `None`
@@ -1445,6 +1461,33 @@ impl ModelsConfig {
                         &format!("backends.{name}.url"),
                         format!("must be an http:// or https:// URL, not {url:?}"),
                     );
+                }
+            }
+            // An AIPlex backend has no default address: the provider's public
+            // API would be sent its credential. Its url is where that goes.
+            if backend.control_plane.as_deref() == Some("aiplex") && backend.api != "generic" {
+                let looks = "url = \"https://<aiplex>/ap/<access point>\"";
+                match backend.url.as_deref().map(access_point_address) {
+                    None => {
+                        return fail(
+                            &format!("backends.{name}.url"),
+                            format!(
+                                "a control-plane backend (aiplex) has no default address: \
+                                 without a url its calls, and the credential they carry, would \
+                                 go to the provider's public API; write its access point, {looks}"
+                            ),
+                        )
+                    }
+                    Some(Err(why)) => {
+                        return fail(
+                            &format!("backends.{name}.url"),
+                            format!(
+                                "{:?} {why}; write the access point, {looks}",
+                                backend.url.as_deref().unwrap_or_default()
+                            ),
+                        )
+                    }
+                    Some(Ok(())) => {}
                 }
             }
             match backend.control_plane.as_deref() {
@@ -3915,6 +3958,60 @@ classes = { compensable = "allow" }
     }
 
     #[test]
+    fn an_aiplex_backend_names_its_url() {
+        let credentials = [
+            "key = \"aiplex\"\n",
+            "auth = \"turn-token\"\naudience = \"https://aiplex.example.com\"\n",
+        ];
+        let file = |api: &str, credential: &str, url: Option<&str>| {
+            let url = url.map_or(String::new(), |u| format!("url = \"{u}\"\n"));
+            format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"{api}\"\n{url}\
+                 control_plane = \"aiplex\"\n{credential}\n\
+                 [[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            )
+        };
+        for api in ["anthropic", "openai"] {
+            for credential in credentials {
+                // Without a url its calls would go to the provider's public
+                // API, with the credential.
+                let error = parse(&file(api, credential, None)).unwrap_err().to_string();
+                for needle in [
+                    "models.backends.ap.url",
+                    "has no default address",
+                    "url = \"https://<aiplex>/ap/<access point>\"",
+                ] {
+                    assert!(error.contains(needle), "{needle:?} not in {error}");
+                }
+                // Nor is a url that is empty, blank or names no host one.
+                for url in [
+                    "",
+                    " ",
+                    "https://",
+                    "https:///ap/ide",
+                    "https://:8443/ap/ide",
+                    "https://aiplex.example.com/ap/ide ",
+                ] {
+                    let error = parse(&file(api, credential, Some(url)))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains("models.backends.ap.url"), "{url:?}: {error}");
+                }
+                // Written out, it is the operator's choice.
+                for url in [
+                    "https://aiplex.example.com/ap/ide",
+                    "https://api.anthropic.com",
+                ] {
+                    let config = parse(&file(api, credential, Some(url))).unwrap();
+                    assert_eq!(config.models.backends["ap"].url.as_deref(), Some(url));
+                }
+            }
+        }
+        // A plain backend still needs none.
+        parse("version = 1\n\n[models.backends.p]\napi = \"anthropic\"\nkey = \"k\"\n").unwrap();
+    }
+
+    #[test]
     fn a_signed_token_backend_is_read_rendered_back_and_refused_by_name() {
         let backend = |extra: &str| {
             format!(
@@ -4013,12 +4110,14 @@ classes = { compensable = "allow" }
                 vec!["models.backends.g.control_plane", "not generic"],
             ),
             (
-                "[models.backends.a]\napi = \"openai\"\ncontrol_plane = \"aiplex\"\n".to_owned(),
+                "[models.backends.a]\napi = \"openai\"\nurl = \"https://aiplex.example.com/ap/x\"\n\
+                 control_plane = \"aiplex\"\n"
+                    .to_owned(),
                 vec!["models.backends.a.key", "needs a key"],
             ),
             (
-                "[models.backends.a]\napi = \"openai\"\nkey = \"k\"\ncompat = \"versioned\"\n\
-                 control_plane = \"aiplex\"\n"
+                "[models.backends.a]\napi = \"openai\"\nurl = \"https://aiplex.example.com/ap/x\"\n\
+                 key = \"k\"\ncompat = \"versioned\"\ncontrol_plane = \"aiplex\"\n"
                     .to_owned(),
                 vec!["models.backends.a.compat", "no compatibility layer"],
             ),

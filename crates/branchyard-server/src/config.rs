@@ -3621,11 +3621,31 @@ mod tests {
                 "models.backends.a.control_plane",
             ),
             (
-                r#"{"backends": {"a": {"api": "openai", "key": "k", "control_plane": "aiplex"},
+                r#"{"backends": {"a": {"api": "openai", "key": "k", "control_plane": "aiplex",
+                                       "url": "https://aiplex.example/ap/coding"},
                     "b": {"api": "openai", "key": "k"}},
                     "routes": [{"model": "*", "backends": ["a", "b"]}]}"#,
                 "{}",
                 "names the control-plane backend a and the plain backend b",
+            ),
+            // An AIPlex backend has no default address: without a url its
+            // credential would go to the provider's public API.
+            (
+                r#"{"backends": {"a": {"api": "openai", "key": "k", "control_plane": "aiplex"}}}"#,
+                "{}",
+                "models.backends.a.url: a control-plane backend (aiplex) has no default address",
+            ),
+            (
+                r#"{"backends": {"a": {"api": "anthropic", "control_plane": "aiplex",
+                                       "auth": "turn-token", "audience": "https://aiplex.example"}}}"#,
+                "{}",
+                "models.backends.a.url: a control-plane backend (aiplex) has no default address",
+            ),
+            (
+                r#"{"backends": {"a": {"api": "anthropic", "key": "k", "control_plane": "aiplex",
+                                       "url": "https:///ap/coding"}}}"#,
+                "{}",
+                "models.backends.a.url: \"https:///ap/coding\" names no host",
             ),
             (
                 r#"{"routes": [{"model": "*", "backends": ["x"]}]}"#,

@@ -395,6 +395,8 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
     }
     // Refused when read, by name.
     let plain = "[models.backends.direct]\napi = \"anthropic\"\nkey = \"anthropic\"\n\n";
+    let address = format!("url = \"{}/ap/ide\"\n", access.url());
+    assert!(backend.contains(&address), "{backend}");
     for (toml, needles) in [
         (
             format!(
@@ -416,6 +418,26 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
                 "models.backends.aiplex-anthropic.control_plane",
                 "\"aiplexx\"",
                 "\"aiplex\"",
+            ],
+        ),
+        // Without a url its calls, and the token, would go to the
+        // provider's public API: with a stored token and with a signed one.
+        (
+            backend.replace(&address, ""),
+            vec![
+                "models.backends.aiplex-anthropic.url",
+                "has no default address",
+                "url = \"https://<aiplex>/ap/<access point>\"",
+            ],
+        ),
+        (
+            backend.replace(&address, "").replace(
+                "key = \"aiplex\"",
+                "auth = \"turn-token\"\naudience = \"https://aiplex.example\"",
+            ),
+            vec![
+                "models.backends.aiplex-anthropic.url",
+                "has no default address",
             ],
         ),
     ] {

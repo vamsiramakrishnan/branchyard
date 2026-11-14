@@ -180,6 +180,84 @@ fn a_signed_token_needs_an_issuer_aiplex_can_reach() {
 }
 
 #[test]
+fn a_refused_issuer_names_the_setting_and_the_value_that_work() {
+    let f = Fixture::new();
+    let access = MockHttp::start(|_| Response::new(200, ""));
+    let mut config = f.config();
+    config.models = Some(signed(&access));
+    let refusal = |config: &branchyard_server::config::Config| config.validate().unwrap_err();
+    // TLS on every interface and no public_url: the issuer would be the
+    // address the server listens on, which nothing reaches.
+    config.tls = Some(branchyard_server::config::TlsFiles {
+        cert: f.dir.join("cert.pem"),
+        key: f.dir.join("key.pem"),
+    });
+    for listen in ["0.0.0.0:8443", "[::]:8443"] {
+        config.listen = listen.parse().unwrap();
+        assert_eq!(
+            refusal(&config),
+            format!(
+                "models.backends.aiplex-anthropic.auth: the issuer \"https://{listen}\" names an \
+                 unspecified address, which a server listens on and nothing can be reached at, \
+                 so AIPlex cannot fetch keys from it; this issuer comes from listen ({listen}): \
+                 set public_url to the URL AIPlex reaches this server at"
+            )
+        );
+    }
+    config.triggers.public_url = Some("https://by.example.com".into());
+    config.validate().unwrap();
+    // Only the spelling of a listen address is wrong: the value to set.
+    config.tls = None;
+    config.triggers.public_url = None;
+    config.listen = "127.0.0.1:80".parse().unwrap();
+    assert_eq!(
+        refusal(&config),
+        "models.backends.aiplex-anthropic.auth: the issuer \"http://127.0.0.1:80\" writes out \
+         the default port of http; the issuer must be spelled the same in Branchyard and in \
+         AIPlex, so Branchyard takes one spelling (a lower-case host, no trailing dot, no \
+         default port): write \"http://127.0.0.1\"; this issuer comes from listen \
+         (127.0.0.1:80): set public_url to \"http://127.0.0.1\""
+    );
+    config.triggers.public_url = Some("http://127.0.0.1".into());
+    config.validate().unwrap();
+    assert_eq!(
+        branchyard_server::models::issuer(&config),
+        "http://127.0.0.1"
+    );
+    // A setting's own value that is wrong is changed where it is.
+    config.triggers.public_url = Some("https://By.example.com.".into());
+    assert_eq!(
+        refusal(&config),
+        "models.backends.aiplex-anthropic.auth: the issuer \"https://By.example.com.\" ends \
+         its host with a dot and has an upper-case letter in its host; the issuer must be \
+         spelled the same in Branchyard and in AIPlex, so Branchyard takes one spelling (a \
+         lower-case host, no trailing dot, no default port): write \"https://by.example.com\"; \
+         it is public_url's value: change it there"
+    );
+    config.triggers.public_url = Some("http://10.0.0.5:7400".into());
+    let error = refusal(&config);
+    assert!(
+        error.contains("not loopback")
+            && error.ends_with("it is public_url's value: change it there"),
+        "{error}"
+    );
+    // With connectors the setting is the connector gateway's.
+    config.triggers.public_url = None;
+    config.connectors = Some(connectors(&f));
+    config.listen = "0.0.0.0:8421".parse().unwrap();
+    let error = refusal(&config);
+    assert!(
+        error.contains("unspecified address")
+            && error.ends_with(
+                "this issuer comes from listen (0.0.0.0:8421): set connectors.issuer to the URL \
+                 AIPlex reaches this server at"
+            ),
+        "{error}"
+    );
+    access.finish();
+}
+
+#[test]
 fn an_audience_on_another_host_than_the_url_is_a_warning_when_the_file_is_read() {
     let f = Fixture::new();
     let path = f.dir.join("server.json");

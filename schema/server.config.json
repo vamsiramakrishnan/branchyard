@@ -2257,7 +2257,7 @@
           "type": "string"
         },
         "url": {
-          "description": "Its base URL (default: the provider's public API; a generic\nbackend needs one).",
+          "description": "Its base URL, where its calls and its credential go. Default: the\nprovider's public API, for a plain `anthropic` or `openai` backend\nonly; a generic backend and a `control_plane` backend must name one\n(for AIPlex, `https://<aiplex>/ap/<access point>`).",
           "type": [
             "string",
             "null"

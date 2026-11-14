@@ -1311,6 +1311,98 @@ fn the_model_gateways_keys_are_named_and_its_routed_models_priced() {
 }
 
 #[test]
+fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
+    let repo = Repo::used();
+    let backend = |name: &str, url: &str, audience: &str| {
+        format!(
+            "[models.backends.{name}]\napi = \"anthropic\"\nurl = \"{url}\"\n\
+             control_plane = \"aiplex\"\nauth = \"turn-token\"\naudience = \"{audience}\"\n\n"
+        )
+    };
+    let routes = "[[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"one\", \"two\"]\n";
+    // Whoever is at the url is sent a token that is good at the audience.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend(
+            "one",
+            "https://gateway.example.net/ap/coding",
+            "https://aiplex.example.com"
+        ),
+        backend(
+            "two",
+            "https://other.example.net/ap/coding",
+            "https://aiplex.example.com"
+        ),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(
+        report.status("models.audience"),
+        "warn",
+        "{}",
+        report.stdout
+    );
+    let detail = report.detail("models.audience");
+    for needle in [
+        "models.backends.one: its audience names the host aiplex.example.com and its url the \
+         host gateway.example.net",
+        "models.backends.two: its audience names the host aiplex.example.com and its url the \
+         host other.example.net",
+    ] {
+        assert!(detail.contains(needle), "{needle:?} not in {detail}");
+    }
+    assert!(
+        report
+            .fix("models.audience")
+            .contains("make url the audience's AIPlex access point"),
+        "{}",
+        report.fix("models.audience")
+    );
+    // One row however many backends, between the keys and the prices.
+    let names: Vec<&str> = report.value["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    let at = names.iter().position(|n| *n == "models.audience").unwrap();
+    assert_eq!(names[at - 1], "models.keys", "{names:?}");
+    assert_eq!(names[at + 1..], ["models.prices"], "{names:?}");
+    assert_eq!(
+        names.iter().filter(|n| **n == "models.audience").count(),
+        1,
+        "{names:?}"
+    );
+    // On the url's host it is ok, and says which backends it looked at.
+    repo.project_file(&format!(
+        "{}{}{routes}",
+        backend(
+            "one",
+            "https://aiplex.example.com/ap/coding",
+            "https://aiplex.example.com"
+        ),
+        backend(
+            "two",
+            "https://AIPLEX.example.com:8443/ap/review",
+            "https://aiplex.example.com"
+        ),
+    ));
+    let report = repo.doctor(&[]);
+    assert_eq!(report.status("models.audience"), "ok", "{}", report.stdout);
+    assert_eq!(
+        report.detail("models.audience"),
+        "no signed token's audience names another host than its backend's url (one, two)"
+    );
+    // No row without a backend called with a signed token.
+    repo.project_file(
+        "[models.backends.one]\napi = \"anthropic\"\nkey = \"DOCTOR_TEST_MODEL_KEY\"\n\
+         url = \"https://aiplex.example.com/ap/coding\"\ncontrol_plane = \"aiplex\"\n",
+    );
+    let report = repo.doctor(&[]);
+    assert!(!report.has("models.audience"), "{}", report.stdout);
+    assert!(report.has("models.keys"), "{}", report.stdout);
+}
+
+#[test]
 fn remote_harness_readiness_does_not_depend_on_workstation_login() {
     let repo = Repo::used().without_keys();
     repo.project_file(

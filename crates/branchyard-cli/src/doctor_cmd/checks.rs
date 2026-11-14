@@ -1542,16 +1542,43 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
         })
         .collect();
     let mut checks = vec![keys_row(&rows)];
-    // A signed token's audience on another host than its url.
-    for note in config.models.notes() {
-        checks.push(Check::warn(
-            "models.audience",
-            note,
+    checks.extend(audience_row(&config.models));
+    checks
+}
+
+/// `models.audience`: whether a signed token's audience names another host
+/// than its backend's `url` ([`ModelsConfig::notes`]), where the token is
+/// sent. One row for every backend called with a token the yard signs
+/// (`auth = "turn-token"`), and none without such a backend.
+///
+/// [`ModelsConfig::notes`]: branchyard_setup::config::ModelsConfig::notes
+fn audience_row(models: &branchyard_setup::config::ModelsConfig) -> Option<Check> {
+    const NAME: &str = "models.audience";
+    let signed: Vec<&str> = models
+        .backends
+        .iter()
+        .filter(|(_, backend)| backend.auth.as_deref() == Some("turn-token"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if signed.is_empty() {
+        return None;
+    }
+    let notes = models.notes();
+    Some(match notes.is_empty() {
+        true => Check::ok(
+            NAME,
+            format!(
+                "no signed token's audience names another host than its backend's url ({})",
+                signed.join(", ")
+            ),
+        ),
+        false => Check::warn(
+            NAME,
+            notes.join("; "),
             "make url the audience's AIPlex access point, or the audience the AIPlex the url \
              names (docs/model-gateway.md#a-token-branchyard-signs)",
-        ));
-    }
-    checks
+        ),
+    })
 }
 
 /// One backend and where its key is.
@@ -2203,6 +2230,69 @@ mod tests {
         assert_eq!(
             signed.detail,
             "aiplex is called with a token the server signs for each turn (auth = turn-token)"
+        );
+    }
+
+    #[test]
+    fn the_audience_row_is_one_row_and_only_for_backends_called_with_a_signed_token() {
+        let models = |backends: serde_json::Value| -> branchyard_setup::config::ModelsConfig {
+            serde_json::from_value(serde_json::json!({ "backends": backends })).unwrap()
+        };
+        let signed = |url: &str, audience: &str| {
+            serde_json::json!({
+                "api": "anthropic", "url": url, "control_plane": "aiplex",
+                "auth": "turn-token", "audience": audience,
+            })
+        };
+        // No backend is called with a signed token: no row.
+        let stored = serde_json::json!({
+            "api": "anthropic", "url": "https://aiplex.example.com/ap/ide",
+            "control_plane": "aiplex", "key": "aiplex",
+        });
+        assert_eq!(audience_row(&models(serde_json::json!({}))), None);
+        assert_eq!(
+            audience_row(&models(serde_json::json!({ "stored": stored }))),
+            None
+        );
+        // The audience on the url's host, in any letter case and with any
+        // port, or one that is not a URL at all: ok, naming the backends.
+        let ok = audience_row(&models(serde_json::json!({
+            "a": signed("https://aiplex.example.com/ap/ide", "https://AIPLEX.example.com:8443"),
+            "b": signed("https://aiplex.example.com/ap/ide", "aiplex-production"),
+            "stored": stored,
+        })))
+        .unwrap();
+        assert_eq!(ok.name, "models.audience");
+        assert_eq!(ok.status, Status::Ok);
+        assert_eq!(
+            ok.detail,
+            "no signed token's audience names another host than its backend's url (a, b)"
+        );
+        assert_eq!(ok.fix, None);
+        // Another host: one warning for all of them, with what to do.
+        let warn = audience_row(&models(serde_json::json!({
+            "a": signed("https://gateway.example.net/ap/ide", "https://aiplex.example.com"),
+            "b": signed("https://aiplex.example.com/ap/ide", "https://aiplex.example.com"),
+            "c": signed("https://other.example.net/ap/ide", "https://aiplex.example.com"),
+        })))
+        .unwrap();
+        assert_eq!(warn.name, "models.audience");
+        assert_eq!(warn.status, Status::Warn);
+        assert_eq!(
+            warn.detail,
+            "models.backends.a: its audience names the host aiplex.example.com and its url the \
+             host gateway.example.net; the token it is sent is good at the audience for up to an \
+             hour, so check the url is the audience's AIPlex; models.backends.c: its audience \
+             names the host aiplex.example.com and its url the host other.example.net; the token \
+             it is sent is good at the audience for up to an hour, so check the url is the \
+             audience's AIPlex"
+        );
+        assert_eq!(
+            warn.fix.as_deref(),
+            Some(
+                "make url the audience's AIPlex access point, or the audience the AIPlex the url \
+                 names (docs/model-gateway.md#a-token-branchyard-signs)"
+            )
         );
     }
 

@@ -219,9 +219,12 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
         },
     ];
     for (name, backend) in &config.backends {
-        let Some(url) = backend.url.as_deref().or(backend.api.default_url()) else {
-            continue; // a generic backend without a URL: `by config validate` says so
+        // A backend with no address (a generic one, or a control plane's,
+        // which has no default) is no source: `by config validate` says so.
+        let Ok(url) = super::backend_url(name, backend) else {
+            continue;
         };
+        let url = url.as_str();
         let kind = match backend.api {
             Api::Anthropic => Kind::Anthropic,
             Api::Openai => Kind::Openai,
@@ -932,6 +935,30 @@ mod tests {
             assert_eq!(request.header("authorization"), None);
         }
         server.finish();
+    }
+
+    #[test]
+    fn a_control_plane_backend_without_a_url_is_never_listed_at_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = key_file(&dir, "aiplex", "aiplex-token-for-aiplex-only");
+        for api in ["anthropic", "openai"] {
+            // Its configuration is refused when read (`Gateway::new`); read
+            // anyway, it is no source: nothing takes the provider's address
+            // for it, where its token would be sent as a bearer.
+            let config: Config = serde_json::from_value(json!({"backends": {
+                "ap": {"api": api, "key": "aiplex", "control_plane": "aiplex"},
+                "plain": {"api": api, "key": "aiplex"}
+            }}))
+            .unwrap();
+            let found = sources(&config, &Bases::default(), |_| token.clone());
+            assert!(
+                found.iter().all(|s| s.id != "backend:ap"),
+                "{api}: {found:?}"
+            );
+            // A plain backend still takes its API's public address.
+            let plain = found.iter().find(|s| s.id == "backend:plain").unwrap();
+            assert!(plain.base.starts_with("https://api."), "{}", plain.base);
+        }
     }
 
     #[test]
