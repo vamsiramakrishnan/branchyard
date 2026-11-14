@@ -331,7 +331,7 @@ def events_for(seen_calls, **changes):
             plane = {"plane": "aiplex", "call_id": (label * 22)[:22], "request_id": f"req-1-{label}"}
             built = {"kind": "call", "model": model, "api": api, "decision": "allowed", "status": 200,
                      "backend": q.BACKEND_ANTHROPIC, "control_plane": plane}  # fmt: skip
-            if kind == "refused":
+            if kind in q.REFUSED_KINDS:
                 call.update(status=404, aiplex_error_code="MODEL_NOT_FOUND")
                 built.update(decision="refused", status=404, reason="refused by aiplex (MODEL_NOT_FOUND)")
                 plane["error_code"] = "MODEL_NOT_FOUND"
@@ -349,19 +349,46 @@ class Mutations(unittest.TestCase):
     def test_item_1_a_run_with_no_refused_call_fails_even_if_the_harness_agrees(self):
         calls = calls_seen()
         events = events_for(calls)
-        # the shim answers call d with a success: no refusal anywhere, and the harness reports it faithfully
+        # the shim answers call d with a success: no refusal of d, and the harness reports it faithfully
         calls[3].update(status=200, aiplex_error_code=None)
         events[3].update(decision="allowed", status=200, reason=None)
         events[3]["control_plane"].pop("error_code")
         problems = q.event_problems(q.CALLS, calls, events)
-        self.assertTrue(any("refused calls are []" in p for p in problems))
+        self.assertTrue(any("refused calls are ['g'], expected exactly ['d', 'g']" in p for p in problems))
+
+    def test_item_1_a_gateway_that_gives_the_unrouted_call_to_the_stand_in_fails(self):
+        # the rule before amendment 1.1: call g answered by the plain stand-in backend, allowed, 200, no AIPlex ids
+        calls = calls_seen()
+        events = events_for(calls)
+        calls[6].update(status=200, aiplex_request_id=None, aiplex_error_code=None, body_head="stand-in")
+        events[6] = {
+            "kind": "call",
+            "model": q.MODEL_UNROUTED,
+            "api": "anthropic",
+            "decision": "allowed",
+            "status": 200,
+            "backend": q.BACKEND_DIRECT,
+        }
+        problems = q.event_problems(q.CALLS, calls, events)
+        self.assertTrue(any("refused calls are ['d'], expected exactly ['d', 'g']" in p for p in problems))
+        self.assertTrue(any(p.startswith("g: no control_plane aiplex") for p in problems))
+        self.assertTrue(any("g: decision is 'allowed', not 'refused'" in p for p in problems))
+        self.assertTrue(any("g: the refusal names backend 'direct-anthropic'" in p for p in problems))
+
+    def test_item_1_the_unrouted_call_is_a_kind_of_its_own_and_goes_to_aiplex(self):
+        self.assertEqual(q.KIND["g"], "unrouted")
+        self.assertEqual(q.KIND["f"], "direct")
+        self.assertEqual([k for k in q.KIND.values() if k == "direct"], ["direct"])
+        self.assertEqual(q.KIND["g"] in q.AIPLEX_KINDS, True)
+        self.assertNotIn(q.MODEL_UNROUTED, {m for _l, _a, m, _f, k in q.CALLS if k == "direct"})
 
     def test_item_1_a_refusal_of_another_call_fails(self):
         calls = calls_seen()
         events = events_for(calls)
         events[0].update(decision="refused", reason="refused by aiplex (MODEL_NOT_FOUND)")
         events[0]["control_plane"]["error_code"] = "MODEL_NOT_FOUND"
-        self.assertTrue(any("refused calls are ['a', 'd']" in p for p in q.event_problems(q.CALLS, calls, events)))
+        problems = q.event_problems(q.CALLS, calls, events)
+        self.assertTrue(any("refused calls are ['a', 'd', 'g']" in p for p in problems))
 
     def test_item_1_a_harness_that_names_another_model_is_caught(self):
         calls = calls_seen()
@@ -461,12 +488,42 @@ class Mutations(unittest.TestCase):
 
     def test_item_6_the_direct_provider_conditions(self):
         calls = calls_seen()
-        stand_in = [{"model": q.MODEL_DIRECT, "token_seen": False}, {"model": q.MODEL_UNROUTED, "token_seen": False}]
-        records = [{"model_id": "mock-claude"}] * 5
-        self.assertEqual(q.direct_problems(calls, stand_in, records, 5), [])
-        self.assertTrue(q.direct_problems(calls, stand_in[:1], records, 5))
-        self.assertTrue(q.direct_problems(calls, [dict(stand_in[0], token_seen=True), stand_in[1]], records, 5))
-        self.assertTrue(q.direct_problems(calls, stand_in, [*records, {"model_id": q.MODEL_DIRECT}], 5))
+        stand_in = [{"model": q.MODEL_DIRECT, "token_seen": False}]
+        records = [{"model_id": "mock-claude"}] * 5 + [{"model_id": q.MODEL_UNROUTED}]
+        self.assertEqual(q.direct_problems(calls, stand_in, records, 6), [])
+        self.assertTrue(q.direct_problems(calls, [], records, 6))
+        self.assertTrue(q.direct_problems(calls, [dict(stand_in[0], token_seen=True)], records, 6))
+        self.assertTrue(q.direct_problems(calls, stand_in, [*records, {"model_id": q.MODEL_DIRECT}], 6))
+        # the gateway before amendment 1.1: the stand-in also answered the unrouted call, and AIPlex holds no record
+        old = [*stand_in, {"model": q.MODEL_UNROUTED, "token_seen": False}]
+        problems = q.direct_problems(calls, old, records[:5], 6)
+        self.assertTrue(any("the stand-in saw models" in p for p in problems))
+        self.assertTrue(any("5 records, 6 calls went to it" in p for p in problems))
+
+    def test_item_6_the_unrouted_call_conditions(self):
+        call = {"status": 404, "aiplex_error_code": "MODEL_NOT_FOUND", "body_head": "{}"}
+        plane = {"plane": "aiplex", "call_id": "g" * 22, "request_id": "req-1-g", "error_code": "MODEL_NOT_FOUND"}
+        good = {"decision": "refused", "backend": q.BACKEND_ANTHROPIC, "control_plane": plane}
+        stand_in = [{"model": q.MODEL_DIRECT}]
+        one = [{"id": "ul_1"}]
+        self.assertEqual(q.unrouted_problems(call, good, stand_in, one), [])
+        # the stand-in received it (and answered it): the old rule
+        reached = [*stand_in, {"model": q.MODEL_UNROUTED}]
+        self.assertEqual(
+            q.unrouted_problems(call, good, reached, one),
+            [f"the stand-in received 1 request(s) for {q.MODEL_UNROUTED}"],
+        )
+        answered = {"status": 200, "aiplex_error_code": None, "body_head": "stand-in"}
+        old_event = {"decision": "allowed", "backend": q.BACKEND_DIRECT}
+        problems = q.unrouted_problems(answered, old_event, reached, [])
+        self.assertEqual(len(problems), 7)
+        # AIPlex tried twice (a second record under one call id), or the event lists a backend tried before
+        self.assertTrue(q.unrouted_problems(call, good, stand_in, [*one, {"id": "ul_2"}]))
+        self.assertTrue(q.unrouted_problems(call, good | {"failed_over": ["x: 404"]}, stand_in, one))
+        # a refusal for another reason
+        other = {"status": 403, "aiplex_error_code": "ACTION_DENIED", "body_head": "{}"}
+        self.assertTrue(q.unrouted_problems(other, good, stand_in, one))
+        self.assertTrue(q.unrouted_problems(call, good | {"backend": q.BACKEND_DIRECT}, stand_in, one))
 
     def test_item_6_an_outage_that_reaches_the_direct_provider_fails(self):
         call = {"status": 502, "body_head": "Branchyard's model gateway: no backend answered"}
@@ -707,6 +764,141 @@ class SignedToken(unittest.TestCase):
     def test_the_calls_of_scenario_two_have_the_same_kinds_as_scenario_one(self):
         for label, _api, _model, _flags, kind in q.CALLS2:
             self.assertEqual(q.KIND[label], kind)
+
+
+def probe_seen(spec, **changes):
+    """What the harness reports for a probe that went as it should (the gateway's own refusal)."""
+    base = {
+        "id": spec["id"],
+        "method": "POST",
+        "path": spec["path"],
+        "content_type": spec["content_type"],
+        "body_bytes": len(spec["body"]),
+        "status": spec.get("status", 200),
+        "aiplex_request_id": None,
+        "aiplex_error_code": None,
+        "body_head": "forbidden by the gateway",
+    }
+    return {**base, **changes}
+
+
+class Probes(unittest.TestCase):
+    """The requests that hide their model, and the mutations each check on them must catch."""
+
+    def test_the_probes_are_the_four_hidden_ones_and_one_letter_case_variant(self):
+        ids = [p["id"] for p in q.PROBES]
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertEqual(
+            [p["id"] for p in q.HIDDEN_PROBES], ["other-spelling", "other-endpoint", "pass-through", "unreadable-body"]
+        )
+        by_id = {p["id"]: p for p in q.PROBES}
+        self.assertEqual(by_id["other-spelling"]["path"], "/v1/messages/")
+        self.assertEqual(json.loads(by_id["other-spelling"]["body"])["model"], q.MODEL_DIRECT)
+        self.assertEqual(by_id["other-endpoint"]["path"], "/v1/messages/batches")
+        self.assertEqual(json.loads(by_id["other-endpoint"]["body"])["model"], q.MODEL_DIRECT)
+        self.assertEqual(by_id["pass-through"]["path"], f"/backends/{q.BACKEND_DIRECT}/v1/messages")
+        self.assertEqual(by_id["unreadable-body"]["path"], "/v1/messages")
+        self.assertEqual(by_id["unreadable-body"]["content_type"], "text/plain")
+        self.assertEqual(by_id["unreadable-body"]["body"], b"\xff")
+        with self.assertRaises(UnicodeDecodeError):
+            by_id["unreadable-body"]["body"].decode("utf-8")
+        self.assertEqual(json.loads(by_id["other-letter-case"]["body"])["model"], "MOCK-CLAUDE")
+        self.assertEqual(q.MODEL_OTHER_CASE.lower(), q.MODEL_ROUTED)
+        self.assertEqual([p["status"] for p in q.HIDDEN_PROBES], [403, 403, 404, 400])
+
+    def test_the_harness_is_given_the_probes_as_data_and_sends_what_the_table_says(self):
+        compile(q.HARNESS, "harness", "exec")
+        given = json.loads(q.PROBE_SPECS)
+        self.assertEqual([g["id"] for g in given], [p["id"] for p in q.PROBES])
+        for g, p in zip(given, q.PROBES, strict=True):
+            self.assertEqual(bytes.fromhex(g["body_hex"]), p["body"])
+            self.assertEqual((g["path"], g["content_type"]), (p["path"], p["content_type"]))
+        self.assertIn("PROBE_SPECS = ", q.HARNESS)
+        self.assertNotIn(q.MODEL_UNROUTED, q.HARNESS)
+
+    def test_a_good_refusal_of_each_hidden_probe_has_no_problem(self):
+        for spec in q.HIDDEN_PROBES:
+            self.assertEqual(q.hidden_probe_problems(spec, probe_seen(spec), [], 3, 3, 7, 7), [], spec["id"])
+            event = {"decision": "refused", "backend": None, "status": spec["status"], "reason": "not served"}
+            self.assertEqual(q.hidden_probe_problems(spec, probe_seen(spec), [event], 3, 3, 7, 7), [])
+
+    def test_a_gateway_without_the_rule_fails_every_hidden_probe_and_names_the_stand_in(self):
+        # before amendment 1.1 each of the four went to the plain stand-in backend, which answered 200
+        for spec in q.HIDDEN_PROBES:
+            seen = probe_seen(spec, status=200, body_head='{"content":[{"text":"stand-in"}]}')
+            event = {"decision": "allowed", "status": 200, "backend": q.BACKEND_DIRECT}
+            problems = q.hidden_probe_problems(spec, seen, [event], 3, 4, 7, 7)
+            self.assertIn(f"the gateway answered 200, not its own {spec['status']}", problems, spec["id"])
+            self.assertIn("the answer is the stand-in's", problems)
+            self.assertIn("the stand-in received 1 request(s)", problems)
+            self.assertIn("an event names the stand-in's backend", problems)
+
+    def test_each_part_of_a_hidden_probe_check_can_fail_alone(self):
+        spec = q.HIDDEN_PROBES[0]
+        good = probe_seen(spec)
+
+        def problems(seen=good, events=(), stand=(3, 3), records=(7, 7)):
+            return q.hidden_probe_problems(spec, seen, events, *stand, *records)
+
+        self.assertEqual(problems(), [])
+        self.assertEqual(problems(stand=(3, 5)), ["the stand-in received 2 request(s)"])
+        self.assertEqual(problems(records=(7, 8)), ["AIPlex's ledger holds 1 new record(s)"])
+        self.assertEqual(
+            problems(probe_seen(spec, status=404)), [f"the gateway answered 404, not its own {spec['status']}"]
+        )
+        self.assertEqual(
+            problems(probe_seen(spec, aiplex_request_id="req-1-1")), ["the answer carries an AIPlex header"]
+        )
+        self.assertEqual(problems(probe_seen(spec, aiplex_error_code="X")), ["the answer carries an AIPlex header"])
+        self.assertEqual(problems(probe_seen(spec, body_head="stand-in")), ["the answer is the stand-in's"])
+        aiplex_event = {"decision": "refused", "control_plane": {"plane": "aiplex", "request_id": "req-1-1"}}
+        self.assertEqual(problems(events=[aiplex_event]), ["an event carries an AIPlex request id"])
+
+    def test_a_probe_that_was_not_sent_or_not_answered_is_never_a_pass(self):
+        for spec in q.PROBES:
+            self.assertTrue(q.hidden_probe_problems(spec, None, [], 3, 3, 7, 7))
+            self.assertTrue(q.case_probe_problems(spec, None, [], 3, 3))
+        spec = q.HIDDEN_PROBES[0]
+        self.assertTrue(
+            q.hidden_probe_problems(spec, probe_seen(spec, status=None, transport_error="URLError"), [], 3, 3, 7, 7)
+        )
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, transport_error="URLError"), [], 3, 3, 7, 7))
+        # sent as something else than the probe says
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, path="/v1/messages"), [], 3, 3, 7, 7))
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, method="GET"), [], 3, 3, 7, 7))
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, content_type="text/plain"), [], 3, 3, 7, 7))
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, body_bytes=1), [], 3, 3, 7, 7))
+        self.assertTrue(q.hidden_probe_problems(spec, probe_seen(spec, id="other"), [], 3, 3, 7, 7))
+
+    def test_the_letter_case_probe_must_go_to_aiplex_and_not_to_the_stand_in(self):
+        spec = q.CASE_PROBE
+        plane = {"plane": "aiplex", "call_id": "c" * 22, "request_id": "req-1-9"}
+        event = {
+            "model": q.MODEL_OTHER_CASE,
+            "decision": "refused",
+            "backend": q.BACKEND_ANTHROPIC,
+            "control_plane": plane,
+        }
+        # what AIPlex answered is not asserted: a refusal and a success pass alike
+        for status in (200, 404, 403):
+            seen = probe_seen(spec, status=status, aiplex_request_id="req-1-9")
+            self.assertEqual(q.case_probe_problems(spec, seen, [event], 3, 3), [], status)
+        seen = probe_seen(spec, status=404)
+        self.assertEqual(q.case_probe_problems(spec, seen, [event], 3, 3), [])
+        # the gateway before amendment 1.1: no route matched `MOCK-CLAUDE`, so the stand-in answered it
+        old = {"model": q.MODEL_OTHER_CASE, "decision": "allowed", "status": 200, "backend": q.BACKEND_DIRECT}
+        problems = q.case_probe_problems(spec, probe_seen(spec, status=200, body_head="stand-in"), [old], 3, 4)
+        self.assertIn("the stand-in received 1 request(s)", problems)
+        self.assertIn(f"the event names backend {q.BACKEND_DIRECT!r}, not an AIPlex backend", problems)
+        self.assertIn("the event has no AIPlex control plane", problems)
+        # no event, or two: not a probe that shows where the request went
+        self.assertEqual(q.case_probe_problems(spec, seen, [], 3, 3), ["0 events for the probe, not 1"])
+        self.assertTrue(q.case_probe_problems(spec, seen, [event, event], 3, 3))
+        # the second AIPlex backend counts as an AIPlex backend
+        second = event | {"backend": q.BACKEND_SECOND}
+        self.assertEqual(q.case_probe_problems(spec, seen, [second], 3, 3), [])
+        self.assertTrue(q.case_probe_problems(spec, seen, [event | {"backend": "somewhere-else"}], 3, 3))
+        self.assertTrue(q.case_probe_problems(spec, seen, [event | {"control_plane": {}}], 3, 3))
 
 
 if __name__ == "__main__":
