@@ -30,10 +30,11 @@ pub fn signs_for_aiplex(config: &Config) -> bool {
     })
 }
 
-/// The issuer of the model gateway's tokens: the connector gateway's when
-/// there is one; else, when a backend is called with a signed token, the
-/// server's `public_url` (its URL as AIPlex reaches it) when set; else
-/// `{scheme}://{listen}`, as it has always been.
+/// The issuer of the model gateway's tokens: with `connectors`, the
+/// connector gateway's (`connectors.issuer`, else the listen address),
+/// which its own tokens are verified against; without, when a backend is
+/// called with a signed token, the server's `public_url` (its URL as AIPlex
+/// reaches it) when set; else `{scheme}://{listen}`, as it has always been.
 pub fn issuer(config: &Config) -> String {
     if let Some(c) = config.connectors.as_ref() {
         return crate::connectors::issuer(config, c);
@@ -71,20 +72,21 @@ pub fn check_signed(config: &Config) -> Result<(), String> {
     else {
         return Ok(());
     };
-    let explicit = config
-        .connectors
-        .as_ref()
-        .is_some_and(|c| c.issuer.is_some())
-        || config.triggers.public_url.is_some();
+    // The setting that names the issuer here: the connector gateway's,
+    // which its own tokens are verified against, when there is one.
+    let (explicit, setting) = match config.connectors.as_ref() {
+        Some(c) => (c.issuer.is_some(), "connectors.issuer"),
+        None => (config.triggers.public_url.is_some(), "public_url"),
+    };
     if !explicit && config.listen.port() == 0 {
         return Err(format!(
             "models.backends.{name}.auth: a token AIPlex verifies names this server's URL as \
              its issuer, and listen names port 0, which is chosen only when the server starts; \
-             set public_url (the server's URL as AIPlex reaches it) or listen on a fixed port"
+             set {setting} (the server's URL as AIPlex reaches it) or listen on a fixed port"
         ));
     }
     branchyard::models::federable_issuer(&issuer(config)).map_err(|why| {
-        format!("models.backends.{name}.auth: {why}; set public_url to its https URL")
+        format!("models.backends.{name}.auth: {why}; set {setting} to its https URL")
     })
 }
 

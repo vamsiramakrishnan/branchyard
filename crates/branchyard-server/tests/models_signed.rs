@@ -152,5 +152,90 @@ fn a_signed_token_needs_an_issuer_aiplex_can_reach() {
         branchyard_server::models::issuer(&config),
         "http://127.0.0.1:7401"
     );
+    // With connectors, the issuer is the connector gateway's, which its own
+    // tokens are verified against: public_url does not move it, and the
+    // message names the setting that does.
+    config.models = Some(signed(&access));
+    config.connectors = Some(connectors(&f));
+    config.listen = "0.0.0.0:8421".parse().unwrap();
+    let error = config.validate().unwrap_err();
+    assert!(
+        error.contains("set connectors.issuer") && !error.contains("public_url"),
+        "{error}"
+    );
+    config.listen = "127.0.0.1:8421".parse().unwrap();
+    assert_eq!(
+        branchyard_server::models::issuer(&config),
+        "http://127.0.0.1:8421"
+    );
+    if let Some(c) = config.connectors.as_mut() {
+        c.issuer = Some("https://by.example.com".into());
+    }
+    config.validate().unwrap();
+    assert_eq!(
+        branchyard_server::models::issuer(&config),
+        "https://by.example.com"
+    );
     access.finish();
+}
+
+#[test]
+fn an_audience_on_another_host_than_the_url_is_a_warning_when_the_file_is_read() {
+    let f = Fixture::new();
+    let path = f.dir.join("server.json");
+    let write = |audience: &str| {
+        fs::write(
+            &path,
+            json!({"listen": "127.0.0.1:7402", "data_dir": "data", "repos": {"app": "repo"},
+                "models": {"backends": {"ap": {"api": "anthropic",
+                    "url": "https://aiplex.example.com/ap/ide", "control_plane": "aiplex",
+                    "auth": "turn-token", "audience": audience}},
+                    "routes": [{"model": "*", "backends": ["ap"]}]}})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write("https://aiplex.example.com");
+    let partial = branchyard_server::config::load_file(&path).unwrap();
+    assert!(
+        !partial.warnings.iter().any(|w| w.contains("audience")),
+        "{:?}",
+        partial.warnings
+    );
+    write("https://elsewhere.example.com");
+    let partial = branchyard_server::config::load_file(&path).unwrap();
+    assert!(
+        partial
+            .warnings
+            .iter()
+            .any(|w| w.contains("models.backends.ap") && w.contains("elsewhere.example.com")),
+        "{:?}",
+        partial.warnings
+    );
+}
+
+/// A connector gateway with no issuer of its own.
+fn connectors(f: &Fixture) -> branchyard_server::config::ConnectorsConfig {
+    branchyard_server::config::ConnectorsConfig {
+        gateway: "http://127.0.0.1:9/mcp".into(),
+        sandbox_gateway: None,
+        issuer: None,
+        signing_key: None,
+        signing_kms: None,
+        audit_file: None,
+        bundles: f.dir.join("bundles"),
+        anvil: vec!["anvil".into()],
+        run_gateway: false,
+        listen: None,
+        vault_key: None,
+        effects_proxy: None,
+        effects_listen: None,
+        effects_sandbox_host: None,
+        sandbox_server: None,
+        sandbox_audience: None,
+        sandbox_identities: Vec::new(),
+        sandbox_jwks_url: None,
+        sandbox_proxy_image: None,
+        sandbox_by: None,
+    }
 }

@@ -1291,6 +1291,21 @@ pub struct ModelBackendConfig {
     pub audience: Option<String>,
 }
 
+/// The host of an `http(s)` URL, lower-cased and without its port; `None`
+/// for anything else (an audience need not be a URL).
+fn url_host(text: &str) -> Option<String> {
+    let rest = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next()?,
+        None => authority.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.trim_end_matches('.').to_ascii_lowercase())
+}
+
 /// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
 /// for `GEMINI_API_KEY`.
 pub const GEMINI_OPENAI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
@@ -1377,6 +1392,29 @@ impl ModelsConfig {
             .check()
             .map_err(|e| ConfigError(format!("models.allow: {e}")))?;
         Ok(Some(access))
+    }
+
+    /// What an operator should look at that is not wrong: a backend called
+    /// with a signed token whose `audience` is an `http(s)` URL on another
+    /// host than its `url`. Whoever is at `url` receives a token that is
+    /// good at the audience for up to an hour, so the two normally share a
+    /// host.
+    pub fn notes(&self) -> Vec<String> {
+        self.backends
+            .iter()
+            .filter(|(_, b)| b.auth.as_deref() == Some("turn-token"))
+            .filter_map(|(name, b)| {
+                let audience = url_host(b.audience.as_deref()?)?;
+                let url = url_host(b.url.as_deref()?)?;
+                (audience != url).then(|| {
+                    format!(
+                        "models.backends.{name}: its audience names the host {audience} and its \
+                         url the host {url}; the token it is sent is good at the audience for up \
+                         to an hour, so check the url is the audience's AIPlex"
+                    )
+                })
+            })
+            .collect()
     }
 
     /// The checks beyond the file's shape. The gateway checks the rest
@@ -3844,6 +3882,36 @@ classes = { compensable = "allow" }
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
         }
+    }
+
+    #[test]
+    fn an_audience_on_another_host_than_the_url_is_noted_not_refused() {
+        let models = |audience: &str| {
+            parse(&format!(
+                "version = 1\n\n[models.backends.ap]\napi = \"anthropic\"\n\
+                 url = \"https://aiplex.example.com/ap/ide\"\ncontrol_plane = \"aiplex\"\n\
+                 auth = \"turn-token\"\naudience = \"{audience}\"\n\n\
+                 [[models.routes]]\nmodel = \"*\"\nbackends = [\"ap\"]\n"
+            ))
+            .unwrap()
+            .models
+        };
+        for same in [
+            "https://aiplex.example.com",
+            "https://AIPLEX.example.com:8443/x",
+            "aiplex-ide",
+            "urn:aiplex:ide",
+        ] {
+            assert!(models(same).notes().is_empty(), "{same}");
+        }
+        let notes = models("https://aiplex.other.example").notes();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("models.backends.ap")
+                && notes[0].contains("aiplex.other.example")
+                && notes[0].contains("aiplex.example.com"),
+            "{notes:?}"
+        );
     }
 
     #[test]

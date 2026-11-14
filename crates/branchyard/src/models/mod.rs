@@ -286,6 +286,7 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
             "the issuer {issuer:?} has a path; AIPlex wants scheme://host[:port] and nothing after"
         ));
     }
+    issuer_as_written(issuer)?;
     let loopback = matches!(
         target.host.as_str(),
         "127.0.0.1" | "::1" | "[::1]" | "localhost"
@@ -296,6 +297,50 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
             "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex fetches \
              keys over https (http only from this machine, for a development AIPlex)"
         )),
+    }
+}
+
+/// Refuse an issuer whose authority AIPlex's bind would not match as an
+/// operator writes it: a host ending in a dot, a host with an upper-case
+/// letter, an IPv6 address without brackets, an empty port, or the
+/// scheme's default port written out (AIPlex compares byte for byte).
+fn issuer_as_written(issuer: &str) -> Result<(), String> {
+    let (scheme, authority) = issuer
+        .split_once("://")
+        .ok_or_else(|| format!("the issuer {issuer:?} is not a URL"))?;
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => {
+            let (host, after) = rest
+                .split_once(']')
+                .ok_or_else(|| format!("the issuer {issuer:?} has an unclosed ["))?;
+            (host, after.strip_prefix(':'))
+        }
+        None if authority.matches(':').count() > 1 => {
+            return Err(format!(
+                "the issuer {issuer:?} names an IPv6 address without brackets; write [address]"
+            ))
+        }
+        None => match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        },
+    };
+    let bad = |what: &str| {
+        Err(format!(
+            "the issuer {issuer:?} {what}; AIPlex matches it byte for byte, so write it as it \
+             will be bound in AIPlex"
+        ))
+    };
+    if host.ends_with('.') {
+        return bad("ends its host with a dot");
+    }
+    if host.bytes().any(|b| b.is_ascii_uppercase()) {
+        return bad("has an upper-case letter in its host");
+    }
+    match (scheme, port) {
+        (_, Some("")) => bad("has an empty port"),
+        ("https", Some("443")) | ("http", Some("80")) => bad("writes out the default port"),
+        _ => Ok(()),
     }
 }
 
@@ -2499,6 +2544,11 @@ mod tests {
             ("https://by.example.com/", "has a path"),
             ("https://by.example.com/branchyard", "has a path"),
             ("by.example.com", "not a URL"),
+            ("https://by.example.com.", "dot"),
+            ("https://By.example.com", "upper-case"),
+            ("https://by.example.com:443", "default port"),
+            ("http://127.0.0.1:80", "default port"),
+            ("https://by.example.com:", "port"),
         ] {
             let error = signed(issuer, "local", plane.clone()).unwrap_err();
             assert!(
@@ -2556,6 +2606,9 @@ mod tests {
                 );
             }
         }
+        // An IPv6 address must be in brackets.
+        assert!(federable_issuer("http://::1:7400").is_err());
+        assert!(federable_issuer("http://[::1]").is_ok());
         assert!(federable_tenant("acme.eu_1@x+y-z"));
         assert!(!federable_tenant(""));
         assert!(!federable_tenant(&"a".repeat(129)));

@@ -3023,6 +3023,8 @@ pub fn load_file(path: &Path) -> Result<Partial, String> {
                 models
                     .check()
                     .map_err(|e| format!("config {}: {e}", path.display()))?;
+                // Not wrong, but to look at: printed with the other warnings.
+                warnings.extend(models.notes());
                 Some(models)
             }
             None => None,

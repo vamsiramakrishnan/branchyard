@@ -163,7 +163,12 @@ pub(crate) fn signed_claims(
     }
     let mut exp = now + SIGNED_TOKEN_SECS;
     if let Some(deadline) = turn.deadline_ms {
-        exp = exp.min((deadline / 1000).max(now + 1));
+        // A token never outlives the turn: past its deadline there is none.
+        let deadline = deadline / 1000;
+        if deadline <= now {
+            return Err("the turn's deadline has passed, so no token is signed".to_owned());
+        }
+        exp = exp.min(deadline);
     }
     Ok(keys::Claims {
         iss: turn.issuer.to_owned(),
@@ -3004,9 +3009,12 @@ mod tests {
         }
         let claims = signed_claims(&turn(Some((now + 600) * 1000)), "a", now).unwrap();
         assert_eq!(claims.exp, now + 600);
-        // A deadline already past: the shortest token there is, never one
-        // that has expired before it is made.
-        let claims = signed_claims(&turn(Some((now - 5) * 1000)), "a", now).unwrap();
+        // A deadline already past, or now: no token at all.
+        for past in [now - 5, now] {
+            let why = signed_claims(&turn(Some(past * 1000)), "a", now).unwrap_err();
+            assert!(why.contains("deadline has passed"), "{why}");
+        }
+        let claims = signed_claims(&turn(Some((now + 1) * 1000)), "a", now).unwrap();
         assert_eq!(claims.exp, now + 1);
         let claims = signed_claims(&turn(None), "https://aiplex.example.com", now).unwrap();
         assert_eq!(claims.sub, "branchyard:acme");

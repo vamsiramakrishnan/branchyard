@@ -1541,7 +1541,17 @@ pub(super) fn models_keys(ctx: &Context) -> Vec<Check> {
             }
         })
         .collect();
-    vec![keys_row(&rows)]
+    let mut checks = vec![keys_row(&rows)];
+    // A signed token's audience on another host than its url.
+    for note in config.models.notes() {
+        checks.push(Check::warn(
+            "models.audience",
+            note,
+            "make url the audience's AIPlex access point, or the audience the AIPlex the url \
+             names (docs/model-gateway.md#a-token-branchyard-signs)",
+        ));
+    }
+    checks
 }
 
 /// One backend and where its key is.
