@@ -1448,8 +1448,11 @@ impl ModelsConfig {
             .filter_map(|(at, later)| {
                 let (before, earlier) =
                     self.routes[..at].iter().enumerate().find(|(_, earlier)| {
+                        // Every model the later pattern matches, the
+                        // earlier one matches too: sound and not complete,
+                        // so a pattern it cannot tell about is not noted.
                         governed(earlier)
-                            && branchyard_provision::connectors::glob_match(
+                            && branchyard_provision::connectors::glob_covers(
                                 &earlier.model,
                                 &later.model,
                             )
@@ -4246,12 +4249,28 @@ classes = { compensable = "allow" }
         ];
         assert_eq!(shadowed.models.route_notes(), noted);
         assert_eq!(shadowed.models.notes(), noted);
-        // The plain route first, a pattern the earlier one does not cover,
-        // and two routes of one kind: nothing to say.
+        // A prefix that covers a longer one is said the same way.
+        let prefix = parse(&file(&format!(
+            "{}{}",
+            route("gpt-*", "ap"),
+            route("gpt-4*", "direct")
+        )))
+        .unwrap();
+        assert_eq!(prefix.models.route_notes().len(), 1);
+        assert!(prefix.models.route_notes()[0].starts_with(
+            "models.routes[1]: no request reaches this route for \"gpt-4*\": the earlier route \
+             for \"gpt-*\" (models.routes[0]) covers its pattern"
+        ));
+        // The plain route first, a pattern the earlier one does not cover
+        // (`gpt-?` matches the text `gpt-*` and not the model `gpt-4o`,
+        // which the plain route still gets), and two routes of one kind:
+        // nothing to say.
         for routes in [
             format!("{}{}", route("gpt-*", "direct"), route("*", "ap")),
             format!("{}{}", route("claude-*", "ap"), route("gpt-*", "direct")),
             format!("{}{}", route("gpt-4*", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-?", "ap"), route("gpt-*", "direct")),
+            format!("{}{}", route("gpt-??", "ap"), route("gpt-4*", "direct")),
             format!("{}{}", route("*", "direct"), route("gpt-*", "direct")),
         ] {
             let config = parse(&file(&routes)).unwrap();
