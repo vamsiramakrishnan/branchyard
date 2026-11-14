@@ -1956,6 +1956,13 @@
             "null"
           ],
           "description": "What the gateway adapts for an endpoint that imitates OpenAI's API\nwith differences: `gemini` for Gemini's OpenAI-compatible endpoint\n(the fields it refuses stripped, the thought signatures it puts on\ntool calls kept and put back when a request replays them),\n`versioned` for an endpoint whose URL already names the API's\nversion, as Z.ai's do (a path's leading `/v1` is dropped, nothing\nelse changes), or `none`. Default: `gemini` for an `openai` backend\nwhose URL's host is `generativelanguage.googleapis.com`, `versioned`\nfor one whose host is `api.z.ai`, else `none`."
+        },
+        "control_plane": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`aiplex` when this backend is an AIPlex access point\n(`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told\nwhich branch, turn and harness is calling, its own refusals are\nfinal, and a route that names it names only such backends. An\n`anthropic` or `openai` backend with a key and no `compat`."
         }
       },
       "required": [

@@ -1272,6 +1272,13 @@ pub struct ModelBackendConfig {
     /// for one whose host is `api.z.ai`, else `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<String>,
+    /// `aiplex` when this backend is an AIPlex access point
+    /// (`{AIPLEX}/ap/{id}`): it is sent its key as a bearer token and told
+    /// which branch, turn and harness is calling, its own refusals are
+    /// final, and a route that names it names only such backends. An
+    /// `anthropic` or `openai` backend with a key and no `compat`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<String>,
 }
 
 /// Gemini's OpenAI-compatible endpoint, which `by init project` proposes
@@ -1392,6 +1399,38 @@ impl ModelsConfig {
                     );
                 }
             }
+            match backend.control_plane.as_deref() {
+                None => {}
+                Some("aiplex") if backend.api == "generic" => {
+                    return fail(
+                        &format!("backends.{name}.control_plane"),
+                        "aiplex is for an anthropic or openai backend (an access point serves \
+                         those APIs), not generic"
+                            .into(),
+                    )
+                }
+                Some("aiplex") if backend.key.is_none() => {
+                    return fail(
+                        &format!("backends.{name}.key"),
+                        "a control-plane backend (aiplex) needs a key: the token it is called \
+                         with"
+                            .into(),
+                    )
+                }
+                Some("aiplex") if backend.compat.as_deref().is_some_and(|c| c != "none") => {
+                    return fail(
+                        &format!("backends.{name}.compat"),
+                        "a control-plane backend (aiplex) takes no compatibility layer".into(),
+                    )
+                }
+                Some("aiplex") => {}
+                Some(other) => {
+                    return fail(
+                        &format!("backends.{name}.control_plane"),
+                        format!("{other:?} is not a control plane; the one there is is \"aiplex\""),
+                    )
+                }
+            }
             match backend.compat.as_deref() {
                 None | Some("none") => {}
                 Some("gemini" | "versioned") if backend.api == "openai" => {}
@@ -1422,6 +1461,48 @@ impl ModelsConfig {
                 if !self.backends.contains_key(name) {
                     return fail(&format!("routes[{i}]"), format!("no backend {name}"));
                 }
+            }
+            let plane = |name: &&String| {
+                self.backends
+                    .get(*name)
+                    .is_some_and(|b| b.control_plane.is_some())
+            };
+            let named = || route.backends.iter().chain(&route.fallbacks);
+            if let (Some(plane), Some(plain)) = (named().find(plane), named().find(|n| !plane(n))) {
+                return fail(
+                    &format!("routes[{i}]"),
+                    format!(
+                        "({}) names the control-plane backend {plane} and the plain backend \
+                         {plain}; a route that names a control-plane backend names only \
+                         control-plane backends, or a refusal or an outage of the control plane \
+                         would send its call to {plain} directly",
+                        route.model
+                    ),
+                );
+            }
+        }
+        for (name, backend) in &self.backends {
+            if backend.control_plane.is_none() {
+                continue;
+            }
+            let named = self
+                .routes
+                .iter()
+                .any(|r| r.backends.contains(name) || r.fallbacks.contains(name));
+            let plain = self
+                .backends
+                .iter()
+                .find(|(_, b)| b.api == backend.api && b.control_plane.is_none());
+            if let (false, Some((plain, _))) = (named, plain) {
+                return fail(
+                    &format!("backends.{name}"),
+                    format!(
+                        "no route names this control-plane backend, and a call no route takes \
+                         goes to the plain {} backend {plain}, so it would never be used; add a \
+                         route that names it ([[models.routes]] with backends = [\"{name}\"])",
+                        backend.api
+                    ),
+                );
             }
         }
         for model in self.prices.keys() {
@@ -3706,6 +3787,86 @@ classes = { compensable = "allow" }
         ] {
             let error = parse(text).unwrap_err().to_string();
             assert!(error.contains(needle), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_control_plane_backend_is_read_rendered_back_and_refused_where_it_could_be_bypassed() {
+        let plane = |name: &str, api: &str| {
+            format!(
+                "[models.backends.{name}]\napi = \"{api}\"\nurl = \"https://aiplex.example.com/ap/ide\"\n\
+                 key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n\n"
+            )
+        };
+        // The contract's example.
+        let text = format!(
+            "version = 1\n\n[secrets]\naiplex = \"AIPLEX_TOKEN\"\n\n{}{}\
+             [[models.routes]]\nmodel = \"claude-*\"\nbackends = [\"aiplex-anthropic\"]\n\n\
+             [[models.routes]]\nmodel = \"gpt-*\"\nbackends = [\"aiplex-openai\"]\n",
+            plane("aiplex-anthropic", "anthropic"),
+            plane("aiplex-openai", "openai")
+        );
+        let config = parse(&text).unwrap();
+        assert_eq!(
+            config.models.backends["aiplex-openai"]
+                .control_plane
+                .as_deref(),
+            Some("aiplex")
+        );
+        assert!(render(&config, "test").contains("control_plane = \"aiplex\""));
+        assert_eq!(parse(&render(&config, "test")).unwrap(), config);
+        let plain = "[models.backends.direct]\napi = \"anthropic\"\nkey = \"k\"\n\n";
+        for (text, needles) in [
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"k\"\ncontrol_plane = \"anvil\"\n"
+                    .to_owned(),
+                vec!["models.backends.a.control_plane", "\"anvil\"", "\"aiplex\""],
+            ),
+            (
+                "[models.backends.g]\napi = \"generic\"\nurl = \"https://x.example\"\n\
+                 key = \"k\"\ncontrol_plane = \"aiplex\"\n"
+                    .to_owned(),
+                vec!["models.backends.g.control_plane", "not generic"],
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\ncontrol_plane = \"aiplex\"\n".to_owned(),
+                vec!["models.backends.a.key", "needs a key"],
+            ),
+            (
+                "[models.backends.a]\napi = \"openai\"\nkey = \"k\"\ncompat = \"versioned\"\n\
+                 control_plane = \"aiplex\"\n"
+                    .to_owned(),
+                vec!["models.backends.a.compat", "no compatibility layer"],
+            ),
+            (
+                format!(
+                    "{}{plain}[[models.routes]]\nmodel = \"claude-*\"\n\
+                     backends = [\"ap\"]\nfallbacks = [\"direct\"]\n",
+                    plane("ap", "anthropic")
+                ),
+                vec![
+                    "models.routes[0]",
+                    "(claude-*)",
+                    "control-plane backend ap",
+                    "plain backend direct",
+                ],
+            ),
+            (
+                format!("{}{plain}", plane("ap", "anthropic")),
+                vec![
+                    "models.backends.ap",
+                    "no route names",
+                    "plain anthropic backend direct",
+                    "add a route that names it",
+                ],
+            ),
+        ] {
+            let error = parse(&format!("version = 1\n\n{text}"))
+                .unwrap_err()
+                .to_string();
+            for needle in needles {
+                assert!(error.contains(needle), "{needle:?} not in {error}\n{text}");
+            }
         }
     }
 

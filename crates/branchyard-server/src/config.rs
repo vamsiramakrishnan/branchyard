@@ -3591,12 +3591,37 @@ mod tests {
         );
         assert_eq!(gateway.budget.monthly_usd, Some(100.0));
         assert_eq!(gateway.audit, branchyard::models::Audit::Contents);
+        // An AIPlex access point, as the "models" table takes it.
+        write(
+            r#"{"backends": {"aiplex": {"api": "openai", "url": "https://aiplex.example.com/ap/ide",
+                "key": "anthropic", "control_plane": "aiplex"}},
+                "routes": [{"model": "gpt-*", "backends": ["aiplex"]}]}"#,
+            "{}",
+        );
+        config.models = load_file(&path).unwrap().models;
+        let gateway = crate::models::gateway_for(&config, "app").unwrap().unwrap();
+        assert_eq!(
+            gateway.backends[0].control_plane,
+            Some(branchyard::models::ControlPlane::Aiplex)
+        );
         config.models = None;
         assert!(crate::models::gateway_for(&config, "app")
             .unwrap()
             .is_none());
         // Refused by name.
         for (models, ceilings, needle) in [
+            (
+                r#"{"backends": {"a": {"api": "openai", "key": "k", "control_plane": "anvil"}}}"#,
+                "{}",
+                "models.backends.a.control_plane",
+            ),
+            (
+                r#"{"backends": {"a": {"api": "openai", "key": "k", "control_plane": "aiplex"},
+                    "b": {"api": "openai", "key": "k"}},
+                    "routes": [{"model": "*", "backends": ["a", "b"]}]}"#,
+                "{}",
+                "names the control-plane backend a and the plain backend b",
+            ),
             (
                 r#"{"routes": [{"model": "*", "backends": ["x"]}]}"#,
                 "{}",

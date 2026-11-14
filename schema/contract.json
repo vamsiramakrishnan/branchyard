@@ -44741,6 +44741,48 @@
           ],
           "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
         },
+        "ControlPlaneCall": {
+          "type": "object",
+          "properties": {
+            "plane": {
+              "$ref": "#/$defs/ControlPlane",
+              "description": "The control plane."
+            },
+            "call_id": {
+              "type": "string",
+              "description": "The call's own id: the `X-Client-Request-Id` it was sent (the same\non every control-plane backend tried) and the id of its usage\nrecord, when it has one."
+            },
+            "request_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's own id of the call (`X-Aiplex-Request-Id`): the\n`request_id` of its record. Kept only when it is 1 to 128 of\n`A-Z a-z 0-9 - _ . :`."
+            },
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's code for a refusal it made itself\n(`X-Aiplex-Error-Code`), such as `QUOTA_BUDGET_EXHAUSTED`. Kept\nonly when it is 1 to 64 of `A-Z 0-9 _`."
+            }
+          },
+          "required": [
+            "plane",
+            "call_id"
+          ],
+          "description": "A call sent to a control-plane backend, as its `model` event records it\n(`docs/model-gateway.md`, \"What is recorded\")."
+        },
+        "ControlPlane": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "aiplex",
+              "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
+            }
+          ],
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -44753,7 +44795,7 @@
             },
             "decision": {
               "type": "string",
-              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized`, `refused` (a control-plane backend refused it: its\nanswer carried an error code of the control plane's own) or\n`failed` (no backend answered)."
             },
             "backend": {
               "type": [
@@ -44833,6 +44875,17 @@
                 "null"
               ],
               "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
+            },
+            "control_plane": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ControlPlaneCall"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a call sent to a control-plane backend, its id and what the\ncontrol plane answered about it; `None` for any other call."
             }
           },
           "required": [
@@ -51149,6 +51202,48 @@
           ],
           "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
         },
+        "ControlPlaneCall": {
+          "type": "object",
+          "properties": {
+            "plane": {
+              "$ref": "#/$defs/ControlPlane",
+              "description": "The control plane."
+            },
+            "call_id": {
+              "type": "string",
+              "description": "The call's own id: the `X-Client-Request-Id` it was sent (the same\non every control-plane backend tried) and the id of its usage\nrecord, when it has one."
+            },
+            "request_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's own id of the call (`X-Aiplex-Request-Id`): the\n`request_id` of its record. Kept only when it is 1 to 128 of\n`A-Z a-z 0-9 - _ . :`."
+            },
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's code for a refusal it made itself\n(`X-Aiplex-Error-Code`), such as `QUOTA_BUDGET_EXHAUSTED`. Kept\nonly when it is 1 to 64 of `A-Z 0-9 _`."
+            }
+          },
+          "required": [
+            "plane",
+            "call_id"
+          ],
+          "description": "A call sent to a control-plane backend, as its `model` event records it\n(`docs/model-gateway.md`, \"What is recorded\")."
+        },
+        "ControlPlane": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "aiplex",
+              "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
+            }
+          ],
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -51161,7 +51256,7 @@
             },
             "decision": {
               "type": "string",
-              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized`, `refused` (a control-plane backend refused it: its\nanswer carried an error code of the control plane's own) or\n`failed` (no backend answered)."
             },
             "backend": {
               "type": [
@@ -51241,6 +51336,17 @@
                 "null"
               ],
               "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
+            },
+            "control_plane": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ControlPlaneCall"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a call sent to a control-plane backend, its id and what the\ncontrol plane answered about it; `None` for any other call."
             }
           },
           "required": [
@@ -64410,6 +64516,48 @@
           ],
           "description": "The record of one call that reached a backend, for an audit: who asked\nis the call's branch and turn, and this is what it asked and what came\nback, without the text of either. See `docs/model-gateway.md`\n(\"Interception records\")."
         },
+        "ControlPlaneCall": {
+          "type": "object",
+          "properties": {
+            "plane": {
+              "$ref": "#/$defs/ControlPlane",
+              "description": "The control plane."
+            },
+            "call_id": {
+              "type": "string",
+              "description": "The call's own id: the `X-Client-Request-Id` it was sent (the same\non every control-plane backend tried) and the id of its usage\nrecord, when it has one."
+            },
+            "request_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's own id of the call (`X-Aiplex-Request-Id`): the\n`request_id` of its record. Kept only when it is 1 to 128 of\n`A-Z a-z 0-9 - _ . :`."
+            },
+            "error_code": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "The control plane's code for a refusal it made itself\n(`X-Aiplex-Error-Code`), such as `QUOTA_BUDGET_EXHAUSTED`. Kept\nonly when it is 1 to 64 of `A-Z 0-9 _`."
+            }
+          },
+          "required": [
+            "plane",
+            "call_id"
+          ],
+          "description": "A call sent to a control-plane backend, as its `model` event records it\n(`docs/model-gateway.md`, \"What is recorded\")."
+        },
+        "ControlPlane": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "aiplex",
+              "description": "An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's\nand OpenAI's APIs under that base."
+            }
+          ],
+          "description": "What a backend is an access point of (`[models.backends.NAME]\ncontrol_plane`): a service that decides, for each call, whether it may\nreach the provider, and records it. The gateway sends it the credential\nas a bearer token and says which branch, turn and harness is calling;\nits refusal reaches the harness as it is, and no call a route sends to\nit goes to a plain backend instead."
+        },
         "ModelCall": {
           "type": "object",
           "properties": {
@@ -64422,7 +64570,7 @@
             },
             "decision": {
               "type": "string",
-              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized` or `failed` (no backend answered)."
+              "description": "`allowed`, `denied` (the token's scope), `rate_limited`, `budget`,\n`unauthorized`, `refused` (a control-plane backend refused it: its\nanswer carried an error code of the control plane's own) or\n`failed` (no backend answered)."
             },
             "backend": {
               "type": [
@@ -64502,6 +64650,17 @@
                 "null"
               ],
               "description": "With `[models] audit = \"contents\"`, the file holding this call's\nrequest and response, relative to the repository root."
+            },
+            "control_plane": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ControlPlaneCall"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a call sent to a control-plane backend, its id and what the\ncontrol plane answered about it; `None` for any other call."
             }
           },
           "required": [

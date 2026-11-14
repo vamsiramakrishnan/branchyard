@@ -284,3 +284,148 @@ fn contents_are_kept_when_the_configuration_says_so_and_another_mode_is_refused_
         assert!(said.contains(needle), "{needle} not in {said}");
     }
 }
+
+const AIPLEX_TOKEN: &str = "aiplex-real-token-cli";
+
+/// An AIPlex access point: a model with `refuse-429` in its name is refused
+/// by AIPlex itself; the rest answered as by the provider. Every answer
+/// carries AIPlex's request id, `req-N` for the N-th.
+fn access_point() -> MockHttp {
+    let n = std::sync::atomic::AtomicUsize::new(0);
+    MockHttp::start(move |request| {
+        let id = format!(
+            "req-{}",
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+        );
+        let model = request.json()["model"].as_str().unwrap_or("").to_owned();
+        if model.contains("refuse-429") {
+            return Response::json(
+                429,
+                &json!({"type": "error", "error": {"type": "rate_limit_error",
+                    "message": "QUOTA_BUDGET_EXHAUSTED: the budget is spent"}}),
+            )
+            .header("X-Aiplex-Request-Id", &id)
+            .header("X-Aiplex-Error-Code", "QUOTA_BUDGET_EXHAUSTED")
+            .header("Retry-After", "30");
+        }
+        Response::json(
+            200,
+            &json!({"type": "message", "model": model, "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 1000, "output_tokens": 100}}),
+        )
+        .header("X-Aiplex-Request-Id", &id)
+    })
+}
+
+#[test]
+fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_name() {
+    let access = access_point();
+    let repo = Repo::new(upstream().port());
+    let token = repo.dir.join("aiplex-token");
+    fs::write(&token, AIPLEX_TOKEN).unwrap();
+    let backend = format!(
+        "[models.backends.aiplex-anthropic]\napi = \"anthropic\"\nurl = \"{}/ap/ide\"\n\
+         key = \"aiplex\"\ncontrol_plane = \"aiplex\"\n\n",
+        access.url()
+    );
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        format!(
+            "version = 1\n\n[secrets]\naiplex = \"@{}\"\n\n[models]\nallow = [\"claude-*\"]\n\
+             audit = \"contents\"\n\n{backend}[[models.routes]]\nmodel = \"claude-*\"\n\
+             backends = [\"aiplex-anthropic\"]\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let out = repo.run("cp", &[], &["claude-sonnet-4-6", "claude-refuse-429"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // AIPlex was called once per call, with its token as a bearer token.
+    let seen = access.requests();
+    assert_eq!(seen.len(), 2);
+    for request in &seen {
+        let bearer = format!("Bearer {AIPLEX_TOKEN}");
+        assert_eq!(request.header_values("authorization"), [bearer.as_str()]);
+        assert!(request.header_values("x-api-key").is_empty());
+        assert_eq!(
+            request.header("X-AIPlex-Tags"),
+            Some("by_branch=cp,by_turn=1,by_harness=gemini-cli")
+        );
+    }
+    let log = repo.text(&["log", "cp"]);
+    assert!(log.contains("call claude-refuse-429: 429"), "{log}");
+    assert!(
+        log.contains(
+            "model: claude-sonnet-4-6 allowed via aiplex-anthropic (200, 1000 in / 100 out"
+        ),
+        "{log}"
+    );
+    assert!(log.contains("aiplex request req-1)"), "{log}");
+    assert!(
+        log.contains(
+            "model: claude-refuse-429 refused via aiplex-anthropic \
+             (429, refused by aiplex (QUOTA_BUDGET_EXHAUSTED), "
+        ),
+        "{log}"
+    );
+    assert!(log.contains("aiplex request req-2)"), "{log}");
+    let json_log = repo.text(&["log", "cp", "--json"]);
+    assert!(json_log.contains(r#""request_id": "req-2""#), "{json_log}");
+    assert!(
+        json_log.contains(r#""error_code": "QUOTA_BUDGET_EXHAUSTED""#),
+        "{json_log}"
+    );
+    assert!(json_log.contains(r#""plane": "aiplex""#), "{json_log}");
+    assert!(json_log.contains(r#""call_id": ""#), "{json_log}");
+    let shown = repo.json(&["show", "cp", "--json"]);
+    assert_eq!(shown["models"]["refused"], json!({"refused": 1}));
+    let models = repo.json(&["models", "--json"]);
+    assert_eq!(models["backends"][0]["control_plane"], "aiplex");
+    let text = repo.text(&["models"]);
+    assert!(text.contains("control plane aiplex"), "{text}");
+    let audit = fs::read_to_string(repo.root.join(".branchyard/models/audit/cp/1.jsonl")).unwrap();
+    for said in [&log, &json_log, &text, &audit] {
+        assert!(!said.contains(AIPLEX_TOKEN), "the token was shown: {said}");
+    }
+    // Refused when read, by name.
+    let plain = "[models.backends.direct]\napi = \"anthropic\"\nkey = \"anthropic\"\n\n";
+    for (toml, needles) in [
+        (
+            format!(
+                "{backend}{plain}[[models.routes]]\nmodel = \"claude-*\"\n\
+                 backends = [\"aiplex-anthropic\"]\nfallbacks = [\"direct\"]\n"
+            ),
+            vec!["models.routes[0]", "aiplex-anthropic", "direct"],
+        ),
+        (
+            format!("{backend}{plain}"),
+            vec![
+                "models.backends.aiplex-anthropic",
+                "add a route that names it",
+            ],
+        ),
+        (
+            backend.replace("control_plane = \"aiplex\"", "control_plane = \"aiplexx\""),
+            vec![
+                "models.backends.aiplex-anthropic.control_plane",
+                "\"aiplexx\"",
+                "\"aiplex\"",
+            ],
+        ),
+    ] {
+        fs::write(
+            repo.root.join("branchyard.toml"),
+            format!("version = 1\n\n{toml}"),
+        )
+        .unwrap();
+        let out = repo.by(&["config", "validate"]);
+        assert!(!out.status.success(), "{toml}");
+        let said = format!("{}{}", stderr(&out), String::from_utf8_lossy(&out.stdout));
+        for needle in needles {
+            assert!(said.contains(needle), "{needle:?} not in {said}");
+        }
+    }
+    access.finish();
+}

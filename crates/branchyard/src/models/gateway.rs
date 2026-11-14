@@ -31,8 +31,8 @@ use super::translate;
 use super::upstream::{self, Failure, Target};
 use super::usage::{Asked, Collector, Meter, Observed};
 use super::{
-    audit, gemini, Api, Audit, Backend, Compat, Gateway, Interception, ModelActivity, ModelCall,
-    Tokens, UsageRecord,
+    audit, gemini, Api, Audit, Backend, Compat, ControlPlane, ControlPlaneCall, Gateway,
+    Interception, ModelActivity, ModelCall, Tokens, UsageRecord,
 };
 use crate::connectors::keys;
 use crate::{Activity, RecordedEvent, Yard};
@@ -60,6 +60,12 @@ pub(crate) struct TurnState {
     pub by_branch: String,
     pub turn: u32,
     pub subject: String,
+    /// The harness's catalog id, as the branch records it: the
+    /// `by_harness` a control-plane backend is told.
+    pub harness: String,
+    /// The turn's W3C trace context, the one its harness is given: a
+    /// control-plane backend is sent it as `traceparent`.
+    pub trace_parent: Option<String>,
     /// The branch's cost limit, what it had spent before this turn, and
     /// what its children held of the limit when the turn started (the
     /// figure a call falls back on when the store cannot be read: each
@@ -330,6 +336,7 @@ fn reason_phrase(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         429 => "Too Many Requests",
+        500 => "Internal Server Error",
         502 => "Bad Gateway",
         _ => "Error",
     }
@@ -382,24 +389,255 @@ fn dropped(name: &str) -> bool {
         || name.starts_with("x-branchyard-")
 }
 
-fn upstream_headers(request: &Request, backend: &Backend, key: &str) -> Vec<(String, String)> {
+/// Request headers that say who is calling or tie a call to a record, which
+/// a control plane reads as the gateway's word: dropped from what the
+/// harness sent to a control-plane backend, whatever their letter case and
+/// however often it sent them (`docs/model-gateway.md`, "AIPlex as the
+/// backend"). `tracestate` goes with the `traceparent` it belongs to, and
+/// `X-Request-Id` would set the control plane's own id of the call.
+fn attribution(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "x-client-request-id" | "traceparent" | "tracestate" | "x-request-id"
+    ) || name.starts_with("x-aiplex-")
+}
+
+/// What the gateway tells a control-plane backend about a call: the id of
+/// the call's usage record, the branch, turn and harness as tags, and the
+/// turn's trace context. Made once per call; a plain backend is sent none
+/// of it.
+pub(crate) struct Attribution {
+    /// `X-Client-Request-Id`: the [`UsageRecord::id`] the call is stored
+    /// under.
+    pub client_request_id: String,
+    /// `X-AIPlex-Tags`, when any tag fits.
+    pub tags: Option<String>,
+    /// `traceparent`, when the turn has a well-formed one.
+    pub traceparent: Option<String>,
+}
+
+/// The header a control-plane backend is sent the call's id in.
+pub(crate) const CLIENT_REQUEST_ID: &str = "X-Client-Request-Id";
+/// The header a control-plane backend is sent the tags in.
+pub(crate) const TAGS: &str = "X-AIPlex-Tags";
+/// The header a control-plane backend is sent the trace context in.
+pub(crate) const TRACEPARENT: &str = "traceparent";
+/// The response header carrying the control plane's id of the call.
+pub(crate) const UPSTREAM_REQUEST_ID: &str = "X-Aiplex-Request-Id";
+/// The response header carrying the control plane's code for a refusal
+/// it made itself; its presence makes the answer final.
+pub(crate) const UPSTREAM_ERROR_CODE: &str = "X-Aiplex-Error-Code";
+/// The longest `X-AIPlex-Tags` value, in bytes.
+const MAX_TAGS: usize = 512;
+/// The longest tag value, in characters.
+const MAX_TAG_VALUE: usize = 64;
+
+impl Attribution {
+    /// The call's attribution for `state`'s turn, with a fresh id.
+    fn new(state: &TurnState) -> Result<Attribution, String> {
+        let id = keys::random_id().map_err(|e| format!("could not make the call's id: {e}"))?;
+        if !request_id_ok(&id) {
+            return Err(format!("could not make the call's id: {id:?} is not one"));
+        }
+        Ok(Attribution {
+            client_request_id: id,
+            tags: tags(&state.by_branch, state.turn, &state.harness),
+            traceparent: state.trace_parent.clone().filter(|t| traceparent_ok(t)),
+        })
+    }
+}
+
+/// Whether `id` is a request id both sides keep: 1 to 128 of
+/// `A-Z a-z 0-9 - _ . :`.
+pub(crate) fn request_id_ok(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+/// Whether `code` is a control plane's error code: 1 to 64 of `A-Z 0-9 _`.
+pub(crate) fn error_code_ok(code: &str) -> bool {
+    (1..=64).contains(&code.len())
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Whether `value` fits a tag: 1 to 64 of
+/// `A-Z a-z 0-9 _ . : / @ + ( ) -` and space.
+fn tag_value_ok(value: &str) -> bool {
+    (1..=MAX_TAG_VALUE).contains(&value.len())
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'(' | b')' | b'-' | b' '
+                )
+        })
+}
+
+/// `by_branch=<branch>,by_turn=<turn>,by_harness=<harness>`: a value that
+/// does not fit is left out with its key, never cut short, and keys are
+/// dropped from the end until the whole is at most 512 bytes. `None` when
+/// no tag is left.
+pub(crate) fn tags(branch: &str, turn: u32, harness: &str) -> Option<String> {
+    let turn = turn.to_string();
+    fit_tags(&[
+        ("by_branch", branch),
+        ("by_turn", turn.as_str()),
+        ("by_harness", harness),
+    ])
+}
+
+/// `key=value` pairs joined by commas, under [`tags`]' rules.
+fn fit_tags(pairs: &[(&str, &str)]) -> Option<String> {
+    let mut parts: Vec<String> = pairs
+        .iter()
+        .filter(|(_, value)| tag_value_ok(value))
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    while parts.join(",").len() > MAX_TAGS {
+        parts.pop();
+    }
+    (!parts.is_empty()).then(|| parts.join(","))
+}
+
+/// Whether `value` is a W3C `traceparent` of version `00`: lowercase hex,
+/// a trace id and a span id that are not all zeros, and flags.
+pub(crate) fn traceparent_ok(value: &str) -> bool {
+    let hex = |part: &str, len: usize| {
+        part.len() == len
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let parts: Vec<&str> = value.split('-').collect();
+    match parts.as_slice() {
+        [version, trace, span, flags] => {
+            *version == "00"
+                && hex(trace, 32)
+                && hex(span, 16)
+                && hex(flags, 2)
+                && trace.bytes().any(|b| b != b'0')
+                && span.bytes().any(|b| b != b'0')
+        }
+        _ => false,
+    }
+}
+
+/// The headers `backend` is sent: what the harness sent, without its
+/// credentials, hop-by-hop headers and `Accept-Encoding`, then
+/// `Accept-Encoding: identity` and the backend's key. A control-plane
+/// backend also loses the harness's [`attribution`] headers, takes its key
+/// as a bearer token whatever its API, and is sent `attribution`.
+fn upstream_headers(
+    request: &Request,
+    backend: &Backend,
+    key: &str,
+    attribution: &Attribution,
+) -> Vec<(String, String)> {
+    let governed = backend.control_plane.is_some();
     let mut headers: Vec<(String, String)> = request
         .headers
         .iter()
-        .filter(|(n, _)| !dropped(n))
+        .filter(|(n, _)| !(dropped(n) || (governed && self::attribution(n))))
         .cloned()
         .collect();
     // Plain bytes, so usage can be read from them.
     headers.push(("Accept-Encoding".into(), "identity".into()));
+    let bearer = ("Authorization".to_owned(), format!("Bearer {key}"));
     match (backend.api, backend.header.as_deref()) {
+        _ if governed => headers.push(bearer),
         (Api::Anthropic, _) => headers.push(("x-api-key".into(), key.to_owned())),
-        (_, None) => headers.push(("Authorization".into(), format!("Bearer {key}"))),
-        (_, Some(header)) if header.eq_ignore_ascii_case("authorization") => {
-            headers.push(("Authorization".into(), format!("Bearer {key}")))
-        }
+        (_, None) => headers.push(bearer),
+        (_, Some(header)) if header.eq_ignore_ascii_case("authorization") => headers.push(bearer),
         (_, Some(header)) => headers.push((header.to_owned(), key.to_owned())),
     }
+    if governed {
+        headers.push((
+            CLIENT_REQUEST_ID.to_owned(),
+            attribution.client_request_id.clone(),
+        ));
+        if let Some(tags) = &attribution.tags {
+            headers.push((TAGS.to_owned(), tags.clone()));
+        }
+        if let Some(traceparent) = &attribution.traceparent {
+            headers.push((TRACEPARENT.to_owned(), traceparent.clone()));
+        }
+    }
     headers
+}
+
+/// The last backend that failed a call: its answer, the body kept of it,
+/// its name, the model it was asked for when translated, and its verdict.
+type Failed = (upstream::Response, Vec<u8>, String, Option<String>, Verdict);
+
+/// The backend that answered a call: its answer, the backend, the model it
+/// was asked for when translated, whether Gemini's signatures are kept from
+/// it, and its verdict.
+type Answered<'a> = (
+    upstream::Response,
+    &'a Backend,
+    Option<String>,
+    bool,
+    Verdict,
+);
+
+/// What a control-plane backend's answer says of itself.
+#[derive(Debug, Default, PartialEq)]
+struct Verdict {
+    /// Its id of the call, when well formed.
+    request_id: Option<String>,
+    /// Its code for a refusal it made, when well formed.
+    error_code: Option<String>,
+    /// Whether the answer carries an error-code header at all: then it is
+    /// the control plane's decision, final, whatever the code says.
+    decided: bool,
+}
+
+impl Verdict {
+    /// What `response` from `backend` says; nothing for a plain backend.
+    fn of(backend: &Backend, headers: &[(String, String)]) -> Verdict {
+        if backend.control_plane.is_none() {
+            return Verdict::default();
+        }
+        let first = |name: &str| {
+            headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.trim())
+        };
+        Verdict {
+            request_id: first(UPSTREAM_REQUEST_ID)
+                .filter(|v| request_id_ok(v))
+                .map(str::to_owned),
+            error_code: first(UPSTREAM_ERROR_CODE)
+                .filter(|v| error_code_ok(v))
+                .map(str::to_owned),
+            decided: first(UPSTREAM_ERROR_CODE).is_some(),
+        }
+    }
+
+    /// What the call's event records of it.
+    fn record(&self, plane: ControlPlane, attribution: &Attribution) -> Box<ControlPlaneCall> {
+        Box::new(ControlPlaneCall {
+            plane,
+            call_id: attribution.client_request_id.clone(),
+            request_id: self.request_id.clone(),
+            error_code: self.error_code.clone(),
+        })
+    }
+
+    /// The call's reason when the control plane refused it.
+    fn reason(&self, backend: &Backend) -> String {
+        let plane = backend.control_plane.unwrap_or(ControlPlane::Aiplex);
+        match &self.error_code {
+            Some(code) => format!("refused by {plane} ({code})"),
+            None => format!("refused by {plane} (an error code that is not one)"),
+        }
+    }
 }
 
 /// Ask an OpenAI chat stream for its usage in its last chunk, which it
@@ -477,6 +715,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
         failed_over: Vec::new(),
         interception: None,
         audit_file: None,
+        control_plane: None,
     };
     let mut json: Option<Value> = match request.body.is_empty() {
         true => None,
@@ -560,6 +799,7 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // Backends, and the route's rate limit.
     let gateway = &state.gateway;
     let model = (!call.model.is_empty()).then_some(call.model.as_str());
+    // The pass-through path names one backend: never both kinds.
     let (index, order): (Option<usize>, Vec<&Backend>) = match &named {
         Some(name) => (None, gateway.backend(name).into_iter().collect()),
         None => gateway.plan(api, model),
@@ -602,6 +842,23 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     }
+    // The call's id, made before it is forwarded: a control-plane backend
+    // is sent it, and the usage record is stored under it.
+    let attribution = match Attribution::new(state) {
+        Ok(attribution) => attribution,
+        Err(why) => {
+            done(&mut call, "failed", 500, Some(why.clone()));
+            refuse(
+                &mut out,
+                api,
+                500,
+                "failed",
+                &format!("Branchyard's model gateway: {why}"),
+                &[],
+            );
+            return;
+        }
+    };
     // The request as the harness sent it, before the gateway changes it.
     let asked = Asked::new(&request.body, json.as_ref());
     let mut body = request.body.clone();
@@ -618,9 +875,10 @@ fn handle(stream: TcpStream, state: &TurnState) {
     // The chat completion a Gemini backend is sent, made once for the call:
     // every Gemini backend of a call is sent the same one.
     let mut for_gemini: Option<Vec<u8>> = None;
-    // Forward: the next backend on a refused connection, a 5xx or a 429.
-    let mut last: Option<(upstream::Response, Vec<u8>, String, Option<String>)> = None;
-    let mut answered: Option<(upstream::Response, String, Option<String>, bool)> = None;
+    // Forward: the next backend on a refused connection, a 5xx or a 429,
+    // unless a control plane decided: its refusal is the answer.
+    let mut last: Option<Failed> = None;
+    let mut answered: Option<Answered<'_>> = None;
     for backend in order {
         let key = match &backend.key {
             Some(source) => match source.read() {
@@ -714,14 +972,19 @@ fn handle(stream: TcpStream, state: &TurnState) {
             Compat::Off => (send_path, send_body),
         };
         let recording = backend.compat == Compat::Gemini && chat;
-        let mut headers = upstream_headers(&request, backend, &key);
+        let mut headers = upstream_headers(&request, backend, &key, &attribution);
         if as_model.is_some() {
             headers.retain(|(n, _)| !n.to_ascii_lowercase().starts_with("anthropic-"));
         }
-        match gateway
-            .transport
-            .send(&target, &request.method, &send_path, &headers, &send_body)
-        {
+        let sent =
+            gateway
+                .transport
+                .send(&target, &request.method, &send_path, &headers, &send_body);
+        let verdict = match &sent {
+            Ok(response) => Verdict::of(backend, &response.headers),
+            Err(_) => Verdict::default(),
+        };
+        match sent {
             Err(Failure::Connect(why)) => {
                 call.failed_over
                     .push(format!("{}: could not connect ({why})", backend.name));
@@ -739,9 +1002,22 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 );
                 return;
             }
+            // A control plane's own refusal is its decision, whatever the
+            // status: no other backend is tried.
+            Ok(response) if verdict.decided => {
+                answered = Some((response, backend, as_model, recording, verdict));
+                break;
+            }
             Ok(mut response) if response.status >= 500 || response.status == 429 => {
-                call.failed_over
-                    .push(format!("{}: {}", backend.name, response.status));
+                call.failed_over.push(match &verdict.request_id {
+                    Some(id) => format!(
+                        "{}: {} ({} request {id})",
+                        backend.name,
+                        response.status,
+                        ControlPlane::Aiplex
+                    ),
+                    None => format!("{}: {}", backend.name, response.status),
+                });
                 let mut kept = Vec::new();
                 best_effort(
                     "read the backend's error body",
@@ -749,22 +1025,29 @@ fn handle(stream: TcpStream, state: &TurnState) {
                         .take(MAX_ERROR_BODY as u64)
                         .read_to_end(&mut kept),
                 );
-                last = Some((response, kept, backend.name.clone(), as_model));
+                last = Some((response, kept, backend.name.clone(), as_model, verdict));
             }
             Ok(response) => {
-                answered = Some((response, backend.name.clone(), as_model, recording));
+                answered = Some((response, backend, as_model, recording, verdict));
                 break;
             }
         }
     }
-    let Some((response, backend, as_model, recording)) = answered else {
+    let Some((mut response, chosen, as_model, recording, verdict)) = answered else {
         match last {
             // Every backend failed: the harness gets the last one's
             // answer, as it would have from the provider, in its own API.
-            Some((response, kept, backend, as_model)) => {
+            Some((mut response, kept, backend, as_model, verdict)) => {
                 call.failed_over.pop();
                 call.backend = Some(backend);
                 call.translated = as_model.clone();
+                if let Some(plane) = gateway
+                    .backend(call.backend.as_deref().unwrap_or(""))
+                    .and_then(|b| b.control_plane)
+                {
+                    call.control_plane = Some(verdict.record(plane, &attribution));
+                    hide_control_plane(&mut response.headers);
+                }
                 let status = response.status;
                 // What the backend sent, before it is put in the harness's
                 // API.
@@ -812,20 +1095,24 @@ fn handle(stream: TcpStream, state: &TurnState) {
         }
         return;
     };
+    let backend = chosen.name.clone();
     call.backend = Some(backend.clone());
     call.translated = as_model.clone();
     call.status = response.status;
+    if let Some(plane) = chosen.control_plane {
+        call.control_plane = Some(verdict.record(plane, &attribution));
+        hide_control_plane(&mut response.headers);
+    }
     let sse = is_sse(&response);
     call.streamed = sse;
     // Usage and tool calls are read in the backend's shape: the harness's
     // own, unless the request was translated.
-    let backend_api = gateway.backend(&backend).map_or(api, |b| b.api);
+    let backend_api = chosen.api;
     let mut reading = Reading::new(backend_api, sse, matches!(gateway.audit, Audit::Contents))
         .recording(
             recording.then(|| gemini::Recorder::new(&gateway.signatures, &state.subject, sse)),
         );
     let no_body = request.method == "HEAD" || matches!(response.status, 204 | 304);
-    let mut response = response;
     let mut buf = vec![0u8; 16 * 1024];
     let mut broken: Option<String> = None;
     let mut client_gone = false;
@@ -985,14 +1272,14 @@ fn handle(stream: TcpStream, state: &TurnState) {
     };
     let reason = with_note(reason, note);
     let status = call.status;
-    let decision = if response_ok(status) {
-        "allowed"
-    } else {
-        "failed"
+    let (decision, reason) = match (response_ok(status), verdict.decided) {
+        (true, _) => ("allowed", reason),
+        (false, true) => ("refused", with_note(Some(verdict.reason(chosen)), reason)),
+        (false, false) => ("failed", reason),
     };
     let tokens = tokens.unwrap_or_default();
     let row = UsageRecord {
-        id: keys::random_id().unwrap_or_default(),
+        id: attribution.client_request_id.clone(),
         at_ms: now_ms(),
         branch: state.by_branch.clone(),
         turn: state.turn,
@@ -1035,6 +1322,14 @@ fn for_gemini_backend(state: &TurnState, backend: &Backend, model: &str, body: V
         true => serde_json::to_vec(&request).unwrap_or(body),
         false => body,
     }
+}
+
+/// Take out of a control-plane backend's answer what would point the
+/// harness at the control plane: a challenge for a credential the harness
+/// does not hold (`WWW-Authenticate`, which names the control plane's own
+/// URL). Status, body and `Retry-After` reach the harness as they are.
+fn hide_control_plane(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("www-authenticate"));
 }
 
 fn response_ok(status: u16) -> bool {
@@ -1528,6 +1823,373 @@ mod tests {
         assert!(done.truncated);
         assert_eq!(done.kept.map(|k| k.len()), Some(first.len()));
         assert_eq!(done.observed.bytes, 2 * first.len() as u64 + 8);
+    }
+
+    /// What a harness might send: its credentials, hop-by-hop headers, its
+    /// provider's own, and the attribution headers a control plane reads,
+    /// forged, in other letter cases and repeated.
+    fn harness_request() -> Request {
+        let headers = [
+            ("Host", "127.0.0.1:4100"),
+            ("Content-Type", "application/json"),
+            ("Content-Length", "2"),
+            ("x-api-key", "the-turn-token"),
+            ("Authorization", "Bearer the-turn-token"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-1"),
+            ("X-Client-Request-Id", "forged-1"),
+            ("x-client-request-id", "forged-2"),
+            ("X-AIPLEX-TAGS", "by_branch=forged"),
+            ("x-aiplex-tags", "by_turn=9"),
+            ("X-AIPlex-Other", "forged"),
+            (
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ),
+            (
+                "TraceParent",
+                "00-11111111111111111111111111111111-2222222222222222-01",
+            ),
+            ("tracestate", "vendor=forged"),
+            ("X-Request-Id", "forged-request"),
+            ("Accept-Encoding", "gzip"),
+            ("Connection", "keep-alive"),
+            ("User-Agent", "harness/1"),
+            ("X-Branchyard-Gateway", "forged"),
+            ("Proxy-Authorization", "Basic forged"),
+            ("api-key", "forged"),
+            ("X-Stainless-Lang", "python"),
+        ];
+        Request {
+            method: "POST".into(),
+            target: "/anthropic/v1/messages".into(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect(),
+            body: b"{}".to_vec(),
+        }
+    }
+
+    fn plain(api: Api, header: Option<&str>) -> Backend {
+        Backend {
+            name: "b".into(),
+            api,
+            url: "http://127.0.0.1:1".into(),
+            key: None,
+            header: header.map(str::to_owned),
+            compat: Compat::Off,
+            control_plane: None,
+        }
+    }
+
+    fn governed(api: Api) -> Backend {
+        Backend {
+            control_plane: Some(super::super::ControlPlane::Aiplex),
+            ..plain(api, None)
+        }
+    }
+
+    /// What the gateway would tell a control plane about a call.
+    fn attribution() -> Attribution {
+        Attribution {
+            client_request_id: "0123456789abcdefABCDEF".into(),
+            tags: tags("app/fix-login", 3, "claude-code"),
+            traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into()),
+        }
+    }
+
+    fn pairs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+        headers
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_backend_is_sent_exactly_the_headers_it_always_was() {
+        // Pinned before control planes existed: everything the harness sent
+        // but its credentials, hop-by-hop headers, `Accept-Encoding` and
+        // Branchyard's own, in its order, then the backend's key.
+        let passed = [
+            ("Content-Type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-1"),
+            ("X-Client-Request-Id", "forged-1"),
+            ("x-client-request-id", "forged-2"),
+            ("X-AIPLEX-TAGS", "by_branch=forged"),
+            ("x-aiplex-tags", "by_turn=9"),
+            ("X-AIPlex-Other", "forged"),
+            (
+                "traceparent",
+                "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            ),
+            (
+                "TraceParent",
+                "00-11111111111111111111111111111111-2222222222222222-01",
+            ),
+            ("tracestate", "vendor=forged"),
+            ("X-Request-Id", "forged-request"),
+            ("User-Agent", "harness/1"),
+            ("X-Stainless-Lang", "python"),
+            ("Accept-Encoding", "identity"),
+        ];
+        let request = harness_request();
+        let with = |last: (&'static str, &'static str)| {
+            let mut all = passed.to_vec();
+            all.push(last);
+            all
+        };
+        let sent = upstream_headers(
+            &request,
+            &plain(Api::Anthropic, None),
+            "sk-key",
+            &attribution(),
+        );
+        assert_eq!(pairs(&sent), with(("x-api-key", "sk-key")));
+        let sent = upstream_headers(
+            &request,
+            &plain(Api::Openai, None),
+            "sk-key",
+            &attribution(),
+        );
+        assert_eq!(pairs(&sent), with(("Authorization", "Bearer sk-key")));
+        let sent = upstream_headers(
+            &request,
+            &plain(Api::Generic, None),
+            "sk-key",
+            &attribution(),
+        );
+        assert_eq!(pairs(&sent), with(("Authorization", "Bearer sk-key")));
+        let sent = upstream_headers(
+            &request,
+            &plain(Api::Generic, Some("AUTHORIZATION")),
+            "sk-key",
+            &attribution(),
+        );
+        assert_eq!(pairs(&sent), with(("Authorization", "Bearer sk-key")));
+        let sent = upstream_headers(
+            &request,
+            &plain(Api::Generic, Some("x-key")),
+            "sk-key",
+            &attribution(),
+        );
+        assert_eq!(pairs(&sent), with(("x-key", "sk-key")));
+    }
+
+    #[test]
+    fn a_control_plane_gets_a_bearer_and_the_gateways_attribution_never_the_harnesses() {
+        // Whatever the harness sent as attribution, in any letter case and
+        // however often, is dropped; the gateway's own follows the key.
+        let passed = [
+            ("Content-Type", "application/json"),
+            ("anthropic-version", "2023-06-01"),
+            ("anthropic-beta", "tools-1"),
+            ("User-Agent", "harness/1"),
+            ("X-Stainless-Lang", "python"),
+            ("Accept-Encoding", "identity"),
+            ("Authorization", "Bearer aiplex-token"),
+            ("X-Client-Request-Id", "0123456789abcdefABCDEF"),
+            (
+                "X-AIPlex-Tags",
+                "by_branch=app/fix-login,by_turn=3,by_harness=claude-code",
+            ),
+            (
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+        ];
+        let request = harness_request();
+        for api in [Api::Anthropic, Api::Openai] {
+            let sent = upstream_headers(&request, &governed(api), "aiplex-token", &attribution());
+            assert_eq!(pairs(&sent), passed, "{api}");
+            // One credential, a bearer token, on both APIs.
+            assert!(!sent
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("x-api-key")));
+        }
+        // No tags fit and no trace context: neither header is sent, and the
+        // call's id still is.
+        let bare = Attribution {
+            client_request_id: "id-1".into(),
+            tags: None,
+            traceparent: None,
+        };
+        let sent = upstream_headers(&request, &governed(Api::Openai), "k", &bare);
+        let names: Vec<&str> = sent.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"X-Client-Request-Id"), "{names:?}");
+        for gone in ["X-AIPlex-Tags", "traceparent", "tracestate", "X-Request-Id"] {
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case(gone)),
+                "{gone}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tags_name_the_branch_turn_and_harness_and_leave_out_what_does_not_fit() {
+        assert_eq!(
+            tags("app/fix-login", 3, "claude-code").as_deref(),
+            Some("by_branch=app/fix-login,by_turn=3,by_harness=claude-code")
+        );
+        // Every character the contract allows, and 64 of them.
+        let allowed = "Az09_.:/@+() -";
+        assert_eq!(
+            tags(allowed, 1, "h").as_deref(),
+            Some("by_branch=Az09_.:/@+() -,by_turn=1,by_harness=h")
+        );
+        let longest = "b".repeat(64);
+        assert_eq!(
+            tags(&longest, 1, "h"),
+            Some(format!("by_branch={longest},by_turn=1,by_harness=h"))
+        );
+        // 65 characters, or one outside the alphabet: left out with its
+        // key, never cut short.
+        let long = "b".repeat(65);
+        assert_eq!(
+            tags(&long, 1, "h").as_deref(),
+            Some("by_turn=1,by_harness=h")
+        );
+        for bad in [
+            "fix,login",
+            "a=b",
+            "été",
+            "tab\tbranch",
+            "x\"y",
+            "a;b",
+            "a#b",
+            "",
+        ] {
+            assert_eq!(
+                tags(bad, 2, "codex").as_deref(),
+                Some("by_turn=2,by_harness=codex"),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(tags("b", 7, "").as_deref(), Some("by_branch=b,by_turn=7"));
+        // Nothing fits: no header.
+        assert_eq!(fit_tags(&[("by_branch", ""), ("by_harness", "a,b")]), None);
+        // Over 512 bytes, keys go from the end until it fits.
+        let value = "v".repeat(64);
+        let many: Vec<(String, &str)> = (0..9)
+            .map(|i| (format!("key{i}"), value.as_str()))
+            .collect();
+        let pairs: Vec<(&str, &str)> = many.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        let fitted = fit_tags(&pairs).unwrap();
+        assert!(fitted.len() <= 512, "{}", fitted.len());
+        assert_eq!(fitted.split(',').count(), 7);
+        assert!(
+            fitted.starts_with("key0=") && fitted.contains("key6=") && !fitted.contains("key7=")
+        );
+    }
+
+    #[test]
+    fn the_calls_id_and_what_a_control_plane_answers_are_checked_against_the_contract() {
+        // Every id the gateway makes fits the contract's alphabet and length.
+        for _ in 0..200 {
+            let id = keys::random_id().unwrap();
+            assert!(request_id_ok(&id), "{id}");
+        }
+        assert!(request_id_ok("req-17"));
+        assert!(request_id_ok("A-z_0.9:x"));
+        assert!(request_id_ok(&"a".repeat(128)));
+        for bad in ["", " ", "a b", "a/b", "é", "a\"b"] {
+            assert!(!request_id_ok(bad), "{bad:?}");
+        }
+        assert!(!request_id_ok(&"a".repeat(129)));
+        assert!(error_code_ok("QUOTA_BUDGET_EXHAUSTED"));
+        assert!(error_code_ok("NO_BACKEND_AVAILABLE"));
+        assert!(error_code_ok(&"A".repeat(64)));
+        for bad in ["", "quota", "Quota_X", "A-B", "A B", "É"] {
+            assert!(!error_code_ok(bad), "{bad:?}");
+        }
+        assert!(!error_code_ok(&"A".repeat(65)));
+        assert!(traceparent_ok(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+        ));
+        for bad in [
+            "",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+            "00-4bf92f3577b34da6a3ce929d0e0e473-00f067aa0ba902b7-01",
+        ] {
+            assert!(!traceparent_ok(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_control_planes_answer_is_read_for_its_id_and_its_code() {
+        let headers = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect()
+        };
+        let refused = headers(&[
+            ("x-aiplex-request-id", "req-17"),
+            ("X-AIPLEX-ERROR-CODE", "QUOTA_BUDGET_EXHAUSTED"),
+        ]);
+        let verdict = Verdict::of(&governed(Api::Anthropic), &refused);
+        assert_eq!(
+            verdict,
+            Verdict {
+                request_id: Some("req-17".into()),
+                error_code: Some("QUOTA_BUDGET_EXHAUSTED".into()),
+                decided: true,
+            }
+        );
+        assert_eq!(
+            verdict.reason(&governed(Api::Anthropic)),
+            "refused by aiplex (QUOTA_BUDGET_EXHAUSTED)"
+        );
+        // A plain backend's answer is not read for them, and decides nothing.
+        assert_eq!(
+            Verdict::of(&plain(Api::Anthropic, None), &refused),
+            Verdict::default()
+        );
+        // A value that does not fit is not kept, but the header still makes
+        // the answer the control plane's decision.
+        let odd = headers(&[
+            ("X-Aiplex-Request-Id", "has space"),
+            ("X-Aiplex-Error-Code", "quota exhausted"),
+        ]);
+        let verdict = Verdict::of(&governed(Api::Openai), &odd);
+        assert_eq!(
+            verdict,
+            Verdict {
+                request_id: None,
+                error_code: None,
+                decided: true,
+            }
+        );
+        assert_eq!(
+            verdict.reason(&governed(Api::Openai)),
+            "refused by aiplex (an error code that is not one)"
+        );
+        // An answer without the code is not a decision.
+        let relayed = headers(&[("X-Aiplex-Request-Id", "req-18"), ("Retry-After", "3")]);
+        let verdict = Verdict::of(&governed(Api::Openai), &relayed);
+        assert!(!verdict.decided);
+        assert_eq!(verdict.request_id.as_deref(), Some("req-18"));
+        // What would point the harness at the control plane is taken out;
+        // the rest is kept.
+        let mut answer = headers(&[
+            ("Retry-After", "30"),
+            (
+                "WWW-Authenticate",
+                "Bearer resource_metadata=\"https://aiplex.test/x\"",
+            ),
+            ("X-Aiplex-Request-Id", "req-19"),
+        ]);
+        hide_control_plane(&mut answer);
+        assert_eq!(
+            pairs(&answer),
+            [("Retry-After", "30"), ("X-Aiplex-Request-Id", "req-19")]
+        );
     }
 
     #[test]

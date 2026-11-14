@@ -41,8 +41,12 @@ pub struct Request {
     pub method: String,
     /// The request target: the path and any query.
     pub path: String,
-    /// Header names are lower-cased.
+    /// Header names are lower-cased; of a header sent more than once, the
+    /// last value.
     pub headers: BTreeMap<String, String>,
+    /// Every header as it was sent, in order, its name in the sender's
+    /// letter case: to see a header sent twice, or in another case.
+    pub sent_headers: Vec<(String, String)>,
     /// The request body, its framing undone.
     pub body: Vec<u8>,
 }
@@ -53,6 +57,16 @@ impl Request {
         self.headers
             .get(&name.to_ascii_lowercase())
             .map(String::as_str)
+    }
+
+    /// Every value of header `name` as sent, in order, matched without
+    /// regard to case.
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        self.sent_headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+            .collect()
     }
 
     /// The body as text, invalid UTF-8 replaced.
@@ -460,10 +474,10 @@ fn connection(
         let path = head.target;
         let framing = branchyard_wire::request_framing(&head.headers)
             .map_err(|e| format!("{method} {path}: {e}"))?;
-        let headers: BTreeMap<String, String> = head
-            .headers
-            .into_iter()
-            .map(|(name, value)| (name.to_ascii_lowercase(), value))
+        let sent_headers = head.headers;
+        let headers: BTreeMap<String, String> = sent_headers
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
             .collect();
         let expected = match framing {
             branchyard_wire::Framing::Length(n) => format!(" (expected {n} bytes)"),
@@ -477,6 +491,7 @@ fn connection(
             method,
             path,
             headers,
+            sent_headers,
             body,
         };
         let response = handler(&request);

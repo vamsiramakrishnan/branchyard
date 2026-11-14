@@ -104,7 +104,14 @@ pub fn main(env: &Env, target: &Target, period: &str, as_json: bool) -> Outcome 
                     },
                     None => "no key".to_owned(),
                 };
-                out.push_str(&format!("  {:<14} {:<9} {}  {key}\n", b.name, b.api, b.url));
+                let plane = match b.control_plane {
+                    Some(plane) => format!("  control plane {plane}"),
+                    None => String::new(),
+                };
+                out.push_str(&format!(
+                    "  {:<14} {:<9} {}  {key}{plane}\n",
+                    b.name, b.api, b.url
+                ));
             }
             if !gateway.routes.is_empty() {
                 out.push_str(&style.paint(render::Tone::Bold, "routes"));
@@ -257,6 +264,7 @@ fn backends_json(gateway: &Gateway) -> Value {
                     "url": b.url,
                     "key": b.key.as_ref().map(ToString::to_string),
                     "key_set": b.key.as_ref().is_some_and(|k| k.read().is_ok()),
+                    "control_plane": b.control_plane,
                 })
             })
             .collect(),

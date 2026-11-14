@@ -12,8 +12,10 @@
 //! For each request the gateway checks the token (signature, expiry, the
 //! turn it was minted for) and its `by_models` scope, picks a backend by
 //! the yard's routes (weighted, then in order, then the route's fallbacks;
-//! the next on a refused connection, a 5xx or a 429), holds per-route rate
-//! limits, the branch's budget and the yard's daily and monthly budgets,
+//! the next on a refused connection, a 5xx or a 429, unless a control
+//! plane such as an AIPlex access point refused it itself, which is final;
+//! one call never goes to both a control plane and a plain backend), holds
+//! per-route rate limits, the branch's budget and the yard's daily and monthly budgets,
 //! forwards the request with the backend's key, streams the response back
 //! as it arrives, and records one [`UsageRecord`] (tokens from the
 //! provider's own usage fields, streamed or not; cost from
@@ -234,6 +236,42 @@ pub struct BackendConfig {
     /// whose host is `api.z.ai`, else [`Compat::Off`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
+    /// The control plane this backend is an access point of
+    /// ([`ControlPlane`]); absent, a plain backend. A control plane's
+    /// refusal is final, and a route that names one names only control
+    /// planes (`docs/model-gateway.md`, "AIPlex as the backend").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<ControlPlane>,
+}
+
+/// What a backend is an access point of (`[models.backends.NAME]
+/// control_plane`): a service that decides, for each call, whether it may
+/// reach the provider, and records it. The gateway sends it the credential
+/// as a bearer token and says which branch, turn and harness is calling;
+/// its refusal reaches the harness as it is, and no call a route sends to
+/// it goes to a plain backend instead.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlPlane {
+    /// An AIPlex access point (`{AIPLEX}/ap/{id}`), which serves Anthropic's
+    /// and OpenAI's APIs under that base.
+    Aiplex,
+}
+
+impl ControlPlane {
+    /// Its name in `control_plane = "..."`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlPlane::Aiplex => "aiplex",
+        }
+    }
+}
+
+impl fmt::Display for ControlPlane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A backend's compatibility layer (`[models.backends.NAME] compat`): what
@@ -349,6 +387,9 @@ pub struct Backend {
     pub header: Option<String>,
     /// Its compatibility layer: as configured, else by its URL's host.
     pub compat: Compat,
+    /// The control plane it is an access point of; `None` for a plain
+    /// backend.
+    pub control_plane: Option<ControlPlane>,
 }
 
 /// A route, resolved.
@@ -508,6 +549,9 @@ impl Gateway {
                     b.api
                 ));
             }
+            if let Some(plane) = b.control_plane {
+                check_control_plane(name, plane, b.api, b.key.is_some(), compat)?;
+            }
             backends.push(Backend {
                 name: name.clone(),
                 api: b.api,
@@ -515,6 +559,7 @@ impl Gateway {
                 key: b.key.as_deref().map(&key),
                 header: b.header.clone(),
                 compat,
+                control_plane: b.control_plane,
             });
         }
         let known = |name: &str, at: &str| -> Result<(), String> {
@@ -540,6 +585,20 @@ impl Gateway {
             for name in r.backends.iter().chain(&r.fallbacks) {
                 known(name, &at)?;
             }
+            let plane_of = |name: &String| {
+                config
+                    .backends
+                    .get(name)
+                    .and_then(|b| b.control_plane)
+                    .is_some()
+            };
+            let named = || r.backends.iter().chain(&r.fallbacks);
+            if let (Some(plane), Some(plain)) = (
+                named().find(|n| plane_of(n)),
+                named().find(|n| !plane_of(n)),
+            ) {
+                return Err(mixed_route(&at, &r.model, plane, plain));
+            }
             if r.requests_per_minute == Some(0) {
                 return Err(format!("{at}.requests_per_minute: must be at least 1"));
             }
@@ -556,6 +615,7 @@ impl Gateway {
                 backend_model: r.backend_model.clone(),
             });
         }
+        check_unrouted(&backends, &routes)?;
         let budget = config.budget.clone().unwrap_or_default();
         if budget.alert_at.is_some_and(|a| !(a > 0.0 && a <= 1.0)) {
             return Err("models.budget.alert_at: give a share above 0 and at most 1".into());
@@ -605,6 +665,26 @@ impl Gateway {
         self.backends.iter().find(|b| b.name == name)
     }
 
+    /// The backends of `order` a call may be sent to: never both kinds,
+    /// so a refusal or an outage of one kind never moves the call to the
+    /// other. A route that names a control-plane backend names only
+    /// control-plane backends ([`Gateway::new`]), and this holds at run time
+    /// whatever the routes say: its plain backends are dropped. A call no
+    /// route takes (`routed` false) goes to the plain backends of its API
+    /// when there are any, as before control planes existed, and to its
+    /// control-plane backends only when it has no plain one.
+    pub(crate) fn confine<'a>(&self, routed: bool, order: Vec<&'a Backend>) -> Vec<&'a Backend> {
+        let planes = order.iter().any(|b| b.control_plane.is_some());
+        let plain = order.iter().any(|b| b.control_plane.is_none());
+        match planes && plain {
+            true => order
+                .into_iter()
+                .filter(|b| b.control_plane.is_some() == routed)
+                .collect(),
+            false => order,
+        }
+    }
+
     /// Whether some backend speaks `api`.
     pub fn serves(&self, api: Api) -> bool {
         self.backends.iter().any(|b| b.api == api)
@@ -637,8 +717,14 @@ impl Gateway {
     /// order), then its fallbacks. Without a route, every backend of
     /// `api` in order. Also the route's index, for its rate limit. A
     /// route naming a `backend_model` also offers its backends of an API
-    /// the request translates to.
+    /// the request translates to. Either way [`Gateway::confine`] has the
+    /// last word: one call's backends are never of both kinds.
     pub(crate) fn plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
+        let (index, order) = self.unconfined_plan(api, model);
+        (index, self.confine(index.is_some(), order))
+    }
+
+    fn unconfined_plan(&self, api: Api, model: Option<&str>) -> (Option<usize>, Vec<&Backend>) {
         let usable = |r: &Route, b: &Backend| {
             b.api == api || (r.backend_model.is_some() && api.translates_to(b.api))
         };
@@ -747,6 +833,76 @@ impl Gateway {
         }
         pricing::cost(api, model, tokens)
     }
+}
+
+/// Refuse what a control-plane backend cannot be: one of a generic API
+/// (an access point serves Anthropic's and OpenAI's), one without a key
+/// (its credential, sent as a bearer token), or one with a compatibility
+/// layer (an access point serves each API as the provider does).
+fn check_control_plane(
+    name: &str,
+    plane: ControlPlane,
+    api: Api,
+    has_key: bool,
+    compat: Compat,
+) -> Result<(), String> {
+    let at = format!("models.backends.{name}");
+    if api == Api::Generic {
+        return Err(format!(
+            "{at}.control_plane: {plane} is for an anthropic or openai backend (an access \
+             point serves those APIs), not generic"
+        ));
+    }
+    if !has_key {
+        return Err(format!(
+            "{at}.key: a control-plane backend ({plane}) needs a key: the token it is called with"
+        ));
+    }
+    if compat != Compat::Off {
+        return Err(format!(
+            "{at}.compat: a control-plane backend ({plane}) takes no compatibility layer, \
+             not {}",
+            compat.as_str()
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a control-plane backend that no route names when a plain
+/// backend speaks its API: a call no route takes goes to the plain one
+/// ([`Gateway::confine`]), so it would never be used.
+fn check_unrouted(backends: &[Backend], routes: &[Route]) -> Result<(), String> {
+    for backend in backends.iter().filter(|b| b.control_plane.is_some()) {
+        let named = routes.iter().any(|r| {
+            r.backends.iter().any(|(n, _)| *n == backend.name)
+                || r.fallbacks.contains(&backend.name)
+        });
+        let plain = backends
+            .iter()
+            .find(|b| b.api == backend.api && b.control_plane.is_none());
+        if let (false, Some(plain)) = (named, plain) {
+            return Err(format!(
+                "models.backends.{name}: no route names this control-plane backend, and a call \
+                 no route takes goes to the plain {api} backend {plain}, so it would never be \
+                 used; add a route that names it ([[models.routes]] with backends = [\"{name}\"])",
+                name = backend.name,
+                api = backend.api,
+                plain = plain.name,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why route `at` (for `model`), which names the control-plane backend
+/// `plane` and the plain backend `plain`, is refused.
+fn mixed_route(at: &str, model: &str, plane: &str, plain: &str) -> String {
+    format!(
+        "{at} ({model}): names the control-plane backend {plane} and the plain backend \
+         {plain}; a route that names a control-plane backend names only control-plane \
+         backends, or a refusal or an outage of the control plane would send its call to \
+         {plain} directly"
+    )
 }
 
 /// A backend name: `[A-Za-z0-9_-]`, 1 to 64 characters.
@@ -870,7 +1026,9 @@ pub struct ModelCall {
     pub model: String,
     pub api: Api,
     /// `allowed`, `denied` (the token's scope), `rate_limited`, `budget`,
-    /// `unauthorized` or `failed` (no backend answered).
+    /// `unauthorized`, `refused` (a control-plane backend refused it: its
+    /// answer carried an error code of the control plane's own) or
+    /// `failed` (no backend answered).
     pub decision: String,
     /// The backend that answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -905,6 +1063,34 @@ pub struct ModelCall {
     /// request and response, relative to the repository root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_file: Option<String>,
+    /// For a call sent to a control-plane backend, its id and what the
+    /// control plane answered about it; `None` for any other call.
+    // Boxed, as `interception` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<Box<ControlPlaneCall>>,
+}
+
+/// A call sent to a control-plane backend, as its `model` event records it
+/// (`docs/model-gateway.md`, "What is recorded").
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneCall {
+    /// The control plane.
+    pub plane: ControlPlane,
+    /// The call's own id: the `X-Client-Request-Id` it was sent (the same
+    /// on every control-plane backend tried) and the id of its usage
+    /// record, when it has one.
+    pub call_id: String,
+    /// The control plane's own id of the call (`X-Aiplex-Request-Id`): the
+    /// `request_id` of its record. Kept only when it is 1 to 128 of
+    /// `A-Z a-z 0-9 - _ . :`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// The control plane's code for a refusal it made itself
+    /// (`X-Aiplex-Error-Code`), such as `QUOTA_BUDGET_EXHAUSTED`. Kept
+    /// only when it is 1 to 64 of `A-Z 0-9 _`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// The record of one call that reached a backend, for an audit: who asked
@@ -1002,6 +1188,11 @@ impl ModelCall {
             }
         }
         detail.push(format!("{} ms", self.latency_ms));
+        if let Some(plane) = &self.control_plane {
+            if let Some(id) = &plane.request_id {
+                detail.push(format!("{} request {id}", plane.plane));
+            }
+        }
         out.push_str(&format!(" ({})", detail.join(", ")));
         out
     }
@@ -1118,19 +1309,37 @@ fn direct_reason(gateway: &Gateway, record: &Record, api: Option<Api>) -> Option
     }
 }
 
+/// What the engine knows of a turn that its gateway needs beyond the
+/// branch's record.
+pub(crate) struct TurnInputs<'a> {
+    /// The connector token, when the turn has one: it carries the model
+    /// scope too. Otherwise the gateway's own is minted.
+    pub token: Option<&'a str>,
+    pub deadline_ms: Option<u64>,
+    pub scopes: &'a TokenScopes,
+    pub budget: crate::Budget,
+    /// What the branch's children hold of its limit.
+    pub reserved: f64,
+    /// The turn's W3C trace context ([`crate::TaskOptions::trace_parent`]),
+    /// which a control-plane backend is sent as `traceparent`.
+    pub trace_parent: Option<&'a str>,
+}
+
 /// Prepare the turn's model access: `None` when the branch is not on the
-/// gateway. `token` is the connector token when the turn has one (it
-/// carries the model scope too); otherwise the gateway's own is minted. A
-/// failure is the turn's, by name.
+/// gateway. A failure is the turn's, by name.
 pub(crate) fn prepare(
     yard: &Yard,
     record: &Record,
-    token: Option<&str>,
-    deadline_ms: Option<u64>,
-    scopes: &TokenScopes,
-    budget: crate::Budget,
-    reserved: f64,
+    inputs: TurnInputs<'_>,
 ) -> Result<Option<Prepared>, String> {
+    let TurnInputs {
+        token,
+        deadline_ms,
+        scopes,
+        budget,
+        reserved,
+        trace_parent,
+    } = inputs;
     let Some(access) = record.provision.as_ref().and_then(|p| p.models.clone()) else {
         return Ok(None);
     };
@@ -1235,6 +1444,8 @@ pub(crate) fn prepare(
         by_branch: gateway.by_branch(&record.info.name),
         turn: record.info.turns + 1,
         subject,
+        harness: record.info.harness.clone(),
+        trace_parent: trace_parent.map(str::to_owned),
         max_usd: budget.max_usd,
         cost_before: record.info.cost_usd.unwrap_or(0.0),
         held: reserved,
@@ -1335,6 +1546,7 @@ pub fn summarize(rows: &[UsageRecord]) -> (UsageTotals, BTreeMap<String, UsageTo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     #[test]
     fn periods_start_at_utc_midnight_and_the_first_of_the_month() {
@@ -1611,6 +1823,7 @@ mod tests {
             failed_over: Vec::new(),
             interception: None,
             audit_file: None,
+            control_plane: None,
         };
         assert_eq!(
             call.describe(),
@@ -1646,6 +1859,7 @@ mod tests {
                 stop_reason: Some("tool_use".into()),
             })),
             audit_file: None,
+            control_plane: None,
         }
     }
 
@@ -1739,6 +1953,265 @@ mod tests {
                 "{bad:?}: {error}"
             );
         }
+    }
+
+    fn built(config: Value) -> Result<Gateway, String> {
+        let config: Config = serde_json::from_value(config).map_err(|e| e.to_string())?;
+        Gateway::new(&config, signer(), |n| KeySource::Env(n.into()))
+    }
+
+    fn names(order: &[&Backend]) -> Vec<String> {
+        order.iter().map(|b| b.name.clone()).collect()
+    }
+
+    #[test]
+    fn a_control_plane_backend_is_refused_where_it_could_be_bypassed() {
+        let plane = |api: &str| {
+            json!({"api": api, "url": "https://aiplex.test/ap/ide",
+            "key": "aiplex", "control_plane": "aiplex"})
+        };
+        let plain = |api: &str| json!({"api": api, "url": "http://127.0.0.1:1", "key": "k"});
+        for (config, needles) in [
+            // A route that mixes the two, in its backends or its fallbacks,
+            // is refused naming the route and both backends.
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["ap", "direct"]}]}),
+                vec![
+                    "models.routes[0] (claude-*)",
+                    "control-plane backend ap",
+                    "plain backend direct",
+                ],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "gpt-*", "backends": ["direct"]},
+                        {"model": "claude-*", "backends": ["ap"], "fallbacks": ["direct"]}]}),
+                vec!["models.routes[1] (claude-*)", "ap", "direct"],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["direct"], "fallbacks": ["ap"]}]}),
+                vec!["models.routes[0] (claude-*)", "ap", "direct"],
+            ),
+            // A generic backend cannot be one.
+            (
+                json!({"backends": {"g": {"api": "generic", "url": "https://aiplex.test/ap/x",
+                    "key": "aiplex", "control_plane": "aiplex"}}}),
+                vec!["models.backends.g.control_plane", "not generic"],
+            ),
+            // One that no route names, beside a plain backend of its API,
+            // would never be used: refused, saying what to add.
+            (
+                json!({"backends": {"ap": plane("openai"), "direct": plain("openai")}}),
+                vec![
+                    "models.backends.ap",
+                    "no route names",
+                    "plain openai backend direct",
+                    "add a route that names it",
+                    "backends = [\"ap\"]",
+                ],
+            ),
+            (
+                json!({"backends": {"ap": plane("anthropic"), "direct": plain("anthropic")},
+                    "routes": [{"model": "claude-*", "backends": ["direct"]}]}),
+                vec!["models.backends.ap", "no route names"],
+            ),
+            // It needs its token, and takes no compatibility layer.
+            (
+                json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                    "control_plane": "aiplex"}}}),
+                vec!["models.backends.ap.key", "needs a key"],
+            ),
+            (
+                json!({"backends": {"ap": {"api": "openai", "url": "https://aiplex.test/ap/x",
+                    "key": "aiplex", "control_plane": "aiplex", "compat": "versioned"}}}),
+                vec!["models.backends.ap.compat", "versioned"],
+            ),
+            // The one value there is.
+            (
+                json!({"backends": {"ap": {"api": "openai", "key": "k",
+                    "control_plane": "anvil"}}}),
+                vec!["`anvil`", "`aiplex`"],
+            ),
+        ] {
+            let error = built(config.clone()).unwrap_err();
+            for needle in needles {
+                assert!(
+                    error.contains(needle),
+                    "{needle:?} not in {error} ({config})"
+                );
+            }
+        }
+        // What the contract shows is accepted: one backend per API, both
+        // control planes, a route each, and a plain route beside them.
+        let gateway = built(json!({
+            "backends": {"aiplex-anthropic": plane("anthropic"), "aiplex-openai": plane("openai"),
+                "spare": plane("anthropic"), "direct": plain("openai")},
+            "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"],
+                    "fallbacks": ["spare"]},
+                {"model": "gpt-*", "backends": ["aiplex-openai"]},
+                {"model": "o3*", "backends": ["direct"]}]
+        }))
+        .unwrap();
+        assert_eq!(
+            gateway.backend("aiplex-openai").unwrap().control_plane,
+            Some(ControlPlane::Aiplex)
+        );
+        assert_eq!(gateway.backend("direct").unwrap().control_plane, None);
+        // Alone on its API, or beside a plain backend of another API, one
+        // that no route names is used by calls no route takes.
+        for config in [
+            json!({"backends": {"ap": plane("openai")}}),
+            json!({"backends": {"ap": plane("openai"), "direct": plain("anthropic")}}),
+        ] {
+            assert!(built(config.clone()).is_ok(), "{config}");
+        }
+        // Written back as it was read.
+        let config: Config =
+            serde_json::from_value(json!({"backends": {"ap": plane("openai")}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["backends"]["ap"]["control_plane"],
+            "aiplex"
+        );
+        let config: Config =
+            serde_json::from_value(json!({"backends": {"p": plain("openai")}})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["backends"]["p"].get("control_plane"),
+            None
+        );
+    }
+
+    #[test]
+    fn one_calls_backends_are_never_of_both_kinds() {
+        let plane = |api: &str| {
+            json!({"api": api, "url": "https://aiplex.test/ap/ide",
+            "key": "aiplex", "control_plane": "aiplex"})
+        };
+        let plain = |api: &str| json!({"api": api, "url": "http://127.0.0.1:1", "key": "k"});
+        let mut gateway = built(json!({
+            "backends": {
+                "ap1": plane("anthropic"), "ap2": plane("anthropic"), "ap3": plane("anthropic"),
+                "apo": plane("openai"), "direct-a": plain("anthropic"), "direct-b": plain("anthropic")
+            },
+            "routes": [
+                {"model": "claude-haiku-*", "backends": ["apo"], "backend_model": "gpt-5-mini"},
+                {"model": "claude-*", "backends": ["ap1", "ap2"], "weights": [3, 1],
+                    "fallbacks": ["ap3"]},
+                {"model": "local-*", "backends": ["direct-b"]}
+            ],
+            "seed": 7
+        }))
+        .unwrap();
+        // The weighted choice, the route's other backends and its fallbacks:
+        // control planes only, every time.
+        for _ in 0..200 {
+            let (route, order) = gateway.plan(Api::Anthropic, Some("claude-sonnet-4-6"));
+            assert_eq!(route, Some(1));
+            let order = names(&order);
+            assert!(
+                order == ["ap1", "ap2", "ap3"] || order == ["ap2", "ap1", "ap3"],
+                "{order:?}"
+            );
+        }
+        // A translated route to a control plane offers only it.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("claude-haiku-4-5"));
+        assert_eq!((route, names(&order)), (Some(0), vec!["apo".to_owned()]));
+        // A route the operator sends to a plain backend stays as it is.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("local-7b"));
+        assert_eq!(
+            (route, names(&order)),
+            (Some(2), vec!["direct-b".to_owned()])
+        );
+        // No route, on an API with plain backends: only those, in name
+        // order, as before control planes existed; a model or none.
+        let (route, order) = gateway.plan(Api::Anthropic, Some("llama-3"));
+        assert_eq!(
+            (route, names(&order)),
+            (None, vec!["direct-a".into(), "direct-b".into()])
+        );
+        assert_eq!(
+            names(&gateway.plan(Api::Anthropic, None).1),
+            ["direct-a", "direct-b"]
+        );
+        // No route, on an API with only control planes: those.
+        let (route, order) = gateway.plan(Api::Openai, Some("o3"));
+        assert_eq!((route, names(&order)), (None, vec!["apo".to_owned()]));
+        assert_eq!(names(&gateway.plan(Api::Openai, None).1), ["apo"]);
+        // An order of both kinds is cut to one at run time: to the control
+        // planes for a route (a route changed after the configuration was
+        // checked still sends nothing to a plain backend), to the plain
+        // backends for a call no route takes.
+        let both: Vec<&Backend> = ["ap1", "direct-a", "ap2"]
+            .iter()
+            .map(|n| gateway.backend(n).unwrap())
+            .collect();
+        assert_eq!(names(&gateway.confine(true, both.clone())), ["ap1", "ap2"]);
+        assert_eq!(names(&gateway.confine(false, both)), ["direct-a"]);
+        gateway.routes[1].fallbacks.push("direct-a".into());
+        gateway.routes[1].backends.push(("direct-a".into(), 5));
+        for _ in 0..50 {
+            let (_, order) = gateway.plan(Api::Anthropic, Some("claude-opus-4"));
+            assert!(
+                order.iter().all(|b| b.control_plane.is_some()),
+                "{:?}",
+                names(&order)
+            );
+            assert_eq!(order.len(), 3);
+        }
+        // Without a control plane, nothing changes: every backend of the
+        // API, in name order.
+        let gateway = built(json!({
+            "backends": {"b": plain("anthropic"), "a": plain("anthropic")}
+        }))
+        .unwrap();
+        assert_eq!(
+            names(&gateway.plan(Api::Anthropic, Some("x")).1),
+            ["a", "b"]
+        );
+        let a = gateway.backend("a").unwrap();
+        assert_eq!(names(&gateway.confine(false, vec![a])), ["a"]);
+    }
+
+    #[test]
+    fn a_control_planes_refusal_and_its_id_read_in_by_log() {
+        let call = ModelCall {
+            model: "claude-sonnet-4-6".into(),
+            api: Api::Anthropic,
+            decision: "refused".into(),
+            backend: Some("aiplex-anthropic".into()),
+            reason: Some("refused by aiplex (QUOTA_BUDGET_EXHAUSTED)".into()),
+            status: 429,
+            translated: None,
+            tokens: None,
+            cost_usd: None,
+            latency_ms: 4,
+            streamed: false,
+            failed_over: Vec::new(),
+            interception: None,
+            audit_file: None,
+            control_plane: Some(Box::new(ControlPlaneCall {
+                plane: ControlPlane::Aiplex,
+                call_id: "AAECAwQFBgcICQoLDA0ODw".into(),
+                request_id: Some("req-17".into()),
+                error_code: Some("QUOTA_BUDGET_EXHAUSTED".into()),
+            })),
+        };
+        assert_eq!(
+            call.describe(),
+            "claude-sonnet-4-6 refused via aiplex-anthropic \
+             (429, refused by aiplex (QUOTA_BUDGET_EXHAUSTED), 4 ms, aiplex request req-17)"
+        );
+        let value = serde_json::to_value(&call).unwrap();
+        assert_eq!(
+            value["control_plane"],
+            json!({"plane": "aiplex", "call_id": "AAECAwQFBgcICQoLDA0ODw",
+                "request_id": "req-17", "error_code": "QUOTA_BUDGET_EXHAUSTED"})
+        );
+        assert_eq!(serde_json::from_value::<ModelCall>(value).unwrap(), call);
+        // A call of a plain backend writes neither, and reads back without.
+        let value = serde_json::to_value(answered()).unwrap();
+        assert_eq!(value.get("control_plane"), None);
     }
 
     #[test]

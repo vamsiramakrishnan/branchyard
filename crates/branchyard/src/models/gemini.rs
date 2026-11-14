@@ -864,6 +864,8 @@ mod tests {
             by_branch: "gem".into(),
             turn: 1,
             subject: PERSON.into(),
+            harness: "deepseek-harness".into(),
+            trace_parent: None,
             max_usd: None,
             cost_before: 0.0,
             held: 0.0,

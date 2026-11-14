@@ -905,11 +905,14 @@ fn run(
     let models = match crate::models::prepare(
         turn.yard,
         &scoped,
-        connectors.as_ref().and_then(|c| c.shared_token()),
-        deadline_ms,
-        &scopes,
-        bounds.budget.clone(),
-        delegation::reserved(&store, record),
+        crate::models::TurnInputs {
+            token: connectors.as_ref().and_then(|c| c.shared_token()),
+            deadline_ms,
+            scopes: &scopes,
+            budget: bounds.budget.clone(),
+            reserved: delegation::reserved(&store, record),
+            trace_parent: turn.options.trace_parent.as_deref(),
+        },
     ) {
         Ok(models) => models,
         Err(reason) => {

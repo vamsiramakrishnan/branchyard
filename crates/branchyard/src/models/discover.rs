@@ -150,6 +150,10 @@ pub struct Source {
     /// listed at `/models` rather than `/v1/models` (Z.ai; a backend with
     /// the `versioned` layer).
     pub versioned: bool,
+    /// Whether the source is a control plane's access point
+    /// (`control_plane`), which takes its key as a bearer token whatever
+    /// its API, as the gateway sends it.
+    pub control_plane: bool,
 }
 
 /// The base URLs of the providers' own sources; the public APIs unless a
@@ -193,6 +197,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
         backend: None,
         duplicate_of: None,
         versioned: false,
+        control_plane: false,
     };
     let mut found = vec![
         provider("gemini", Kind::Gemini, &bases.gemini, named(&GEMINI_KEYS)),
@@ -235,6 +240,7 @@ pub fn sources(config: &Config, bases: &Bases, key: impl Fn(&str) -> KeySource) 
             backend: Some(name.clone()),
             duplicate_of: None,
             versioned,
+            control_plane: backend.control_plane.is_some(),
         });
     }
     for i in 1..found.len() {
@@ -312,6 +318,13 @@ impl Source {
             ),
         ];
         match (self.kind, self.header.as_deref()) {
+            (Kind::Anthropic, _) if self.control_plane => {
+                headers.push(("Authorization".to_owned(), format!("Bearer {key}")));
+                headers.push(("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()));
+            }
+            _ if self.control_plane => {
+                headers.push(("Authorization".to_owned(), format!("Bearer {key}")))
+            }
             (Kind::Gemini, _) => headers.push(("x-goog-api-key".to_owned(), key.to_owned())),
             (Kind::Anthropic, _) => {
                 headers.push(("x-api-key".to_owned(), key.to_owned()));
@@ -749,6 +762,7 @@ mod tests {
             backend: None,
             duplicate_of: None,
             versioned: false,
+            control_plane: false,
         }
     }
 
@@ -903,6 +917,53 @@ mod tests {
             assert_eq!(request.header("anthropic-version"), Some("2023-06-01"));
             assert_eq!(request.header("authorization"), None);
         }
+        server.finish();
+    }
+
+    #[test]
+    fn a_control_plane_backend_lists_with_a_bearer_token_on_both_apis() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = MockHttp::start(|request| {
+            Response::json(
+                200,
+                &json!({"data": [{"id": "claude-sonnet-4-6"}], "has_more": false}),
+            )
+            .header("X-Aiplex-Request-Id", &format!("req{}", request.path.len()))
+        });
+        let config: Config = serde_json::from_value(json!({"backends": {
+            "aiplex-anthropic": {"api": "anthropic", "url": format!("{}/ap/ide", server.url()),
+                "key": "aiplex", "control_plane": "aiplex"},
+            "aiplex-openai": {"api": "openai", "url": format!("{}/ap/ide", server.url()),
+                "key": "aiplex", "control_plane": "aiplex"}
+        }}))
+        .unwrap();
+        let token = key_file(&dir, "aiplex", "aiplex-token");
+        let found = sources(&config, &Bases::default(), |_| token.clone());
+        for id in ["backend:aiplex-anthropic", "backend:aiplex-openai"] {
+            let source = found.iter().find(|s| s.id == id).unwrap();
+            assert!(source.control_plane, "{id}");
+            let listing = list(source, &transport(), 1);
+            assert_eq!(models_of(&listing), ["claude-sonnet-4-6"], "{listing:?}");
+        }
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        for request in &requests {
+            assert!(
+                request.path.starts_with("/ap/ide/v1/models"),
+                "{}",
+                request.path
+            );
+            assert_eq!(
+                request.header_values("authorization"),
+                ["Bearer aiplex-token"]
+            );
+            assert!(request.header_values("x-api-key").is_empty());
+        }
+        // The Anthropic wire still says its version, so AIPlex answers in
+        // Anthropic's shape.
+        assert!(requests
+            .iter()
+            .any(|r| r.header("anthropic-version") == Some("2023-06-01")));
         server.finish();
     }
 
