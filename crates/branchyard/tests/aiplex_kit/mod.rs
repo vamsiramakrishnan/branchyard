@@ -27,7 +27,9 @@ pub const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 /// calls, each `{label, api, path, model, stream, headers, fold, method}`
 /// (`method` `GET` sends no body; `raw_path`, a path at the gateway's root
 /// such as the pass-through `/backends/NAME/...`; a path is sent as
-/// written, with its query and without normalizing it), sent
+/// written, with its query and without normalizing it; `body_bytes`, the
+/// body's bytes as numbers, sent as they are with any method, under
+/// `content_type`, or under none when that is empty), sent
 /// with `http.client` so a header can be repeated, in any case, or folded
 /// (`fold`: a name and the values put on continuation lines); `OUT` gets,
 /// by label, the status, every response header, `Retry-After`,
@@ -63,6 +65,8 @@ for call in plan:
         body["stream"] = True
     method = call.get("method", "POST")
     payload = json.dumps(body).encode() if method == "POST" else b""
+    if call.get("body_bytes") is not None:
+        payload = bytes(call["body_bytes"])
     if call.get("raw_path"):
         base = os.environ["BRANCHYARD_MODEL_GATEWAY"]
         headers = [("x-api-key", token), ("anthropic-version", "2023-06-01")]
@@ -74,7 +78,8 @@ for call in plan:
     if call.get("fold"):
         conn.putheader(*call["fold"])
     if payload:
-        conn.putheader("Content-Type", "application/json")
+        if call.get("content_type", "application/json"):
+            conn.putheader("Content-Type", call.get("content_type", "application/json"))
         conn.putheader("Content-Length", str(len(payload)))
     conn.endheaders(payload or None)
     response = conn.getresponse()
@@ -609,6 +614,20 @@ pub fn calls(events: &[RecordedEvent]) -> BTreeMap<String, ModelCall> {
         .filter_map(|e| match &e.activity {
             Activity::Model(m) => match m.as_ref() {
                 ModelActivity::Call(call) => Some((call.model.clone(), call.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every model call in `events`, in order.
+pub fn all_calls(events: &[RecordedEvent]) -> Vec<ModelCall> {
+    events
+        .iter()
+        .filter_map(|e| match &e.activity {
+            Activity::Model(m) => match m.as_ref() {
+                ModelActivity::Call(call) => Some(call.clone()),
                 _ => None,
             },
             _ => None,

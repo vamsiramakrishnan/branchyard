@@ -24,7 +24,8 @@ pub struct HttpUrl {
 impl HttpUrl {
     /// Parse `url`, refusing anything outside the strict form above.
     pub fn parse(url: &str) -> Result<HttpUrl, WireError> {
-        let bad = |why: &str| WireError::BadUrl(format!("{url:?} {why}"));
+        // The URL as a message may show it: never its user information.
+        let bad = |why: &str| WireError::BadUrl(format!("{:?} {why}", without_userinfo(url)));
         if url.bytes().any(|b| b <= b' ' || b >= 0x7f) {
             return Err(bad("has whitespace, control or non-ASCII characters"));
         }
@@ -46,7 +47,13 @@ impl HttpUrl {
             Some(i) => (&rest[..i], &rest[i..]),
             None => (rest, ""),
         };
-        if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        if authority.contains('@') {
+            return Err(bad(
+                "has user information (user:password@), which is not taken; it is left out of \
+                 this message",
+            ));
+        }
+        if authority.is_empty() || authority.contains('\\') {
             return Err(bad("has no usable host"));
         }
         let default = if tls { 443 } else { 80 };
@@ -137,6 +144,22 @@ impl HttpUrl {
                 self.origin()
             ))),
         }
+    }
+}
+
+/// `url` without its user information (`user:password@`), for a message: a
+/// password written into a URL is not for a log or an error. Whatever stands
+/// before the last `@` of the authority (what follows `://`, or the start,
+/// up to the first `/`, `?` or `#`) is left out; a text without one is
+/// returned as it is. It does not check that `url` is a URL.
+pub fn without_userinfo(url: &str) -> String {
+    let start = url.find("://").map_or(0, |at| at + 3);
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |at| start + at);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &url[..start], &url[start + at + 1..]),
+        None => url.to_owned(),
     }
 }
 

@@ -1335,6 +1335,24 @@ fn a_signed_tokens_audience_on_another_host_than_its_url_is_one_warning_row() {
         ),
     ));
     let report = repo.doctor(&[]);
+    // A repository's own yard is local, which cannot be federated: the row
+    // says what every turn on the gateway would say.
+    assert_eq!(report.status("models.keys"), "fail", "{}", report.stdout);
+    assert!(
+        report.detail("models.keys").contains(
+            "one is called with a token a server signs for each turn (auth = turn-token), which \
+             a local yard cannot be"
+        ),
+        "{}",
+        report.detail("models.keys")
+    );
+    assert!(
+        report
+            .fix("models.keys")
+            .contains("give the backend a key here"),
+        "{}",
+        report.fix("models.keys")
+    );
     assert_eq!(
         report.status("models.audience"),
         "warn",

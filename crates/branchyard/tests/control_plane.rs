@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use aiplex_kit::*;
-use branchyard_testkit::{Banner, MockHttp, Request};
+use branchyard_testkit::{Banner, MockHttp, Request, Response};
 use common::{text, Fixture};
 use serde_json::{json, Value};
 
@@ -838,12 +838,19 @@ fn a_call_sent_to_aiplex_names_its_id_whatever_came_back() {
     // path never reaches an AIPlex backend, by its own check.
     let got = &read["pass-through"];
     assert_eq!(got["status"], 404, "{got}");
+    // The harness is told what it is told of a backend that is not there;
+    // the event has the reason.
+    let body = got["body"].as_str().unwrap();
+    assert!(body.contains("no backend ap"), "{got}");
+    assert!(!body.contains("control-plane"), "{got}");
     assert!(
-        got["body"]
-            .as_str()
+        calls["claude-x"]
+            .reason
+            .as_deref()
             .unwrap()
-            .contains("the pass-through path never reaches"),
-        "{got}"
+            .contains("ap is a control-plane backend, which the pass-through path never reaches"),
+        "{:?}",
+        calls["claude-x"].reason
     );
     assert!(asked(&seen, "claude-x").is_empty());
     first.finish();
@@ -1282,6 +1289,298 @@ fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
     );
     assert_eq!(plain[0].header_values("x-api-key"), [PROVIDER_KEY]);
     assert_eq!(read["plain"]["status"], 200, "{}", read["plain"]);
+    access.finish();
+    direct.finish();
+}
+
+/// Bodies the gateway's parser refuses and another parser reads: a byte
+/// that is not UTF-8, JSON nested 200 arrays deep, a lone surrogate.
+fn unreadable() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "not utf-8",
+            b"{\"model\":\"claude-ok-json\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi \xff\"}]}"
+                .to_vec(),
+        ),
+        (
+            "deep",
+            format!(
+                "{{\"model\":\"claude-ok-json\",\"x\":{}1{}}}",
+                "[".repeat(200),
+                "]".repeat(200)
+            )
+            .into_bytes(),
+        ),
+        (
+            "surrogate",
+            br#"{"model":"claude-ok-json","x":"\ud800"}"#.to_vec(),
+        ),
+    ]
+}
+
+/// A call whose body is `body` as it is, under `content_type` (none when
+/// empty).
+fn raw(label: &str, api: &str, path: &str, body: &[u8], content_type: &str) -> Value {
+    json!({"label": label, "api": api, "path": path, "model": "", "body_bytes": body,
+        "content_type": content_type, "headers": []})
+}
+
+/// The four routes whose body is JSON, as the harness addresses them
+/// (OPENAI_BASE_URL already ends in /v1).
+const JSON_ROUTES: [(&str, &str); 4] = [
+    ("anthropic", "/v1/messages"),
+    ("anthropic", "/v1/messages/count_tokens"),
+    ("openai", "/chat/completions"),
+    ("openai", "/responses"),
+];
+
+#[test]
+fn a_body_the_gateway_did_not_read_is_not_routed_beside_a_control_plane() {
+    for mixed in [false, true] {
+        let f = Fixture::new();
+        let (access, direct) = (aiplex("one"), aiplex("direct"));
+        let at = format!("{}/ap/ide", access.url());
+        let mut backends = json!({
+            "aiplex-anthropic": {"api": "anthropic", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"},
+            "aiplex-openai": {"api": "openai", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"}
+        });
+        if mixed {
+            // A plain backend of each API: where a call no route takes goes.
+            backends["direct"] =
+                json!({"api": "anthropic", "url": direct.url(), "key": "anthropic"});
+            backends["direct-openai"] =
+                json!({"api": "openai", "url": direct.url(), "key": "anthropic"});
+        }
+        use_gateway(
+            &f,
+            json!({"backends": backends, "routes": [
+                {"model": "claude-*", "backends": ["aiplex-anthropic"]},
+                {"model": "o3-*", "backends": ["aiplex-openai"]}
+            ]}),
+        );
+        let mut plan = Vec::new();
+        let mut refused = Vec::new();
+        for (api, path) in JSON_ROUTES {
+            for (name, body) in unreadable() {
+                for content_type in ["text/plain", "", "application/octet-stream"] {
+                    let label = format!("{name} {path} {content_type:?}");
+                    plan.push(raw(&label, api, path, &body, content_type));
+                    refused.push(label);
+                }
+            }
+            // A body the parser reads, whose model another reader would not
+            // take as the gateway does; and one in a coding.
+            for (name, body) in [
+                ("array", br#"{"model":["claude-ok-json"]}"#.as_slice()),
+                ("number", br#"{"model":7}"#),
+                (
+                    "twice",
+                    br#"{"model":"claude-ok-json","model":"claude-other"}"#,
+                ),
+                (
+                    "case",
+                    br#"{"model":"claude-ok-json","MODEL":"claude-other"}"#,
+                ),
+                ("only case", br#"{"Model":"claude-ok-json"}"#),
+                ("list", br#"["claude-ok-json"]"#),
+            ] {
+                let label = format!("{name} {path}");
+                plan.push(raw(&label, api, path, body, "application/json"));
+                refused.push(label);
+            }
+            let label = format!("gzip {path}");
+            let mut encoded = raw(
+                &label,
+                api,
+                path,
+                br#"{"model":"claude-ok-json"}"#,
+                "text/plain",
+            );
+            encoded["headers"] = json!([["Content-Encoding", "gzip"]]);
+            plan.push(encoded);
+            refused.push(label);
+        }
+        // A body it reads is routed, whatever its content type says.
+        let fine = br#"{"model":"claude-ok-json","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#;
+        plan.push(raw(
+            "read",
+            "anthropic",
+            "/v1/messages",
+            fine,
+            "application/json",
+        ));
+        plan.push(raw(
+            "read as text",
+            "anthropic",
+            "/v1/messages",
+            fine,
+            "text/plain",
+        ));
+        let (events, read) = run(&f, "unread", None, &Value::Array(plan));
+        for label in &refused {
+            assert_eq!(
+                read[label]["status"], 400,
+                "mixed {mixed}, {label}: {}",
+                read[label]
+            );
+            let body = read[label]["body"].as_str().unwrap();
+            assert!(
+                body.contains("with a control plane configured the gateway routes such a request only when it read the model"),
+                "{label}: {body}"
+            );
+        }
+        // Neither kind of backend heard any of them.
+        let heard: Vec<String> = access
+            .requests()
+            .iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect();
+        assert_eq!(
+            heard,
+            ["POST /ap/ide/v1/messages", "POST /ap/ide/v1/messages"],
+            "mixed {mixed}"
+        );
+        assert!(
+            direct.requests().is_empty(),
+            "mixed {mixed}: {:?}",
+            direct.requests()
+        );
+        for label in ["read", "read as text"] {
+            assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
+        }
+        // Each refusal is an event with its reason.
+        let failed: Vec<_> = all_calls(&events)
+            .into_iter()
+            .filter(|call| call.decision == "failed")
+            .collect();
+        assert_eq!(failed.len(), refused.len(), "mixed {mixed}");
+        for call in &failed {
+            assert_eq!(call.status, 400);
+            assert!(call
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("the body of POST /v1/"));
+            assert_eq!((&call.backend, &call.control_plane), (&None, &None));
+        }
+        access.finish();
+        direct.finish();
+    }
+}
+
+#[test]
+fn a_plain_only_gateway_forwards_what_it_cannot_read_as_it_always_did() {
+    let f = Fixture::new();
+    let provider = MockHttp::start(|_| Response::json(200, &json!({"ok": true})));
+    use_gateway(
+        &f,
+        json!({"backends": {
+            "direct": {"api": "anthropic", "url": provider.url(), "key": "anthropic"},
+            "direct-openai": {"api": "openai", "url": provider.url(), "key": "anthropic"}
+        }}),
+    );
+    let mut plan = Vec::new();
+    let mut sent = Vec::new();
+    for (api, path) in JSON_ROUTES {
+        for (name, body) in unreadable() {
+            let label = format!("{name} {path}");
+            plan.push(raw(&label, api, path, &body, "text/plain"));
+            sent.push((label, body));
+        }
+        for (name, body) in [
+            (
+                "twice",
+                br#"{"model":"claude-ok-json","model":"claude-other"}"#.as_slice(),
+            ),
+            ("only case", br#"{"Model":"claude-ok-json"}"#),
+            ("number", br#"{"model":7}"#),
+        ] {
+            let label = format!("{name} {path}");
+            plan.push(raw(&label, api, path, body, "application/json"));
+            sent.push((label, body.to_vec()));
+        }
+    }
+    let (_, read) = run(&f, "plain", None, &Value::Array(plan));
+    let heard = provider.requests();
+    assert_eq!(heard.len(), sent.len(), "{heard:?}");
+    for ((label, body), request) in sent.iter().zip(&heard) {
+        assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
+        assert_eq!(&request.body, body, "{label}");
+    }
+    provider.finish();
+}
+
+#[test]
+fn the_pass_through_path_tells_the_harness_nothing_of_a_control_plane() {
+    let f = Fixture::new();
+    let (access, direct) = (aiplex("one"), aiplex("direct"));
+    let at = format!("{}/ap/ide", access.url());
+    use_gateway(
+        &f,
+        json!({"backends": {
+            "aiplex-anthropic": {"api": "anthropic", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"},
+            "aiplex-openai": {"api": "openai", "url": at, "key": "aiplex",
+                "control_plane": "aiplex"},
+            "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"}
+        }, "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]}),
+    );
+    let through = |label: &str, backend: &str, model: &str| {
+        let mut call = call(label, "anthropic", "/v1/messages", model, false);
+        call["raw_path"] = json!(format!("/backends/{backend}/v1/messages"));
+        call
+    };
+    let mut listing = json!({"label": "models with a body", "api": "openai", "path": "/models",
+        "model": "", "method": "GET", "headers": []});
+    listing["body_bytes"] = json!(br#"{"model":"o3-ok"}"#.as_slice());
+    let plan = json!([
+        through("plane", "aiplex-anthropic", "claude-pass-plane"),
+        through("none", "nowhere", "claude-pass-none"),
+        listing,
+        {"label": "models", "api": "openai", "path": "/models", "model": "",
+            "method": "GET", "headers": []},
+    ]);
+    let (events, read) = run(&f, "pass", None, &plan);
+    // One answer for a backend that is not there and one the path never
+    // reaches: the harness cannot tell which names are control planes.
+    for label in ["plane", "none"] {
+        assert_eq!(read[label]["status"], 404, "{label}: {}", read[label]);
+    }
+    let told =
+        |label: &str, name: &str| read[label]["body"].as_str().unwrap().replace(name, "NAME");
+    assert_eq!(told("plane", "aiplex-anthropic"), told("none", "nowhere"));
+    assert!(told("plane", "aiplex-anthropic").contains("no backend NAME"));
+    // The event is the operator's, and has the reason.
+    let calls = calls(&events);
+    assert_eq!(
+        calls["claude-pass-plane"].reason.as_deref(),
+        Some("aiplex-anthropic is a control-plane backend, which the pass-through path never reaches")
+    );
+    assert_eq!(
+        calls["claude-pass-none"].reason.as_deref(),
+        Some("no backend nowhere")
+    );
+    // A GET with a body is not sent to a control plane; without one it is.
+    let got = &read["models with a body"];
+    assert_eq!(got["status"], 400, "{got}");
+    assert!(
+        got["body"]
+            .as_str()
+            .unwrap()
+            .contains("a GET with a body is not sent to a control-plane backend"),
+        "{got}"
+    );
+    assert_eq!(read["models"]["status"], 200, "{}", read["models"]);
+    let heard = access.requests();
+    assert_eq!(heard.len(), 1, "{heard:?}");
+    assert_eq!(
+        (heard[0].method.as_str(), heard[0].path.as_str()),
+        ("GET", "/ap/ide/v1/models")
+    );
+    assert!(heard[0].body.is_empty());
+    assert!(direct.requests().is_empty());
     access.finish();
     direct.finish();
 }

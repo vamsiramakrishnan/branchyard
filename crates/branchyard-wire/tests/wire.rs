@@ -536,3 +536,53 @@ fn urls_split_and_refuse() {
         assert!(HttpUrl::parse(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn a_url_in_a_message_never_shows_its_user_information() {
+    use branchyard_wire::without_userinfo;
+    for (url, shown) in [
+        (
+            "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+            "http://127.0.0.1:1/ap/ide",
+        ),
+        ("https://ann@by.example.com", "https://by.example.com"),
+        (
+            "https://a@b@by.example.com/p@q",
+            "https://by.example.com/p@q",
+        ),
+        ("ftp://ann:secret-pw@host/x", "ftp://host/x"),
+        ("ann:secret-pw@host:80/x", "host:80/x"),
+        (
+            "https://by.example.com/p?to=a@b#c@d",
+            "https://by.example.com/p?to=a@b#c@d",
+        ),
+        ("https://by.example.com", "https://by.example.com"),
+        ("", ""),
+        ("@", ""),
+    ] {
+        assert_eq!(without_userinfo(url), shown, "{url}");
+    }
+    // No refusal quotes it, whatever else is wrong with the URL.
+    for url in [
+        "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+        "http://ann:secret-pw@h:x",
+        "ftp://ann:secret-pw@h",
+        "http://ann:secret-pw@h#frag",
+        "http://ann:secret-pw@h /p",
+        "http://ann:secret-pw@",
+        "http://ann:secret-pw@h/é",
+    ] {
+        let error = HttpUrl::parse(url).unwrap_err().to_string();
+        assert!(
+            !error.contains("ann") && !error.contains("secret-pw"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        HttpUrl::parse("http://ann:secret-pw@127.0.0.1:1/ap/ide")
+            .unwrap_err()
+            .to_string(),
+        "\"http://127.0.0.1:1/ap/ide\" has user information (user:password@), which is not \
+         taken; it is left out of this message"
+    );
+}

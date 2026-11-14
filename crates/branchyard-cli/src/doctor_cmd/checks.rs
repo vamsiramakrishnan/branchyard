@@ -1663,12 +1663,17 @@ fn keys_row(rows: &[KeyRow]) -> Check {
     let mut status = Status::Ok;
     for row in rows {
         let (text, worst) = match (&row.source, row.present) {
+            // This is a repository's own configuration, for a local yard,
+            // and a local yard cannot sign what AIPlex verifies: every turn
+            // on the gateway says so, and so does this row.
             _ if row.signed => (
                 format!(
-                    "{} is called with a token the server signs for each turn (auth = turn-token)",
+                    "{} is called with a token a server signs for each turn (auth = turn-token), \
+                     which a local yard cannot be: AIPlex cannot fetch a local yard's keys, so \
+                     every turn on the gateway here is refused",
                     row.backend
                 ),
-                Status::Ok,
+                Status::Fail,
             ),
             // A control plane's token under a provider's variable name:
             // accepted, and said, since the name suggests another reader.
@@ -1707,6 +1712,12 @@ fn keys_row(rows: &[KeyRow]) -> Check {
             NAME,
             detail,
             "name the secret holding its key under key in [models.backends.NAME]",
+        ),
+        Status::Fail if rows.iter().any(|row| row.signed) => Check::fail(
+            NAME,
+            detail,
+            "give the backend a key here (key = \"...\", an AIPlex token); auth = \"turn-token\" \
+             belongs in a server's configuration (docs/model-gateway.md#a-token-branchyard-signs)",
         ),
         Status::Fail => Check::fail(
             NAME,
@@ -2289,15 +2300,26 @@ mod tests {
         let keyless = keys_row(&[row("a", "anthropic", None, None)]);
         assert_eq!(keyless.status, Status::Warn);
         assert!(keyless.detail.contains("a (anthropic) names no key"));
-        // A backend called with the server's signed token needs no key.
+        // A backend called with a signed token, in a repository's own file.
         let signed = keys_row(&[KeyRow {
             signed: true,
             ..row("aiplex", "anthropic", None, None)
         }]);
-        assert_eq!(signed.status, Status::Ok);
+        // A local yard cannot use it: the row says what every turn says.
+        assert_eq!(signed.status, Status::Fail);
         assert_eq!(
             signed.detail,
-            "aiplex is called with a token the server signs for each turn (auth = turn-token)"
+            "aiplex is called with a token a server signs for each turn (auth = turn-token), \
+             which a local yard cannot be: AIPlex cannot fetch a local yard's keys, so every \
+             turn on the gateway here is refused"
+        );
+        assert_eq!(
+            signed.fix.as_deref(),
+            Some(
+                "give the backend a key here (key = \"...\", an AIPlex token); auth = \
+                 \"turn-token\" belongs in a server's configuration \
+                 (docs/model-gateway.md#a-token-branchyard-signs)"
+            )
         );
         // A control plane's token read from a provider's variable name is
         // accepted, and the row says who is sent it; a plain backend's

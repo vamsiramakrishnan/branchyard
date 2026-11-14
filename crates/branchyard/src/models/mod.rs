@@ -276,8 +276,10 @@ pub const AIPLEX_PURPOSE: &str = "aiplex";
 /// fetches `{issuer}/.well-known/jwks.json` and compares the issuer byte
 /// for byte with the one it was bound to, so it must be `https://host[:port]`,
 /// or `http://` on a loopback host (`127.0.0.1`, `[::1]`, `localhost`), with
-/// nothing after; an address something can be reached at (not `0.0.0.0` or
-/// `[::]`); and in the one spelling Branchyard takes
+/// nothing after and no user information; an address something can be
+/// reached at (not `0.0.0.0` or `[::]`, no IPv6 zone, and not a number in a
+/// form only some resolvers read as an address, such as `0` or `127.1`);
+/// and in the one spelling Branchyard takes
 /// ([`canonical_issuer`]), so the two sides cannot differ by a dot. Each
 /// refusal says what is wrong, and what to write where Branchyard can tell.
 pub fn federable_issuer(issuer: &str) -> Result<(), String> {
@@ -287,23 +289,59 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
              from, so it cannot be federated; use key = \"...\" (an AIPlex token) instead"
         ));
     }
+    // User information is never shown, and never taken: checked before any
+    // message quotes the issuer.
+    let shown = branchyard_wire::without_userinfo(issuer);
+    if shown != issuer {
+        return Err(format!(
+            "the issuer {shown:?} has user information (user:password@), which is not taken \
+             and is left out of this message; write scheme://host[:port]"
+        ));
+    }
+    // An IPv6 address with a zone, before the URL parser, which reads only
+    // some zones.
+    let zone = issuer
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .is_some_and(|(address, _)| address.contains('%'));
+    if zone {
+        return Err(format!(
+            "the issuer {issuer:?} names an IPv6 address with a zone (%), which is one \
+             machine's interface and nothing AIPlex can reach; write the address without it"
+        ));
+    }
     let written = WrittenIssuer::read(issuer)?;
     let host = written.host();
-    if host
-        .parse::<IpAddr>()
-        .is_ok_and(|ip| ip.to_canonical().is_unspecified())
-    {
+    // A host that is a number in a form only some resolvers read as an
+    // address (`0`, `127.1`, `0x7f.1`, `010.0.0.1`): to others it is a name.
+    if numeric_host(&host) && host.parse::<Ipv4Addr>().is_err() {
+        return Err(format!(
+            "the issuer {issuer:?} names its host as a number that is not four decimal parts \
+             ({host}), which some resolvers read as an IP address (0 as 0.0.0.0, 127.1 as \
+             127.0.0.1) and others as a name; write the address as a.b.c.d"
+        ));
+    }
+    let address = host.parse::<IpAddr>().ok().map(|ip| ip.to_canonical());
+    if address.is_some_and(|ip| ip.is_unspecified()) {
         return Err(format!(
             "the issuer {issuer:?} names an unspecified address, which a server listens on and \
              nothing can be reached at, so AIPlex cannot fetch keys from it"
         ));
     }
-    let loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
-    if !written.tls && !loopback {
-        return Err(format!(
-            "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex fetches \
-             keys over https (http only from this machine, for a development AIPlex)"
-        ));
+    let taken = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    if !written.tls && !taken {
+        return Err(match address.is_some_and(|ip| ip.is_loopback()) {
+            true => format!(
+                "the issuer {issuer:?} is plain http on a loopback address in a spelling that \
+                 is not taken; plain http is for a development AIPlex on this machine, written \
+                 127.0.0.1, [::1] or localhost"
+            ),
+            false => format!(
+                "the issuer {issuer:?} is plain http on a host that is not loopback; AIPlex \
+                 fetches keys over https (http only from this machine, written 127.0.0.1, \
+                 [::1] or localhost, for a development AIPlex)"
+            ),
+        });
     }
     let canonical = written.canonical();
     match canonical == issuer {
@@ -315,6 +353,19 @@ pub fn federable_issuer(issuer: &str) -> Result<(), String> {
             written.misspelled()
         )),
     }
+}
+
+/// Whether `host`'s last label is a number as `inet_aton` reads one: decimal
+/// digits, or `0x` and hexadecimal digits. Such a host is an address to the
+/// resolvers that take that form, in one to four parts, with octal and
+/// hexadecimal ones.
+fn numeric_host(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or(host);
+    let hex = last
+        .strip_prefix("0x")
+        .or_else(|| last.strip_prefix("0X"))
+        .is_some_and(|digits| digits.bytes().all(|b| b.is_ascii_hexdigit()));
+    !host.contains(':') && !last.is_empty() && (last.bytes().all(|b| b.is_ascii_digit()) || hex)
 }
 
 /// The one spelling Branchyard takes of the issuer `issuer`: its scheme, its
@@ -901,6 +952,11 @@ impl Gateway {
         // as the named one was above, from the children still to start.
         gateway.hide_copies()?;
         Ok(gateway)
+    }
+
+    /// Whether any backend is a control plane's access point.
+    pub(crate) fn has_control_plane(&self) -> bool {
+        self.backends.iter().any(|b| b.control_plane.is_some())
     }
 
     /// The tokens of the control-plane backends that are called with a
@@ -3242,10 +3298,39 @@ mod tests {
                  from: \"https://by.example.com:port\" has an invalid port"
                     .to_owned(),
             ),
+            // User information is refused first and never shown, whatever
+            // else is wrong with the issuer.
             (
                 "https://user@by.example.com".to_owned(),
-                "the issuer \"https://user@by.example.com\" is not a URL AIPlex can fetch keys \
-                 from: \"https://user@by.example.com\" has no usable host"
+                "the issuer \"https://by.example.com\" has user information (user:password@), \
+                 which is not taken and is left out of this message; write scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "https://ann:secret-pw@by.example.com/path".to_owned(),
+                "the issuer \"https://by.example.com/path\" has user information \
+                 (user:password@), which is not taken and is left out of this message; write \
+                 scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "ftp://ann:secret-pw@by.example.com".to_owned(),
+                "the issuer \"ftp://by.example.com\" has user information (user:password@), \
+                 which is not taken and is left out of this message; write scheme://host[:port]"
+                    .to_owned(),
+            ),
+            (
+                "https://[fe80::1%eth0]:8443".to_owned(),
+                "the issuer \"https://[fe80::1%eth0]:8443\" names an IPv6 address with a zone \
+                 (%), which is one machine's interface and nothing AIPlex can reach; write the \
+                 address without it"
+                    .to_owned(),
+            ),
+            (
+                "https://[::%1]:8443".to_owned(),
+                "the issuer \"https://[::%1]:8443\" names an IPv6 address with a zone (%), \
+                 which is one machine's interface and nothing AIPlex can reach; write the \
+                 address without it"
                     .to_owned(),
             ),
             // An address a server listens on, which nothing reaches.
@@ -3279,8 +3364,8 @@ mod tests {
             (
                 "http://10.0.0.5:7400".to_owned(),
                 "the issuer \"http://10.0.0.5:7400\" is plain http on a host that is not \
-                 loopback; AIPlex fetches keys over https (http only from this machine, for a \
-                 development AIPlex)"
+                 loopback; AIPlex fetches keys over https (http only from this machine, written \
+                 127.0.0.1, [::1] or localhost, for a development AIPlex)"
                     .to_owned(),
             ),
             // One spelling, so the two sides cannot differ by a dot.
@@ -3328,7 +3413,53 @@ mod tests {
         ];
         for (issuer, message) in &refused {
             assert_eq!(federable_issuer(issuer).as_ref(), Err(message), "{issuer}");
+            assert!(!message.contains("secret-pw") && !message.contains("ann:"));
         }
+        // A host that is a number in a form only some resolvers read as an
+        // address: each of these is 0.0.0.0 or loopback to `inet_aton`.
+        for (issuer, host) in [
+            ("https://0", "0"),
+            ("https://0:8443", "0"),
+            ("https://0.0", "0.0"),
+            ("https://0x0.0", "0x0.0"),
+            ("https://000.000.000.000", "000.000.000.000"),
+            ("https://0x7f.1:8443", "0x7f.1"),
+            ("http://127.1:8421", "127.1"),
+            ("http://2130706433:8421", "2130706433"),
+            ("https://010.0.0.1", "010.0.0.1"),
+            ("https://by.example.0x10", "by.example.0x10"),
+        ] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} names its host as a number that is not four decimal \
+                     parts ({host}), which some resolvers read as an IP address (0 as 0.0.0.0, \
+                     127.1 as 127.0.0.1) and others as a name; write the address as a.b.c.d"
+                )),
+                "{issuer}"
+            );
+        }
+        // Loopback, in a spelling that is not one of the three taken.
+        for issuer in [
+            "http://127.0.0.2:8421",
+            "http://127.255.255.254",
+            "http://[::ffff:127.0.0.1]:8421",
+        ] {
+            assert_eq!(
+                federable_issuer(issuer),
+                Err(format!(
+                    "the issuer {issuer:?} is plain http on a loopback address in a spelling \
+                     that is not taken; plain http is for a development AIPlex on this machine, \
+                     written 127.0.0.1, [::1] or localhost"
+                )),
+                "{issuer}"
+            );
+        }
+        // A name, and an address in four decimal parts, are neither.
+        for host in ["by.example.com", "x0.example", "0x.example.com", "a.b.c0"] {
+            assert!(!numeric_host(host), "{host}");
+        }
+        assert!(numeric_host("10.0.0.5") && "10.0.0.5".parse::<Ipv4Addr>().is_ok());
         // The one spelling, for whoever has to say what to write: the
         // spelling alone, whatever else is wrong with the issuer.
         for (issuer, canonical) in [

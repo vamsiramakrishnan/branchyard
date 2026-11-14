@@ -575,6 +575,93 @@ fn not_a_control_plane_route(api: Api, method: &str, path: &str) -> String {
     )
 }
 
+/// The routes whose body is JSON by their API's definition, with the model
+/// in it: what the gateway reads before it routes.
+const JSON_ROUTES: [&str; 4] = [
+    "/v1/messages",
+    "/v1/messages/count_tokens",
+    "/v1/chat/completions",
+    "/v1/responses",
+];
+
+/// How many top-level members of the JSON object `body` are named `model`:
+/// spelled exactly so, and in another letter case (`Model`, `MODEL`). A
+/// parser may keep the first of two members, or the last, or match the
+/// name without regard to case (Go's does, and AIPlex is written in Go), so
+/// only one member, spelled `model`, names the same model to everyone.
+fn model_members(body: &[u8]) -> (usize, usize) {
+    struct Count;
+    impl<'de> serde::de::Visitor<'de> for Count {
+        type Value = (usize, usize);
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let (mut exact, mut other) = (0, 0);
+            while let Some(name) = map.next_key::<String>()? {
+                map.next_value::<serde::de::IgnoredAny>()?;
+                match (name == "model", name.eq_ignore_ascii_case("model")) {
+                    (true, _) => exact += 1,
+                    (false, true) => other += 1,
+                    (false, false) => {}
+                }
+            }
+            Ok((exact, other))
+        }
+    }
+    let mut body = serde_json::Deserializer::from_slice(body);
+    serde::Deserializer::deserialize_map(&mut body, Count).unwrap_or((0, 0))
+}
+
+/// Why `request` is not routed by a gateway that has a control plane, when
+/// it is a `POST` to one of [`JSON_ROUTES`] whose body the gateway did not
+/// read as its backend will: an encoded body, a body that is not JSON as
+/// the gateway's parser reads it (bytes that are not UTF-8, a lone
+/// surrogate, nesting past the parser's limit), not an object, a `model`
+/// that is not a string, or more than one member that a parser could take
+/// for the model. `None` for any other request, and for a body the gateway
+/// read; one without a `model` member is a call no route takes.
+fn unread_body(request: &Request, path: &str, json: Option<&Value>) -> Option<String> {
+    let route = path.split_once('?').map_or(path, |(route, _)| route);
+    if request.method != "POST" || !JSON_ROUTES.contains(&route) {
+        return None;
+    }
+    let refused = |why: &str| {
+        Some(format!(
+            "the body of POST {route} {why}; with a control plane configured the gateway routes \
+             such a request only when it read the model as the backend will"
+        ))
+    };
+    if let Some(coding) = encoded(&request.headers) {
+        return refused(&format!("is encoded ({coding})"));
+    }
+    let Some(json) = json else {
+        return refused(
+            "is not JSON the gateway can read (valid UTF-8, one JSON value, nested no deeper \
+             than its parser reads)",
+        );
+    };
+    let Some(object) = json.as_object() else {
+        return refused("is not a JSON object");
+    };
+    if object.get("model").is_some_and(|model| !model.is_string()) {
+        return refused("names a model that is not a string");
+    }
+    match model_members(&request.body) {
+        (0 | 1, 0) => None,
+        (_, 0) => refused("names its model more than once"),
+        _ => refused(
+            "has a member named model in another letter case, which some parsers read as the \
+             model",
+        ),
+    }
+}
+
 /// Of what the harness sent, the request headers a control-plane backend
 /// is sent: the body's content type, `Accept`, the user agent, the
 /// APIs' own version, beta and idempotency headers. Nothing else of the
@@ -1005,6 +1092,25 @@ fn handle(stream: TcpStream, state: &TurnState) {
             return;
         }
     };
+    // With a control plane configured, a request whose body is JSON by its
+    // API's definition is routed only when the gateway read it. Otherwise
+    // the turn's scope would not see its model, and beside a plain backend
+    // it would be planned as a call no route takes and go to the provider,
+    // although its model's route names the control plane.
+    if state.gateway.has_control_plane() {
+        if let Some(why) = unread_body(&request, &path, json.as_ref()) {
+            done(&mut call, "failed", 400, Some(why.clone()));
+            refuse(
+                &mut out,
+                api,
+                400,
+                "bad_request",
+                &format!("Branchyard's model gateway: {why}"),
+                &[],
+            );
+            return;
+        }
+    }
     let access = branchyard_provision::models::ModelAccess { allow: allowed };
     if !call.model.is_empty() && !access.allows(&call.model) {
         let why = format!(
@@ -1062,13 +1168,21 @@ fn handle(stream: TcpStream, state: &TurnState) {
                 model.unwrap_or("this request")
             ),
         };
-        done(&mut call, "failed", 404, Some(why.clone()));
+        // The event has the reason, which is the operator's. The harness
+        // is told the same of a backend that is not there and of one the
+        // path never reaches, so it cannot learn which names are control
+        // planes.
+        let told = match &named {
+            Some(name) => format!("no backend {name}"),
+            None => why.clone(),
+        };
+        done(&mut call, "failed", 404, Some(why));
         refuse(
             &mut out,
             api,
             404,
             "failed",
-            &format!("Branchyard's model gateway: {why}"),
+            &format!("Branchyard's model gateway: {told}"),
             &[],
         );
         return;
@@ -1086,6 +1200,24 @@ fn handle(stream: TcpStream, state: &TurnState) {
             api,
             403,
             "denied",
+            &format!("Branchyard's model gateway: {why}"),
+            &[],
+        );
+        return;
+    }
+    // Nor is a control plane sent a body on a GET: the model list takes
+    // none, and the gateway reads none there.
+    if request.method == "GET"
+        && !request.body.is_empty()
+        && order.iter().any(|b| b.control_plane.is_some())
+    {
+        let why = "a GET with a body is not sent to a control-plane backend".to_owned();
+        done(&mut call, "failed", 400, Some(why.clone()));
+        refuse(
+            &mut out,
+            api,
+            400,
+            "bad_request",
             &format!("Branchyard's model gateway: {why}"),
             &[],
         );
@@ -2336,6 +2468,119 @@ fn append(state: &TurnState, activity: ModelActivity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_json_routes_body_is_read_as_its_backend_will_read_it_or_not_routed() {
+        let request = |method: &str, body: &[u8], headers: &[(&str, &str)]| Request {
+            method: method.to_owned(),
+            target: String::new(),
+            headers: headers
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect(),
+            body: body.to_vec(),
+        };
+        let why = |path: &str, body: &[u8], headers: &[(&str, &str)]| {
+            let json: Option<Value> = serde_json::from_slice(body).ok();
+            unread_body(&request("POST", body, headers), path, json.as_ref())
+        };
+        let said = |route: &str, what: &str| {
+            Some(format!(
+                "the body of POST {route} {what}; with a control plane configured the gateway \
+                 routes such a request only when it read the model as the backend will"
+            ))
+        };
+        let unreadable = "is not JSON the gateway can read (valid UTF-8, one JSON value, nested \
+                          no deeper than its parser reads)";
+        let deep = format!(
+            "{{\"model\":\"m\",\"x\":{}1{}}}",
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        for route in JSON_ROUTES {
+            // Read: with a model, without one, and with a query.
+            assert_eq!(why(route, br#"{"model":"m","messages":[]}"#, &[]), None);
+            assert_eq!(why(route, br#"{"messages":[]}"#, &[]), None);
+            assert_eq!(
+                why(&format!("{route}?beta=true"), br#"{"model":"m"}"#, &[]),
+                None
+            );
+            assert_eq!(why(route, br#"{"mod\u0065l":"m"}"#, &[]), None);
+            // What serde_json refuses and another parser accepts.
+            for body in [
+                b"{\"model\":\"m\",\"x\":\"hi \xff\"}".as_slice(),
+                deep.as_bytes(),
+                br#"{"model":"m","x":"\ud800"}"#,
+                b"",
+                b"model=m",
+                br#"{"model":"m"} {"model":"n"}"#,
+            ] {
+                assert_eq!(why(route, body, &[]), said(route, unreadable));
+            }
+            for body in [br#"["m"]"#.as_slice(), br#""m""#, b"7", b"null"] {
+                assert_eq!(why(route, body, &[]), said(route, "is not a JSON object"));
+            }
+            for body in [
+                br#"{"model":["m"]}"#.as_slice(),
+                br#"{"model":7}"#,
+                br#"{"model":null}"#,
+                br#"{"model":{"id":"m"}}"#,
+            ] {
+                assert_eq!(
+                    why(route, body, &[]),
+                    said(route, "names a model that is not a string")
+                );
+            }
+            for body in [
+                br#"{"model":"m","model":"n"}"#.as_slice(),
+                br#"{"model":"m","x":1,"mod\u0065l":"n"}"#,
+            ] {
+                assert_eq!(
+                    why(route, body, &[]),
+                    said(route, "names its model more than once")
+                );
+            }
+            for body in [
+                br#"{"Model":"m"}"#.as_slice(),
+                br#"{"model":"m","MODEL":"n"}"#,
+                br#"{"mOdEl":"m","model":"n"}"#,
+            ] {
+                assert_eq!(
+                    why(route, body, &[]),
+                    said(
+                        route,
+                        "has a member named model in another letter case, which some parsers \
+                         read as the model"
+                    )
+                );
+            }
+            assert_eq!(
+                why(route, br#"{"model":"m"}"#, &[("Content-Encoding", "gzip")]),
+                said(route, "is encoded (gzip)")
+            );
+        }
+        // A nested member is the request's own, and other requests are not
+        // this check's: another path, another method.
+        assert_eq!(
+            why(
+                "/v1/messages",
+                br#"{"model":"m","metadata":{"Model":"x","model":"y"}}"#,
+                &[]
+            ),
+            None
+        );
+        assert_eq!(why("/v1/embeddings", b"\xff", &[]), None);
+        assert_eq!(why("/v1/messages/", b"\xff", &[]), None);
+        assert_eq!(
+            unread_body(&request("GET", b"\xff", &[]), "/v1/messages", None),
+            None
+        );
+        assert_eq!(
+            model_members(br#"{"model":1,"Model":2,"MODEL":3,"x":{"model":4}}"#),
+            (1, 2)
+        );
+        assert_eq!(model_members(b"[]"), (0, 0));
+    }
 
     #[test]
     fn a_control_plane_is_asked_only_the_integrations_routes() {

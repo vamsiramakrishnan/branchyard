@@ -1293,13 +1293,41 @@ pub struct ModelBackendConfig {
     pub audience: Option<String>,
 }
 
+/// `url` as a message may show it: without its user information
+/// (`user:password@`), which is whatever stands before the last `@` of the
+/// authority. The gateway's own URL parser shows a URL the same way
+/// (`branchyard_wire::without_userinfo`).
+fn shown_url(url: &str) -> String {
+    let start = url.find("://").map_or(0, |at| at + 3);
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |at| start + at);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &url[..start], &url[start + at + 1..]),
+        None => url.to_owned(),
+    }
+}
+
 /// Why `url` is no address for a control-plane backend, where its
-/// credential is sent: it must be plain text with a host. The gateway
-/// parses it in full when it is built; this is what `by config validate`
-/// can say without it.
+/// credential is sent: it must be plain text with a host, and a base URL
+/// (no user information, no query, no fragment), as the gateway's own
+/// parser requires when the gateway is built; this is what `by config
+/// validate` says of it, in the parser's words.
 fn access_point_address(url: &str) -> Result<(), &'static str> {
     if url.bytes().any(|b| b <= b' ' || b >= 0x7f) {
         return Err("has whitespace, control or non-ASCII characters");
+    }
+    if shown_url(url) != url {
+        return Err(
+            "has user information (user:password@), which is not taken; it is left out of \
+             this message",
+        );
+    }
+    if url.contains('#') {
+        return Err("must not have a fragment");
+    }
+    if url.contains('?') {
+        return Err("must be a base URL: a host and a path, no query");
     }
     match url_host(url) {
         Some(_) => Ok(()),
@@ -1496,7 +1524,10 @@ impl ModelsConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         &format!("backends.{name}.url"),
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
                 }
             }
@@ -1520,7 +1551,7 @@ impl ModelsConfig {
                             &format!("backends.{name}.url"),
                             format!(
                                 "{:?} {why}; write the access point, {looks}",
-                                backend.url.as_deref().unwrap_or_default()
+                                shown_url(backend.url.as_deref().unwrap_or_default())
                             ),
                         )
                     }
@@ -2794,7 +2825,10 @@ impl ProjectConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         key,
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
                 }
             }
@@ -2876,7 +2910,10 @@ impl ProjectConfig {
                 if !(url.starts_with("http://") || url.starts_with("https://")) {
                     return fail(
                         &format!("trackers.{name}.url"),
-                        format!("must be an http:// or https:// URL, not {url:?}"),
+                        format!(
+                            "must be an http:// or https:// URL, not {:?}",
+                            shown_url(url)
+                        ),
                     );
                 }
             }
@@ -4148,6 +4185,33 @@ classes = { compensable = "allow" }
                         .to_string();
                     assert!(error.contains("models.backends.ap.url"), "{url:?}: {error}");
                 }
+                // Nor one the gateway's own parser refuses, in its words;
+                // user information is never shown.
+                for (url, why) in [
+                    (
+                        "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+                        "models.backends.ap.url: \"http://127.0.0.1:1/ap/ide\" has user \
+                         information (user:password@), which is not taken; it is left out of \
+                         this message",
+                    ),
+                    (
+                        "https://aiplex.example.com/ap/ide?x=1",
+                        "must be a base URL: a host and a path, no query",
+                    ),
+                    (
+                        "https://aiplex.example.com/ap/ide#x",
+                        "must not have a fragment",
+                    ),
+                ] {
+                    let error = parse(&file(api, credential, Some(url)))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(why), "{url:?}: {error}");
+                    assert!(
+                        !error.contains("secret-pw") && !error.contains("ann:"),
+                        "{error}"
+                    );
+                }
                 // Written out, it is the operator's choice.
                 for url in [
                     "https://aiplex.example.com/ap/ide",
@@ -4160,6 +4224,35 @@ classes = { compensable = "allow" }
         }
         // A plain backend still needs none.
         parse("version = 1\n\n[models.backends.p]\napi = \"anthropic\"\nkey = \"k\"\n").unwrap();
+        // No backend's refused url is shown with its user information.
+        let error = parse(
+            "version = 1\n\n[models.backends.p]\napi = \"generic\"\n\
+             url = \"ftp://ann:secret-pw@host/x\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("must be an http:// or https:// URL, not \"ftp://host/x\""),
+            "{error}"
+        );
+        for (url, shown) in [
+            (
+                "http://ann:secret-pw@127.0.0.1:1/ap/ide",
+                "http://127.0.0.1:1/ap/ide",
+            ),
+            (
+                "https://a@b@by.example.com/p@q",
+                "https://by.example.com/p@q",
+            ),
+            ("ann:secret-pw@host:80/x", "host:80/x"),
+            (
+                "https://by.example.com/p?to=a@b",
+                "https://by.example.com/p?to=a@b",
+            ),
+            ("", ""),
+        ] {
+            assert_eq!(shown_url(url), shown, "{url}");
+        }
     }
 
     #[test]
