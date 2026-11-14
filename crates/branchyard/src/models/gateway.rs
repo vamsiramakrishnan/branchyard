@@ -525,6 +525,56 @@ fn dropped(name: &str) -> bool {
         || name.starts_with("x-branchyard-")
 }
 
+/// The routes a control-plane backend is asked, by the API the harness
+/// speaks: the integration contract's transport table, by method and exact
+/// path. An access point serves more under its URL (its other wires, whose
+/// paths name the model; embeddings and media; its tools at `/mcp`; its
+/// registries), and the harness's path would take the backend's credential
+/// to any of it, past the turn's model scope and the gateway's metering
+/// (`docs/model-gateway.md`, "What is sent").
+pub(crate) const CONTROL_PLANE_ROUTES: &[(Api, &str, &str)] = &[
+    (Api::Anthropic, "POST", "/v1/messages"),
+    (Api::Anthropic, "POST", "/v1/messages/count_tokens"),
+    (Api::Anthropic, "GET", "/v1/models"),
+    (Api::Openai, "POST", "/v1/chat/completions"),
+    (Api::Openai, "POST", "/v1/responses"),
+    (Api::Openai, "GET", "/v1/models"),
+];
+
+/// Whether `method path` is one of [`CONTROL_PLANE_ROUTES`] for `api`: the
+/// method and the path before any query, byte for byte. A query is the
+/// API's own and passes; a path is not normalized, so `/v1/messages/` and
+/// `/v1/messages/../mcp` are not routes.
+fn control_plane_route(api: Api, method: &str, path: &str) -> bool {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    CONTROL_PLANE_ROUTES
+        .iter()
+        .any(|(a, m, p)| *a == api && *m == method && *p == path)
+}
+
+/// Why `method path` is not sent to a control-plane backend of `api`: what
+/// was asked, and the routes that are. The harness chose the method and
+/// the path, so they are shown only when short and printable.
+fn not_a_control_plane_route(api: Api, method: &str, path: &str) -> String {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let printable = |text: &str, most: usize| {
+        !text.is_empty() && text.len() <= most && text.bytes().all(|b| b.is_ascii_graphic())
+    };
+    let asked = match printable(method, 16) && printable(path, 96) {
+        true => format!("{method} {path}"),
+        false => "this request".to_owned(),
+    };
+    let routes: Vec<String> = CONTROL_PLANE_ROUTES
+        .iter()
+        .filter(|(a, _, _)| *a == api)
+        .map(|(_, m, p)| format!("{m} {p}"))
+        .collect();
+    format!(
+        "{asked} is not a route a control-plane backend is asked ({})",
+        routes.join(", ")
+    )
+}
+
 /// Of what the harness sent, the request headers a control-plane backend
 /// is sent: the body's content type, `Accept`, the user agent, the
 /// APIs' own version, beta and idempotency headers. Nothing else of the
@@ -1018,6 +1068,24 @@ fn handle(stream: TcpStream, state: &TurnState) {
             api,
             404,
             "failed",
+            &format!("Branchyard's model gateway: {why}"),
+            &[],
+        );
+        return;
+    }
+    // A control plane is asked only the integration's routes: its access
+    // point serves its tools and its other wires under the same URL, where
+    // the harness's path would take the backend's credential.
+    if order.iter().any(|b| b.control_plane.is_some())
+        && !control_plane_route(api, &request.method, &path)
+    {
+        let why = not_a_control_plane_route(api, &request.method, &path);
+        done(&mut call, "denied", 403, Some(why.clone()));
+        refuse(
+            &mut out,
+            api,
+            403,
+            "denied",
             &format!("Branchyard's model gateway: {why}"),
             &[],
         );
@@ -2255,6 +2323,102 @@ fn append(state: &TurnState, activity: ModelActivity) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_control_plane_is_asked_only_the_integrations_routes() {
+        use Api::{Anthropic, Generic, Openai};
+        for (api, method, path) in [
+            (Anthropic, "POST", "/v1/messages"),
+            (Anthropic, "POST", "/v1/messages?beta=true"),
+            (Anthropic, "POST", "/v1/messages/count_tokens"),
+            (Anthropic, "POST", "/v1/messages/count_tokens?beta=true"),
+            (Anthropic, "GET", "/v1/models"),
+            (Anthropic, "GET", "/v1/models?limit=1000&after_id=x"),
+            (Openai, "POST", "/v1/chat/completions"),
+            (Openai, "POST", "/v1/responses"),
+            (Openai, "GET", "/v1/models"),
+            // A query is not the path, whatever it holds.
+            (Openai, "GET", "/v1/models?next=/mcp"),
+        ] {
+            assert!(control_plane_route(api, method, path), "{method} {path}");
+        }
+        for (api, method, path) in [
+            // What an access point serves beside them.
+            (Anthropic, "POST", "/mcp"),
+            (Anthropic, "POST", "/mcp/github"),
+            (Anthropic, "POST", "/model/anthropic.claude-opus/converse"),
+            (
+                Anthropic,
+                "POST",
+                "/v1beta/models/gemini-pro:generateContent",
+            ),
+            (Openai, "POST", "/v1/embeddings"),
+            (Openai, "POST", "/v1/moderations"),
+            (Openai, "POST", "/v1/images/generations"),
+            (Openai, "POST", "/v1/audio/speech"),
+            (Openai, "GET", "/v1/realtime"),
+            (Openai, "GET", "/v1/responses/resp_1"),
+            (Openai, "GET", "/v1/models/gpt-5"),
+            (Openai, "GET", "/v1beta/models"),
+            (Openai, "GET", "/skills"),
+            (Openai, "GET", "/v0.1/servers"),
+            // The other API's routes, and other methods.
+            (Anthropic, "POST", "/v1/chat/completions"),
+            (Anthropic, "POST", "/v1/responses"),
+            (Openai, "POST", "/v1/messages"),
+            (Openai, "POST", "/v1/messages/count_tokens"),
+            (Anthropic, "GET", "/v1/messages"),
+            (Anthropic, "POST", "/v1/models"),
+            (Anthropic, "DELETE", "/v1/models"),
+            (Anthropic, "post", "/v1/messages"),
+            (Generic, "POST", "/v1/messages"),
+            (Generic, "GET", "/v1/models"),
+            // A route in another spelling: compared as written.
+            (Anthropic, "POST", "/v1/messages/"),
+            (Anthropic, "POST", "//v1/messages"),
+            (Anthropic, "POST", "/v1//messages"),
+            (Anthropic, "POST", "/V1/messages"),
+            (Anthropic, "POST", "/v1/messages/../mcp"),
+            (Anthropic, "POST", "/v1/messages/..%2fmcp"),
+            (Anthropic, "POST", "/v1/messages%3Fx"),
+            (Anthropic, "POST", "/v1/messages#x"),
+            (Anthropic, "POST", "/v1/messages;x"),
+            (Anthropic, "POST", "/./v1/messages"),
+            (Anthropic, "POST", ""),
+            (Anthropic, "POST", "/"),
+            (Anthropic, "POST", "?/v1/messages"),
+        ] {
+            assert!(!control_plane_route(api, method, path), "{method} {path}");
+        }
+        // The refusal names what was asked, without its query, and the
+        // routes of the API; never text a terminal would act on.
+        assert_eq!(
+            not_a_control_plane_route(Anthropic, "POST", "/mcp/github?token=x"),
+            "POST /mcp/github is not a route a control-plane backend is asked (POST \
+             /v1/messages, POST /v1/messages/count_tokens, GET /v1/models)"
+        );
+        assert_eq!(
+            not_a_control_plane_route(Openai, "GET", "/v1/../skills"),
+            "GET /v1/../skills is not a route a control-plane backend is asked (POST \
+             /v1/chat/completions, POST /v1/responses, GET /v1/models)"
+        );
+        for (method, path) in [
+            ("POST", "/a\u{1b}[2J"),
+            ("POST", "/a b"),
+            ("POST", "/caf\u{e9}"),
+            ("POST", ""),
+            ("", "/mcp"),
+            ("P\rOST", "/mcp"),
+            ("POST", &format!("/{}", "a".repeat(96))),
+            ("METHODTHATISTOOLONG", "/mcp"),
+        ] {
+            assert!(
+                not_a_control_plane_route(Anthropic, method, path)
+                    .starts_with("this request is not a route"),
+                "{method:?} {path:?}"
+            );
+        }
+    }
 
     #[test]
     fn paths_name_their_api() {

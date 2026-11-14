@@ -1116,3 +1116,172 @@ fn a_harness_that_goes_away_during_a_refusal_leaves_it_a_refusal() {
     second.finish();
     direct.finish();
 }
+
+#[test]
+fn an_aiplex_backend_is_asked_only_the_integrations_routes() {
+    let f = Fixture::new();
+    let (access, direct) = (aiplex("one"), aiplex("direct"));
+    // Anthropic's API: AIPlex by route, and a plain backend for the rest.
+    // OpenAI's: AIPlex only, so a call no route takes goes to it too.
+    let at = format!("{}/ap/ide", access.url());
+    use_gateway(
+        &f,
+        json!({
+            "backends": {
+                "aiplex-anthropic": {"api": "anthropic", "url": at, "key": "aiplex",
+                    "control_plane": "aiplex"},
+                "aiplex-openai": {"api": "openai", "url": at, "key": "aiplex",
+                    "control_plane": "aiplex"},
+                "direct": {"api": "anthropic", "url": direct.url(), "key": "anthropic"}
+            },
+            "routes": [{"model": "claude-*", "backends": ["aiplex-anthropic"]}]
+        }),
+    );
+    let post =
+        |label: &str, api: &str, path: &str, model: &str| call(label, api, path, model, false);
+    let get = |label: &str, path: &str| {
+        json!({"label": label, "api": "openai", "path": path, "model": "",
+            "method": "GET", "headers": forged("openai")})
+    };
+    // What an access point serves beside the integration's routes: its
+    // tools, its other wires, its registries; and other spellings of a
+    // route. OPENAI_BASE_URL already ends in /v1.
+    let refused = [
+        ("tools", "anthropic", "/mcp", "claude-tools", "POST /mcp"),
+        (
+            "connection",
+            "anthropic",
+            "/mcp/github",
+            "claude-connection",
+            "POST /mcp/github",
+        ),
+        (
+            "bedrock",
+            "anthropic",
+            "/model/anthropic.claude-opus/converse",
+            "claude-bedrock",
+            "POST /model/anthropic.claude-opus/converse",
+        ),
+        (
+            "dots",
+            "anthropic",
+            "/v1/messages/../mcp",
+            "claude-dots",
+            "POST /v1/messages/../mcp",
+        ),
+        (
+            "slash",
+            "anthropic",
+            "/v1/messages/",
+            "claude-slash",
+            "POST /v1/messages/",
+        ),
+        (
+            "other api",
+            "anthropic",
+            "/v1/chat/completions",
+            "claude-chat",
+            "POST /v1/chat/completions",
+        ),
+        (
+            "embeddings",
+            "openai",
+            "/embeddings",
+            "o3-embeddings",
+            "POST /v1/embeddings",
+        ),
+        (
+            "gemini",
+            "openai",
+            "/../v1beta/models/gemini-pro:generateContent",
+            "o3-gemini",
+            "POST /v1/../v1beta/models/gemini-pro:generateContent",
+        ),
+    ];
+    let mut plan: Vec<Value> = refused
+        .iter()
+        .map(|(label, api, path, model, _)| post(label, api, path, model))
+        .collect();
+    plan.extend([
+        get("skills", "/../skills?x=1"),
+        // The routes, with the API's own query.
+        post(
+            "messages",
+            "anthropic",
+            "/v1/messages?beta=true",
+            "claude-ok-json",
+        ),
+        post(
+            "count",
+            "anthropic",
+            "/v1/messages/count_tokens?beta=true",
+            "claude-ok-count",
+        ),
+        post("chat", "openai", "/chat/completions", "o3-ok"),
+        post("responses", "openai", "/responses", "o3-ok-responses"),
+        get("models", "/models?limit=5"),
+        // A plain backend is sent what the harness asks for, as before.
+        post("plain", "anthropic", "/mcp", "llama-3"),
+    ]);
+    let (events, read) = run(&f, "routes", None, &Value::Array(plan));
+    let calls = calls(&events);
+    for (label, api, _, model, shown) in refused {
+        let routes = match api {
+            "anthropic" => "POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models",
+            _ => "POST /v1/chat/completions, POST /v1/responses, GET /v1/models",
+        };
+        let why = format!("{shown} is not a route a control-plane backend is asked ({routes})");
+        assert_eq!(read[label]["status"], 403, "{label}: {}", read[label]);
+        let body = read[label]["body"].as_str().unwrap();
+        assert!(body.contains(&why), "{label}: {body}");
+        let event = &calls[model];
+        assert_eq!(
+            (event.decision.as_str(), event.status),
+            ("denied", 403),
+            "{label}"
+        );
+        assert_eq!(event.reason.as_deref(), Some(why.as_str()), "{label}");
+        assert_eq!(
+            (&event.backend, &event.control_plane),
+            (&None, &None),
+            "{label}"
+        );
+    }
+    assert_eq!(read["skills"]["status"], 403, "{}", read["skills"]);
+    assert!(read["skills"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("GET /v1/../skills is not a route a control-plane backend is asked"));
+    // AIPlex heard the routes, and nothing else.
+    let heard: Vec<String> = access
+        .requests()
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    assert_eq!(
+        heard,
+        [
+            "POST /ap/ide/v1/messages?beta=true",
+            "POST /ap/ide/v1/messages/count_tokens?beta=true",
+            "POST /ap/ide/v1/chat/completions",
+            "POST /ap/ide/v1/responses",
+            "GET /ap/ide/v1/models?limit=5",
+        ]
+    );
+    for label in ["messages", "count", "chat", "responses", "models"] {
+        assert_eq!(read[label]["status"], 200, "{label}: {}", read[label]);
+    }
+    assert_eq!(calls["claude-ok-json"].decision, "allowed");
+    // The plain backend was sent the path as the harness wrote it, with its
+    // own key.
+    let plain = direct.requests();
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    assert_eq!(
+        (plain[0].method.as_str(), plain[0].path.as_str()),
+        ("POST", "/mcp")
+    );
+    assert_eq!(plain[0].header_values("x-api-key"), [PROVIDER_KEY]);
+    assert_eq!(read["plain"]["status"], 200, "{}", read["plain"]);
+    access.finish();
+    direct.finish();
+}

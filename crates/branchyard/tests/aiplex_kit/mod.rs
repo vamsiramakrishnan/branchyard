@@ -26,7 +26,8 @@ pub const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 /// The fake harness: `harness.py PLAN OUT`. `PLAN` is a JSON list of
 /// calls, each `{label, api, path, model, stream, headers, fold, method}`
 /// (`method` `GET` sends no body; `raw_path`, a path at the gateway's root
-/// such as the pass-through `/backends/NAME/...`), sent
+/// such as the pass-through `/backends/NAME/...`; a path is sent as
+/// written, with its query and without normalizing it), sent
 /// with `http.client` so a header can be repeated, in any case, or folded
 /// (`fold`: a name and the values put on continuation lines); `OUT` gets,
 /// by label, the status, every response header, `Retry-After`,
@@ -67,7 +68,7 @@ for call in plan:
         headers = [("x-api-key", token), ("anthropic-version", "2023-06-01")]
     url = urllib.parse.urlsplit(base + (call.get("raw_path") or call["path"]))
     conn = http.client.HTTPConnection(url.hostname, url.port, timeout=60)
-    conn.putrequest(method, url.path, skip_accept_encoding=True)
+    conn.putrequest(method, url.path + ("?" + url.query if url.query else ""), skip_accept_encoding=True)
     for name, value in headers + [tuple(h) for h in call.get("headers", [])]:
         conn.putheader(name, value)
     if call.get("fold"):
