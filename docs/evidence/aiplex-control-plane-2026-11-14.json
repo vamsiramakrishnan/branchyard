@@ -14,7 +14,7 @@
     "--aiplex-commit",
     "f4e3991",
     "--branchyard-commit",
-    "8d6c52f",
+    "56145b8",
     "--out",
     "docs/evidence/aiplex-control-plane-2026-11-14.json"
   ],
@@ -35,13 +35,13 @@
       "from": "`aiplex version`"
     },
     "branchyard_commit": {
-      "value": "8d6c52f",
+      "value": "56145b8",
       "verified": false,
       "note": "stated on the command line; `by --version` prints no commit"
     },
     "binary_sha256": {
-      "by": "9962fe9ac73e3f1f7110a0b4063f19240623363130121f9addd1cdad56b7889a",
-      "fake-acp-agent": "23c9ab1c3ec7b0f4e2ae04b0a75d7974ad75b1225952aa505112a34164763d6b",
+      "by": "f912fe78b49da6310724ea44d1fb0699f590fc8f609b8e857413b2d642d8de93",
+      "fake-acp-agent": "bcd8efd8b4f44ce8212f418599dc3ce2c411e5217fc152d6a14fc1453005a928",
       "aiplex": "8cf5752b9baf0ff49a1ce3bd4b38414e75ec1c0954e15dbd2cd243a7822a1e0d",
       "aiplex-api": "31eb87e696883b0dff09cf9b25f8289bbe974ec4800451ccc279a034a8f21017"
     },
@@ -102,17 +102,18 @@
       "observed": {
         "problems": [],
         "base_urls": [
-          "http://127.0.0.1:42071/anthropic",
-          "http://127.0.0.1:42071/openai/v1"
+          "http://127.0.0.1:37637/anthropic",
+          "http://127.0.0.1:37637/openai/v1"
         ]
       }
     },
     {
       "id": "harness-holds-no-token",
-      "claim": "no variable of the harness's environment holds the AIPlex token (the whole token or its signature segment, as a substring of any value), and `AIPLEX_TOKEN` is not set; the harness was given the digests it needs to look",
+      "claim": "no variable of the harness's environment holds the AIPlex token (the whole token or its signature segment, as a substring of any value), and `AIPLEX_TOKEN` is not set, although `by` was started with the token in `AIPLEX_TOKEN` and again in `SAME_TOKEN_OTHER_NAME`; the harness was given the digests it needs to look",
       "result": "pass",
       "observed": {
         "problems": [],
+        "token_also_given_to_by_as": "SAME_TOKEN_OTHER_NAME",
         "aiplex_token_variable_set": false,
         "variables_holding_the_token": [],
         "helpers_received": {
@@ -200,8 +201,8 @@
             "backend": "aiplex-local-anthropic",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "VaJbeo0LdNwa0UrpRfLHvA",
-              "request_id": "req-f397f948e5c6a2e7-19"
+              "call_id": "yPgM7S74v1NbfTnFT2FPKA",
+              "request_id": "req-d6bb7f28eff4c949-19"
             },
             "reason": null,
             "failed_over": null
@@ -214,8 +215,8 @@
             "backend": "aiplex-local-openai",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "DVWZ1NJE406o3IAt-Zi1bg",
-              "request_id": "req-f397f948e5c6a2e7-20"
+              "call_id": "BFC-ER4_qEVYqxUNOgedFg",
+              "request_id": "req-d6bb7f28eff4c949-20"
             },
             "reason": null,
             "failed_over": null
@@ -228,8 +229,8 @@
             "backend": "aiplex-local-anthropic",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "OOSdwVUQioYVZJuS0l7zkw",
-              "request_id": "req-f397f948e5c6a2e7-21"
+              "call_id": "1fHCg-wGdDGg1BDIUlqF8g",
+              "request_id": "req-d6bb7f28eff4c949-21"
             },
             "reason": null,
             "failed_over": null
@@ -242,8 +243,8 @@
             "backend": "aiplex-local-anthropic-2",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "jUT2g954Edho98mycKcfVg",
-              "request_id": "req-f397f948e5c6a2e7-22",
+              "call_id": "NTFgWxYBGDLM29FLCSVQSA",
+              "request_id": "req-d6bb7f28eff4c949-22",
               "error_code": "MODEL_NOT_FOUND"
             },
             "reason": "refused by aiplex (MODEL_NOT_FOUND)",
@@ -257,8 +258,8 @@
             "backend": "aiplex-local-openai",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "SQeXNit13dP64PJP51C9nQ",
-              "request_id": "req-f397f948e5c6a2e7-23"
+              "call_id": "fd8v034LXLN69Pr7CLkP6w",
+              "request_id": "req-d6bb7f28eff4c949-23"
             },
             "reason": null,
             "failed_over": null
@@ -292,9 +293,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-f397f948e5c6a2e7-19",
-        "call_id": "VaJbeo0LdNwa0UrpRfLHvA",
-        "client_request_id": "VaJbeo0LdNwa0UrpRfLHvA",
+        "request_id": "req-d6bb7f28eff4c949-19",
+        "call_id": "yPgM7S74v1NbfTnFT2FPKA",
+        "client_request_id": "yPgM7S74v1NbfTnFT2FPKA",
         "operation": "anthropic.messages",
         "http_status": 200,
         "status": "ok",
@@ -324,9 +325,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-f397f948e5c6a2e7-20",
-        "call_id": "DVWZ1NJE406o3IAt-Zi1bg",
-        "client_request_id": "DVWZ1NJE406o3IAt-Zi1bg",
+        "request_id": "req-d6bb7f28eff4c949-20",
+        "call_id": "BFC-ER4_qEVYqxUNOgedFg",
+        "client_request_id": "BFC-ER4_qEVYqxUNOgedFg",
         "operation": "compat.chat-completions",
         "http_status": 200,
         "status": "ok",
@@ -356,9 +357,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-f397f948e5c6a2e7-21",
-        "call_id": "OOSdwVUQioYVZJuS0l7zkw",
-        "client_request_id": "OOSdwVUQioYVZJuS0l7zkw",
+        "request_id": "req-d6bb7f28eff4c949-21",
+        "call_id": "1fHCg-wGdDGg1BDIUlqF8g",
+        "client_request_id": "1fHCg-wGdDGg1BDIUlqF8g",
         "operation": "anthropic.messages",
         "http_status": 200,
         "status": "ok",
@@ -388,9 +389,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-f397f948e5c6a2e7-22",
-        "call_id": "jUT2g954Edho98mycKcfVg",
-        "client_request_id": "jUT2g954Edho98mycKcfVg",
+        "request_id": "req-d6bb7f28eff4c949-22",
+        "call_id": "NTFgWxYBGDLM29FLCSVQSA",
+        "client_request_id": "NTFgWxYBGDLM29FLCSVQSA",
         "operation": "unknown-model",
         "http_status": 404,
         "status": "error",
@@ -430,9 +431,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-f397f948e5c6a2e7-23",
-        "call_id": "SQeXNit13dP64PJP51C9nQ",
-        "client_request_id": "SQeXNit13dP64PJP51C9nQ",
+        "request_id": "req-d6bb7f28eff4c949-23",
+        "call_id": "fd8v034LXLN69Pr7CLkP6w",
+        "client_request_id": "fd8v034LXLN69Pr7CLkP6w",
         "operation": "compat.chat-completions",
         "http_status": 200,
         "status": "ok",
@@ -524,7 +525,7 @@
           2
         ],
         "event_text": [
-          "2026-11-14T10:48:34.931Z  model: mock-claude failed (502, aiplex-local-anthropic: could not connect (Connection refused (os error 111)), 1 ms, call O9GkxoFE7bzow-cuCyjxmQ)"
+          "2026-11-14T12:59:15.279Z  model: mock-claude failed (502, aiplex-local-anthropic: could not connect (Connection refused (os error 111)), 1 ms, call 1inIl0sQknnajwOdolTQew)"
         ]
       }
     },
@@ -579,13 +580,13 @@
       "",
       "[models.backends.aiplex-local-anthropic]",
       "api = \"anthropic\"",
-      "url = \"http://127.0.0.1:41591/ap/local\"",
+      "url = \"http://127.0.0.1:43685/ap/local\"",
       "key = \"aiplex\"",
       "control_plane = \"aiplex\"",
       "",
       "[models.backends.aiplex-local-openai]",
       "api = \"openai\"",
-      "url = \"http://127.0.0.1:41591/ap/local\"",
+      "url = \"http://127.0.0.1:43685/ap/local\"",
       "key = \"aiplex\"",
       "control_plane = \"aiplex\"",
       "",
@@ -607,7 +608,7 @@
     ],
     "turn_exit": 0,
     "turn_output_tail": [
-      "checkpoint 1 at 265fc52426 (0 file(s), +0 -0)",
+      "checkpoint 1 at bd393f6dc7 (0 file(s), +0 -0)",
       "",
       "branch     qualify (by/qualify)",
       "status     no changes",
@@ -617,13 +618,13 @@
       "           by rm qualify"
     ],
     "by_log_text": [
-      "2026-11-14T10:48:34.187Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 6 ms, aiplex request req-f397f948e5c6a2e7-19, call VaJbeo0LdNwa0UrpRfLHvA)",
-      "2026-11-14T10:48:34.191Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-f397f948e5c6a2e7-20, call DVWZ1NJE406o3IAt-Zi1bg)",
-      "2026-11-14T10:48:34.195Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 3 ms, aiplex request req-f397f948e5c6a2e7-21, call OOSdwVUQioYVZJuS0l7zkw)",
-      "2026-11-14T10:48:34.197Z  model: mock-absent refused via aiplex-local-anthropic-2 (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-f397f948e5c6a2e7-22, call jUT2g954Edho98mycKcfVg)",
-      "2026-11-14T10:48:34.200Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 2 ms, aiplex request req-f397f948e5c6a2e7-23, call SQeXNit13dP64PJP51C9nQ)",
-      "2026-11-14T10:48:34.202Z  model: direct-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)",
-      "2026-11-14T10:48:34.204Z  model: unrouted-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)"
+      "2026-11-14T12:59:14.538Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 5 ms, aiplex request req-d6bb7f28eff4c949-19, call yPgM7S74v1NbfTnFT2FPKA)",
+      "2026-11-14T12:59:14.543Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 4 ms, aiplex request req-d6bb7f28eff4c949-20, call BFC-ER4_qEVYqxUNOgedFg)",
+      "2026-11-14T12:59:14.546Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 2 ms, aiplex request req-d6bb7f28eff4c949-21, call 1fHCg-wGdDGg1BDIUlqF8g)",
+      "2026-11-14T12:59:14.549Z  model: mock-absent refused via aiplex-local-anthropic-2 (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-d6bb7f28eff4c949-22, call NTFgWxYBGDLM29FLCSVQSA)",
+      "2026-11-14T12:59:14.552Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 2 ms, aiplex request req-d6bb7f28eff4c949-23, call fd8v034LXLN69Pr7CLkP6w)",
+      "2026-11-14T12:59:14.554Z  model: direct-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)",
+      "2026-11-14T12:59:14.556Z  model: unrouted-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)"
     ],
     "expected_tags": {
       "by_branch": "qualify",
@@ -648,8 +649,8 @@
         }
       ],
       "variables_naming_aiplex": [],
-      "anthropic_base_url": "http://127.0.0.1:42071/anthropic",
-      "openai_base_url": "http://127.0.0.1:42071/openai/v1"
+      "anthropic_base_url": "http://127.0.0.1:37637/anthropic",
+      "openai_base_url": "http://127.0.0.1:37637/openai/v1"
     },
     "trace_ids_distinct": true,
     "caller_kind_and_access_point": [
@@ -658,14 +659,14 @@
         "local"
       ]
     ],
-    "stop_output": "Stopped aiplex dev (pid 18772)."
+    "stop_output": "Stopped aiplex dev (pid 3372)."
   },
   "not_done": [
-    "scenario 2, a Branchyard-signed token (`auth = \"turn-token\"`, contract section 7, `--federated`): the Branchyard side of the signed token does not exist yet",
+    "a Branchyard-signed token (`auth = \"turn-token\"`): that is scenario 2, a separate run of this script with `--federated` and a record of its own",
     "a real model or a real coding agent: the providers are AIPlex's mock providers and the harness is a script",
     "`traceparent`: a local turn has no trace context, so none was sent and AIPlex made its own trace ids",
     "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, a person's token, an agent's token)",
-    "a Branchyard server (`by serve`): only a local yard ran",
+    "a Branchyard server (`by serve`): only a local yard ran here; scenario 2 runs one",
     "a run on another operating system",
     "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified"
   ]
