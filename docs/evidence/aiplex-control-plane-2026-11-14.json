@@ -14,7 +14,7 @@
     "--aiplex-commit",
     "f4e3991",
     "--branchyard-commit",
-    "be423a2",
+    "f9a5caf",
     "--out",
     "docs/evidence/aiplex-control-plane-2026-11-14.json"
   ],
@@ -35,13 +35,13 @@
       "from": "`aiplex version`"
     },
     "branchyard_commit": {
-      "value": "be423a2",
+      "value": "f9a5caf",
       "verified": false,
       "note": "stated on the command line; `by --version` prints no commit"
     },
     "binary_sha256": {
-      "by": "1b68fdc32eab7e032c4cd999c9adb228bb63aa937f239ef30576d408cf5c65d1",
-      "fake-acp-agent": "b056ef14b4656c5a64d7f0621f65670b0a315c4913c814c26c43a1633c4d1053",
+      "by": "79f1f00ee0e209929e6cadd049831d78a64c7929eb9f4c9f4c86d70144375b78",
+      "fake-acp-agent": "ed2aef0aeba24a8c2a70bfe0b322000b9a5277d17f9356e311bc600c30e82da5",
       "aiplex": "8cf5752b9baf0ff49a1ce3bd4b38414e75ec1c0954e15dbd2cd243a7822a1e0d",
       "aiplex-api": "31eb87e696883b0dff09cf9b25f8289bbe974ec4800451ccc279a034a8f21017"
     },
@@ -79,7 +79,7 @@
           404,
           200,
           200,
-          200
+          404
         ],
         "streamed_complete": [
           true
@@ -102,8 +102,8 @@
       "observed": {
         "problems": [],
         "base_urls": [
-          "http://127.0.0.1:44863/anthropic",
-          "http://127.0.0.1:44863/openai/v1"
+          "http://127.0.0.1:41895/anthropic",
+          "http://127.0.0.1:41895/openai/v1"
         ]
       }
     },
@@ -176,11 +176,11 @@
             "transfer-encoding"
           ],
           "g": [
+            "cache-control",
             "connection",
             "content-type",
-            "date",
-            "server",
-            "transfer-encoding"
+            "transfer-encoding",
+            "x-request-id"
           ]
         },
         "framing_headers_exempt": "added by Branchyard's own HTTP server to every answer, not relayed from AIPlex"
@@ -188,7 +188,7 @@
     },
     {
       "id": "branchyard-events",
-      "claim": "`by log --json` has one `model` event per call: for the calls to AIPlex, AIPlex's request id and Branchyard's call id; exactly call d refused, as refused by aiplex with MODEL_NOT_FOUND; for the calls to the stand-in provider, no AIPlex control plane",
+      "claim": "`by log --json` has one `model` event per call: for the calls to AIPlex, AIPlex's request id and Branchyard's call id; exactly calls d (a model a route names that AIPlex does not serve) and g (`unrouted-claude`, which no route names) refused, as refused by aiplex with MODEL_NOT_FOUND, by one of the AIPlex backends; for the call to the stand-in provider (f), no AIPlex control plane",
       "result": "pass",
       "observed": {
         "problems": [],
@@ -201,8 +201,8 @@
             "backend": "aiplex-local-anthropic",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "xrGEkifrH5SepykX8vg9KQ",
-              "request_id": "req-70d82dfe19f7746f-19"
+              "call_id": "ehmQBl_YQ1GcM0CPoz5o_A",
+              "request_id": "req-bbafda88c159fb75-19"
             },
             "reason": null,
             "failed_over": null
@@ -215,8 +215,8 @@
             "backend": "aiplex-local-openai",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "q6wQ_r6zAbkB1HJQvmnjWA",
-              "request_id": "req-70d82dfe19f7746f-20"
+              "call_id": "0-4AAShebhoG4eIu_scVXA",
+              "request_id": "req-bbafda88c159fb75-20"
             },
             "reason": null,
             "failed_over": null
@@ -229,8 +229,8 @@
             "backend": "aiplex-local-anthropic",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "ACBMvbJ9TZBQlVfycHMdaw",
-              "request_id": "req-70d82dfe19f7746f-21"
+              "call_id": "kLPfgPrhHJvIuplN4yUy2A",
+              "request_id": "req-bbafda88c159fb75-21"
             },
             "reason": null,
             "failed_over": null
@@ -240,11 +240,11 @@
             "model": "mock-absent",
             "decision": "refused",
             "status": 404,
-            "backend": "aiplex-local-anthropic",
+            "backend": "aiplex-local-anthropic-2",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "JygFtch69Tvp_ybk5S3ERw",
-              "request_id": "req-70d82dfe19f7746f-22",
+              "call_id": "lEk-DUXt3UzlnosrjGUJzw",
+              "request_id": "req-bbafda88c159fb75-22",
               "error_code": "MODEL_NOT_FOUND"
             },
             "reason": "refused by aiplex (MODEL_NOT_FOUND)",
@@ -258,8 +258,8 @@
             "backend": "aiplex-local-openai",
             "control_plane": {
               "plane": "aiplex",
-              "call_id": "3yvBT3df8SEvbfiKpG4n4Q",
-              "request_id": "req-70d82dfe19f7746f-23"
+              "call_id": "MOURkQw6SlhguggrhqqHkw",
+              "request_id": "req-bbafda88c159fb75-23"
             },
             "reason": null,
             "failed_over": null
@@ -277,11 +277,16 @@
           {
             "label": "g",
             "model": "unrouted-claude",
-            "decision": "allowed",
-            "status": 200,
-            "backend": "direct-anthropic",
-            "control_plane": null,
-            "reason": null,
+            "decision": "refused",
+            "status": 404,
+            "backend": "aiplex-local-anthropic",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "X3i7mze5mRLOD3EVLSgZ2Q",
+              "request_id": "req-bbafda88c159fb75-24",
+              "error_code": "MODEL_NOT_FOUND"
+            },
+            "reason": "refused by aiplex (MODEL_NOT_FOUND)",
             "failed_over": null
           }
         ]
@@ -293,9 +298,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-70d82dfe19f7746f-19",
-        "call_id": "xrGEkifrH5SepykX8vg9KQ",
-        "client_request_id": "xrGEkifrH5SepykX8vg9KQ",
+        "request_id": "req-bbafda88c159fb75-19",
+        "call_id": "ehmQBl_YQ1GcM0CPoz5o_A",
+        "client_request_id": "ehmQBl_YQ1GcM0CPoz5o_A",
         "operation": "anthropic.messages",
         "http_status": 200,
         "status": "ok",
@@ -325,9 +330,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-70d82dfe19f7746f-20",
-        "call_id": "q6wQ_r6zAbkB1HJQvmnjWA",
-        "client_request_id": "q6wQ_r6zAbkB1HJQvmnjWA",
+        "request_id": "req-bbafda88c159fb75-20",
+        "call_id": "0-4AAShebhoG4eIu_scVXA",
+        "client_request_id": "0-4AAShebhoG4eIu_scVXA",
         "operation": "compat.chat-completions",
         "http_status": 200,
         "status": "ok",
@@ -357,9 +362,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-70d82dfe19f7746f-21",
-        "call_id": "ACBMvbJ9TZBQlVfycHMdaw",
-        "client_request_id": "ACBMvbJ9TZBQlVfycHMdaw",
+        "request_id": "req-bbafda88c159fb75-21",
+        "call_id": "kLPfgPrhHJvIuplN4yUy2A",
+        "client_request_id": "kLPfgPrhHJvIuplN4yUy2A",
         "operation": "anthropic.messages",
         "http_status": 200,
         "status": "ok",
@@ -389,9 +394,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-70d82dfe19f7746f-22",
-        "call_id": "JygFtch69Tvp_ybk5S3ERw",
-        "client_request_id": "JygFtch69Tvp_ybk5S3ERw",
+        "request_id": "req-bbafda88c159fb75-22",
+        "call_id": "lEk-DUXt3UzlnosrjGUJzw",
+        "client_request_id": "lEk-DUXt3UzlnosrjGUJzw",
         "operation": "unknown-model",
         "http_status": 404,
         "status": "error",
@@ -421,7 +426,7 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "backend": "aiplex-local-anthropic",
+        "backend": "aiplex-local-anthropic-2",
         "records_for_the_call_id": 1
       }
     },
@@ -431,9 +436,9 @@
       "result": "pass",
       "observed": {
         "problems": [],
-        "request_id": "req-70d82dfe19f7746f-23",
-        "call_id": "3yvBT3df8SEvbfiKpG4n4Q",
-        "client_request_id": "3yvBT3df8SEvbfiKpG4n4Q",
+        "request_id": "req-bbafda88c159fb75-23",
+        "call_id": "MOURkQw6SlhguggrhqqHkw",
+        "client_request_id": "MOURkQw6SlhguggrhqqHkw",
         "operation": "compat.chat-completions",
         "http_status": 200,
         "status": "ok",
@@ -471,8 +476,54 @@
       }
     },
     {
+      "id": "record-join-g",
+      "claim": "call g (anthropic unrouted-claude): AIPlex has one record, found by the request id and by the client request id, whose client_request_id is Branchyard's call id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "request_id": "req-bbafda88c159fb75-24",
+        "call_id": "X3i7mze5mRLOD3EVLSgZ2Q",
+        "client_request_id": "X3i7mze5mRLOD3EVLSgZ2Q",
+        "operation": "unknown-model",
+        "http_status": 404,
+        "status": "error",
+        "error_class": "model_not_found"
+      }
+    },
+    {
+      "id": "record-tags-g",
+      "claim": "call g: the record's tags are by_branch, by_turn and by_harness with the values Branchyard's own records give",
+      "result": "pass",
+      "observed": {
+        "expected": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        },
+        "observed_tags": {
+          "by_branch": "qualify",
+          "by_harness": "gemini-cli",
+          "by_turn": "1"
+        }
+      }
+    },
+    {
+      "id": "unrouted-call-refused-by-aiplex",
+      "claim": "the call for `unrouted-claude`, which no route names, went to the AIPlex backends of its API and not to the plain stand-in backend: AIPlex refused it (the harness got 404 with a body that is not the stand-in's; the event's control_plane.error_code is MODEL_NOT_FOUND, since the gateway strips AIPlex's headers before the harness), the refusal is final (the event names one AIPlex backend and lists none tried before it, and AIPlex holds exactly one record for the call's id), and the stand-in received no request for it",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "backend": "aiplex-local-anthropic",
+        "failed_over": null,
+        "records_for_the_call_id": 1,
+        "stand_in_requests_for_the_model": 0,
+        "harness_status": 404,
+        "harness_body_head": "{\"error\":{\"message\":\"model \\\"unrouted-claude\\\" is not available through this access point\",\"type\":\"not_found_error\"},\"type\":\"error\"}"
+      }
+    },
+    {
       "id": "direct-provider-beside-aiplex",
-      "claim": "a call for `direct-claude` (a route to the plain stand-in backend) and a call for `unrouted-claude` (no route; the API has a plain backend, so it goes to plain backends only) are answered by the stand-in, which never receives the AIPlex token, while AIPlex holds records only for the calls routed to it",
+      "claim": "a call for `direct-claude` (a route names the plain stand-in backend for it) is answered by the stand-in, and the stand-in answers no other call of the turn (not the one for `unrouted-claude`, which no route names); it never receives the AIPlex token, while AIPlex holds records only for the calls that went to it (none for the stand-in's model)",
       "result": "pass",
       "observed": {
         "problems": [],
@@ -490,24 +541,178 @@
               "user-agent",
               "x-api-key"
             ]
-          },
-          {
-            "path": "/v1/messages",
-            "model": "unrouted-claude",
-            "header_names": [
-              "accept-encoding",
-              "anthropic-version",
-              "connection",
-              "content-length",
-              "content-type",
-              "host",
-              "user-agent",
-              "x-api-key"
-            ]
           }
         ],
-        "aiplex_records": 5,
-        "aiplex_bound_calls": 5
+        "aiplex_records": 6,
+        "aiplex_bound_calls": 6
+      }
+    },
+    {
+      "id": "hidden-model-other-spelling",
+      "claim": "a listed path in another spelling (a trailing slash) with a readable body for the plain-routed model: the gateway refuses it itself (status 403, not the stand-in's answer, no AIPlex header), the stand-in receives no request, AIPlex's ledger gains no record, and no event names the stand-in's backend or carries an AIPlex request id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "method": "POST",
+        "path": "/v1/messages/",
+        "url_form": "{ANTHROPIC_BASE_URL}/v1/messages/",
+        "content_type": "application/json",
+        "body_bytes": 93,
+        "harness_status": 403,
+        "harness_body_head": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Branchyard's model gateway: POST /v1/messages/ is not a ro",
+        "stand_in_requests_before_and_after": [
+          1,
+          1
+        ],
+        "aiplex_records_before_and_after": [
+          6,
+          6
+        ],
+        "events": [
+          {
+            "model": "direct-claude",
+            "decision": "denied",
+            "status": 403,
+            "backend": null,
+            "reason": "POST /v1/messages/ is not a route the gateway serves while a control plane is configured (POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models)",
+            "control_plane": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "hidden-model-other-endpoint",
+      "claim": "a path outside the list (the batches endpoint) with a readable body whose top-level model is the plain-routed one: the gateway refuses it itself (status 403, not the stand-in's answer, no AIPlex header), the stand-in receives no request, AIPlex's ledger gains no record, and no event names the stand-in's backend or carries an AIPlex request id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "method": "POST",
+        "path": "/v1/messages/batches",
+        "url_form": "{ANTHROPIC_BASE_URL}/v1/messages/batches",
+        "content_type": "application/json",
+        "body_bytes": 93,
+        "harness_status": 403,
+        "harness_body_head": "{\"type\":\"error\",\"error\":{\"type\":\"permission_error\",\"message\":\"Branchyard's model gateway: POST /v1/messages/batches is n",
+        "stand_in_requests_before_and_after": [
+          1,
+          1
+        ],
+        "aiplex_records_before_and_after": [
+          6,
+          6
+        ],
+        "events": [
+          {
+            "model": "direct-claude",
+            "decision": "denied",
+            "status": 403,
+            "backend": null,
+            "reason": "POST /v1/messages/batches is not a route the gateway serves while a control plane is configured (POST /v1/messages, POST /v1/messages/count_tokens, GET /v1/models)",
+            "control_plane": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "hidden-model-pass-through",
+      "claim": "the pass-through path to the stand-in's backend name, at the gateway's root ($BRANCHYARD_MODEL_GATEWAY/backends/NAME/..., not under the Anthropic API prefix): the gateway refuses it itself (status 404, not the stand-in's answer, no AIPlex header), the stand-in receives no request, AIPlex's ledger gains no record, and no event names the stand-in's backend or carries an AIPlex request id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "method": "POST",
+        "path": "/backends/direct-anthropic/v1/messages",
+        "url_form": "{BRANCHYARD_MODEL_GATEWAY}/backends/direct-anthropic/v1/messages",
+        "content_type": "application/json",
+        "body_bytes": 93,
+        "harness_status": 404,
+        "harness_body_head": "{\"error\":{\"message\":\"Branchyard's model gateway: no backend direct-anthropic\",\"type\":\"not_found_error\",\"code\":\"not_found",
+        "stand_in_requests_before_and_after": [
+          1,
+          1
+        ],
+        "aiplex_records_before_and_after": [
+          6,
+          6
+        ],
+        "events": [
+          {
+            "model": "direct-claude",
+            "decision": "failed",
+            "status": 404,
+            "backend": null,
+            "reason": "the pass-through path is closed while a control plane is configured: direct-anthropic is not reached by it",
+            "control_plane": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "hidden-model-unreadable-body",
+      "claim": "a body the gateway cannot read on a listed path (one byte that is not UTF-8, text/plain): the gateway refuses it itself (status 400, not the stand-in's answer, no AIPlex header), the stand-in receives no request, AIPlex's ledger gains no record, and no event names the stand-in's backend or carries an AIPlex request id",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "method": "POST",
+        "path": "/v1/messages",
+        "url_form": "{ANTHROPIC_BASE_URL}/v1/messages",
+        "content_type": "text/plain",
+        "body_bytes": 1,
+        "harness_status": 400,
+        "harness_body_head": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Branchyard's model gateway: the body of POST /v1/messages is not ",
+        "stand_in_requests_before_and_after": [
+          1,
+          1
+        ],
+        "aiplex_records_before_and_after": [
+          6,
+          6
+        ],
+        "events": [
+          {
+            "model": "",
+            "decision": "failed",
+            "status": 400,
+            "backend": null,
+            "reason": "the body of POST /v1/messages is not JSON the gateway can read (valid UTF-8, one JSON value, nested no deeper than its parser reads); with a control plane configured the gateway routes such a request only when it read the model as the backend will",
+            "control_plane": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "letter-case-other-letter-case",
+      "claim": "the AIPlex-routed model `mock-claude` written `MOCK-CLAUDE` goes to AIPlex and not to the stand-in: the event names an AIPlex backend with AIPlex's control plane and the stand-in receives no request; what AIPlex answered is recorded, not asserted (here: the answer carried no AIPlex request id (status 404))",
+      "result": "pass",
+      "observed": {
+        "problems": [],
+        "path": "/v1/messages",
+        "harness_status": 404,
+        "harness_aiplex_error_code": null,
+        "harness_aiplex_request_id": null,
+        "harness_body_head": "{\"error\":{\"message\":\"model \\\"MOCK-CLAUDE\\\" is not available through this access point\",\"type\":\"not_found_error\"},\"type\":",
+        "stand_in_requests_before_and_after": [
+          1,
+          1
+        ],
+        "aiplex_records_before_and_after": [
+          6,
+          7
+        ],
+        "events": [
+          {
+            "model": "MOCK-CLAUDE",
+            "decision": "refused",
+            "status": 404,
+            "backend": "aiplex-local-anthropic",
+            "reason": "refused by aiplex (MODEL_NOT_FOUND)",
+            "control_plane": {
+              "plane": "aiplex",
+              "call_id": "pwFm6NLqQ6fw-p8b3WTXrw",
+              "request_id": "req-bbafda88c159fb75-108",
+              "error_code": "MODEL_NOT_FOUND"
+            }
+          }
+        ]
       }
     },
     {
@@ -521,11 +726,11 @@
         "event_decision": "failed",
         "event_status": 502,
         "stand_in_requests_before_and_after": [
-          2,
-          2
+          1,
+          1
         ],
         "event_text": [
-          "2026-11-14T14:39:32.950Z  model: mock-claude failed (502, aiplex-local-anthropic: could not connect (Connection refused (os error 111)), 1 ms, call AvJS8ZkLhyq79w1yGMNhCg)"
+          "2026-11-14T23:39:41.861Z  model: mock-claude failed (502, aiplex-local-anthropic: could not connect (Connection refused (os error 111)), 1 ms, call mZRSg4iF9_IuIwOqAvHAoA)"
         ]
       }
     },
@@ -580,13 +785,13 @@
       "",
       "[models.backends.aiplex-local-anthropic]",
       "api = \"anthropic\"",
-      "url = \"http://127.0.0.1:52029/ap/local\"",
+      "url = \"http://127.0.0.1:55575/ap/local\"",
       "key = \"aiplex\"",
       "control_plane = \"aiplex\"",
       "",
       "[models.backends.aiplex-local-openai]",
       "api = \"openai\"",
-      "url = \"http://127.0.0.1:52029/ap/local\"",
+      "url = \"http://127.0.0.1:55575/ap/local\"",
       "key = \"aiplex\"",
       "control_plane = \"aiplex\"",
       "",
@@ -608,7 +813,7 @@
     ],
     "turn_exit": 0,
     "turn_output_tail": [
-      "checkpoint 1 at 3b1567d8c7 (0 file(s), +0 -0)",
+      "checkpoint 1 at bc6e0fb45c (0 file(s), +0 -0)",
       "",
       "branch     qualify (by/qualify)",
       "status     no changes",
@@ -618,13 +823,13 @@
       "           by rm qualify"
     ],
     "by_log_text": [
-      "2026-11-14T14:39:32.248Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 6 ms, aiplex request req-70d82dfe19f7746f-19, call xrGEkifrH5SepykX8vg9KQ)",
-      "2026-11-14T14:39:32.251Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 2 ms, aiplex request req-70d82dfe19f7746f-20, call q6wQ_r6zAbkB1HJQvmnjWA)",
-      "2026-11-14T14:39:32.254Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 2 ms, aiplex request req-70d82dfe19f7746f-21, call ACBMvbJ9TZBQlVfycHMdaw)",
-      "2026-11-14T14:39:32.257Z  model: mock-absent refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 1 ms, aiplex request req-70d82dfe19f7746f-22, call JygFtch69Tvp_ybk5S3ERw)",
-      "2026-11-14T14:39:32.261Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-70d82dfe19f7746f-23, call 3yvBT3df8SEvbfiKpG4n4Q)",
-      "2026-11-14T14:39:32.263Z  model: direct-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)",
-      "2026-11-14T14:39:32.265Z  model: unrouted-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 1 ms)"
+      "2026-11-14T23:39:26.411Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 7 ms, aiplex request req-bbafda88c159fb75-19, call ehmQBl_YQ1GcM0CPoz5o_A)",
+      "2026-11-14T23:39:26.416Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 4 ms, aiplex request req-bbafda88c159fb75-20, call 0-4AAShebhoG4eIu_scVXA)",
+      "2026-11-14T23:39:26.422Z  model: mock-claude allowed via aiplex-local-anthropic (200, 1 in / 9 out, stop: end_turn, 5 ms, aiplex request req-bbafda88c159fb75-21, call kLPfgPrhHJvIuplN4yUy2A)",
+      "2026-11-14T23:39:26.426Z  model: mock-absent refused via aiplex-local-anthropic-2 (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-bbafda88c159fb75-22, call lEk-DUXt3UzlnosrjGUJzw)",
+      "2026-11-14T23:39:26.430Z  model: mock-gpt allowed via aiplex-local-openai (200, 1 in / 9 out, stop: stop, 3 ms, aiplex request req-bbafda88c159fb75-23, call MOURkQw6SlhguggrhqqHkw)",
+      "2026-11-14T23:39:26.433Z  model: direct-claude allowed via direct-anthropic (200, 1 in / 1 out, stop: end_turn, 2 ms)",
+      "2026-11-14T23:39:26.436Z  model: unrouted-claude refused via aiplex-local-anthropic (404, refused by aiplex (MODEL_NOT_FOUND), 2 ms, aiplex request req-bbafda88c159fb75-24, call X3i7mze5mRLOD3EVLSgZ2Q)"
     ],
     "expected_tags": {
       "by_branch": "qualify",
@@ -649,8 +854,8 @@
         }
       ],
       "variables_naming_aiplex": [],
-      "anthropic_base_url": "http://127.0.0.1:44863/anthropic",
-      "openai_base_url": "http://127.0.0.1:44863/openai/v1"
+      "anthropic_base_url": "http://127.0.0.1:41895/anthropic",
+      "openai_base_url": "http://127.0.0.1:41895/openai/v1"
     },
     "trace_ids_distinct": true,
     "caller_kind_and_access_point": [
@@ -659,7 +864,7 @@
         "local"
       ]
     ],
-    "stop_output": "Stopped aiplex dev (pid 5804)."
+    "stop_output": "Stopped aiplex dev (pid 722)."
   },
   "not_done": [
     "a Branchyard-signed token (`auth = \"turn-token\"`): that is scenario 2, a separate run of this script with `--federated` and a record of its own",
@@ -667,6 +872,8 @@
     "`traceparent`: a local turn has no trace context, so none was sent and AIPlex made its own trace ids",
     "an AIPlex that is not `aiplex dev` (cloud deployment, real quota, a person's token, an agent's token)",
     "a Branchyard server (`by serve`): only a local yard ran here; scenario 2 runs one",
+    "a request that hides its model any other way than the four probed (another spelling of a listed path, a path outside the list, the pass-through path, a body the gateway cannot read) and the one letter-case variant: white space around a name, an alias or a vendor prefix, another endpoint or method, a `model` that is not at the top level, a body with a content coding, and the OpenAI wire were not probed",
+    "a plain backend that a route names with `model = \"*\"` beside the AIPlex ones, and a second plain backend",
     "a run on another operating system",
     "the Branchyard commit: `by --version` prints none, so the one given on the command line is stated, not verified"
   ]
