@@ -829,11 +829,13 @@ impl Sqlite {
             .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
         // Before SQLite is given the file: a log with another page size is
         // refused (RUSTSEC-2026-0459). SQLite is given the name the check
-        // resolved, which is also the path this store keeps.
-        let path = branchyard_support::check_wal_pair(&dir.join("state.db"))
-            .map_err(|e| Error::State(e.to_string()))?
-            .into_path_buf();
-        let conn = Connection::open(&path).map_err(|e| db(&path.display().to_string(), e))?;
+        // resolved; the store keeps, and names in messages, the path it was
+        // built from (its label comes from that path).
+        let path = dir.join("state.db");
+        let checked =
+            branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
+        let conn =
+            Connection::open(checked.as_path()).map_err(|e| db(&path.display().to_string(), e))?;
         conn.busy_timeout(BUSY).map_err(|e| db("busy timeout", e))?;
         // Switching a new database to WAL can fail at once with SQLITE_BUSY
         // while another process switches it, without waiting in the busy
@@ -4619,6 +4621,36 @@ mod tests {
         fn drop(&mut self) {
             branchyard_support::cleanup_dir(&self.0);
         }
+    }
+
+    /// The label is the repository directory's name, taken from the path
+    /// the store was opened with, whatever a link in that path points to.
+    #[cfg(unix)]
+    #[test]
+    fn the_label_and_path_of_a_store_behind_a_link_are_the_given_ones() {
+        let scratch = branchyard_testkit::Scratch::new("sqlite-label");
+        let root = scratch.path().join("myrepo");
+        let shared = scratch.path().join("shared/stores");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        // `.branchyard` is a link to a directory elsewhere.
+        std::os::unix::fs::symlink(&shared, root.join(".branchyard")).unwrap();
+        let store = Sqlite::open(&root.join(".branchyard")).unwrap();
+        assert_eq!(store.label(), "myrepo");
+        assert_eq!(store.path(), root.join(".branchyard/state.db"));
+        assert!(shared.join("state.db").metadata().unwrap().len() > 0);
+        drop(store);
+        // `state.db` is a link to a file elsewhere.
+        let other = scratch.path().join("other");
+        let vault = scratch.path().join("vault/db");
+        fs::create_dir_all(other.join(".branchyard")).unwrap();
+        fs::create_dir_all(&vault).unwrap();
+        std::os::unix::fs::symlink(vault.join("state.db"), other.join(".branchyard/state.db"))
+            .unwrap();
+        let store = Sqlite::open(&other.join(".branchyard")).unwrap();
+        assert_eq!(store.label(), "other");
+        assert_eq!(store.path(), other.join(".branchyard/state.db"));
+        assert!(vault.join("state.db").metadata().unwrap().len() > 0);
     }
 
     #[test]

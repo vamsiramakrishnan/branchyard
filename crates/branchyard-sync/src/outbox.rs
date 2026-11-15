@@ -80,19 +80,17 @@ impl Outbox {
             std::fs::create_dir_all(parent)?;
         }
         // Before SQLite is given the file: a log with another page size is
-        // refused (RUSTSEC-2026-0459). SQLite, the permissions and the path
-        // kept use the name the check resolved.
-        let path = branchyard_support::check_wal_pair(path)
-            .map_err(|e| crate::error::Error::local(e.to_string()))?
-            .into_path_buf();
-        let path = path.as_path();
-        let conn = Connection::open(path)?;
+        // refused (RUSTSEC-2026-0459). SQLite and the permissions use the
+        // name the check resolved; the outbox keeps the path it was given.
+        let checked = branchyard_support::check_wal_pair(path)
+            .map_err(|e| crate::error::Error::local(e.to_string()))?;
+        let conn = Connection::open(checked.as_path())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             branchyard_support::best_effort(
                 "restrict the outbox file to its owner",
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)),
+                std::fs::set_permissions(checked.as_path(), std::fs::Permissions::from_mode(0o600)),
             );
         }
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
@@ -416,10 +414,11 @@ mod tests {
         std::os::unix::fs::symlink("real/target.db", root.join("sync.db")).unwrap();
         let outbox = Outbox::open(&root.join("data/../sync.db")).unwrap();
         outbox.enqueue("r", "a", 10).unwrap();
-        // The files are where the target is, and the path kept names it.
+        // The files are where the target is; the outbox keeps the path it
+        // was given.
         assert!(root.join("real/target.db").metadata().unwrap().len() > 0);
         assert!(root.join("real/target.db-wal").exists());
-        assert_eq!(outbox.path(), root.join("real/target.db"));
+        assert_eq!(outbox.path(), root.join("data/../sync.db"));
         drop(outbox);
         // The link's text drops `nope/..`; the system cannot get through.
         let wal = root.join("real/target.db-wal");

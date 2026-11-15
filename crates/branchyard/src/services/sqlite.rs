@@ -195,10 +195,11 @@ impl LocalRegistry {
             fs::create_dir_all(parent)?;
         }
         // Before `private` makes a file and before SQLite is given the file;
-        // both, and the path kept, use the name the check resolved.
-        let path = branchyard_support::check_wal_pair(&path)?.into_path_buf();
-        private(&path)?;
-        let mut conn = Connection::open(&path).map_err(sql)?;
+        // both use the name the check resolved. The registry keeps, and names
+        // in messages, the path it was given.
+        let checked = branchyard_support::check_wal_pair(&path)?;
+        private(checked.as_path())?;
+        let mut conn = Connection::open(checked.as_path()).map_err(sql)?;
         conn.busy_timeout(BUSY).map_err(sql)?;
         let deadline = std::time::Instant::now() + BUSY;
         let mode: String = loop {

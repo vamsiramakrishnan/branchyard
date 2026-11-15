@@ -15,7 +15,10 @@ last name by reading it, at most 40), into a plain name (absolute, no `.` or
 `..`, no link), checks the log beside that name, and returns it; every open
 gives SQLite that name, because SQLite resolves a path differently (it drops
 `nope/..` from the text and opens `real.db`, where the system cannot get
-through the missing `nope`). A `-wal` of 32 bytes or more whose page size
+through the missing `nope`). Only SQLite, and a file operation between the
+check and the open, is given that name: a store keeps, returns and prints the
+path it was given, so a repository whose `.branchyard` or `state.db` is a link
+keeps its label and its team memory. A `-wal` of 32 bytes or more whose page size
 differs from the database's, or that sits beside a database shorter than 100
 bytes, is an error naming both files (where they are, and the path given when
 that differs); the remedy is to move both files away or restore a copy you
@@ -23,9 +26,13 @@ trust, never to delete the log of a database that has content. A log beside a
 missing or empty database is refused too, saying that a log cannot be used
 without its database (move the log away to start a new store): SQLite used to
 remove such a log silently, unread, and it may hold committed changes. Also
-refused: a directory that cannot be resolved, a path that begins with `file:`
-(SQLite reads it as a URI and opens another file than the one checked; write
-`./file:x` or an absolute path), a chain of more than 40 symbolic links or a
+refused: a directory that cannot be resolved (with advice that follows the
+cause, naming the link and its target when the directory came from a link), a
+path that begins with `file:` (SQLite reads it as a URI, not as a path, and
+Branchyard gives SQLite paths only; write `./file:x` or an absolute path), the
+exact name `:memory:` (SQLite opens an in-memory database for it, not a file;
+`BRANCHYARD_REGISTRY=:memory:` fails again, as it did before) and the empty
+path, a chain of more than 40 symbolic links or a
 loop (SQLite follows 200), a log that is a symbolic link (SQLite does not open
 one) and a log, or a database beside a log, that is not a regular file (a FIFO,
 a socket, a directory, a device). The type of a file is read without opening

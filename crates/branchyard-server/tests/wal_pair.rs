@@ -121,10 +121,8 @@ fn the_stores_open_what_was_checked_through_a_linked_directory_and_a_linked_file
     assert!(dir.join("other/server.db").metadata().unwrap().len() > 0);
     assert!(dir.join("other/server.db-wal").exists());
     assert!(!dir.join("real/state.db-wal").exists());
-    assert_eq!(
-        store.path(),
-        dir.join("other/server.db").canonicalize().unwrap()
-    );
+    // The store keeps the path it was given, not the target's name.
+    assert_eq!(store.path(), path);
     drop((store, triggers, companion));
     let wal = plant(&dir.join("other/server.db"));
     assert_refused(

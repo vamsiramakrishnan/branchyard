@@ -262,10 +262,15 @@ fn a_name_that_sqlite_reads_as_a_uri_is_refused() {
     for name in ["file:reg.db", "file:///data/x.db?mode=ro"] {
         let message = refusal(Path::new(name));
         assert!(message.contains(name), "{message}");
+        // The reason is the true one: a URI, not a path, and only paths are
+        // given to SQLite; it does not claim another file would be opened.
         assert!(
-            message.contains("URI") && message.contains("another file"),
+            message.contains("URI")
+                && message.contains("not as a path")
+                && message.contains("gives SQLite paths only"),
             "{message}"
         );
+        assert!(!message.contains("another file"), "{message}");
         assert!(message.contains("./"), "{message}");
     }
     // Only the five bytes `file:` at the start; `./file:x` and a directory
@@ -506,10 +511,89 @@ fn a_dotdot_through_real_directories_is_resolved_and_the_log_beside_the_file_is_
 #[test]
 fn a_path_without_a_file_name_is_refused() {
     let dir = Scratch::new("pair");
-    for given in [dir.join("sub/.."), "/".into(), "".into()] {
+    for given in [dir.join("sub/.."), "/".into()] {
         let message = refusal(&given);
         assert!(message.contains("no file name"), "{message}");
     }
+}
+
+#[test]
+fn the_empty_path_is_refused_saying_it_is_empty() {
+    let message = refusal(Path::new(""));
+    assert!(message.contains("the path is empty"), "{message}");
+    assert!(!message.contains("`..`"), "{message}");
+}
+
+#[test]
+fn the_name_memory_is_refused_as_sqlite_opens_no_file_for_it() {
+    let message = refusal(Path::new(":memory:"));
+    assert!(
+        message.contains("in-memory database") && message.contains("not a file"),
+        "{message}"
+    );
+    assert!(message.contains("./:memory:"), "{message}");
+    // Only the exact name: a name of a file that merely contains or starts
+    // with it, and the explicit relative name, are ordinary paths.
+    let dir = Scratch::new("pair");
+    accepted(&dir.join(":memory:"));
+    accepted(Path::new("./:memory:"));
+    accepted(Path::new(":memory:x"));
+    accepted(Path::new("x:memory:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_advice_for_a_directory_that_cannot_be_resolved_follows_the_cause() {
+    let dir = Scratch::new("pair");
+    // Not found: create it, or point elsewhere.
+    let message = refusal(&dir.join("nope/state.db"));
+    assert!(message.contains("create the directory"), "{message}");
+    // A part of the path is a file: not the advice to create anything.
+    fs::write(dir.join("afile"), b"x").unwrap();
+    let message = refusal(&dir.join("afile/sub/state.db"));
+    assert!(message.contains("cannot be resolved"), "{message}");
+    assert!(message.contains("is a file, not a directory"), "{message}");
+    assert!(!message.contains("create the directory"), "{message}");
+    // Not searchable (a superuser searches anything, so skip it for one).
+    if !rustix::process::geteuid().is_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let locked = dir.join("locked");
+        fs::create_dir_all(locked.join("sub")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let message = refusal(&locked.join("sub/state.db"));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(message.contains("cannot be searched"), "{message}");
+        assert!(!message.contains("create the directory"), "{message}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_that_came_from_a_link_is_named_with_the_link_and_its_target() {
+    let dir = Scratch::new("pair");
+    let link = dir.join("state.db");
+    std::os::unix::fs::symlink("vault/missing/real.db", &link).unwrap();
+    let message = refusal(&link);
+    let target_dir = dir.join("vault/missing");
+    assert!(
+        message.contains(&format!(
+            "{} is a symbolic link to vault/missing/real.db",
+            link.display()
+        )),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "the directory {} of that target",
+            target_dir.display()
+        )),
+        "{message}"
+    );
+    assert!(message.contains("cannot be resolved"), "{message}");
+    // A directory the person typed is named as theirs, not as a link's.
+    let message = refusal(&dir.join("nope/state.db"));
+    assert!(message.contains("its directory"), "{message}");
+    assert!(!message.contains("symbolic link"), "{message}");
 }
 
 /// The state of a thread (`S` sleeping, `R` running ...), from `/proc`.

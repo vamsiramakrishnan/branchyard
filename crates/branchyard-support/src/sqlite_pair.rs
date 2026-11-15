@@ -94,8 +94,9 @@ fn shown(path: &Path) -> String {
 /// SQLite builds the full name of a file it opens by itself and drops `.` and
 /// `..` from the text without looking at the file system, so a name that
 /// SQLite would resolve differently from the system is exactly what the check
-/// must not leave to it: for this name its resolution returns the same bytes
-/// (a name of 510 bytes or more it refuses to open at all).
+/// must not leave to it: for this name its resolution returns the same bytes.
+/// (The bundled SQLite refuses to open a name of 505 bytes or more at all; that
+/// limit is its own and was the same before the check, 504 bytes open.)
 ///
 /// Open this, not the path the check was given. Dropping it unused is a
 /// warning, and clippy turns that into an error.
@@ -163,6 +164,12 @@ fn given_note(given: &Path, plain: &Path) -> String {
     }
 }
 
+/// Whether `path` is exactly `:memory:`, the name for which SQLite opens an
+/// in-memory database and no file.
+fn is_memory_name(path: &Path) -> bool {
+    path.as_os_str() == ":memory:"
+}
+
 /// Whether SQLite reads `path` as a URI (it compares the first five bytes).
 fn reads_as_uri(path: &Path) -> bool {
     #[cfg(unix)]
@@ -176,6 +183,21 @@ fn reads_as_uri(path: &Path) -> bool {
     }
 }
 
+/// What the person can do about a directory that cannot be resolved, by cause.
+/// A cause not listed gets no advice, only the system's words.
+fn resolve_advice(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "; create the directory, or point the path at one that exists",
+        io::ErrorKind::PermissionDenied => {
+            "; a directory on the way cannot be searched: change its permissions, or point the path at another"
+        }
+        io::ErrorKind::NotADirectory => {
+            "; a part of the path is a file, not a directory: point the path at a directory"
+        }
+        _ => "",
+    }
+}
+
 /// The plain name of the file `given` names: the system resolves every
 /// directory (`canonicalize`), and a link at the last name is read and
 /// followed, at most [`MAX_LINKS`] of them. The name of a file that does not
@@ -184,6 +206,8 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
     let refuse =
         |why: String| PairError::Refused(format!("refusing to open {}: {why}", shown(given)));
     let mut current = given.to_path_buf();
+    // The link whose target `current` is, and the target as it was read.
+    let mut via: Option<(PathBuf, PathBuf)> = None;
     for round in 0..=MAX_LINKS {
         let Some(last) = current.file_name() else {
             return Err(refuse(format!(
@@ -197,9 +221,18 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
             None => return Err(refuse(format!("{} has no directory", shown(&current)))),
         };
         let dir = dir.canonicalize().map_err(|e| {
+            let advice = resolve_advice(e.kind());
+            let what = match &via {
+                Some((link, target)) => format!(
+                    "{} is a symbolic link to {}, and the directory {} of that target",
+                    shown(link),
+                    shown(target),
+                    shown(dir)
+                ),
+                None => format!("its directory {}", shown(dir)),
+            };
             refuse(format!(
-                "its directory {} cannot be resolved ({e}), so the files SQLite would open cannot be named; create the directory, or point the path at one that exists",
-                shown(dir)
+                "{what} cannot be resolved ({e}), so the file cannot be named{advice}"
             ))
         })?;
         let name = dir.join(last);
@@ -227,7 +260,8 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
         })?;
         // A relative target is read from the directory the link is in, which
         // is the resolved one; an absolute target replaces everything.
-        current = dir.join(target);
+        current = dir.join(&target);
+        via = Some((name, target));
     }
     Err(refuse(format!(
         "it is a chain of more than {MAX_LINKS} symbolic links (or a loop of them), longer than the check follows, so the file SQLite would open cannot be named; point the path at the database file itself"
@@ -398,22 +432,32 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// resolves `path` itself, with the system, into a plain name ([`CheckedPath`]:
 /// absolute, no `.` or `..`, no link in it, the last element included), checks
 /// that, and returns it. **Open the returned name, and use it for anything
-/// else that touches the file before the open**, never `path`; for such a name
-/// SQLite's own resolution gives back the same bytes. The function must be
-/// called after the directory exists: a directory that cannot be resolved is
-/// refused.
+/// else that touches the file between the check and the open**, never `path`.
+/// Nothing else uses it: a store keeps, returns and prints the path it was
+/// given. The function must be called after the directory exists: a directory
+/// that cannot be resolved is refused.
+///
+/// What the returned name is worth: for every path the check accepts, SQLite's
+/// own resolution of that path reaches the same file, because the cases where
+/// the two differ are refused (`..` after a missing element or a file, a
+/// `file:` name, `:memory:`, the empty name, a chain of more than 40 links).
+/// Giving SQLite the returned name is therefore a second line of defence, and
+/// no test of outcomes can tell a site that does from one that does not (three
+/// sites were changed to give SQLite the original path, and every test still
+/// passed); the `must_use` warning is what holds a site to it.
 ///
 /// - A path whose text begins with `file:` is refused: SQLite reads such a
-///   name as a URI and opens the file the URI names. Write it as an absolute
-///   path or one that begins with `./`. (The exact names `:memory:` and the
-///   empty name, which SQLite opens no file for, are not special here: no
-///   caller passes them, and a relative name is resolved against the current
-///   directory like any other; the empty name has no file name and is
-///   refused.)
+///   name as a URI, not as a path, and Branchyard gives SQLite paths only.
+///   Write it as an absolute path or one that begins with `./`. The exact
+///   name `:memory:` is refused too (SQLite opens an in-memory database for
+///   it and no file; `./:memory:` names a file), and so is the empty path,
+///   which has no file name.
 /// - Each directory is resolved with the system, so a directory part that
 ///   cannot be resolved (it is missing, `nope/..` after a missing element,
-///   not searchable) is refused, and a path that ends in `..` or is a root
-///   has no file name and is refused.
+///   not searchable, below a file) is refused, with advice that follows the
+///   cause, naming the link and its target when the directory came from a
+///   link; a path that ends in `..` or is a root has no file name and is
+///   refused.
 /// - A symbolic link at the last name is followed, up to 40 links in a row
 ///   (SQLite itself follows up to 200), and the log checked is the one beside
 ///   the target, as SQLite opens it. A chain of more than 40 links, or a
@@ -451,9 +495,19 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// [`PairError::Unreadable`] when a file of the pair exists and cannot be
 /// looked at, opened or read; both name the path.
 pub fn check_wal_pair(path: &Path) -> Result<CheckedPath, PairError> {
+    if path.as_os_str().is_empty() {
+        return Err(PairError::Refused(
+            "refusing to open an empty path: the path is empty, so there is no file to check; give the path of the database file".to_owned(),
+        ));
+    }
+    if is_memory_name(path) {
+        return Err(PairError::Refused(
+            "refusing to open `:memory:`: SQLite opens an in-memory database for that name, not a file; to name a file called `:memory:`, write it as `./:memory:`".to_owned(),
+        ));
+    }
     if reads_as_uri(path) {
         return Err(PairError::Refused(format!(
-            "refusing to open {}: SQLite reads a name that begins with `file:` as a URI and would open another file than the one checked; write the path as an absolute path, or a relative one that begins with `./`",
+            "refusing to open {}: SQLite reads a name that begins with `file:` as a URI, not as a path, and Branchyard gives SQLite paths only; write the path as an absolute path, or a relative one that begins with `./`",
             shown(path)
         )));
     }
@@ -502,5 +556,25 @@ pub fn check_wal_pair(path: &Path) -> Result<CheckedPath, PairError> {
                 MOVE_BOTH,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_advice_for_a_directory_follows_the_cause() {
+        assert!(resolve_advice(io::ErrorKind::NotFound).contains("create the directory"));
+        let denied = resolve_advice(io::ErrorKind::PermissionDenied);
+        assert!(denied.contains("cannot be searched"), "{denied}");
+        assert!(!denied.contains("create the directory"), "{denied}");
+        let file = resolve_advice(io::ErrorKind::NotADirectory);
+        assert!(file.contains("is a file"), "{file}");
+        assert!(!file.contains("create the directory"), "{file}");
+        // Any other cause: the system's words only, no advice that might be
+        // wrong.
+        assert_eq!(resolve_advice(io::ErrorKind::TimedOut), "");
+        assert_eq!(resolve_advice(io::ErrorKind::Other), "");
     }
 }

@@ -1135,10 +1135,10 @@ impl SqliteStore {
             fs::create_dir_all(parent)?;
         }
         // Before SQLite is given the file: a log with another page size is
-        // refused (RUSTSEC-2026-0459). SQLite and the path kept use the name
-        // the check resolved.
-        let path = branchyard_support::check_wal_pair(&path)?.into_path_buf();
-        let mut conn = rusqlite::Connection::open(&path).map_err(sql)?;
+        // refused (RUSTSEC-2026-0459). SQLite is given the name the check
+        // resolved; the store keeps the path it was given.
+        let checked = branchyard_support::check_wal_pair(&path)?;
+        let mut conn = rusqlite::Connection::open(checked.as_path()).map_err(sql)?;
         conn.busy_timeout(Duration::from_secs(30)).map_err(sql)?;
         let mode = sqlite_wal(&conn).map_err(sql)?;
         if !mode.eq_ignore_ascii_case("wal") {

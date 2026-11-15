@@ -94,17 +94,16 @@ pub fn store_schema(root: &Path) -> Result<Option<StoreSchema>, Error> {
         return Ok(None);
     }
     // SQLite is given the name the check resolved (RUSTSEC-2026-0459).
-    let path = branchyard_support::check_wal_pair(&path)
-        .map_err(|e| Error::State(e.to_string()))?
-        .into_path_buf();
+    let checked =
+        branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
     let unreadable = |error: rusqlite::Error| {
         Error::State(format!(
             "{} is not a readable state database: {error}",
             path.display()
         ))
     };
-    let conn =
-        Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(unreadable)?;
+    let conn = Connection::open_with_flags(checked.as_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(unreadable)?;
     conn.busy_timeout(READ_WAIT).map_err(unreadable)?;
     let recorded: Result<Option<String>, rusqlite::Error> = conn
         .query_row("SELECT value FROM meta WHERE key = 'schema'", [], |r| {
