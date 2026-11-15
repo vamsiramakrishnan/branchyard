@@ -22,7 +22,9 @@ tracing = { workspace = true }
 ulid = { version = "3.0.0", default-features = false }
 
 [target."cfg(unix)".dependencies]
-rustix = { workspace = true }
+# `fs`: the log and the database are opened without blocking and without
+# following a link (`sqlite_pair`).
+rustix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 # Its own `testing` feature, for the integration tests.

@@ -10,11 +10,21 @@ uninitialized memory then; the bundled SQLite cannot be upgraded yet because
 `.branchyard/state.db` (every `by` command, `by doctor`, the hooks' reader),
 `.branchyard/sync.db`, the service registry (and the file `BRANCHYARD_REGISTRY`
 names) and the server's `state.db` and `sync/*.db`. A `-wal` of 32 bytes or more
-whose page size differs from the database's, or that sits beside a missing or
-shorter-than-100-byte database, is an error naming the file and both sizes; the
-remedy it gives is to move both files away or restore a copy you trust, never to
-delete the log alone. A server refuses to start on such a data directory.
-Nothing else about the log or database is judged. The advisory is in
+whose page size differs from the database's, or that sits beside a database
+shorter than 100 bytes, is an error naming both files (where they are, and the
+path given when that differs); the remedy is to move both files away or restore
+a copy you trust, never to delete the log of a database that has content. A log
+beside a missing or empty database is refused too, saying that a log cannot be
+used without its database (move the log away to start a new store): SQLite used
+to remove such a log silently, unread, and it may hold committed changes. Also
+refused: a path that begins with `file:` (SQLite reads it as a URI and opens
+another file than the one checked; write `./file:x` or an absolute path), a
+chain of more than 40 symbolic links or a loop (SQLite follows 200), a log that
+is a symbolic link (SQLite does not open one) and a log, or a database beside a
+log, that is not a regular file; the files are opened without blocking, so a
+FIFO no longer hangs a command. A file that cannot be read is reported with its
+path. A server refuses to start on such a data directory. Nothing else about the
+log or database is judged. The advisory is in
 `deny.toml`'s `ignore` with the reason. Still exposed: the check and the open are
 two steps, so a same-user process that swaps the files between them is not
 stopped; the `microsandbox` SDK opens a database of its own through the same

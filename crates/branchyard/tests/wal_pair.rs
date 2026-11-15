@@ -143,3 +143,35 @@ fn a_store_left_by_a_killed_writer_still_opens() {
     Yard::open(copy.path()).unwrap();
     drop(live);
 }
+
+#[test]
+fn the_registry_refuses_a_name_sqlite_would_read_as_a_uri() {
+    // `BRANCHYARD_REGISTRY=file:reg.db` reaches the registry as this path.
+    let name = Path::new("file:reg.db");
+    let message = LocalRegistry::open(name).err().unwrap().to_string();
+    assert!(message.contains("file:reg.db"), "{message}");
+    assert!(
+        message.contains("URI") && message.contains("another file"),
+        "{message}"
+    );
+    assert!(message.contains("./"), "{message}");
+    // Refused before anything was made, here or at the file the URI names.
+    assert!(!name.exists() && !Path::new("reg.db").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_registry_names_a_file_it_cannot_read() {
+    // The registry is a link into a path below a regular file: its log's
+    // name fails with "not a directory", which must come out with the path.
+    let dir = Scratch::new("wal-registry");
+    fs::write(dir.join("plain"), b"x").unwrap();
+    let link = dir.join("registry.db");
+    std::os::unix::fs::symlink(dir.join("plain/registry.db"), &link).unwrap();
+    let error = LocalRegistry::open(&link).err().unwrap();
+    let message = error.to_string();
+    assert!(
+        message.contains("plain/registry.db-wal") && message.contains("could not be read"),
+        "{message}"
+    );
+}
