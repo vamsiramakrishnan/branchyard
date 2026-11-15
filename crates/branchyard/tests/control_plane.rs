@@ -1834,7 +1834,8 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
     let body = got["body"].as_str().unwrap();
     assert!(
         body.contains(
-            "no route names llama-3, and it is not sent to a backend no route names for it"
+            "no route that can take this request names llama-3, and it is not sent to a \
+             backend no route names for it"
         ),
         "{body}"
     );
@@ -1842,8 +1843,8 @@ fn a_model_routed_to_aiplex_goes_to_aiplex_or_nowhere() {
     assert_eq!(
         calls["llama-3"].reason.as_deref(),
         Some(
-            "no route names llama-3 for a request in the openai API, and beside a control \
-             plane a model no route names is an AIPlex backend's, of which this API has none, \
+            "no route that can take a request in the openai API names llama-3, and beside a \
+             control plane a model no route names is an AIPlex backend's, of which this API has none, \
              so the request is sent nowhere: add a route for llama-3; a last route with model \
              = \"*\" that names a plain backend sends it everything no earlier route names"
         )

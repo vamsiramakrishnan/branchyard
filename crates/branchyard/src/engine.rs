@@ -951,6 +951,14 @@ fn run(
                 });
             }
             recorder.record(Activity::Model(Box::new(activity)))?;
+            // What the configuration said when it was read (a plain
+            // backend no route names, a route no request reaches), once a
+            // turn, where its other warnings go.
+            if let Some(yard_gateway) = turn.yard.models() {
+                for note in yard_gateway.notes() {
+                    recorder.record(Activity::Warning(note.clone()))?;
+                }
+            }
             turn_hosts.model_gateway = crate::egress::gateway_rule(&url);
             model_env = env;
             model_scrub = scrub;

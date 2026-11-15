@@ -510,22 +510,23 @@ fn a_request_no_route_names_is_aiplexs_or_nobodys_and_never_a_plain_backends() {
             let (why, told) = match model {
                 Some(model) => (
                     format!(
-                        "no route names {model} for a request in the {api} API, and beside a \
-                         control plane a model no route names is an AIPlex backend's, of which \
-                         this API has none, so the request is sent nowhere: add a route for \
-                         {model}; a last route with model = \"*\" that names a plain backend \
-                         sends it everything no earlier route names"
+                        "no route that can take a request in the {api} API names {model}, and \
+                         beside a control plane a model no route names is an AIPlex backend's, \
+                         of which this API has none, so the request is sent nowhere: add a \
+                         route for {model}; a last route with model = \"*\" that names a plain \
+                         backend sends it everything no earlier route names"
                     ),
                     format!(
-                        "no route names {model}, and it is not sent to a backend no route \
-                         names for it"
+                        "no route that can take this request names {model}, and it is not sent \
+                         to a backend no route names for it"
                     ),
                 ),
                 None => (
                     format!(
                         "this request names no model, so no route can name it, and beside a \
                          control plane such a request is an AIPlex backend's; the {api} API \
-                         has none, so it is sent nowhere"
+                         has none, so it is sent nowhere: name a model that a route names for \
+                         the {api} API, or give the {api} API an AIPlex backend"
                     ),
                     "this request names no model, and it is not sent to a backend no route \
                      names for it"
@@ -570,6 +571,170 @@ fn a_request_no_route_names_is_aiplexs_or_nobodys_and_never_a_plain_backends() {
         access.finish();
         plain.finish();
     }
+}
+
+#[test]
+fn a_model_name_that_is_only_white_space_names_no_model_beside_a_control_plane() {
+    // The name of a real model is never white space: beside a control
+    // plane, one that is empty once trimmed is no model, as `""` is, so a
+    // last route `*` to a plain backend does not take it.
+    let names = ["", " ", "\t", "\u{a0}", "\n"];
+    let plan = |f: &Fixture, name: &str| {
+        let plan: Vec<Value> = names
+            .iter()
+            .enumerate()
+            .flat_map(|(n, model)| {
+                [
+                    call(
+                        &format!("anthropic {n}"),
+                        "anthropic",
+                        "/v1/messages",
+                        model,
+                        false,
+                    ),
+                    call(
+                        &format!("openai {n}"),
+                        "openai",
+                        "/chat/completions",
+                        model,
+                        false,
+                    ),
+                ]
+            })
+            .collect();
+        let count = plan.len();
+        let (_, read) = run(f, name, None, &Value::Array(plan));
+        for api in ["anthropic", "openai"] {
+            for n in 0..names.len() {
+                let got = &read[format!("{api} {n}").as_str()];
+                assert_eq!(got["status"], 200, "{api} {n}: {got}");
+            }
+        }
+        count
+    };
+    let plain_routes = json!([
+        {"model": "*", "backends": ["direct"]},
+        {"model": "*", "backends": ["direct-openai"]}
+    ]);
+    let plain_backends = |plain: &MockHttp| {
+        json!({
+            "direct": {"api": "anthropic", "url": plain.url(), "key": "anthropic"},
+            "direct-openai": {"api": "openai", "url": plain.url(), "key": "anthropic"}
+        })
+    };
+    // Beside AIPlex on each API, with a last route `*` to a plain backend
+    // of each: every one of them goes to AIPlex, as written.
+    let f = Fixture::new();
+    let (access, plain) = (aiplex("one"), aiplex("direct"));
+    let mut backends = plain_backends(&plain);
+    let mut routes = vec![
+        json!({"model": "claude-*", "backends": ["aiplex-anthropic"]}),
+        json!({"model": "gpt-*", "backends": ["aiplex-openai"]}),
+    ];
+    routes.extend(plain_routes.as_array().unwrap().iter().cloned());
+    for api in ["anthropic", "openai"] {
+        backends[format!("aiplex-{api}")] = json!({"api": api,
+            "url": format!("{}/ap/ide", access.url()), "key": "aiplex",
+            "control_plane": "aiplex"});
+    }
+    use_gateway(&f, json!({"backends": backends, "routes": routes}));
+    let count = plan(&f, "blank");
+    let heard: Vec<String> = access.requests().iter().map(model_of).collect();
+    let expected: Vec<String> = names
+        .iter()
+        .flat_map(|name| [name.to_string(), name.to_string()])
+        .collect();
+    assert_eq!(heard, expected);
+    assert_eq!(heard.len(), count);
+    assert!(
+        plain.requests().is_empty(),
+        "the plain backend was sent {:?}",
+        plain.requests()
+    );
+    access.finish();
+    plain.finish();
+    // A plain-only gateway: a name that is white space is a name, as it
+    // always was, and `*` takes it; `""` names no model and goes to the
+    // plain backends of its API, as it always did.
+    let f = Fixture::new();
+    let plain = aiplex("direct");
+    use_gateway(
+        &f,
+        json!({"backends": plain_backends(&plain), "routes": plain_routes}),
+    );
+    plan(&f, "blank-plain");
+    let heard: Vec<String> = plain.requests().iter().map(model_of).collect();
+    assert_eq!(heard, expected);
+    plain.finish();
+}
+
+#[test]
+fn a_model_a_route_names_for_the_other_api_only_is_said_so_when_refused() {
+    // AIPlex on Anthropic's API only, and a plain route `direct-*` to a
+    // plain Anthropic backend: an OpenAI request for `direct-x` has no
+    // backend to go to (OpenAI's API has a plain backend, for its own
+    // route, and no AIPlex one). Its reason says what is true: no route
+    // that can take it names it, and a route names it for the other API.
+    let f = Fixture::new();
+    let (access, plain) = (aiplex("one"), aiplex("direct"));
+    use_gateway(
+        &f,
+        json!({
+            "backends": {
+                "aiplex-anthropic": {"api": "anthropic",
+                    "url": format!("{}/ap/ide", access.url()), "key": "aiplex",
+                    "control_plane": "aiplex"},
+                "direct": {"api": "anthropic", "url": plain.url(), "key": "anthropic"},
+                "direct-openai": {"api": "openai", "url": plain.url(), "key": "anthropic"}
+            },
+            "routes": [
+                {"model": "claude-*", "backends": ["aiplex-anthropic"]},
+                {"model": "direct-*", "backends": ["direct"]},
+                {"model": "odirect-*", "backends": ["direct-openai"]}
+            ]
+        }),
+    );
+    let plan = json!([
+        call(
+            "other api",
+            "openai",
+            "/chat/completions",
+            "direct-x",
+            false
+        ),
+        call("own api", "anthropic", "/v1/messages", "direct-y", false),
+    ]);
+    let (events, read) = run(&f, "elsewhere", None, &plan);
+    let got = &read["other api"];
+    assert_eq!(got["status"], 404, "{got}");
+    let body = got["body"].as_str().unwrap();
+    assert!(
+        body.contains(
+            "no route that can take this request names direct-x, and it is not sent to a \
+             backend no route names for it"
+        ),
+        "{body}"
+    );
+    assert!(
+        !body.contains("direct-*") && !body.contains("anthropic"),
+        "{body}"
+    );
+    assert_eq!(
+        calls(&events)["direct-x"].reason.as_deref(),
+        Some(
+            "no route that can take a request in the openai API names direct-x (the route \
+             \"direct-*\" names it for a request in the anthropic API), and beside a control \
+             plane a model no route names is an AIPlex backend's, of which this API has none, \
+             so the request is sent nowhere: add a route for direct-x; a last route with model \
+             = \"*\" that names a plain backend sends it everything no earlier route names"
+        )
+    );
+    assert_eq!(read["own api"]["status"], 200, "{}", read["own api"]);
+    let heard: Vec<String> = plain.requests().iter().map(model_of).collect();
+    assert_eq!(heard, ["direct-y"]);
+    assert!(access.requests().is_empty());
+    access.finish();
+    plain.finish();
 }
 
 #[test]

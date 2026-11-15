@@ -3249,6 +3249,8 @@ by config path [OPTIONS]
 
 Load FILE, or every file by reads, strictly
 
+After the files, prints what the configuration notes and does not refuse (a `note` line each, `notes` in --json): beside an AIPlex backend, a plain backend no route names and a route no request reaches. Notes do not change the exit status.
+
 ```text
 by config validate [OPTIONS] [FILE]
 ```
