@@ -8,9 +8,11 @@ use std::path::{Path, PathBuf};
 /// Why a database and its write-ahead log were not handed to SQLite.
 #[derive(Debug)]
 pub enum PairError {
-    /// The pair cannot have been written by SQLite for this database.
+    /// The pair, or the path given for it, is not one to hand to SQLite; the
+    /// message says why and what to do.
     Refused(String),
-    /// A file of the pair could not be read.
+    /// A file of the pair, or the name given for it, could not be looked at,
+    /// opened or read.
     Unreadable {
         /// The file.
         path: PathBuf,
@@ -438,10 +440,10 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 ///
 /// Giving SQLite the returned name is a second line of defence against a
 /// difference in resolution nobody has found. It also lets a path open that
-/// SQLite's own resolution refuses: one whose text passes its name buffer of
-/// about 512 bytes while the resolved name is short, or one that needs more
-/// than about 200 links in all. Each open site has a test that opens a store
-/// through such a path.
+/// SQLite's own resolution refuses: one whose name, as SQLite builds it
+/// element by element, passes its buffer of about 512 bytes while the
+/// resolved name is short, or one that needs more than about 200 links in
+/// all. Each open site has a test that opens a store through such a path.
 ///
 /// - A path whose text begins with `file:` is refused: SQLite reads such a
 ///   name as a URI, not as a path, and Branchyard gives SQLite paths only.
@@ -471,9 +473,10 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// - A log of 32 bytes or more beside a database shorter than its 100-byte
 ///   header, or with another page size: refused.
 ///
-/// A refusal names the database and the log where they are, and the path
-/// given when that differs; control characters in any name it shows are
-/// written as escapes.
+/// A refusal of the pair names the database and the log where they are, and
+/// the path given when that differs. A refusal of the path names the path
+/// given, and the link and its target when one led there. Control characters
+/// in any name shown are written as escapes.
 ///
 /// Not stopped: the check and the open are two steps. Whoever can change the
 /// files, or a directory above them, between the two (replace a file or a
@@ -483,8 +486,8 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// # Errors
 ///
 /// [`PairError::Refused`] for a pair or a name SQLite cannot be given,
-/// [`PairError::Unreadable`] when a file of the pair exists and cannot be
-/// looked at, opened or read; both name the path.
+/// [`PairError::Unreadable`] when a file of the pair, or the name given for
+/// it, cannot be looked at, opened or read; both name the path.
 pub fn check_wal_pair(path: &Path) -> Result<CheckedPath, PairError> {
     if path.as_os_str().is_empty() {
         return Err(PairError::Refused(

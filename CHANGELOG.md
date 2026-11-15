@@ -18,10 +18,10 @@ gives SQLite that name, because SQLite resolves a path differently (it drops
 through the missing `nope`). Only SQLite, and a file operation beside the
 open, is given that name: a store keeps, returns and prints the
 path it was given, so a repository whose `.branchyard` or `state.db` is a link
-keeps its label and its team memory. A path whose text is longer than the 512
-bytes in which SQLite builds a name, but whose resolved name is short (or that
-needs more than about 200 links in all for SQLite), now opens, where it failed
-before the check. A `-wal` of 32 bytes or more whose page size
+keeps its label and its team memory. A path whose name, as SQLite builds it
+element by element, passes its buffer of about 512 bytes while the resolved
+name is short (or that needs more than about 200 links in all for SQLite) now
+opens, where it failed before the check. A `-wal` of 32 bytes or more whose page size
 differs from the database's, or that sits beside a database shorter than 100
 bytes, is an error naming both files (where they are, and the path given when
 that differs); the remedy is to move both files away or restore a copy you
