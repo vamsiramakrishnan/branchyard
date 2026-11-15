@@ -37,6 +37,13 @@ fn pair(db: &[u8], wal: Option<&[u8]>) -> (Scratch, std::path::PathBuf) {
     (dir, path)
 }
 
+/// The plain name the check returned for a pair it accepts.
+fn accepted(path: &Path) -> std::path::PathBuf {
+    check_wal_pair(path)
+        .unwrap_or_else(|e| panic!("expected the pair to be accepted: {e}"))
+        .into_path_buf()
+}
+
 fn refusal(path: &Path) -> String {
     match check_wal_pair(path) {
         Err(PairError::Refused(message)) => message,
@@ -47,7 +54,7 @@ fn refusal(path: &Path) -> String {
 #[test]
 fn agreeing_page_sizes_are_accepted() {
     let (_dir, path) = pair(&database(4096, 4096), Some(&log(32 + 100, 4096)));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
 }
 
 #[test]
@@ -66,17 +73,17 @@ fn another_page_size_is_refused_naming_the_file_and_both_sizes() {
 #[test]
 fn a_missing_empty_or_short_log_is_accepted() {
     let (_a, path) = pair(&database(4096, 4096), None);
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
     let (_b, path) = pair(&database(4096, 4096), Some(&[]));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
     let (_c, path) = pair(&database(4096, 4096), Some(&log(31, 8192)));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
 }
 
 #[test]
 fn a_missing_database_is_accepted_without_a_log_and_refused_with_one() {
     let dir = Scratch::new("pair");
-    check_wal_pair(&dir.join("state.db")).unwrap();
+    accepted(&dir.join("state.db"));
     fs::write(dir.join("state.db-wal"), log(32, 4096)).unwrap();
     let message = refusal(&dir.join("state.db"));
     assert!(message.contains("missing"), "{message}");
@@ -88,22 +95,22 @@ fn a_database_shorter_than_its_header_is_refused_with_a_log() {
     let message = refusal(&path);
     assert!(message.contains("99"), "{message}");
     let (_dir, path) = pair(&database(99, 4096), Some(&log(31, 4096)));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
     let (_dir, path) = pair(&[], Some(&[]));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
 }
 
 #[test]
 fn the_log_is_not_judged_by_its_magic_number() {
     // The helper fills every byte with 0xAB: no magic number, same page size.
     let (_dir, path) = pair(&database(100, 512), Some(&log(64, 512)));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
 }
 
 #[test]
 fn page_size_field_one_means_65536() {
     let (_dir, path) = pair(&database(100, 1), Some(&log(32, 65536)));
-    check_wal_pair(&path).unwrap();
+    accepted(&path);
     let (_dir, path) = pair(&database(100, 1), Some(&log(32, 1)));
     let message = refusal(&path);
     assert!(message.contains("65536"), "{message}");
@@ -137,12 +144,12 @@ fn a_symlinked_database_is_checked_against_the_log_beside_its_target() {
     // A log beside the link alone is not the one SQLite would open.
     fs::write(dir.join("state.db-wal"), log(32, 512)).unwrap();
     fs::write(real.join("state.db-wal"), log(32, 4096)).unwrap();
-    check_wal_pair(&link).unwrap();
+    accepted(&link);
 }
 
 /// Run the check on a thread and wait for it: a check that blocks fails the
 /// test after the timeout instead of hanging it.
-fn within_a_while(path: &Path) -> Result<(), PairError> {
+fn within_a_while(path: &Path) -> Result<branchyard_support::CheckedPath, PairError> {
     let path = path.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -232,7 +239,7 @@ fn a_short_chain_of_links_still_opens() {
     let real = dir.join("state.db");
     fs::write(&real, database(4096, 4096)).unwrap();
     fs::write(dir.join("state.db-wal"), log(32, 4096)).unwrap();
-    check_wal_pair(&chain(&dir, &real, 3)).unwrap();
+    accepted(&chain(&dir, &real, 3));
 }
 
 #[cfg(unix)]
@@ -263,9 +270,9 @@ fn a_name_that_sqlite_reads_as_a_uri_is_refused() {
     }
     // Only the five bytes `file:` at the start; `./file:x` and a directory
     // named so are plain names.
-    check_wal_pair(&dir.join("file:reg.db")).unwrap();
-    check_wal_pair(Path::new("./file:reg.db")).unwrap();
-    check_wal_pair(Path::new("File:reg.db")).unwrap();
+    accepted(&dir.join("file:reg.db"));
+    accepted(Path::new("./file:reg.db"));
+    accepted(Path::new("File:reg.db"));
 }
 
 #[cfg(unix)]
@@ -430,4 +437,312 @@ fn a_refusal_names_where_the_files_are_and_the_path_it_was_given() {
 fn the_given_path_is_not_repeated_when_it_is_where_the_files_are() {
     let (_dir, path) = pair(&database(4096, 4096), Some(&log(32, 8192)));
     assert!(!refusal(&path).contains("given as"));
+}
+
+// ---- The check and SQLite must read the same files ----
+
+/// `real.db` in `dir` with a log beside it that records another page size.
+#[cfg(unix)]
+fn crafted_in(dir: &Path) {
+    fs::write(dir.join("real.db"), database(4096, 4096)).unwrap();
+    fs::write(dir.join("real.db-wal"), log(32, 512)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_through_a_missing_directory_and_dotdot_is_refused() {
+    // SQLite drops `nope/..` as text and opens `real.db`; the system cannot
+    // get through the missing `nope`. The two must not be left to differ.
+    let dir = Scratch::new("pair");
+    crafted_in(dir.path());
+    let link = dir.join("state.db");
+    std::os::unix::fs::symlink("nope/../real.db", &link).unwrap();
+    let message = refusal(&link);
+    assert!(message.contains("nope"), "{message}");
+    assert!(message.contains("cannot be resolved"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_directory_through_a_missing_one_is_refused() {
+    let dir = Scratch::new("pair");
+    let real = dir.join("realdir");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("state.db"), database(4096, 4096)).unwrap();
+    fs::write(real.join("state.db-wal"), log(32, 512)).unwrap();
+    std::os::unix::fs::symlink("nope/../realdir", dir.join(".branchyard")).unwrap();
+    let message = refusal(&dir.join(".branchyard/state.db"));
+    assert!(message.contains("cannot be resolved"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_given_path_with_dotdot_after_a_missing_element_is_refused() {
+    let dir = Scratch::new("pair");
+    crafted_in(dir.path());
+    let message = refusal(&dir.join("nope/../real.db"));
+    assert!(message.contains("cannot be resolved"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dotdot_through_real_directories_is_resolved_and_the_log_beside_the_file_is_found() {
+    let dir = Scratch::new("pair");
+    crafted_in(dir.path());
+    fs::create_dir(dir.join("sub")).unwrap();
+    for given in [
+        format!("{}/sub/../real.db", dir.path().display()),
+        format!("{}/./real.db", dir.path().display()),
+        format!("{}//real.db", dir.path().display()),
+        format!("{}/real.db/", dir.path().display()),
+        format!("{}/real.db/.", dir.path().display()),
+    ] {
+        let message = refusal(Path::new(&given));
+        assert!(message.contains("512"), "{given}: {message}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_path_without_a_file_name_is_refused() {
+    let dir = Scratch::new("pair");
+    for given in [dir.join("sub/.."), "/".into(), "".into()] {
+        let message = refusal(&given);
+        assert!(message.contains("no file name"), "{message}");
+    }
+}
+
+/// The state of a thread (`S` sleeping, `R` running ...), from `/proc`.
+#[cfg(target_os = "linux")]
+fn thread_state(id: &Path) -> Option<char> {
+    let stat = fs::read_to_string(Path::new("/proc").join(id).join("stat")).ok()?;
+    stat.rsplit(')').next()?.trim_start().chars().next()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fifo_with_a_writer_waiting_is_refused_and_the_writer_stays_blocked() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (dir, path) = pair(&database(4096, 4096), None);
+    let pipe = dir.join("state.db-wal");
+    fifo(&pipe);
+    let (id_tx, id_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer_pipe = pipe.clone();
+    let writer = std::thread::spawn(move || {
+        id_tx.send(fs::read_link("/proc/thread-self").unwrap()).ok();
+        // Blocks until a reader opens the pipe.
+        let opened = fs::OpenOptions::new().write(true).open(&writer_pipe);
+        done_tx.send(opened.is_ok()).ok();
+    });
+    let id = branchyard_testkit::wait::until_for(
+        "the writer reports its thread",
+        Duration::from_secs(10),
+        || id_rx.try_recv().ok(),
+    );
+    branchyard_testkit::wait::until_for(
+        "the writer sleeps in its open",
+        Duration::from_secs(10),
+        || (thread_state(&id) == Some('S')).then_some(()),
+    );
+    let outcome = within_a_while(&path);
+    let still_asleep = thread_state(&id) == Some('S');
+    let released_early = done_rx.try_recv().is_ok();
+    // Let the writer go, whatever the check did, so the thread ends.
+    if !released_early {
+        let reader = rustix::fs::open(
+            &pipe,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        branchyard_testkit::wait::until_for(
+            "the writer is released",
+            Duration::from_secs(10),
+            || done_rx.try_recv().ok(),
+        );
+        drop(reader);
+    }
+    writer.join().unwrap();
+    match outcome {
+        Err(PairError::Refused(message)) => assert!(message.contains("FIFO"), "{message}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(
+        !released_early,
+        "the check opened the pipe and freed its writer"
+    );
+    assert!(still_asleep, "the writer was woken by the check");
+}
+
+#[cfg(unix)]
+fn socket(path: &Path) -> std::os::unix::net::UnixListener {
+    std::os::unix::net::UnixListener::bind(path).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_as_the_log_or_the_database_is_refused_as_a_socket() {
+    let (dir, path) = pair(&database(4096, 4096), None);
+    let _log = socket(&dir.join("state.db-wal"));
+    let message = refusal_within_a_while(&path);
+    assert!(
+        message.contains("a socket") && message.contains("state.db-wal"),
+        "{message}"
+    );
+    assert!(message.contains("not a regular file"), "{message}");
+
+    let dir = Scratch::new("pair");
+    let _db = socket(&dir.join("state.db"));
+    fs::write(dir.join("state.db-wal"), log(32, 4096)).unwrap();
+    let message = refusal_within_a_while(&dir.join("state.db"));
+    assert!(message.contains("a socket"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn control_characters_in_a_name_are_escaped_in_a_refusal() {
+    let dir = Scratch::new("pair");
+    let odd = dir.join("a\nby: all good\u{1b}[2K\tb");
+    fs::create_dir(&odd).unwrap();
+    fs::write(odd.join("state.db"), database(4096, 4096)).unwrap();
+    fs::write(odd.join("state.db-wal"), log(32, 512)).unwrap();
+    let message = refusal(&odd.join("state.db"));
+    assert_eq!(message.lines().count(), 1, "{message:?}");
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert!(
+        message.contains("a\\nby: all good\\u{1b}[2K\\tb"),
+        "{message:?}"
+    );
+    // A read error shows the name escaped too, as an error and as io::Error.
+    fs::write(dir.join("plain\nfile"), b"x").unwrap();
+    let error = check_wal_pair(&dir.join("plain\nfile/state.db")).unwrap_err();
+    assert!(!error.to_string().contains('\n'), "{error:?}");
+    let text = std::io::Error::from(error).to_string();
+    assert!(
+        !text.contains('\n') && text.contains("plain\\nfile"),
+        "{text:?}"
+    );
+    // A link's name is escaped in the chain refusal.
+    let looped = dir.join("l\noop");
+    std::os::unix::fs::symlink(&looped, &looped).unwrap();
+    assert!(!refusal(&looped).contains('\n'));
+}
+
+// ---- The returned name ----
+
+/// Whether `name` is plain: absolute, no `.`, `..` or empty element, no link.
+#[cfg(unix)]
+fn assert_plain(name: &Path) {
+    assert!(name.is_absolute(), "{name:?}");
+    let text = name.to_str().unwrap();
+    assert!(!text.contains("//") && !text.ends_with('/'), "{text}");
+    let mut prefix = std::path::PathBuf::new();
+    for part in name.components() {
+        prefix.push(part);
+        assert!(
+            !matches!(
+                part,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            ),
+            "{text}"
+        );
+        if let Ok(meta) = fs::symlink_metadata(&prefix) {
+            assert!(!meta.file_type().is_symlink(), "{prefix:?} is a link");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_returned_name_of_a_spelled_out_path_is_the_plain_name_of_the_real_file() {
+    let dir = Scratch::new("pair");
+    let real_dir = dir.path().canonicalize().unwrap();
+    fs::create_dir(dir.join("sub")).unwrap();
+    fs::write(dir.join("real.db"), database(4096, 4096)).unwrap();
+    for given in [
+        format!("{}/sub/../real.db", dir.path().display()),
+        format!("{}/./real.db", dir.path().display()),
+        format!("{}//real.db", dir.path().display()),
+        format!("{}/real.db/", dir.path().display()),
+        format!("{}/real.db/.", dir.path().display()),
+    ] {
+        let name = accepted(Path::new(&given));
+        assert_eq!(name, real_dir.join("real.db"), "{given}");
+        assert_plain(&name);
+    }
+    // A name that does not exist yet keeps its resolved directory.
+    let name = accepted(&dir.join("sub/./../new.db"));
+    assert_eq!(name, real_dir.join("new.db"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_relative_path_comes_back_absolute() {
+    // The test's working directory is the crate's: `Cargo.toml` is a file
+    // there, and a name beside it that does not exist is a new database.
+    let name = accepted(Path::new("./no-such-database.db"));
+    assert!(name.is_absolute(), "{name:?}");
+    assert_eq!(
+        name,
+        std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap()
+            .join("no-such-database.db")
+    );
+    let name = accepted(Path::new("Cargo.toml"));
+    assert_plain(&name);
+    assert!(name.ends_with("Cargo.toml"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_database_behind_links_comes_back_as_the_name_of_its_target() {
+    let (dir, real) = target_with_crafted_log();
+    fs::write(dir.join("target/state.db-wal"), log(32, 4096)).unwrap();
+    let real = real.canonicalize().unwrap();
+    for count in [1, 3, 40] {
+        let links = Scratch::new("pair");
+        let name = accepted(&chain(&links, &real, count));
+        assert_eq!(name, real, "{count} links");
+        assert_plain(&name);
+    }
+    let links = Scratch::new("pair");
+    let first = chain(&links, &real, 41);
+    assert!(refusal(&first).contains("longer than"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_link_comes_back_as_its_target_and_a_log_beside_it_is_refused() {
+    let dir = Scratch::new("pair");
+    let real_dir = dir.path().canonicalize().unwrap();
+    std::os::unix::fs::symlink("missing.db", dir.join("state.db")).unwrap();
+    let name = accepted(&dir.join("state.db"));
+    assert_eq!(name, real_dir.join("missing.db"));
+    fs::write(dir.join("missing.db-wal"), log(32, 4096)).unwrap();
+    let message = refusal(&dir.join("state.db"));
+    assert!(message.contains("has no database"), "{message}");
+    assert!(message.contains("missing.db-wal"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_returned_name_in_a_linked_directory_has_no_link_in_it() {
+    let dir = Scratch::new("pair");
+    let real = dir.join("realdir");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("state.db"), database(4096, 4096)).unwrap();
+    std::os::unix::fs::symlink("realdir", dir.join(".branchyard")).unwrap();
+    // The database file in it is a link, too, to a sibling by a `..` path.
+    fs::write(real.join("other.db"), database(4096, 4096)).unwrap();
+    std::os::unix::fs::symlink("../realdir/other.db", real.join("linked.db")).unwrap();
+    let name = accepted(&dir.join(".branchyard/state.db"));
+    assert_eq!(name, real.canonicalize().unwrap().join("state.db"));
+    assert_plain(&name);
+    let name = accepted(&dir.join(".branchyard/linked.db"));
+    assert_eq!(name, real.canonicalize().unwrap().join("other.db"));
+    assert_plain(&name);
 }

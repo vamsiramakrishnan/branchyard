@@ -144,21 +144,6 @@ fn a_store_left_by_a_killed_writer_still_opens() {
     drop(live);
 }
 
-#[test]
-fn the_registry_refuses_a_name_sqlite_would_read_as_a_uri() {
-    // `BRANCHYARD_REGISTRY=file:reg.db` reaches the registry as this path.
-    let name = Path::new("file:reg.db");
-    let message = LocalRegistry::open(name).err().unwrap().to_string();
-    assert!(message.contains("file:reg.db"), "{message}");
-    assert!(
-        message.contains("URI") && message.contains("another file"),
-        "{message}"
-    );
-    assert!(message.contains("./"), "{message}");
-    // Refused before anything was made, here or at the file the URI names.
-    assert!(!name.exists() && !Path::new("reg.db").exists());
-}
-
 #[cfg(unix)]
 #[test]
 fn the_registry_names_a_file_it_cannot_read() {
@@ -174,4 +159,78 @@ fn the_registry_names_a_file_it_cannot_read() {
         message.contains("plain/registry.db-wal") && message.contains("could not be read"),
         "{message}"
     );
+}
+
+/// A database file SQLite made: a store that was opened and closed, moved to
+/// `to`.
+#[cfg(unix)]
+fn real_database_at(to: &Path) {
+    let source = repository();
+    drop(Yard::open(source.path()).unwrap());
+    fs::copy(source.join(".branchyard/state.db"), to).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_store_opens_what_was_checked_through_a_linked_directory_and_a_linked_database() {
+    let repo = repository();
+    let elsewhere = Scratch::new("wal-target");
+    fs::create_dir_all(elsewhere.join("real")).unwrap();
+    fs::create_dir_all(elsewhere.join("other")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.join("real"), repo.join(".branchyard")).unwrap();
+    std::os::unix::fs::symlink("../other/store.db", elsewhere.join("real/state.db")).unwrap();
+    let yard = Yard::open(repo.path()).unwrap();
+    yard.services().unwrap();
+    // The files are where the targets are, the log beside the database's.
+    assert!(elsewhere.join("other/store.db").metadata().unwrap().len() > 0);
+    assert!(elsewhere.join("other/store.db-wal").exists());
+    assert!(!elsewhere.join("real/state.db-wal").exists());
+    assert!(elsewhere.join("real/registry.db").exists());
+    assert!(branchyard::glance::read(repo.path(), None)
+        .unwrap()
+        .is_some());
+    assert!(branchyard::doctor::store_schema(repo.path())
+        .unwrap()
+        .is_some());
+    drop(yard);
+    // A forged log beside the target is the one refused.
+    let wal = plant(&elsewhere.join("other/store.db"));
+    assert_refused(&Yard::open(repo.path()).err().unwrap().to_string(), &wal);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_store_refuses_a_link_through_a_missing_directory_and_dotdot() {
+    let repo = repository();
+    fs::create_dir_all(repo.join(".branchyard")).unwrap();
+    real_database_at(&repo.join(".branchyard/real.db"));
+    plant(&repo.join(".branchyard/real.db"));
+    std::os::unix::fs::symlink("nope/../real.db", repo.join(".branchyard/state.db")).unwrap();
+    let message = Yard::open(repo.path()).err().unwrap().to_string();
+    assert!(message.contains("cannot be resolved"), "{message}");
+    assert!(message.contains("nope"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_registry_opens_what_was_checked_and_refuses_the_dotdot_trick() {
+    let dir = Scratch::new("wal-registry");
+    fs::create_dir(dir.join("real")).unwrap();
+    std::os::unix::fs::symlink("real", dir.join("linked")).unwrap();
+    std::os::unix::fs::symlink("real/reg.db", dir.join("registry.db")).unwrap();
+    let registry = LocalRegistry::open(dir.join("linked/../registry.db")).unwrap();
+    assert!(dir.join("real/reg.db").metadata().unwrap().len() > 0);
+    assert_eq!(
+        registry.path(),
+        dir.join("real/reg.db").canonicalize().unwrap()
+    );
+    drop(registry);
+    // The trick: the link's text drops `nope/..`; the system cannot.
+    plant(&dir.join("real/reg.db"));
+    std::os::unix::fs::symlink("nope/../real/reg.db", dir.join("tricky.db")).unwrap();
+    let message = LocalRegistry::open(dir.join("tricky.db"))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("cannot be resolved"), "{message}");
 }

@@ -54,7 +54,7 @@ pub use best_effort::{
 pub use id::{new_ulid, ulid_from_parts};
 pub use locks::{CondvarExt, LockExt, RwLockExt};
 pub use process::{kill_group, kill_process, terminate_group};
-pub use sqlite_pair::{check_wal_pair, PairError};
+pub use sqlite_pair::{check_wal_pair, CheckedPath, PairError};
 pub use threads::{join_reporting, spawn_named, survive_panic, PanicReport};
 
 /// Operator-only workspace-manager credential, never forwarded to a harness.

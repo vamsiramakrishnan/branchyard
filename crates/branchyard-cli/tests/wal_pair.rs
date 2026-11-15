@@ -148,3 +148,33 @@ fn a_store_left_by_a_killed_writer_still_opens() {
     copy.ok(&["ls"]);
     drop(live);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_store_reached_through_links_opens_and_the_dotdot_trick_is_refused() {
+    // `.branchyard/state.db` is a link into another directory: the built
+    // `by` opens the file the link names (its log, removed when the last
+    // connection closes, would be beside it, not beside the link).
+    let repo = branchyard_testkit::repo!();
+    let elsewhere = repo.dir.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::create_dir_all(repo.root.join(".branchyard")).unwrap();
+    let link = repo.root.join(".branchyard/state.db");
+    std::os::unix::fs::symlink(elsewhere.join("store.db"), &link).unwrap();
+    repo.ok(&["ls"]);
+    assert!(elsewhere.join("store.db").metadata().unwrap().len() > 0);
+    assert!(!repo.root.join(".branchyard/state.db-wal").exists());
+    repo.ok(&["ls"]);
+    // The same file named through `nope/..`, with a forged log beside it:
+    // SQLite would drop `nope/..` and open the forged pair; `by` refuses.
+    fs::remove_file(&link).unwrap();
+    let wal = plant(&elsewhere.join("store.db"));
+    let tricky = format!("{}/nope/../store.db", elsewhere.display());
+    std::os::unix::fs::symlink(&tricky, &link).unwrap();
+    let out = repo.by(&["ls"]);
+    assert!(!out.status.success(), "{out:?}");
+    let message = text(&out.stderr);
+    assert!(message.contains("cannot be resolved"), "{message}");
+    // The forged log was not touched.
+    assert_eq!(fs::read(&wal).unwrap().len(), 32);
+}

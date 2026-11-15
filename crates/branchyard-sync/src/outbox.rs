@@ -79,10 +79,13 @@ impl Outbox {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Before SQLite is given the path: a log with another page size is
-        // refused (RUSTSEC-2026-0459).
-        branchyard_support::check_wal_pair(path)
-            .map_err(|e| crate::error::Error::local(e.to_string()))?;
+        // Before SQLite is given the file: a log with another page size is
+        // refused (RUSTSEC-2026-0459). SQLite, the permissions and the path
+        // kept use the name the check resolved.
+        let path = branchyard_support::check_wal_pair(path)
+            .map_err(|e| crate::error::Error::local(e.to_string()))?
+            .into_path_buf();
+        let path = path.as_path();
         let conn = Connection::open(path)?;
         #[cfg(unix)]
         {
@@ -401,6 +404,32 @@ mod tests {
         assert!(error.message.contains("512"), "{error:?}");
         assert_eq!(std::fs::read(&wal).unwrap(), header);
         assert!(!dir.path().join("sync.db-shm").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_outbox_opens_what_was_checked_and_refuses_the_dotdot_trick() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("data")).unwrap();
+        std::os::unix::fs::symlink("real/target.db", root.join("sync.db")).unwrap();
+        let outbox = Outbox::open(&root.join("data/../sync.db")).unwrap();
+        outbox.enqueue("r", "a", 10).unwrap();
+        // The files are where the target is, and the path kept names it.
+        assert!(root.join("real/target.db").metadata().unwrap().len() > 0);
+        assert!(root.join("real/target.db-wal").exists());
+        assert_eq!(outbox.path(), root.join("real/target.db"));
+        drop(outbox);
+        // The link's text drops `nope/..`; the system cannot get through.
+        let wal = root.join("real/target.db-wal");
+        let mut header = vec![0u8; 32];
+        header[8..12].copy_from_slice(&512u32.to_be_bytes());
+        std::fs::write(&wal, &header).unwrap();
+        std::os::unix::fs::symlink("nope/../real/target.db", root.join("tricky.db")).unwrap();
+        let error = Outbox::open(&root.join("tricky.db")).err().unwrap();
+        assert!(error.message.contains("cannot be resolved"), "{error:?}");
+        assert_eq!(std::fs::read(&wal).unwrap(), header);
     }
 
     #[test]

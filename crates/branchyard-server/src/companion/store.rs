@@ -218,10 +218,11 @@ impl SqliteCompanion {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Before SQLite is given the path: a log with another page size is
-        // refused (RUSTSEC-2026-0459).
-        branchyard_support::check_wal_pair(path)?;
-        let mut conn = rusqlite::Connection::open(path).map_err(sql)?;
+        // Before SQLite is given the file: a log with another page size is
+        // refused (RUSTSEC-2026-0459). SQLite is given the name the check
+        // resolved.
+        let checked = branchyard_support::check_wal_pair(path)?;
+        let mut conn = rusqlite::Connection::open(checked.as_path()).map_err(sql)?;
         conn.busy_timeout(Duration::from_secs(30)).map_err(sql)?;
         let _: String = conn
             .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))

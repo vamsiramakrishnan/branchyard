@@ -104,3 +104,57 @@ fn the_server_sync_outbox_refuses_a_forged_log() {
     assert_refused(&error, &wal);
     assert!(error.contains("sync: app"), "{error}");
 }
+
+#[cfg(unix)]
+#[test]
+fn the_stores_open_what_was_checked_through_a_linked_directory_and_a_linked_file() {
+    let dir = Scratch::new("wal-stores");
+    fs::create_dir_all(dir.join("real")).unwrap();
+    fs::create_dir_all(dir.join("other")).unwrap();
+    std::os::unix::fs::symlink("real", dir.join("data")).unwrap();
+    std::os::unix::fs::symlink("../other/server.db", dir.join("real/state.db")).unwrap();
+    let path = dir.join("data/./state.db");
+    let store = SqliteStore::open(&path, None).unwrap();
+    let triggers = SqliteTriggers::open(&path).unwrap();
+    let companion = SqliteCompanion::open(&path).unwrap();
+    // The files are where the target is, the log beside the database.
+    assert!(dir.join("other/server.db").metadata().unwrap().len() > 0);
+    assert!(dir.join("other/server.db-wal").exists());
+    assert!(!dir.join("real/state.db-wal").exists());
+    assert_eq!(
+        store.path(),
+        dir.join("other/server.db").canonicalize().unwrap()
+    );
+    drop((store, triggers, companion));
+    let wal = plant(&dir.join("other/server.db"));
+    assert_refused(
+        &SqliteStore::open(&path, None).err().unwrap().to_string(),
+        &wal,
+    );
+    assert_refused(
+        &SqliteTriggers::open(&path).err().unwrap().to_string(),
+        &wal,
+    );
+    assert_refused(
+        &SqliteCompanion::open(&path).err().unwrap().to_string(),
+        &wal,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_stores_refuse_a_link_through_a_missing_directory_and_dotdot() {
+    let dir = Scratch::new("wal-stores");
+    let real = dir.join("real.db");
+    drop(SqliteStore::open(&real, None).unwrap());
+    plant(&real);
+    std::os::unix::fs::symlink("nope/../real.db", dir.join("state.db")).unwrap();
+    let path = dir.join("state.db");
+    for message in [
+        SqliteStore::open(&path, None).err().unwrap().to_string(),
+        SqliteTriggers::open(&path).err().unwrap().to_string(),
+        SqliteCompanion::open(&path).err().unwrap().to_string(),
+    ] {
+        assert!(message.contains("cannot be resolved"), "{message}");
+    }
+}

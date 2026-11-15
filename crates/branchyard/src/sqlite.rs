@@ -825,10 +825,14 @@ impl Sqlite {
     /// Open or create `state.db` in `dir`, and import what earlier versions
     /// left there.
     pub fn open(dir: &Path) -> Result<Sqlite, Error> {
-        let path = dir.join("state.db");
-        // Before SQLite is given the path: a log with another page size is
-        // refused (RUSTSEC-2026-0459).
-        branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
+        // Before SQLite is given the file: a log with another page size is
+        // refused (RUSTSEC-2026-0459). SQLite is given the name the check
+        // resolved, which is also the path this store keeps.
+        let path = branchyard_support::check_wal_pair(&dir.join("state.db"))
+            .map_err(|e| Error::State(e.to_string()))?
+            .into_path_buf();
         let conn = Connection::open(&path).map_err(|e| db(&path.display().to_string(), e))?;
         conn.busy_timeout(BUSY).map_err(|e| db("busy timeout", e))?;
         // Switching a new database to WAL can fail at once with SQLITE_BUSY

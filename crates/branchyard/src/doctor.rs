@@ -93,13 +93,16 @@ pub fn store_schema(root: &Path) -> Result<Option<StoreSchema>, Error> {
     if !path.is_file() {
         return Ok(None);
     }
+    // SQLite is given the name the check resolved (RUSTSEC-2026-0459).
+    let path = branchyard_support::check_wal_pair(&path)
+        .map_err(|e| Error::State(e.to_string()))?
+        .into_path_buf();
     let unreadable = |error: rusqlite::Error| {
         Error::State(format!(
             "{} is not a readable state database: {error}",
             path.display()
         ))
     };
-    branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
     let conn =
         Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(unreadable)?;
     conn.busy_timeout(READ_WAIT).map_err(unreadable)?;
