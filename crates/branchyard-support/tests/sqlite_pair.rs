@@ -593,6 +593,34 @@ fn the_advice_for_a_directory_that_cannot_be_resolved_follows_the_cause() {
 
 #[cfg(unix)]
 #[test]
+fn a_database_in_an_existing_directory_that_cannot_be_searched_is_refused_with_advice() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // A superuser searches anything, so there is nothing to refuse for one.
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let dir = Scratch::new("pair");
+    let locked = dir.join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    std::os::unix::fs::symlink("locked/reg.db", dir.join("l.db")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let direct = refusal(&locked.join("reg.db"));
+    let linked = refusal(&dir.join("l.db"));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    for message in [&direct, &linked] {
+        assert!(message.contains("cannot be searched"), "{message}");
+        assert!(message.contains("change its permissions"), "{message}");
+        assert!(!message.contains("could not be read"), "{message}");
+    }
+    assert!(direct.contains("its directory"), "{direct}");
+    assert!(
+        linked.contains("is a symbolic link to locked/reg.db"),
+        "{linked}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_directory_that_came_from_a_link_is_named_with_the_link_and_its_target() {
     let dir = Scratch::new("pair");
     let link = dir.join("state.db");

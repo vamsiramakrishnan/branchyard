@@ -49,7 +49,7 @@ const DB_HEADER: usize = 100;
 const WAL_HEADER: usize = 32;
 /// Links followed before giving up on a chain. This is where a plain open of
 /// a file stops working (Linux's `MAXSYMLINKS`); the bundled SQLite resolves
-/// up to 200 itself (`SQLITE_MAX_SYMLINK`), so a longer chain is refused, not
+/// about 200 itself (`SQLITE_MAX_SYMLINK`), so a longer chain is refused, not
 /// followed on.
 const MAX_LINKS: usize = 40;
 
@@ -91,12 +91,9 @@ fn shown(path: &Path) -> String {
 /// Returned by [`check_wal_pair`]. It is an absolute path with no `.` or `..`
 /// element and no empty one, and none of its parts, the last included, was a
 /// symbolic link when it was made; the log that was checked is `<name>-wal`.
-/// SQLite builds the full name of a file it opens by itself and drops `.` and
-/// `..` from the text without looking at the file system, so a name that
-/// SQLite would resolve differently from the system is exactly what the check
-/// must not leave to it: for this name its resolution returns the same bytes.
-/// (The bundled SQLite refuses to open a name of 505 bytes or more at all; that
-/// limit is its own and was the same before the check, 504 bytes open.)
+/// SQLite resolves a path by itself and drops `.` and `..` from the text
+/// without looking at the file system, so the check resolves the path with the
+/// system and returns the result.
 ///
 /// Open this, not the path the check was given. Dropping it unused is a
 /// warning, and clippy turns that into an error.
@@ -250,6 +247,10 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
             // cannot be resolved.
             Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
                 return Err(unusable(&dir, "is a file and cannot hold the database", &e));
+            }
+            // The resolved directory exists and cannot be searched.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                return Err(unusable(&dir, "cannot be searched", &e));
             }
             Err(source) => return Err(PairError::Unreadable { path: name, source }),
         }
@@ -422,34 +423,25 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// (RUSTSEC-2026-0459). This reads the two page sizes itself (bytes 16 and 17
 /// of the database, big-endian, 1 meaning 65536; bytes 8 to 11 of the log,
 /// big-endian) and refuses a pair that disagrees. It judges nothing else about
-/// the contents: a pair SQLite wrote always agrees, whatever its magic number
-/// or checksums say. The log is read first and the database second, so a store
-/// another process is creating is never refused for the file it has not yet
+/// the contents. The log is read first and the database second, so a store
+/// another process is creating is not refused for the file it has not yet
 /// written.
 ///
 /// The file the check reads must be the file SQLite opens, so the check does
-/// not leave the resolution of `path` to SQLite (which drops `.` and `..` from
-/// the text, keeps a missing element without error and follows links by
-/// itself, and so can arrive at another file than the system does). It
-/// resolves `path` itself, with the system, into a plain name ([`CheckedPath`]:
-/// absolute, no `.` or `..`, no link in it, the last element included), checks
-/// that, and returns it. **Open the returned name, and use it for anything
-/// else that touches the file between the check and the open**, never `path`.
-/// Nothing else uses it: a store keeps, returns and prints the path it was
-/// given. The function must be called after the directory exists: a directory
-/// that cannot be resolved is refused. A store that creates its directory
-/// calls `create_dir_all` first, so the advice below is reached through a
-/// link's target and by readers that create nothing.
+/// not leave the resolution of `path` to SQLite. It resolves `path` itself,
+/// with the system, into a plain name ([`CheckedPath`]: absolute, no `.` or
+/// `..`, no link in it, the last element included), checks that, and returns
+/// it. **Open the returned name, and use it for anything else that touches the
+/// file between the check and the open**, not `path`. A store keeps, returns
+/// and prints the path it was given. A directory that cannot be resolved is
+/// refused, so a store that creates its directory makes it before the check.
 ///
-/// What the returned name is worth: for every path the check accepts, SQLite's
-/// own resolution of that path reaches the same file or opens none (it refuses
-/// a name whose text under construction passes its 512-byte buffer, even when
-/// the resolved name is short, and more than 200 links in all, counting those
-/// in directories). Giving SQLite the returned name is therefore a second line
-/// of defence against a difference nobody has found, and it is also what lets
-/// such a path open, where it failed before the check. Each open site has a
-/// test that opens a store through a long path of that kind, which fails if the
-/// site gives SQLite the path it was given.
+/// Giving SQLite the returned name is a second line of defence against a
+/// difference in resolution nobody has found. It also lets a path open that
+/// SQLite's own resolution refuses: one whose text passes its name buffer of
+/// about 512 bytes while the resolved name is short, or one that needs more
+/// than about 200 links in all. Each open site has a test that opens a store
+/// through such a path.
 ///
 /// - A path whose text begins with `file:` is refused: SQLite reads such a
 ///   name as a URI, not as a path, and Branchyard gives SQLite paths only.
@@ -457,14 +449,13 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 ///   name `:memory:` is refused too (SQLite opens an in-memory database for
 ///   it and no file; `./:memory:` names a file), and so is the empty path,
 ///   which has no file name.
-/// - Each directory is resolved with the system, so a directory part that
-///   cannot be used (it is missing, `nope/..` after a missing element,
-///   not searchable, or a file, or below one) is refused, with advice that follows the
-///   cause, naming the link and its target when the directory came from a
-///   link; a path that ends in `..` or is a root has no file name and is
-///   refused.
+/// - Each directory is resolved with the system, so a directory that cannot be
+///   used (missing, not searchable, a file, or below one) is refused, with
+///   advice that follows the cause, naming the link and its target when the
+///   directory came from a link; a path that ends in `..` or is a root has no
+///   file name and is refused.
 /// - A symbolic link at the last name is followed, up to 40 links in a row
-///   (SQLite itself follows up to 200), and the log checked is the one beside
+///   (SQLite itself follows about 200), and the log checked is the one beside
 ///   the target, as SQLite opens it. A chain of more than 40 links, or a
 ///   loop, is refused. A link whose target does not exist is followed to the
 ///   name of the target.
@@ -472,16 +463,13 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 ///   compare; `Ok`.
 /// - A log that is a symbolic link (SQLite does not open a log through one)
 ///   or not a regular file (a FIFO, a socket, a directory, a device): refused,
-///   naming what it is. The type of a name is read without opening it; only a
-///   regular file is opened, without blocking and without following a link,
-///   and its type is read again from the handle. Both files are treated so.
+///   naming what it is. The type of a name is read without opening it; a
+///   regular file is opened without blocking and without following a link.
 /// - A log of 32 bytes or more beside a database that is missing or empty:
 ///   refused, as is one beside a database that is not a regular file. A log
-///   cannot be used without its database; SQLite used to remove such a log
-///   unread, and it may hold committed changes.
+///   cannot be used without its database, and it may hold committed changes.
 /// - A log of 32 bytes or more beside a database shorter than its 100-byte
-///   header (SQLite writes the database header before any log in WAL mode),
-///   or with another page size: refused.
+///   header, or with another page size: refused.
 ///
 /// A refusal names the database and the log where they are, and the path
 /// given when that differs; control characters in any name it shows are
@@ -490,9 +478,7 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// Not stopped: the check and the open are two steps. Whoever can change the
 /// files, or a directory above them, between the two (replace a file or a
 /// directory by another, plant a log) is not stopped, and the check cannot see
-/// a log written after it. Only Unix is built and tested; elsewhere the files
-/// are looked at and then opened by name, with a second lookup, so a swap is
-/// no less possible.
+/// a log written after it. Only Unix is built and tested.
 ///
 /// # Errors
 ///
