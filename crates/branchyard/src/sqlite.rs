@@ -826,6 +826,9 @@ impl Sqlite {
     /// left there.
     pub fn open(dir: &Path) -> Result<Sqlite, Error> {
         let path = dir.join("state.db");
+        // Before SQLite is given the path: a log with another page size is
+        // refused (RUSTSEC-2026-0459).
+        branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
         let conn = Connection::open(&path).map_err(|e| db(&path.display().to_string(), e))?;
         conn.busy_timeout(BUSY).map_err(|e| db("busy timeout", e))?;
         // Switching a new database to WAL can fail at once with SQLITE_BUSY

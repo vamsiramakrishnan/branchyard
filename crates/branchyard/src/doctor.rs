@@ -99,6 +99,7 @@ pub fn store_schema(root: &Path) -> Result<Option<StoreSchema>, Error> {
             path.display()
         ))
     };
+    branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
     let conn =
         Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(unreadable)?;
     conn.busy_timeout(READ_WAIT).map_err(unreadable)?;

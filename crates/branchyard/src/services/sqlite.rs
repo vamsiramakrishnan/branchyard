@@ -194,6 +194,8 @@ impl LocalRegistry {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        // Before `private` makes a file and before SQLite is given the path.
+        branchyard_support::check_wal_pair(&path)?;
         private(&path)?;
         let mut conn = Connection::open(&path).map_err(sql)?;
         conn.busy_timeout(BUSY).map_err(sql)?;

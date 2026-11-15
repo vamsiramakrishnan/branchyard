@@ -63,6 +63,26 @@ The check a merge runs is part of the `merge` step. The final record, the final 
 
 A merge the caller repeats after it succeeded is still refused with `already_merged` by `by merge`: the journal replays a merge only when the record does not yet say it was merged. A delegated integration (`by integrate`) is idempotent instead: a child already merged into its parent, or whose candidate the parent contains, is recorded as merged and reported with `already` ([delegation](delegation.md#integrating-several-children)).
 
+## A log with another page size is refused
+
+SQLite before 3.54.0 can return uninitialized process memory when it opens a database together with a write-ahead log (`<file>-wal`) whose page size differs from the database's (RUSTSEC-2026-0459, CVE-2026-119375). The bundled SQLite (`libsqlite3-sys` 0.37.0, through `rusqlite` 0.39) cannot be upgraded yet: `sqlx-sqlite`, which the optional `microsandbox` dependency brings in, caps `libsqlite3-sys` below 0.38, and the graph holds one copy. So every database Branchyard opens first goes through `branchyard_support::check_wal_pair` ([`sqlite_pair.rs`](../crates/branchyard-support/src/sqlite_pair.rs)), which reads the two page sizes itself (bytes 16 and 17 of the database, 1 meaning 65536; bytes 8 to 11 of the log) before SQLite is given the path:
+
+- no log, an empty log or one shorter than its 32-byte header: nothing to compare, the database opens as before;
+- a log of 32 bytes or more whose page size differs from the database's: refused;
+- a log of 32 bytes or more beside a database that is missing or shorter than its 100-byte header: refused (SQLite writes the database's header before any log).
+
+The refusal names the file and both sizes: the pair was not written by SQLite for this database; move both files away to start with a new store, or restore them from a copy you trust. Do not delete the log alone: it can hold committed changes. A symbolic link at the database path is followed as SQLite follows it, and the log checked is the one beside the target.
+
+Every production open goes through it: `.branchyard/state.db` (every `by` command, and the read-only readers `by doctor` and the hooks' `glance`), `.branchyard/sync.db` and the server's `sync/<repo>.db`, the service registry (`.branchyard/registry.db` or the file `BRANCHYARD_REGISTRY` names), and the server's `state.db` (operation registry, triggers and companion, which fail the server's start naming the file). A command on a refused store fails with the message and a non-zero status; `by doctor` reports failed `repository.state` and `repository.schema` rows; a hook prints the refusal on standard error, nothing on standard output, and exits 0, as it does for any store it cannot read. In-memory databases (`open_in_memory`, for tests and embedding) have no file and are not checked.
+
+What stays exposed:
+
+- The check and the open are two steps. A process running as the same user that swaps the files between them is not stopped (it can read this process's memory by other means).
+- The `microsandbox` SDK, when that feature is built, opens a database of its own under its home through the same bundled SQLite; the check does not cover it.
+- The check knows this advisory's precondition only. It is not a validation of the database: a pair that passes can still be corrupt or hostile in other ways.
+
+The advisory is in `deny.toml`'s `ignore` list with this reason; the entry goes when `sqlx-sqlite` allows `libsqlite3-sys` 0.39 or later and `rusqlite` is raised to 0.41 or later. Hermetic tests: `crates/branchyard-support/tests/sqlite_pair.rs` (the check), and `wal_pair.rs` in `branchyard`, `branchyard-server` and `branchyard-cli` (each site).
+
 ## Leases and fencing
 
 `create`, `send`, `fork`, `merge` and `remove` take the branch's lease in the same transaction that marks the branch running (or, for a merge or removal, keeps its record), with a new generation. The engine opened by each `Yard::open` is one owner, identified by its process, the process's start time, and the host and boot it runs on. While the lease is held, from admission until the turn, merge or removal concludes, a heartbeat thread renews it every 5 seconds for 30. A renewal that fails because the store is busy or unreadable is logged once for that outage (`by: warning: renew the lease on branch NAME: ...`, and again when it recovers) and tried again at the next beat; once less than one beat of the lease is left unrenewed, 25 seconds in, the lease counts as lost, is logged as such, and the turn stops writing, as it does when another engine takes the lease. A heartbeat thread that cannot be started is an error from `send`, `create` and the other operations that take a lease, which releases it; it does not leave a lease that nothing renews.

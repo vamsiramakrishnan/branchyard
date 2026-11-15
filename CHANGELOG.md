@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+A database whose write-ahead log has another page size is refused before SQLite
+opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
+uninitialized memory then; the bundled SQLite cannot be upgraded yet because
+`sqlx-sqlite`, through the optional `microsandbox` dependency, caps
+`libsqlite3-sys`). `branchyard_support::check_wal_pair` runs at every open of
+`.branchyard/state.db` (every `by` command, `by doctor`, the hooks' reader),
+`.branchyard/sync.db`, the service registry (and the file `BRANCHYARD_REGISTRY`
+names) and the server's `state.db` and `sync/*.db`. A `-wal` of 32 bytes or more
+whose page size differs from the database's, or that sits beside a missing or
+shorter-than-100-byte database, is an error naming the file and both sizes; the
+remedy it gives is to move both files away or restore a copy you trust, never to
+delete the log alone. A server refuses to start on such a data directory.
+Nothing else about the log or database is judged. The advisory is in
+`deny.toml`'s `ignore` with the reason. Still exposed: the check and the open are
+two steps, so a same-user process that swaps the files between them is not
+stopped; the `microsandbox` SDK opens a database of its own through the same
+bundled SQLite, which the check does not cover; and the check is this
+advisory's precondition only, not a validation of the database. Hermetic. Not
+done: a run against a real SQLite 3.54 or the advisory's published exploit.
+
 Beside an AIPlex backend, a plain backend is sent only what a route names for
 it (amendment 1.1 of the AIPlex integration contract; `docs/model-gateway.md`,
 "The route rule"). In a configuration with a backend that has

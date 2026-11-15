@@ -79,6 +79,10 @@ impl Outbox {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Before SQLite is given the path: a log with another page size is
+        // refused (RUSTSEC-2026-0459).
+        branchyard_support::check_wal_pair(path)
+            .map_err(|e| crate::error::Error::local(e.to_string()))?;
         let conn = Connection::open(path)?;
         #[cfg(unix)]
         {
@@ -378,6 +382,26 @@ impl UploadJournal for OutboxJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_with_another_page_size_is_refused_before_sqlite_opens_the_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync.db");
+        drop(Outbox::open(&path).unwrap());
+        let wal = dir.path().join("sync.db-wal");
+        let mut header = vec![0u8; 32];
+        header[8..12].copy_from_slice(&512u32.to_be_bytes());
+        std::fs::write(&wal, &header).unwrap();
+        let error = Outbox::open(&path).err().unwrap();
+        assert!(error.is(crate::error::Kind::Local), "{error:?}");
+        assert!(
+            error.message.contains(&wal.display().to_string()),
+            "{error:?}"
+        );
+        assert!(error.message.contains("512"), "{error:?}");
+        assert_eq!(std::fs::read(&wal).unwrap(), header);
+        assert!(!dir.path().join("sync.db-shm").exists());
+    }
 
     #[test]
     fn the_outbox_survives_reopening() {

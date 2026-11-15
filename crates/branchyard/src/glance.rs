@@ -169,6 +169,7 @@ pub fn read(root: &Path, inbox_of: Option<&str>) -> Result<Option<Glance>, Error
     let failed = |what: &str, error: rusqlite::Error| {
         Error::State(format!("{} ({what}): {error}", path.display()))
     };
+    branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
     let conn = Connection::open_with_flags(
         &path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
