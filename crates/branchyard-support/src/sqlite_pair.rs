@@ -183,7 +183,7 @@ fn reads_as_uri(path: &Path) -> bool {
     }
 }
 
-/// What the person can do about a directory that cannot be resolved, by cause.
+/// What the person can do about a directory that cannot be used, by cause.
 /// A cause not listed gets no advice, only the system's words.
 fn resolve_advice(kind: io::ErrorKind) -> &'static str {
     match kind {
@@ -192,7 +192,7 @@ fn resolve_advice(kind: io::ErrorKind) -> &'static str {
             "; a directory on the way cannot be searched: change its permissions, or point the path at another"
         }
         io::ErrorKind::NotADirectory => {
-            "; a part of the path is a file, not a directory: point the path at a directory"
+            "; a part of the path is a file, not a directory: the path has to name a file inside a directory, so point it at one"
         }
         _ => "",
     }
@@ -220,7 +220,9 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
             Some(parent) => parent,
             None => return Err(refuse(format!("{} has no directory", shown(&current)))),
         };
-        let dir = dir.canonicalize().map_err(|e| {
+        // A directory that cannot be used, by cause; the link and its target
+        // are named when the directory came from a link's target.
+        let unusable = |dir: &Path, how: &str, e: &io::Error| {
             let advice = resolve_advice(e.kind());
             let what = match &via {
                 Some((link, target)) => format!(
@@ -232,22 +234,22 @@ fn plain_name(given: &Path) -> Result<PathBuf, PairError> {
                 None => format!("its directory {}", shown(dir)),
             };
             refuse(format!(
-                "{what} cannot be resolved ({e}), so the file cannot be named{advice}"
+                "{what} {how} ({e}), so the file cannot be named{advice}"
             ))
-        })?;
+        };
+        let dir = dir
+            .canonicalize()
+            .map_err(|e| unusable(dir, "cannot be resolved", &e))?;
         let name = dir.join(last);
         match std::fs::symlink_metadata(&name) {
             Ok(m) if m.file_type().is_symlink() => {}
-            // A new database, or a file; a name below a file is read as a
-            // failure by the reads that follow, with the log's name.
+            // A new database, or a file.
             Ok(_) => return Ok(name),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(name);
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(name),
+            // The resolved directory is a file: refused like a directory that
+            // cannot be resolved.
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
+                return Err(unusable(&dir, "is a file and cannot hold the database", &e));
             }
             Err(source) => return Err(PairError::Unreadable { path: name, source }),
         }
@@ -435,16 +437,19 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// else that touches the file between the check and the open**, never `path`.
 /// Nothing else uses it: a store keeps, returns and prints the path it was
 /// given. The function must be called after the directory exists: a directory
-/// that cannot be resolved is refused.
+/// that cannot be resolved is refused. A store that creates its directory
+/// calls `create_dir_all` first, so the advice below is reached through a
+/// link's target and by readers that create nothing.
 ///
 /// What the returned name is worth: for every path the check accepts, SQLite's
-/// own resolution of that path reaches the same file, because the cases where
-/// the two differ are refused (`..` after a missing element or a file, a
-/// `file:` name, `:memory:`, the empty name, a chain of more than 40 links).
-/// Giving SQLite the returned name is therefore a second line of defence, and
-/// no test of outcomes can tell a site that does from one that does not (three
-/// sites were changed to give SQLite the original path, and every test still
-/// passed); the `must_use` warning is what holds a site to it.
+/// own resolution of that path reaches the same file or opens none (it refuses
+/// a name whose text under construction passes its 512-byte buffer, even when
+/// the resolved name is short, and more than 200 links in all, counting those
+/// in directories). Giving SQLite the returned name is therefore a second line
+/// of defence against a difference nobody has found, and it is also what lets
+/// such a path open, where it failed before the check. Each open site has a
+/// test that opens a store through a long path of that kind, which fails if the
+/// site gives SQLite the path it was given.
 ///
 /// - A path whose text begins with `file:` is refused: SQLite reads such a
 ///   name as a URI, not as a path, and Branchyard gives SQLite paths only.
@@ -453,8 +458,8 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 ///   it and no file; `./:memory:` names a file), and so is the empty path,
 ///   which has no file name.
 /// - Each directory is resolved with the system, so a directory part that
-///   cannot be resolved (it is missing, `nope/..` after a missing element,
-///   not searchable, below a file) is refused, with advice that follows the
+///   cannot be used (it is missing, `nope/..` after a missing element,
+///   not searchable, or a file, or below one) is refused, with advice that follows the
 ///   cause, naming the link and its target when the directory came from a
 ///   link; a path that ends in `..` or is a root has no file name and is
 ///   refused.

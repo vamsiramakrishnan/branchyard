@@ -146,9 +146,10 @@ fn a_store_left_by_a_killed_writer_still_opens() {
 
 #[cfg(unix)]
 #[test]
-fn the_registry_names_a_file_it_cannot_read() {
-    // The registry is a link into a path below a regular file: its log's
-    // name fails with "not a directory", which must come out with the path.
+fn the_registry_refuses_a_link_into_a_file_with_the_link_and_the_advice() {
+    // The registry is a link to a path below a regular file: the directory of
+    // the target is a file, which is refused with the path, the link and the
+    // advice, not left to a read of a log nobody typed.
     let dir = Scratch::new("wal-registry");
     fs::write(dir.join("plain"), b"x").unwrap();
     let link = dir.join("registry.db");
@@ -156,9 +157,12 @@ fn the_registry_names_a_file_it_cannot_read() {
     let error = LocalRegistry::open(&link).err().unwrap();
     let message = error.to_string();
     assert!(
-        message.contains("plain/registry.db-wal") && message.contains("could not be read"),
+        message.contains("is a symbolic link to") && message.contains("plain/registry.db"),
         "{message}"
     );
+    assert!(message.contains("is a file"), "{message}");
+    assert!(message.contains("inside a directory"), "{message}");
+    assert!(!message.contains("registry.db-wal"), "{message}");
 }
 
 /// A database file SQLite made: a store that was opened and closed, moved to
@@ -231,4 +235,60 @@ fn the_registry_opens_what_was_checked_and_refuses_the_dotdot_trick() {
         .unwrap()
         .to_string();
     assert!(message.contains("cannot be resolved"), "{message}");
+}
+
+/// `<dir>/<250 a>/<250 b>/<250 c>/../../../<name>`: it names `<dir>/<name>`, and its text
+/// is longer than the 512 bytes in which SQLite builds a name, so SQLite's own
+/// resolution of it opens no file, while the name the check returns is short.
+#[cfg(unix)]
+fn long_way_to(dir: &Path, name: &str) -> std::path::PathBuf {
+    let deep = dir
+        .join("a".repeat(250))
+        .join("b".repeat(250))
+        .join("c".repeat(250));
+    fs::create_dir_all(&deep).unwrap();
+    let path = deep.join("../../..").join(name);
+    assert!(path.as_os_str().len() > 600, "{path:?}");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn the_registry_opens_through_a_path_longer_than_sqlite_resolves() {
+    let dir = Scratch::new("wal-long-registry");
+    let registry = LocalRegistry::open(long_way_to(dir.path(), "registry.db")).unwrap();
+    assert!(dir.join("registry.db").metadata().unwrap().len() > 0);
+    drop(registry);
+}
+
+/// A repository at `<base>/repo` with its store made, and the long way to it.
+#[cfg(unix)]
+fn long_way_to_a_repository(base: &Scratch) -> std::path::PathBuf {
+    let repo = base.join("repo");
+    let status = branchyard_support::child::command("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    drop(Yard::open(&repo).unwrap());
+    long_way_to(base.path(), "repo")
+}
+
+#[cfg(unix)]
+#[test]
+fn glance_reads_through_a_path_longer_than_sqlite_resolves() {
+    let base = Scratch::new("wal-long-glance");
+    let root = long_way_to_a_repository(&base);
+    let glance = branchyard::glance::read(&root, None).unwrap();
+    assert!(glance.is_some(), "the store was not found through {root:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reads_the_schema_through_a_path_longer_than_sqlite_resolves() {
+    let base = Scratch::new("wal-long-doctor");
+    let root = long_way_to_a_repository(&base);
+    let schema = branchyard::doctor::store_schema(&root).unwrap();
+    assert!(schema.is_some(), "the store was not found through {root:?}");
 }

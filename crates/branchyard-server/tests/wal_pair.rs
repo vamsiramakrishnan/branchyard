@@ -156,3 +156,45 @@ fn the_stores_refuse_a_link_through_a_missing_directory_and_dotdot() {
         assert!(message.contains("cannot be resolved"), "{message}");
     }
 }
+
+/// `<dir>/<250 a>/<250 b>/<250 c>/../../../state.db`: the text is longer than the 512
+/// bytes in which SQLite builds a name, so SQLite's own resolution of it opens
+/// no file, while the name the check returns is short.
+#[cfg(unix)]
+fn long_way_to_state(dir: &Scratch) -> std::path::PathBuf {
+    let deep = dir
+        .join("a".repeat(250))
+        .join("b".repeat(250))
+        .join("c".repeat(250));
+    fs::create_dir_all(&deep).unwrap();
+    let path = deep.join("../../../state.db");
+    assert!(path.as_os_str().len() > 600, "{path:?}");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn the_operation_store_opens_through_a_path_longer_than_sqlite_resolves() {
+    let dir = Scratch::new("wal-long-store");
+    let store = SqliteStore::open(long_way_to_state(&dir), None).unwrap();
+    assert!(dir.join("state.db").metadata().unwrap().len() > 0);
+    drop(store);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_trigger_store_opens_through_a_path_longer_than_sqlite_resolves() {
+    let dir = Scratch::new("wal-long-triggers");
+    let store = SqliteTriggers::open(&long_way_to_state(&dir)).unwrap();
+    assert!(dir.join("state.db").metadata().unwrap().len() > 0);
+    drop(store);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_companion_store_opens_through_a_path_longer_than_sqlite_resolves() {
+    let dir = Scratch::new("wal-long-companion");
+    let store = SqliteCompanion::open(&long_way_to_state(&dir)).unwrap();
+    assert!(dir.join("state.db").metadata().unwrap().len() > 0);
+    drop(store);
+}

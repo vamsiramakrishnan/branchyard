@@ -4653,6 +4653,35 @@ mod tests {
         assert!(vault.join("state.db").metadata().unwrap().len() > 0);
     }
 
+    /// A store directory reached by `<dir>/<250 a>/<250 b>/<250 c>/../../..`: the text is
+    /// longer than the 512 bytes in which SQLite builds a name, so SQLite's own
+    /// resolution of the path opens no file, while the name the check returns
+    /// is short.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_opens_through_a_path_longer_than_sqlite_resolves() {
+        let scratch = branchyard_testkit::Scratch::new("sqlite-long");
+        let deep = scratch
+            .path()
+            .join("a".repeat(250))
+            .join("b".repeat(250))
+            .join("c".repeat(250));
+        fs::create_dir_all(&deep).unwrap();
+        let dir = deep.join("../../../store");
+        assert!(dir.as_os_str().len() > 600, "{dir:?}");
+        let store = Sqlite::open(&dir).unwrap();
+        assert!(
+            scratch
+                .path()
+                .join("store/state.db")
+                .metadata()
+                .unwrap()
+                .len()
+                > 0
+        );
+        drop(store);
+    }
+
     #[test]
     fn processes_opening_a_new_store_at_once_all_succeed() {
         for round in 0..20 {

@@ -4,7 +4,7 @@
 
 #![allow(clippy::panic, clippy::unwrap_used)] // tests: a panic is the failure report
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use branchyard_support::{check_wal_pair, PairError};
 use branchyard_testkit::Scratch;
@@ -388,24 +388,48 @@ fn a_short_database_beside_a_log_names_both_files() {
 
 #[cfg(unix)]
 #[test]
-fn a_path_below_a_regular_file_is_unreadable_and_the_error_names_it() {
+fn a_path_below_a_regular_file_is_refused_with_advice_and_names_the_path() {
     let dir = Scratch::new("pair");
     fs::write(dir.join("plain"), b"x").unwrap();
+    // Given directly: the directory is a file.
     let path = dir.join("plain").join("state.db");
+    let message = refusal(&path);
+    assert!(message.contains(&path.display().to_string()), "{message}");
+    assert!(message.contains("is a file"), "{message}");
+    assert!(message.contains("inside a directory"), "{message}");
+    assert!(!message.contains("-wal"), "{message}");
+    // Through a link, which is named with its target.
+    let link = dir.join("l.db");
+    std::os::unix::fs::symlink("plain/state.db", &link).unwrap();
+    let message = refusal(&link);
+    assert!(
+        message.contains("is a symbolic link to plain/state.db"),
+        "{message}"
+    );
+    assert!(message.contains("is a file"), "{message}");
+    assert!(!message.contains("-wal"), "{message}");
+    // The refusal does not depend on permissions, and is an io::Error of the
+    // same kind for the stores that print it.
     let error = check_wal_pair(&path).unwrap_err();
-    let PairError::Unreadable { path: named, .. } = &error else {
-        panic!("expected unreadable, got {error:?}");
+    assert_eq!(
+        std::io::Error::from(error).kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn an_unreadable_file_of_the_pair_keeps_its_kind_and_names_its_path_through_io_error() {
+    let error = PairError::Unreadable {
+        path: PathBuf::from("/x/state.db-wal"),
+        source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
     };
-    assert!(named.ends_with("state.db-wal"), "{named:?}");
-    assert!(error.to_string().contains("state.db-wal"), "{error}");
-    // As an io::Error, which the registry and the server print, too.
     let io_error = std::io::Error::from(error);
     let text = io_error.to_string();
     assert!(
-        text.contains("state.db-wal") && text.contains("could not be read"),
+        text.contains("/x/state.db-wal") && text.contains("could not be read"),
         "{text}"
     );
-    assert_eq!(io_error.kind(), std::io::ErrorKind::NotADirectory);
+    assert_eq!(io_error.kind(), std::io::ErrorKind::PermissionDenied);
 }
 
 #[cfg(unix)]
@@ -699,7 +723,8 @@ fn control_characters_in_a_name_are_escaped_in_a_refusal() {
         message.contains("a\\nby: all good\\u{1b}[2K\\tb"),
         "{message:?}"
     );
-    // A read error shows the name escaped too, as an error and as io::Error.
+    // A refusal of a path below a file shows the name escaped too, as an
+    // error and as io::Error.
     fs::write(dir.join("plain\nfile"), b"x").unwrap();
     let error = check_wal_pair(&dir.join("plain\nfile/state.db")).unwrap_err();
     assert!(!error.to_string().contains('\n'), "{error:?}");

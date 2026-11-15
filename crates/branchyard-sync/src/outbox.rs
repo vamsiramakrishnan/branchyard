@@ -431,6 +431,28 @@ mod tests {
         assert_eq!(std::fs::read(&wal).unwrap(), header);
     }
 
+    /// `<dir>/<250 a>/<250 b>/<250 c>/../../../sync.db`: the text is longer
+    /// than the 512 bytes in which SQLite builds a name, so SQLite's own
+    /// resolution of it opens no file, while the name the check returns is
+    /// short.
+    #[cfg(unix)]
+    #[test]
+    fn the_outbox_opens_through_a_path_longer_than_sqlite_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir
+            .path()
+            .join("a".repeat(250))
+            .join("b".repeat(250))
+            .join("c".repeat(250));
+        std::fs::create_dir_all(&deep).unwrap();
+        let path = deep.join("../../../sync.db");
+        assert!(path.as_os_str().len() > 600, "{path:?}");
+        let outbox = Outbox::open(&path).unwrap();
+        outbox.enqueue("r", "a", 10).unwrap();
+        assert_eq!(outbox.pending("r").unwrap().len(), 1);
+        assert!(dir.path().join("sync.db").metadata().unwrap().len() > 0);
+    }
+
     #[test]
     fn the_outbox_survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
