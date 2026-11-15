@@ -110,24 +110,44 @@ fn validate(cwd: &Path, file: Option<&str>, json: bool) -> Outcome {
     };
     let mut results = Vec::new();
     let mut ok = true;
+    // What the configuration says that is not wrong: the route notes of the
+    // one file asked about, else of the merge, which is what `by` reads.
+    let mut notes = Vec::new();
     for path in &files {
-        let result = setup_io::read_layer(path);
-        ok &= result.is_ok();
-        results.push((path.clone(), result.err().map(|e| e.to_string())));
+        match setup_io::read_layer(path) {
+            Ok(layer) => {
+                if file.is_some() {
+                    notes = layer.models.route_notes();
+                }
+                results.push((path.clone(), None));
+            }
+            Err(e) => {
+                ok = false;
+                results.push((path.clone(), Some(e.to_string())));
+            }
+        }
     }
     // The layers must also merge.
     if ok && file.is_none() {
-        if let Err(e) = setup_io::load(cwd, None) {
-            ok = false;
-            results.push((cwd.to_path_buf(), Some(e.to_string())));
+        match setup_io::load(cwd, None) {
+            Ok(effective) => notes = effective.config.models.route_notes(),
+            Err(e) => {
+                ok = false;
+                results.push((cwd.to_path_buf(), Some(e.to_string())));
+            }
         }
+    }
+    if !ok {
+        notes.clear();
     }
     if json {
         let entries: Vec<Value> = results
             .iter()
             .map(|(path, error)| json!({ "path": path, "ok": error.is_none(), "error": error }))
             .collect();
-        print(&to_json(&json!({ "valid": ok, "files": entries })))?;
+        print(&to_json(
+            &json!({ "valid": ok, "files": entries, "notes": notes }),
+        ))?;
     } else if files.is_empty() {
         print("No configuration files to validate. Write one with `by init project`.\n")?;
     } else {
@@ -137,6 +157,10 @@ fn validate(cwd: &Path, file: Option<&str>, json: bool) -> Outcome {
                 None => text.push_str(&format!("ok       {}\n", path.display())),
                 Some(error) => text.push_str(&format!("invalid  {error}\n")),
             }
+        }
+        // Notes, not refusals: the exit status is the files'.
+        for note in &notes {
+            text.push_str(&format!("note     {note}\n"));
         }
         print(&text)?;
     }

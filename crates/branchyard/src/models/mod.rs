@@ -766,6 +766,9 @@ pub struct Gateway {
     /// root certificates when the environment names them
     /// ([`upstream::Transport::from_env`]).
     transport: upstream::Transport,
+    /// What the configuration said when it was read that a turn on this
+    /// gateway repeats on its branch ([`Gateway::noting`]).
+    notes: Vec<String>,
 }
 
 impl fmt::Debug for Gateway {
@@ -952,6 +955,7 @@ impl Gateway {
             }),
             signatures: gemini::Signatures::default(),
             transport: upstream::Transport::from_env(upstream::QUIET),
+            notes: Vec::new(),
         };
         // A control plane's token under another variable's name is hidden
         // as the named one was above, from the children still to start.
@@ -986,6 +990,33 @@ impl Gateway {
             .map(String::as_str)
             .collect();
         (!planes.is_empty()).then_some((route.model.as_str(), planes))
+    }
+
+    /// The first route whose pattern takes `model` (as `Gateway::takes` asks),
+    /// and the APIs of the requests it can take: its backends' own, and
+    /// Anthropic's where it translates for an OpenAI backend. For a refusal
+    /// of a request in another API, to say which route names the model.
+    pub(crate) fn named_elsewhere(&self, model: &str) -> Option<(&str, Vec<Api>)> {
+        let route = self.routes.iter().find(|r| self.takes(r, model))?;
+        let mut apis: Vec<Api> = Vec::new();
+        for backend in route
+            .backends
+            .iter()
+            .map(|(name, _)| name)
+            .chain(&route.fallbacks)
+            .filter_map(|name| self.backend(name))
+        {
+            let translated = (route.backend_model.is_some()
+                && Api::Anthropic.translates_to(backend.api))
+            .then_some(Api::Anthropic);
+            for api in std::iter::once(backend.api).chain(translated) {
+                if !apis.contains(&api) {
+                    apis.push(api);
+                }
+            }
+        }
+        apis.sort_unstable();
+        Some((route.model.as_str(), apis))
     }
 
     /// The tokens of the control-plane backends that are called with a
@@ -1061,6 +1092,20 @@ impl Gateway {
     pub fn quiet_after(mut self, quiet: std::time::Duration) -> Gateway {
         self.transport = upstream::Transport::from_env(quiet);
         self
+    }
+
+    /// The same gateway, whose turns each say `notes` once on their
+    /// branch, as warnings: what the configuration said when it was read
+    /// (a local yard's route notes), so an operator who never runs
+    /// `by doctor` hears of them where a turn's other warnings go.
+    pub fn noting(mut self, notes: Vec<String>) -> Gateway {
+        self.notes = notes;
+        self
+    }
+
+    /// What each turn on this gateway says once ([`Gateway::noting`]).
+    pub(crate) fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     fn backend(&self, name: &str) -> Option<&Backend> {

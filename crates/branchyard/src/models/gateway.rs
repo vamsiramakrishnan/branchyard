@@ -1217,7 +1217,15 @@ fn handle(stream: TcpStream, state: &TurnState) {
     }
     // Backends, and the route's rate limit.
     let gateway = &state.gateway;
-    let model = (!call.model.is_empty()).then_some(call.model.as_str());
+    // Beside a control plane, a name that is only white space is no model,
+    // as an empty one is: the name of a real model never is, so such a
+    // request is the control plane's or nobody's, not a plain `*` route's.
+    // Without one, as it always was.
+    let blank = match gateway.has_control_plane() {
+        true => call.model.trim().is_empty(),
+        false => call.model.is_empty(),
+    };
+    let model = (!blank).then_some(call.model.as_str());
     // The model list names no model and spends nothing: the one request a
     // plain backend beside a control plane is sent without a route.
     let listing = request.method == "GET" && path.split('?').next() == Some("/v1/models");
@@ -1266,24 +1274,37 @@ fn handle(stream: TcpStream, state: &TurnState) {
             // plane's, and this API has no backend of it: the request is
             // nobody's. The event says what an operator can change; the
             // harness is told no backend's name.
+            // A route whose pattern matches it but that has no backend this
+            // request can use is named, with the APIs it takes requests in.
             (None, Some(model)) if gateway.has_control_plane() && !listing => (
                 format!(
-                    "no route names {model} for a request in the {api} API, and beside a \
-                     control plane a model no route names is an AIPlex backend's, of which \
-                     this API has none, so the request is sent nowhere: add a route for \
+                    "no route that can take a request in the {api} API names {model}{}, and \
+                     beside a control plane a model no route names is an AIPlex backend's, of \
+                     which this API has none, so the request is sent nowhere: add a route for \
                      {model}; a last route with model = \"*\" that names a plain backend \
-                     sends it everything no earlier route names"
+                     sends it everything no earlier route names",
+                    match gateway.named_elsewhere(model) {
+                        Some((pattern, apis)) => format!(
+                            " (the route {pattern:?} names it for a request in the {} API)",
+                            apis.iter()
+                                .map(Api::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        ),
+                        None => String::new(),
+                    }
                 ),
                 format!(
-                    "no route names {model}, and it is not sent to a backend no route names \
-                     for it"
+                    "no route that can take this request names {model}, and it is not sent to \
+                     a backend no route names for it"
                 ),
             ),
             (None, None) if gateway.has_control_plane() && !listing => (
                 format!(
                     "this request names no model, so no route can name it, and beside a \
                      control plane such a request is an AIPlex backend's; the {api} API has \
-                     none, so it is sent nowhere"
+                     none, so it is sent nowhere: name a model that a route names for the \
+                     {api} API, or give the {api} API an AIPlex backend"
                 ),
                 "this request names no model, and it is not sent to a backend no route names \
                  for it"

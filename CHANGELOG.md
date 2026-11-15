@@ -12,16 +12,18 @@ kinds of backend, any other path or method `403`; a model no route takes, and a
 request on those routes that names no model, go to the request's API's AIPlex
 backends, else `404`, never to a plain backend; `GET /v1/models` is answered as
 before, and a `GET` with a body is `400`; a route that names AIPlex backends
-matches a model's name in any letter case and with white space around it; the
-pass-through path `/backends/NAME/...` answers `404` for every name. An AIPlex
-backend no route names is no longer refused beside a plain backend of its API.
-A server's warnings and `by doctor`'s new `models.routes` row note an AIPlex
-route behind a plain route that covers its pattern, a generic backend and a
-plain backend no route names. Who is affected: a configuration with both kinds
-of backend that relied on a plain backend taking what no route named. The
-remedy is one route, written last: `model = "*"` naming the plain backend.
-A configuration without an AIPlex backend is unchanged. Hermetic. Not done:
-the notes in `by config validate`, and a live run of the new rule.
+matches a model's name in any letter case and with white space around it, and a
+`model` that is only white space names no model; the pass-through path
+`/backends/NAME/...` answers `404` for every name. An AIPlex backend no route
+names is no longer refused beside a plain backend of its API. A server's
+warnings, `by doctor`'s new `models.routes` row, `by config validate` (`note`
+lines, `notes` in `--json`, exit status unchanged) and a warning on each local
+turn's branch note an AIPlex route behind a plain route that covers its pattern
+for an API both take, a generic backend and a plain backend no route names. Who
+is affected: a configuration with both kinds of backend that relied on a plain
+backend taking what no route named. The remedy is one route, written last:
+`model = "*"` naming the plain backend. A configuration without an AIPlex
+backend is unchanged. Hermetic. Not done: a live run of the new rule.
 
 Admin compute console (`docs/admin-console.md`). The server serves `/admin`, a
 page for operators, with `GET /v1/admin/compute` (`admin`) reading each execution

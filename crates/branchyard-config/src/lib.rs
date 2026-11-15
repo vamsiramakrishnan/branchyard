@@ -1440,12 +1440,18 @@ impl ModelsConfig {
     ///   control-plane backends and whose pattern covers its own (`*`
     ///   before `gpt-*`): the first route whose pattern matches a model
     ///   decides, whatever API the request speaks, so the models the later
-    ///   route was written for are held to the earlier one's backends.
+    ///   route was written for are held to the earlier one's backends. The
+    ///   earlier route matches a name in any letter case, so the patterns
+    ///   are compared in lower case (`gpt-*` covers `GPT-*`).
     /// - A route that names control-plane backends behind an earlier route
     ///   of plain backends whose pattern covers its own (`*` before
-    ///   `claude-*`): every name the earlier pattern matches as written
-    ///   goes to the plain backends, the opposite of what the later route
-    ///   asks for.
+    ///   `claude-*`) and that can take a request the later route's
+    ///   backends serve (the same API, or a translation): every name the
+    ///   earlier pattern matches as written, asked for in such an API, goes
+    ///   to the plain backends, the opposite of what the later route asks
+    ///   for. The note names those APIs; a request in another API passes
+    ///   the plain route by, as the planner skips a route with no backend
+    ///   it can use.
     /// - A generic backend: only the pass-through path reaches one, and it
     ///   is closed beside a control plane.
     /// - A plain backend that no route names: beside a control plane it is
@@ -1454,6 +1460,7 @@ impl ModelsConfig {
     /// Patterns are compared with `glob_covers`, which is sound and not
     /// complete, so a pair of patterns it cannot tell about is not noted.
     pub fn route_notes(&self) -> Vec<String> {
+        use branchyard_provision::connectors::glob_covers;
         let plane = |name: &String| {
             self.backends
                 .get(name)
@@ -1464,18 +1471,50 @@ impl ModelsConfig {
         }
         let governed =
             |route: &ModelRouteConfig| route.backends.iter().chain(&route.fallbacks).any(plane);
-        let covered_by = |at: usize, earlier_governed: bool| {
-            let later = &self.routes[at];
-            self.routes[..at].iter().enumerate().find(|(_, earlier)| {
-                governed(earlier) == earlier_governed
-                    && branchyard_provision::connectors::glob_covers(&earlier.model, &later.model)
-            })
+        // The APIs of the requests a route can take, as the planner asks:
+        // its backends' own, and Anthropic's for a route that translates
+        // for an OpenAI backend (`backend_model`).
+        let takes = |route: &ModelRouteConfig| {
+            let mut apis: Vec<&str> = Vec::new();
+            for name in route.backends.iter().chain(&route.fallbacks) {
+                let Some(backend) = self.backends.get(name) else {
+                    continue;
+                };
+                let mut add = |api: &'static str| {
+                    if !apis.contains(&api) {
+                        apis.push(api);
+                    }
+                };
+                match backend.api.as_str() {
+                    "anthropic" => add("anthropic"),
+                    "openai" => {
+                        add("openai");
+                        if route.backend_model.is_some() {
+                            add("anthropic");
+                        }
+                    }
+                    _ => add("generic"),
+                }
+            }
+            apis.sort_unstable();
+            apis
         };
         let mut notes = Vec::new();
         for (at, later) in self.routes.iter().enumerate() {
+            let earlier = self.routes[..at].iter().enumerate();
             match governed(later) {
                 false => {
-                    if let Some((before, earlier)) = covered_by(at, true) {
+                    // The earlier AIPlex route reads a name in any letter
+                    // case, so its pattern covers what it covers in lower
+                    // case.
+                    let covering = earlier.clone().find(|(_, earlier)| {
+                        governed(earlier)
+                            && glob_covers(
+                                &earlier.model.to_lowercase(),
+                                &later.model.to_lowercase(),
+                            )
+                    });
+                    if let Some((before, earlier)) = covering {
                         notes.push(format!(
                             "models.routes[{at}]: no request reaches this route for {:?}: the \
                              earlier route for {:?} (models.routes[{before}]) covers its pattern \
@@ -1487,15 +1526,29 @@ impl ModelsConfig {
                     }
                 }
                 true => {
-                    if let Some((before, earlier)) = covered_by(at, false) {
+                    let served = takes(later);
+                    let covering = earlier.clone().find_map(|(before, earlier)| {
+                        let shared: Vec<&str> = takes(earlier)
+                            .into_iter()
+                            .filter(|api| served.contains(api))
+                            .collect();
+                        (!governed(earlier)
+                            && !shared.is_empty()
+                            && glob_covers(&earlier.model, &later.model))
+                        .then_some((before, earlier, shared))
+                    });
+                    if let Some((before, earlier, shared)) = covering {
+                        let apis = shared.join(" or ");
                         notes.push(format!(
                             "models.routes[{at}]: the earlier route for {:?} \
-                             (models.routes[{before}]) names plain backends and covers this \
-                             route's pattern {:?}, and the first route whose pattern matches a \
-                             model decides: a model named as this pattern has it goes to the \
-                             plain backend, and only a name the earlier pattern does not match as \
-                             written (another letter case, white space around it) can reach this \
-                             route's AIPlex backends; put this route before that one",
+                             (models.routes[{before}]) names plain backends that take a request \
+                             in the {apis} API and covers this route's pattern {:?}, and the \
+                             first route whose pattern matches a model and that can take the \
+                             request decides: a model named as this pattern has it, asked for in \
+                             the {apis} API, goes to the plain backend, and only a name the \
+                             earlier pattern does not match as written (another letter case, \
+                             white space around it) can reach this route's AIPlex backends there; \
+                             put this route before that one",
                             earlier.model, later.model
                         ));
                     }
@@ -4286,6 +4339,24 @@ classes = { compensable = "allow" }
         ];
         assert_eq!(shadowed.models.route_notes(), noted);
         assert_eq!(shadowed.models.notes(), noted);
+        // An AIPlex route reads a name in any letter case, so a plain
+        // pattern it covers in lower case is noted too: `gpt-*` takes
+        // `GPT-4` before `GPT-*` can.
+        let cased = parse(&file(&format!(
+            "{}{}",
+            route("gpt-*", "ap"),
+            route("GPT-*", "direct")
+        )))
+        .unwrap();
+        assert_eq!(
+            cased.models.route_notes(),
+            [
+                "models.routes[1]: no request reaches this route for \"GPT-*\": the earlier route \
+              for \"gpt-*\" (models.routes[0]) covers its pattern and names AIPlex backends, and \
+              the first route whose pattern matches a model decides, whatever API the request \
+              speaks; put this route before that one"
+            ]
+        );
         // A prefix that covers a longer one is said the same way.
         let prefix = parse(&file(&format!(
             "{}{}",
@@ -4666,16 +4737,61 @@ classes = { compensable = "allow" }
                 models.route_notes(),
                 [format!(
                     "models.routes[1]: the earlier route for {earlier:?} (models.routes[0]) \
-                     names plain backends and covers this route's pattern {later:?}, and the \
-                     first route whose pattern matches a model decides: a model named as this \
-                     pattern has it goes to the plain backend, and only a name the earlier \
-                     pattern does not match as written (another letter case, white space \
-                     around it) can reach this route's AIPlex backends; put this route before \
-                     that one"
+                     names plain backends that take a request in the anthropic API and covers \
+                     this route's pattern {later:?}, and the first route whose pattern matches \
+                     a model and that can take the request decides: a model named as this \
+                     pattern has it, asked for in the anthropic API, goes to the plain backend, \
+                     and only a name the earlier pattern does not match as written (another \
+                     letter case, white space around it) can reach this route's AIPlex backends \
+                     there; put this route before that one"
                 )],
                 "{earlier} {later}"
             );
         }
+        // Only for the APIs both routes can take a request in: the planner
+        // skips a route with no backend the request can use, so a plain
+        // OpenAI backend on `*` does not take an Anthropic request for
+        // `claude-x`, unless the route translates for it (`backend_model`).
+        let openai = "[models.backends.oai]\napi = \"openai\"\nkey = \"OPENAI_API_KEY\"\n\n";
+        let models = file(
+            openai,
+            &[("*", "oai"), ("claude-*", "ap"), ("direct-*", "direct")],
+        );
+        assert!(
+            models.route_notes().is_empty(),
+            "{:?}",
+            models.route_notes()
+        );
+        let translating = file(
+            &format!(
+                "{openai}[[models.routes]]\nmodel = \"*\"\nbackends = [\"oai\"]\n\
+                 backend_model = \"gpt-4o\"\n\n"
+            ),
+            &[("claude-*", "ap"), ("*", "direct")],
+        );
+        let notes = translating.route_notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with(
+                "models.routes[1]: the earlier route for \"*\" (models.routes[0]) names plain \
+                 backends that take a request in the anthropic API and covers this route's \
+                 pattern \"claude-*\""
+            ),
+            "{notes:?}"
+        );
+        // An AIPlex route of both APIs behind a plain route of one: said
+        // for that one.
+        let both = "[models.backends.ap-openai]\napi = \"openai\"\n\
+             url = \"https://aiplex.example.com/ap/ide\"\nkey = \"aiplex\"\n\
+             control_plane = \"aiplex\"\n\n[[models.routes]]\nmodel = \"*\"\n\
+             backends = [\"direct\"]\n\n[[models.routes]]\nmodel = \"claude-*\"\n\
+                    backends = [\"ap\", \"ap-openai\"]\n\n";
+        let notes = file(both, &[]).route_notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("names plain backends that take a request in the anthropic API"),
+            "{notes:?}"
+        );
         // A generic backend: only the pass-through path reaches one, and
         // it is closed beside a control plane.
         let generic = "[models.backends.local]\napi = \"generic\"\n\

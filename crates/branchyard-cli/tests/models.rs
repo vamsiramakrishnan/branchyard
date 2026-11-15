@@ -461,5 +461,58 @@ fn an_aiplex_backend_is_shown_its_refusal_is_final_and_bad_ones_are_refused_by_n
         stderr(&out),
         String::from_utf8_lossy(&out.stdout)
     );
+    // The plain backend no route names is said where a local operator
+    // looks first, after the `ok` line, as a note: the exit status is the
+    // file's.
+    let note = "models.backends.direct: no route names this plain backend, so beside an AIPlex \
+                backend it is sent only the model list; add a route for the models it should \
+                serve (a last route with model = \"*\" sends it every model no earlier route \
+                names)";
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = said.lines().collect();
+    assert!(lines[0].starts_with("ok "), "{said}");
+    assert_eq!(
+        lines.last(),
+        Some(&format!("note     {note}").as_str()),
+        "{said}"
+    );
+    let checked = repo.json(&["config", "validate", "--json"]);
+    assert_eq!(checked["valid"], json!(true));
+    assert_eq!(checked["notes"], json!([note]));
+    // And a turn on this yard says it once, where its other warnings go.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        format!(
+            "version = 1\n\n[secrets]\naiplex = \"@{}\"\n\n[models]\nallow = [\"claude-*\"]\n\n\
+             {backend}{plain}",
+            token.display()
+        ),
+    )
+    .unwrap();
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-q", "--amend", "--no-edit"]);
+    let out = repo.run("noted", &[], &["claude-sonnet-4-6"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let log = repo.text(&["log", "noted"]);
+    assert!(
+        log.contains("model: claude-sonnet-4-6 allowed via aiplex-anthropic (200"),
+        "{log}"
+    );
+    assert_eq!(log.matches(note).count(), 1, "{log}");
+    // Without a plain backend no route names, nothing is said.
+    fs::write(
+        repo.root.join("branchyard.toml"),
+        format!(
+            "version = 1\n\n[secrets]\naiplex = \"@{}\"\n\n{backend}",
+            token.display()
+        ),
+    )
+    .unwrap();
+    let said = repo.text(&["config", "validate"]);
+    assert!(!said.contains("note"), "{said}");
+    assert_eq!(
+        repo.json(&["config", "validate", "--json"])["notes"],
+        json!([])
+    );
     access.finish();
 }

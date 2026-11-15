@@ -463,7 +463,10 @@ fn model_gateway_signed(
     let engine = models_config(config)?;
     let root = yard.root();
     let gateway = models::Gateway::new(&engine, signer, |name| key_source(root, secrets, name))
-        .map_err(|e| section("[models]", e))?;
+        .map_err(|e| section("[models]", e))?
+        // What the routes leave unreached beside a control plane, said on
+        // each turn's branch: `by doctor` is not the only place to hear it.
+        .noting(config.route_notes());
     Ok(Some(gateway))
 }
 

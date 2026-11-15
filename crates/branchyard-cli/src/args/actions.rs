@@ -1258,6 +1258,11 @@ pub enum ConfigAction {
     /// The user and project files, and whether they exist
     Path,
     /// Load FILE, or every file by reads, strictly
+    ///
+    /// After the files, prints what the configuration notes and does not
+    /// refuse (a `note` line each, `notes` in --json): beside an AIPlex
+    /// backend, a plain backend no route names and a route no request
+    /// reaches. Notes do not change the exit status.
     Validate {
         /// One file to check (default: the user and project files, and their merge)
         #[arg(value_hint = ValueHint::FilePath)]
