@@ -33,7 +33,7 @@ use std::path::Path;
 /// taking locks: a held lock went missing). Such a table is read several
 /// times (`PASSES`) and the answer is every lock any pass showed, each once.
 /// A lock this process holds throughout is then missed only if every pass
-/// skips it, and a lock it does not hold is in none.
+/// skips it, and a lock it holds at no time during the call is in none.
 ///
 /// # Errors
 ///

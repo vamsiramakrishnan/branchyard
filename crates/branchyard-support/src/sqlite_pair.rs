@@ -346,9 +346,13 @@ enum Read {
 /// look and the open, or two threads opening the same file at once, can leave
 /// more than one on a file, and each is kept.
 ///
-/// A descriptor is closed by a later check of a file on the same file system
-/// (device), once its file has no name left (`nlink` 0, read from the
-/// handle), not at the moment the name goes. Closing it releases any lock
+/// A descriptor is closed by a later check of a file on the same device
+/// (`st_dev`), once its file has no name left (`nlink` 0, read from the
+/// handle), not at the moment the name goes. A device is usually a file
+/// system, but on an overlay whose layers are on different file systems a
+/// file that came from a lower layer and a file made since have different
+/// devices, so a removed database that came from a lower layer is not closed
+/// by checks of the one that replaced it. Closing it releases any lock
 /// this process still holds on that deleted file. That matters in one case:
 /// this process and another both still have the deleted database open, and
 /// the other can then do what the lock would have stopped
@@ -661,8 +665,9 @@ fn read_closing(path: &Path, limit: usize) -> io::Result<Read> {
 /// descriptor on a regular file that still has a name. That is up to two per
 /// pair (more than one on a file when its name was swapped during the check,
 /// or two threads opened it at once). A descriptor is released by a later
-/// check once its file has no name left, not when the name goes, so a
-/// process that checks nothing more keeps it until it exits.
+/// check of a file on the same device (`st_dev`) once its file has no name
+/// left, not when the name goes, so a process that checks nothing more on
+/// that device keeps it until it exits.
 ///
 /// Not stopped: the check and the open are two steps. Whoever can change the
 /// files, or a directory above them, between the two (replace a file or a

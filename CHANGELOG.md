@@ -49,9 +49,9 @@ two per database; more than one on a file when its name was swapped during the
 check or two threads opened it at once), because closing any descriptor on a
 file releases every POSIX lock the process holds on it, SQLite's among them,
 and the log's name may be a hard link to a database. A later check of a file on
-the same file system releases a descriptor once its file has no name left,
-which also releases any lock the process still held on that deleted file. The
-advisory is in `deny.toml`'s `ignore` with the reason. Still exposed: the
+the same device (`st_dev`) releases a descriptor once its file has no name
+left, which also releases any lock the process still held on that deleted file.
+The advisory is in `deny.toml`'s `ignore` with the reason. Still exposed: the
 check and the open are two steps, so whoever can change the files, or a
 directory above them, between the two is not stopped; the `microsandbox` SDK
 opens a database of its own through the same bundled SQLite, which the check

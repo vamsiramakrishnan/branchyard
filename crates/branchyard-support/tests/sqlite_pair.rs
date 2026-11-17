@@ -956,13 +956,15 @@ fn the_check_holds_one_descriptor_per_database_until_its_name_is_gone() {
 
 /// A second file system for a test: `/dev/shm` when it is a directory that
 /// can be written and is on another device than the ordinary scratch
-/// directory; otherwise `None`, after a line on standard error.
+/// directory; otherwise why there is none.
 #[cfg(target_os = "linux")]
-fn second_file_system() -> Option<PathBuf> {
+fn second_file_system() -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt as _;
     let shm = PathBuf::from("/dev/shm");
     let ordinary = Scratch::new("pair-dev");
-    let ordinary_dev = fs::metadata(ordinary.path()).unwrap().dev();
+    let ordinary_dev = fs::metadata(ordinary.path())
+        .map_err(|e| format!("the scratch directory cannot be looked at: {e}"))?
+        .dev();
     let why = match fs::metadata(&shm) {
         Err(e) => format!("/dev/shm cannot be looked at: {e}"),
         Ok(m) if !m.is_dir() => "/dev/shm is not a directory".to_string(),
@@ -973,15 +975,15 @@ fn second_file_system() -> Option<PathBuf> {
             let probe = shm.join(format!("branchyard-probe-{}", std::process::id()));
             match fs::create_dir(&probe) {
                 Ok(()) => {
-                    fs::remove_dir(&probe).unwrap();
-                    return Some(shm);
+                    fs::remove_dir(&probe)
+                        .map_err(|e| format!("a probe in /dev/shm cannot be removed: {e}"))?;
+                    return Ok(shm);
                 }
                 Err(e) => format!("/dev/shm cannot be written: {e}"),
             }
         }
     };
-    eprintln!("sqlite_pair: a check on another file system did nothing: {why}");
-    None
+    Err(why)
 }
 
 #[cfg(target_os = "linux")]
@@ -989,8 +991,20 @@ fn second_file_system() -> Option<PathBuf> {
 fn a_check_releases_only_descriptors_on_the_file_system_it_is_about() {
     use branchyard_testkit::descriptors_of;
     use std::os::unix::fs::MetadataExt as _;
-    let Some(shm) = second_file_system() else {
-        return;
+    let shm = match second_file_system() {
+        Ok(shm) => shm,
+        Err(why) => {
+            // A passing test's output is not shown, so in CI a skip would
+            // pass without testing anything: there it is a failure.
+            let in_ci =
+                std::env::var_os("CI").is_some_and(|v| !v.is_empty() && v != "false" && v != "0");
+            assert!(
+                !in_ci,
+                "this test needs a second file system and CI has none: {why}"
+            );
+            eprintln!("skipped: no second file system on this host ({why})");
+            return;
+        }
     };
     let on_shm = |name: &str| {
         let dir = Scratch::new_in(&shm, name);
