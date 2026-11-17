@@ -318,8 +318,7 @@ fn open_plain(path: &Path) -> io::Result<Opened> {
     }
 }
 
-/// What reading the database's header through [`held::read`] found.
-#[cfg(unix)]
+/// What reading a file's header found.
 enum Read {
     Missing,
     /// A symbolic link at the name (the open does not follow one).
@@ -329,33 +328,44 @@ enum Read {
     Bytes(Vec<u8>),
 }
 
-/// The descriptors this process keeps on the database files whose headers
-/// the check has read.
+/// The descriptors this process keeps on the files of the pairs whose headers
+/// the check has read: databases and their logs.
 ///
 /// On Unix, SQLite's locks are POSIX record locks (`fcntl(F_SETLK)`), which
 /// belong to the process and the file: closing **any** descriptor on a file
 /// releases every such lock the process holds on it, and SQLite, believing it
 /// still holds its lock, does not take it again. The check cannot know
-/// whether the process has a connection on a database (another thread may be
-/// opening one), so it never closes a descriptor on a database file that
-/// still has a name. It keeps one read-only descriptor per file (device and
-/// inode), opened close-on-exec so a child does not inherit it, and reads
-/// through it with positioned reads, which move no file offset.
+/// whether the process has a connection on a file (another thread may be
+/// opening one), nor whether the name of a log is a hard link to a database,
+/// so it never closes a descriptor on a regular file that still has a name,
+/// whichever role the name plays. It keeps a read-only descriptor per file
+/// (device and inode), opened close-on-exec so a child does not inherit it,
+/// and reads through it with positioned reads, which move no file offset.
+/// That is up to two per pair; a name swapped between the look and the open,
+/// or two threads opening the same file at once, can leave more than one on a
+/// file, and each is kept.
 ///
-/// A descriptor is closed only when its file has no name left (`nlink` 0,
-/// read from the handle), checked each time the table is used. That is safe:
-/// a file without a name cannot be opened by anyone else, and SQLite stops
-/// checkpointing and removing a log once its database has been moved or
-/// removed (`fileHasMoved` in `sqlite3.c`). While a descriptor is held its
-/// inode cannot be freed, so its inode number is not reused for another file
-/// on that device and an entry found by device and inode is that file.
+/// A descriptor is closed by a later check, of any pair, once its file has no
+/// name left (`nlink` 0, read from the handle), not at the moment the name
+/// goes. Closing it releases any lock this process still holds on that
+/// deleted file. That matters in one case: this process and another both
+/// still have the deleted database open, and the other can then do what the
+/// lock would have stopped (`PRAGMA journal_mode=DELETE` removes the log by
+/// name without checking that the database has not moved, and the name may
+/// by then be another database's log). The sweep stays all the same: without
+/// it, a long-lived process that creates and removes databases would keep a
+/// descriptor, and the file's blocks, for each until it exits.
+///
+/// While a descriptor is held its inode cannot be freed, so its inode number
+/// is not reused for another file on that device and an entry found by device
+/// and inode is that file.
 #[cfg(unix)]
 mod held {
     use std::fs::{File, Metadata};
     use std::io;
     use std::os::unix::fs::{FileExt as _, MetadataExt as _};
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::{open_plain, Opened, Read};
     use crate::LockExt as _;
@@ -364,53 +374,72 @@ mod held {
         /// Device and inode as the handle reported them; `None` when the
         /// handle could not be asked (it is kept all the same).
         identity: Option<(u64, u64)>,
-        file: File,
+        file: Arc<File>,
     }
 
-    /// One lock across the lookup, the open and the insert, so two threads
-    /// cannot both open the same file.
+    /// The table, and only the table: every `open`, `fstat`, `pread` and
+    /// `close` is made outside this lock, so a file system that hangs stalls
+    /// the checks that touch it and not every store open in the process.
     static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
 
-    /// Up to `limit` leading bytes of the database at `path`, whose name was
-    /// just seen (`seen`, not followed) to be a regular file.
+    fn table() -> std::sync::MutexGuard<'static, Vec<Held>> {
+        HELD.lock_recovering("held descriptors")
+    }
+
+    /// Up to `limit` leading bytes of the file at `path`, whose name was just
+    /// seen (`seen`, not followed) to be a regular file.
     pub(super) fn read(path: &Path, seen: &Metadata, limit: usize) -> io::Result<Read> {
-        let mut held = HELD.lock_recovering("held database descriptors");
-        // A file whose handle cannot be asked is kept: it may still have a
-        // name.
-        held.retain(|h| h.file.metadata().map_or(true, |m| m.nlink() > 0));
+        sweep();
         let identity = (seen.dev(), seen.ino());
-        if let Some(h) = held.iter().find(|h| h.identity == Some(identity)) {
-            return read_head(&h.file, limit).map(Read::Bytes);
+        let found = table()
+            .iter()
+            .find(|h| h.identity == Some(identity))
+            .map(|h| Arc::clone(&h.file));
+        if let Some(file) = found {
+            return read_head(&file, limit).map(Read::Bytes);
         }
         let file = match open_plain(path)? {
             Opened::Missing => return Ok(Read::Missing),
             Opened::Link => return Ok(Read::Link),
-            Opened::File(file) => file,
+            Opened::File(file) => Arc::new(file),
         };
         let metadata = match file.metadata() {
             Ok(metadata) => metadata,
             Err(e) => {
-                held.push(Held {
-                    identity: None,
-                    file,
-                });
+                // It may still have a name.
+                keep(None, file);
                 return Err(e);
             }
         };
         if !metadata.is_file() {
-            // Not a database; SQLite holds no lock on it. Closed here.
+            // Not a database or a log; SQLite holds no lock on it. Closed
+            // here.
             return Ok(Read::NotRegular(metadata.file_type()));
         }
         // Kept even when the table has this identity already (the name was
-        // swapped between the look and the open): it must not be closed
-        // either.
-        let entry = Held {
-            identity: Some((metadata.dev(), metadata.ino())),
-            file,
-        };
-        let bytes = read_head(&entry.file, limit);
-        held.push(entry);
-        bytes.map(Read::Bytes)
+        // swapped between the look and the open, or another thread opened
+        // the file meanwhile): it must not be closed either.
+        keep(Some((metadata.dev(), metadata.ino())), Arc::clone(&file));
+        read_head(&file, limit).map(Read::Bytes)
+    }
+
+    fn keep(identity: Option<(u64, u64)>, file: Arc<File>) {
+        table().push(Held { identity, file });
+    }
+
+    /// Drop the entries whose file has no name left. The handles are taken
+    /// under the lock and asked outside it; a descriptor closes when its
+    /// last clone is dropped, after the lock is released. A handle that
+    /// cannot be asked is kept: its file may still have a name.
+    fn sweep() {
+        let all: Vec<Arc<File>> = table().iter().map(|h| Arc::clone(&h.file)).collect();
+        let gone: Vec<Arc<File>> = all
+            .into_iter()
+            .filter(|file| file.metadata().is_ok_and(|m| m.nlink() == 0))
+            .collect();
+        if !gone.is_empty() {
+            table().retain(|h| !gone.iter().any(|g| Arc::ptr_eq(g, &h.file)));
+        }
     }
 
     /// Up to `limit` bytes from the start of `file`, by positioned reads.
@@ -461,7 +490,6 @@ fn kind_of(file_type: std::fs::FileType) -> &'static str {
 /// following a link, and the type of the handle is judged again, so a swap
 /// between the two looks cannot make the read come from something else.
 fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, PairError> {
-    use std::io::Read as _;
     let path = names.of(role);
     let unreadable = |source| PairError::Unreadable {
         path: path.to_path_buf(),
@@ -513,36 +541,41 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(unreadable(e)),
     };
-    // The database is read through a descriptor that is kept open (see
-    // `held`); only the log is opened, read and closed here.
+    // Both files are read through a descriptor that is kept open (see
+    // `held`): the log's name may be a hard link to a database.
     #[cfg(unix)]
-    if role == Role::Database {
-        return match held::read(path, &seen, limit).map_err(unreadable)? {
-            Read::Missing => Ok(None),
-            Read::Link => Err(link()),
-            Read::NotRegular(file_type) => Err(not_regular(file_type, true)),
-            Read::Bytes(bytes) => Ok(Some(bytes)),
-        };
-    }
+    let read = held::read(path, &seen, limit);
     #[cfg(not(unix))]
-    drop(seen);
-    // Where locks belong to the handle and not to the process (not Unix;
-    // this branch is not built here), closing this descriptor releases no
-    // lock SQLite holds, so the database is read this way too.
-    let file = match open_plain(path).map_err(unreadable)? {
-        Opened::Missing => return Ok(None),
-        Opened::Link => return Err(link()),
+    let read = {
+        drop(seen);
+        read_closing(path, limit)
+    };
+    match read.map_err(unreadable)? {
+        Read::Missing => Ok(None),
+        Read::Link => Err(link()),
+        Read::NotRegular(file_type) => Err(not_regular(file_type, true)),
+        Read::Bytes(bytes) => Ok(Some(bytes)),
+    }
+}
+
+/// Where locks belong to the handle and not to the process (not Unix; this
+/// branch is not built here), closing a descriptor releases no lock SQLite
+/// holds, so a file is opened, read and closed.
+#[cfg(not(unix))]
+fn read_closing(path: &Path, limit: usize) -> io::Result<Read> {
+    use std::io::Read as _;
+    let file = match open_plain(path)? {
+        Opened::Missing => return Ok(Read::Missing),
+        Opened::Link => return Ok(Read::Link),
         Opened::File(file) => file,
     };
-    let metadata = file.metadata().map_err(unreadable)?;
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(not_regular(metadata.file_type(), true));
+        return Ok(Read::NotRegular(metadata.file_type()));
     }
     let mut bytes = Vec::with_capacity(limit);
-    file.take(limit as u64)
-        .read_to_end(&mut bytes)
-        .map_err(unreadable)?;
-    Ok(Some(bytes))
+    file.take(limit as u64).read_to_end(&mut bytes)?;
+    Ok(Read::Bytes(bytes))
 }
 
 /// Check the database at `path` and its write-ahead log before SQLite is
@@ -606,10 +639,15 @@ fn head(names: &Names, role: Role, limit: usize) -> Result<Option<Vec<u8>>, Pair
 /// given, and the link and its target when one led there. Control characters
 /// in any name shown are written as escapes.
 ///
-/// On Unix the database is read through a read-only descriptor the process
-/// keeps for as long as it runs and the file has a name, one per database
-/// file: closing a descriptor on the file would release the POSIX locks
-/// SQLite holds on it in this process.
+/// On Unix the database and the log are each read through a read-only
+/// descriptor the process keeps, because closing a descriptor on a file would
+/// release the POSIX locks SQLite holds on it in this process, and the log's
+/// name may be a hard link to a database: the check never closes a
+/// descriptor on a regular file that still has a name. That is up to two per
+/// pair (more than one on a file when its name was swapped during the check,
+/// or two threads opened it at once). A descriptor is released by a later
+/// check once its file has no name left, not when the name goes, so a
+/// process that checks nothing more keeps it until it exits.
 ///
 /// Not stopped: the check and the open are two steps. Whoever can change the
 /// files, or a directory above them, between the two (replace a file or a

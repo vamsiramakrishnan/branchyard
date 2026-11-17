@@ -14,27 +14,78 @@ use std::path::Path;
 /// kind and the byte range; `EOF` for a lock to the end of the file).
 /// Locks of other kinds (`FLOCK`, `OFDLCK`) and waiters are not included.
 ///
+/// The file is found by this process's pid and its inode number, not by its
+/// device: `/proc/locks` prints the device of the inode's superblock, which
+/// is not always the one `stat` reports (an overlay file system whose layers
+/// are on different file systems, a btrfs subvolume), and a match by device
+/// would find no lock there although one is held. The cost: a file with the
+/// same inode number on another file system, locked by this process, would
+/// be counted too; no test here locks one.
+///
+/// The kernel prints `/proc/locks` at most a page per read. A table that
+/// comes in one read is a snapshot, and the answer is exactly what it shows.
+/// A longer one is not: a lock taken or released anywhere between two reads
+/// shifts the lines after it, so one pass can skip a line or print it twice
+/// (seen with other threads taking locks: a held lock went missing). Such a
+/// table is read several times (`PASSES`) and the answer is every lock any pass
+/// showed, each once. A lock this process holds throughout is then missed
+/// only if every pass skips it, and a lock it does not hold is in none.
+///
 /// # Errors
 ///
 /// When `path` cannot be looked at or `/proc/locks` cannot be read.
 pub fn posix_locks_on(path: &Path) -> io::Result<Vec<String>> {
     let meta = std::fs::metadata(path)?;
-    let table = std::fs::read_to_string("/proc/locks")?;
-    Ok(posix_locks_in(
-        &table,
-        std::process::id(),
-        meta.dev(),
-        meta.ino(),
-    ))
+    let (pid, ino) = (std::process::id(), meta.ino());
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..PASSES {
+        let (table, reads) = lock_table_once()?;
+        let mut held: Vec<String> = Vec::new();
+        for lock in posix_locks_in(&table, pid, ino) {
+            if !held.contains(&lock) {
+                held.push(lock);
+            }
+        }
+        if reads <= 1 {
+            return Ok(held);
+        }
+        for lock in held {
+            if !seen.contains(&lock) {
+                seen.push(lock);
+            }
+        }
+    }
+    Ok(seen)
 }
 
-/// The POSIX locks `pid` holds on device `dev` (as `st_dev` encodes it) and
-/// inode `ino`, read from `table`, the text of `/proc/locks`.
-pub fn posix_locks_in(table: &str, pid: u32, dev: u64, ino: u64) -> Vec<String> {
-    // `/proc/locks` prints the device as `major:minor` in hexadecimal; this
-    // is how glibc's `major` and `minor` decode `st_dev`.
-    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
-    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+/// How many times a table that does not come in one read is read.
+const PASSES: usize = 8;
+
+/// One pass over `/proc/locks`, and the number of reads it took.
+fn lock_table_once() -> io::Result<(String, usize)> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open("/proc/locks")?;
+    let mut chunk = vec![0u8; 1 << 16];
+    let mut text = Vec::new();
+    let mut reads = 0;
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                reads += 1;
+                text.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((String::from_utf8_lossy(&text).into_owned(), reads))
+}
+
+/// The POSIX locks `pid` holds on inode number `ino`, on any device, read
+/// from `table`, the text of `/proc/locks` (see [`posix_locks_on`] for why
+/// the device is not compared).
+pub fn posix_locks_in(table: &str, pid: u32, ino: u64) -> Vec<String> {
     let mut held = Vec::new();
     for line in table.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -46,16 +97,7 @@ pub fn posix_locks_in(table: &str, pid: u32, dev: u64, ino: u64) -> Vec<String> 
         if kind != "POSIX" || owner.parse::<u32>().ok() != Some(pid) {
             continue;
         }
-        let mut parts = file.split(':');
-        let (Some(maj), Some(min), Some(inode), None) =
-            (parts.next(), parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let same = u64::from_str_radix(maj, 16).ok() == Some(major)
-            && u64::from_str_radix(min, 16).ok() == Some(minor)
-            && inode.parse::<u64>().ok() == Some(ino);
-        if same {
+        if file.rsplit(':').next().and_then(|i| i.parse::<u64>().ok()) == Some(ino) {
             held.push(format!("{mode} {start}-{end}"));
         }
     }
@@ -100,33 +142,27 @@ mod tests {
     #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
     use super::*;
 
-    /// `st_dev` for `major:minor` as Linux encodes it.
-    fn dev(major: u64, minor: u64) -> u64 {
-        (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12) | ((major & !0xfff) << 32)
-    }
-
     #[test]
-    fn only_posix_locks_of_this_pid_on_this_file_are_listed() {
+    fn only_posix_locks_of_this_pid_on_this_inode_are_listed() {
         let table = "\
 1: POSIX  ADVISORY  READ  42 fd:01:7 1073741826 1073742335
 2: POSIX  ADVISORY  WRITE 43 fd:01:7 0 EOF
 3: FLOCK  ADVISORY  WRITE 42 fd:01:7 0 EOF
 4: OFDLCK ADVISORY  READ  -1 fd:01:7 0 EOF
 5: POSIX  ADVISORY  READ  42 fd:01:8 0 EOF
-6: POSIX  ADVISORY  READ  42 fd:02:7 0 EOF
-6: -> POSIX  ADVISORY  WRITE 42 fd:01:7 0 EOF
-7: POSIX  ADVISORY  WRITE 42 fd:01:7 0 EOF
+5: -> POSIX  ADVISORY  WRITE 42 fd:01:7 0 EOF
+6: POSIX  ADVISORY  WRITE 42 fd:01:7 0 EOF
+7: POSIX  ADVISORY  READ  42 00:29:77 0 EOF
 ";
         assert_eq!(
-            posix_locks_in(table, 42, dev(0xfd, 1), 7),
+            posix_locks_in(table, 42, 7),
             vec!["READ 1073741826-1073742335", "WRITE 0-EOF"]
         );
-        // A minor number above 255 is split across `st_dev`.
-        let wide = "1: POSIX  ADVISORY  READ  42 103:1a3:9 0 EOF\n";
-        assert_eq!(
-            posix_locks_in(wide, 42, dev(0x103, 0x1a3), 9),
-            vec!["READ 0-EOF"]
-        );
+        // The device is not compared: an overlay file `stat` reports on
+        // 00:2a is printed on its superblock's device, 00:29.
+        assert_eq!(posix_locks_in(table, 42, 77), vec!["READ 0-EOF"]);
+        // An inode number is matched whole, not as a suffix.
+        assert_eq!(posix_locks_in(table, 42, 777), Vec::<String>::new());
     }
 
     #[test]

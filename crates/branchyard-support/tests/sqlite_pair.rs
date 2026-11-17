@@ -939,13 +939,203 @@ fn the_check_holds_one_descriptor_per_database_until_its_name_is_gone() {
     accepted(&dir.join("alias.db"));
     assert_eq!(descriptors_on(&path).unwrap(), 1, "a link adds none");
     let meta = fs::metadata(&path).unwrap();
+    // The test's own descriptor keeps the inode, so its number is not given
+    // to another test's file meanwhile.
+    let own = fs::File::open(&path).unwrap();
     fs::remove_file(&path).unwrap();
     // The next check of any database releases the one without a name.
     let (_other, other) = pair(&database(4096, 4096), Some(&log(64, 4096)));
     accepted(&other);
+    // A check on another thread may still hold a clone of the handle for the
+    // moment its own sweep takes; the descriptor closes when it lets go.
+    branchyard_testkit::wait::until("released once the file had no name", || {
+        descriptors_of(meta.dev(), meta.ino()).unwrap() == 1
+    });
+    drop(own);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_log_that_is_a_hard_link_to_the_database_is_refused_and_the_lock_is_kept() {
+    use branchyard_testkit::posix_locks_on;
+    let (dir, path) = pair(&database(4096, 4096), None);
+    let file = fs::File::open(&path).unwrap();
+    lock_shared(&file, &path);
+    // The log's name is the database itself: its "page size" is bytes 8 to
+    // 11 of the database's header, 0 here.
+    fs::hard_link(&path, dir.join("state.db-wal")).unwrap();
+    let message = refusal(&path);
+    assert!(message.contains("page size of 0 bytes"), "{message}");
     assert_eq!(
-        descriptors_of(meta.dev(), meta.ino()).unwrap(),
-        0,
-        "released once the file had no name"
+        posix_locks_on(&path).unwrap(),
+        vec!["READ 0-EOF"],
+        "the lock after the check read the database as the log"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_log_hard_linked_to_another_database_is_refused_and_that_lock_is_kept() {
+    use branchyard_testkit::posix_locks_on;
+    let (_other_dir, other) = pair(&database(4096, 4096), None);
+    let file = fs::File::open(&other).unwrap();
+    lock_shared(&file, &other);
+    let (dir, path) = pair(&database(4096, 4096), None);
+    fs::hard_link(&other, dir.join("state.db-wal")).unwrap();
+    let message = refusal(&path);
+    assert!(message.contains("page size of 0 bytes"), "{message}");
+    assert_eq!(
+        posix_locks_on(&other).unwrap(),
+        vec!["READ 0-EOF"],
+        "the lock on the database the log's name led to"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn many_checks_of_one_pair_keep_one_descriptor_on_each_file() {
+    use branchyard_testkit::descriptors_on;
+    let (dir, path) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    for _ in 0..20 {
+        accepted(&path);
+    }
+    assert_eq!(descriptors_on(&path).unwrap(), 1, "on the database");
+    let wal = dir.join("state.db-wal");
+    assert_eq!(descriptors_on(&wal).unwrap(), 1, "on the log");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_log_made_again_releases_the_old_one_at_a_later_check() {
+    use branchyard_testkit::{descriptors_of, descriptors_on};
+    use std::os::unix::fs::MetadataExt as _;
+    let (dir, path) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    let wal = dir.join("state.db-wal");
+    accepted(&path);
+    assert_eq!(descriptors_on(&wal).unwrap(), 1, "the log, kept");
+    let old = fs::metadata(&wal).unwrap();
+    // As above: the test's descriptor keeps the old inode's number.
+    let own = fs::File::open(&wal).unwrap();
+    fs::remove_file(&wal).unwrap();
+    fs::write(&wal, log(64, 4096)).unwrap();
+    assert_ne!(fs::metadata(&wal).unwrap().ino(), old.ino(), "a new inode");
+    accepted(&path);
+    // As above: another thread's sweep may hold the handle for a moment.
+    branchyard_testkit::wait::until("the old log, released once it had no name", || {
+        descriptors_of(old.dev(), old.ino()).unwrap() == 1
+    });
+    drop(own);
+    assert_eq!(descriptors_on(&wal).unwrap(), 1, "the new log, kept");
+    assert_eq!(descriptors_on(&path).unwrap(), 1, "the database, kept");
+}
+
+/// Many threads check eight databases, each locked by the test, while four of
+/// them remove and make again two other pairs and check those. A hung file
+/// system cannot be made in a hermetic test, so this shows only that the
+/// table stays right with its I/O done outside its lock.
+#[cfg(target_os = "linux")]
+#[test]
+fn checks_on_many_threads_keep_every_lock_and_few_descriptors() {
+    use branchyard_testkit::{descriptors_on, posix_locks_on};
+    const THREADS: usize = 32;
+    const CHURNERS: usize = 4;
+    let stable: Vec<_> = (0..8)
+        .map(|_| pair(&database(4096, 4096), Some(&log(64, 4096))))
+        .collect();
+    let locks: Vec<_> = stable
+        .iter()
+        .map(|(_, path)| {
+            let file = fs::File::open(path).unwrap();
+            lock_shared(&file, path);
+            // The first open of each file, before the threads: the threads
+            // find it in the table.
+            accepted(path);
+            file
+        })
+        .collect();
+    let churned: Vec<_> = (0..2)
+        .map(|_| pair(&database(4096, 4096), Some(&log(64, 4096))))
+        .collect();
+    std::thread::scope(|scope| {
+        for t in 0..THREADS {
+            let (stable, churned) = (&stable, &churned);
+            scope.spawn(move || {
+                for i in 0..100 {
+                    if t < CHURNERS {
+                        let path = &churned[(t + i) % churned.len()].1;
+                        let wal = PathBuf::from(format!("{}-wal", path.display()));
+                        if i % 10 == 0 {
+                            fs::remove_file(&wal).ok();
+                            fs::remove_file(path).ok();
+                            fs::write(path, database(4096, 4096)).ok();
+                            fs::write(&wal, log(64, 4096)).ok();
+                        }
+                        // Refused or unreadable while another thread is
+                        // between its writes; any answer will do.
+                        check_wal_pair(path).ok();
+                    } else {
+                        accepted(&stable[(t + i) % stable.len()].1);
+                    }
+                }
+            });
+        }
+    });
+    for ((dir, path), _file) in stable.iter().zip(&locks) {
+        assert_eq!(posix_locks_on(path).unwrap(), vec!["READ 0-EOF"]);
+        // The test's own descriptor and the check's.
+        assert_eq!(descriptors_on(path).unwrap(), 2, "{}", path.display());
+        assert_eq!(descriptors_on(&dir.join("state.db-wal")).unwrap(), 1);
+    }
+    for (dir, path) in &churned {
+        // Made again and checked only by the churning threads; two of them
+        // may open the same new file at once, so up to one kept descriptor
+        // per churning thread on a file.
+        accepted(path);
+        assert!(
+            descriptors_on(path).unwrap() <= CHURNERS,
+            "{}",
+            path.display()
+        );
+        let wal = dir.join("state.db-wal");
+        assert!(
+            descriptors_on(&wal).unwrap() <= CHURNERS,
+            "{}",
+            wal.display()
+        );
+    }
+}
+
+/// The lock helper sees a lock this process holds while other threads take
+/// and release locks on other files: `/proc/locks` comes a page per read, and
+/// a change between two reads shifts the lines after it.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_lock_helper_sees_a_held_lock_while_other_locks_change() {
+    use branchyard_testkit::posix_locks_on;
+    use rustix::fs::{fcntl_lock, FlockOperation};
+    let dir = Scratch::new("locks");
+    let path = dir.join("held");
+    fs::write(&path, b"x").unwrap();
+    let file = fs::File::open(&path).unwrap();
+    fcntl_lock(&file, FlockOperation::NonBlockingLockShared).unwrap();
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for i in 0..8 {
+            let (dir, stop) = (&dir, &stop);
+            scope.spawn(move || {
+                let other = dir.join(format!("other{i}"));
+                fs::write(&other, b"x").unwrap();
+                let other = fs::File::open(&other).unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    fcntl_lock(&other, FlockOperation::NonBlockingLockShared).unwrap();
+                    fcntl_lock(&other, FlockOperation::NonBlockingUnlock).unwrap();
+                }
+            });
+        }
+        let seen: Vec<_> = (0..2000).map(|_| posix_locks_on(&path).unwrap()).collect();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for held in seen {
+            assert_eq!(held, vec!["READ 0-EOF"]);
+        }
+    });
 }

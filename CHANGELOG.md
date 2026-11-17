@@ -43,11 +43,14 @@ directory, a device). The type of a file is read without opening
 it, so a FIFO is not opened. A path a refusal shows has
 its control characters written as escapes. A file that cannot be read is
 reported with its path. A server refuses to start on such a data directory.
-Nothing else about the log or database is judged. On Unix the database is
-read through a read-only descriptor the process keeps for as long as it runs
-and the file has a name (one per database file), because closing any
-descriptor on a file releases every POSIX lock the process holds on it,
-SQLite's among them. The advisory is in
+Nothing else about the log or database is judged. On Unix the database and
+its log are each read through a read-only descriptor the process keeps (up to
+two per database; more than one on a file when its name was swapped during the
+check or two threads opened it at once), because closing any descriptor on a
+file releases every POSIX lock the process holds on it, SQLite's among them,
+and the log's name may be a hard link to a database. A later check releases a
+descriptor once its file has no name left, which also releases any lock the
+process still held on that deleted file. The advisory is in
 `deny.toml`'s `ignore` with the reason. Still exposed: the check and the open
 are two steps, so whoever can change the files, or a directory above them,
 between the two is not stopped; the `microsandbox` SDK opens a database of its
