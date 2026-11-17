@@ -22,14 +22,18 @@ use std::path::Path;
 /// same inode number on another file system, locked by this process, would
 /// be counted too; no test here locks one.
 ///
-/// The kernel prints `/proc/locks` at most a page per read. A table that
-/// comes in one read is a snapshot, and the answer is exactly what it shows.
-/// A longer one is not: a lock taken or released anywhere between two reads
-/// shifts the lines after it, so one pass can skip a line or print it twice
-/// (seen with other threads taking locks: a held lock went missing). Such a
-/// table is read several times (`PASSES`) and the answer is every lock any pass
-/// showed, each once. A lock this process holds throughout is then missed
-/// only if every pass skips it, and a lock it does not hold is in none.
+/// The kernel prints `/proc/locks` at most a page per read, in whole lines,
+/// so one read that was clearly shorter than a page ended because the table
+/// did, and it is the whole table, a snapshot: the answer is exactly what it
+/// shows (`whole_table`). A read near a page may have been cut there, and
+/// the rest released before the next read looks like the end of the table,
+/// so such a pass is not trusted. Neither is a table that took several reads:
+/// a lock taken or released anywhere between two reads shifts the lines after
+/// it, so one pass can skip a line or print it twice (seen with other threads
+/// taking locks: a held lock went missing). Such a table is read several
+/// times (`PASSES`) and the answer is every lock any pass showed, each once.
+/// A lock this process holds throughout is then missed only if every pass
+/// skips it, and a lock it does not hold is in none.
 ///
 /// # Errors
 ///
@@ -46,7 +50,7 @@ pub fn posix_locks_on(path: &Path) -> io::Result<Vec<String>> {
                 held.push(lock);
             }
         }
-        if reads <= 1 {
+        if whole_table(reads, table.len()) {
             return Ok(held);
         }
         for lock in held {
@@ -58,8 +62,19 @@ pub fn posix_locks_on(path: &Path) -> io::Result<Vec<String>> {
     Ok(seen)
 }
 
-/// How many times a table that does not come in one read is read.
+/// How many times a table that is not known to be whole is read.
 const PASSES: usize = 8;
+
+/// A page is at least 4096 bytes on every Linux, and a line of `/proc/locks`
+/// is well under 256; a single read shorter than this was not cut at a page.
+const ONE_READ_LIMIT: usize = 4096 - 256;
+
+/// Whether a pass of `reads` reads that returned `len` bytes in all is the
+/// whole table: at most one read, and one clearly shorter than a page. The
+/// reads use a 64 KiB buffer, so a short read is not the buffer's doing.
+fn whole_table(reads: usize, len: usize) -> bool {
+    reads <= 1 && len < ONE_READ_LIMIT
+}
 
 /// One pass over `/proc/locks`, and the number of reads it took.
 fn lock_table_once() -> io::Result<(String, usize)> {
@@ -141,6 +156,21 @@ pub fn descriptors_of(dev: u64, ino: u64) -> io::Result<usize> {
 mod tests {
     #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
     use super::*;
+
+    #[test]
+    fn a_pass_is_the_whole_table_only_when_one_read_was_clearly_shorter_than_a_page() {
+        // An empty table: no read at all.
+        assert!(whole_table(0, 0));
+        assert!(whole_table(1, 1));
+        assert!(whole_table(1, ONE_READ_LIMIT - 1));
+        // Within a line of a page: the kernel may have cut it there.
+        assert!(!whole_table(1, ONE_READ_LIMIT));
+        assert!(!whole_table(1, 4095));
+        assert!(!whole_table(1, 4096));
+        assert!(!whole_table(1, 65536));
+        // More than one read is never taken for the whole table.
+        assert!(!whole_table(2, 10));
+    }
 
     #[test]
     fn only_posix_locks_of_this_pid_on_this_inode_are_listed() {

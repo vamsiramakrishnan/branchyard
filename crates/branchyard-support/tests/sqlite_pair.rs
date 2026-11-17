@@ -954,6 +954,76 @@ fn the_check_holds_one_descriptor_per_database_until_its_name_is_gone() {
     drop(own);
 }
 
+/// A second file system for a test: `/dev/shm` when it is a directory that
+/// can be written and is on another device than the ordinary scratch
+/// directory; otherwise `None`, after a line on standard error.
+#[cfg(target_os = "linux")]
+fn second_file_system() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    let shm = PathBuf::from("/dev/shm");
+    let ordinary = Scratch::new("pair-dev");
+    let ordinary_dev = fs::metadata(ordinary.path()).unwrap().dev();
+    let why = match fs::metadata(&shm) {
+        Err(e) => format!("/dev/shm cannot be looked at: {e}"),
+        Ok(m) if !m.is_dir() => "/dev/shm is not a directory".to_string(),
+        Ok(m) if m.dev() == ordinary_dev => {
+            "/dev/shm is on the same device as the scratch directory".to_string()
+        }
+        Ok(_) => {
+            let probe = shm.join(format!("branchyard-probe-{}", std::process::id()));
+            match fs::create_dir(&probe) {
+                Ok(()) => {
+                    fs::remove_dir(&probe).unwrap();
+                    return Some(shm);
+                }
+                Err(e) => format!("/dev/shm cannot be written: {e}"),
+            }
+        }
+    };
+    eprintln!("sqlite_pair: a check on another file system did nothing: {why}");
+    None
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_check_releases_only_descriptors_on_the_file_system_it_is_about() {
+    use branchyard_testkit::descriptors_of;
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(shm) = second_file_system() else {
+        return;
+    };
+    let on_shm = |name: &str| {
+        let dir = Scratch::new_in(&shm, name);
+        let path = dir.join("state.db");
+        fs::write(&path, database(4096, 4096)).unwrap();
+        fs::write(dir.join("state.db-wal"), log(64, 4096)).unwrap();
+        (dir, path)
+    };
+    let (first_dir, first) = on_shm("pair-shm");
+    accepted(&first);
+    let meta = fs::metadata(&first).unwrap();
+    assert_eq!(descriptors_of(meta.dev(), meta.ino()).unwrap(), 1);
+    // The test's own descriptor keeps the inode number from being reused.
+    let own = fs::File::open(&first).unwrap();
+    fs::remove_file(&first).unwrap();
+    fs::remove_file(first_dir.join("state.db-wal")).unwrap();
+    // A check on the ordinary file system does not look at it.
+    let (_ordinary_dir, ordinary) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    accepted(&ordinary);
+    assert_eq!(
+        descriptors_of(meta.dev(), meta.ino()).unwrap(),
+        2,
+        "a check of a file on another file system released it"
+    );
+    // A check on the same file system does.
+    let (_second_dir, second) = on_shm("pair-shm");
+    accepted(&second);
+    branchyard_testkit::wait::until("released by a check on its own file system", || {
+        descriptors_of(meta.dev(), meta.ino()).unwrap() == 1
+    });
+    drop(own);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_log_that_is_a_hard_link_to_the_database_is_refused_and_the_lock_is_kept() {

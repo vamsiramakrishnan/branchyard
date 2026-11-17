@@ -341,20 +341,22 @@ enum Read {
 /// whichever role the name plays. It keeps a read-only descriptor per file
 /// (device and inode), opened close-on-exec so a child does not inherit it,
 /// and reads through it with positioned reads, which move no file offset.
-/// That is up to two per pair; a name swapped between the look and the open,
-/// or two threads opening the same file at once, can leave more than one on a
-/// file, and each is kept.
+/// That is up to two per pair (the log's, whatever its length, and the
+/// database's when the log was 32 bytes or more); a name swapped between the
+/// look and the open, or two threads opening the same file at once, can leave
+/// more than one on a file, and each is kept.
 ///
-/// A descriptor is closed by a later check, of any pair, once its file has no
-/// name left (`nlink` 0, read from the handle), not at the moment the name
-/// goes. Closing it releases any lock this process still holds on that
-/// deleted file. That matters in one case: this process and another both
-/// still have the deleted database open, and the other can then do what the
-/// lock would have stopped (`PRAGMA journal_mode=DELETE` removes the log by
-/// name without checking that the database has not moved, and the name may
-/// by then be another database's log). The sweep stays all the same: without
-/// it, a long-lived process that creates and removes databases would keep a
-/// descriptor, and the file's blocks, for each until it exits.
+/// A descriptor is closed by a later check of a file on the same file system
+/// (device), once its file has no name left (`nlink` 0, read from the
+/// handle), not at the moment the name goes. Closing it releases any lock
+/// this process still holds on that deleted file. That matters in one case:
+/// this process and another both still have the deleted database open, and
+/// the other can then do what the lock would have stopped
+/// (`PRAGMA journal_mode=DELETE` removes the log by name without checking
+/// that the database has not moved, and the name may by then be another
+/// database's log). The sweep stays all the same: without it, a long-lived
+/// process that creates and removes databases would keep a descriptor, and
+/// the file's blocks, for each until it exits.
 ///
 /// While a descriptor is held its inode cannot be freed, so its inode number
 /// is not reused for another file on that device and an entry found by device
@@ -372,14 +374,19 @@ mod held {
 
     struct Held {
         /// Device and inode as the handle reported them; `None` when the
-        /// handle could not be asked (it is kept all the same).
+        /// handle could not be asked after it was opened (nothing has been
+        /// seen to do that). Such an entry is kept all the same, is never
+        /// matched by a lookup, and is not looked at by the sweep, so it
+        /// stays until the process exits; a later check of the same file
+        /// opens and keeps another descriptor.
         identity: Option<(u64, u64)>,
         file: Arc<File>,
     }
 
     /// The table, and only the table: every `open`, `fstat`, `pread` and
-    /// `close` is made outside this lock, so a file system that hangs stalls
-    /// the checks that touch it and not every store open in the process.
+    /// `close` is made outside this lock. A check asks (`fstat`) only the
+    /// kept descriptors on the device of the file it is reading, so it waits
+    /// only for the file systems its own path and files are on.
     static HELD: Mutex<Vec<Held>> = Mutex::new(Vec::new());
 
     fn table() -> std::sync::MutexGuard<'static, Vec<Held>> {
@@ -389,7 +396,7 @@ mod held {
     /// Up to `limit` leading bytes of the file at `path`, whose name was just
     /// seen (`seen`, not followed) to be a regular file.
     pub(super) fn read(path: &Path, seen: &Metadata, limit: usize) -> io::Result<Read> {
-        sweep();
+        sweep(seen.dev());
         let identity = (seen.dev(), seen.ino());
         let found = table()
             .iter()
@@ -427,12 +434,20 @@ mod held {
         table().push(Held { identity, file });
     }
 
-    /// Drop the entries whose file has no name left. The handles are taken
-    /// under the lock and asked outside it; a descriptor closes when its
-    /// last clone is dropped, after the lock is released. A handle that
-    /// cannot be asked is kept: its file may still have a name.
-    fn sweep() {
-        let all: Vec<Arc<File>> = table().iter().map(|h| Arc::clone(&h.file)).collect();
+    /// Drop the entries on device `dev` whose file has no name left. The
+    /// handles are taken under the lock and asked outside it; a descriptor
+    /// closes when its last clone is dropped, after the lock is released.
+    /// Entries on other devices are not asked, so the sweep makes a check
+    /// wait for no file system but the one its file is on; their descriptors
+    /// wait for a later check on their own device. A handle that cannot be
+    /// asked is kept: its file may still have a name. An entry without an
+    /// identity is not looked at.
+    fn sweep(dev: u64) {
+        let all: Vec<Arc<File>> = table()
+            .iter()
+            .filter(|h| h.identity.is_some_and(|(d, _)| d == dev))
+            .map(|h| Arc::clone(&h.file))
+            .collect();
         let gone: Vec<Arc<File>> = all
             .into_iter()
             .filter(|file| file.metadata().is_ok_and(|m| m.nlink() == 0))

@@ -48,16 +48,16 @@ its log are each read through a read-only descriptor the process keeps (up to
 two per database; more than one on a file when its name was swapped during the
 check or two threads opened it at once), because closing any descriptor on a
 file releases every POSIX lock the process holds on it, SQLite's among them,
-and the log's name may be a hard link to a database. A later check releases a
-descriptor once its file has no name left, which also releases any lock the
-process still held on that deleted file. The advisory is in
-`deny.toml`'s `ignore` with the reason. Still exposed: the check and the open
-are two steps, so whoever can change the files, or a directory above them,
-between the two is not stopped; the `microsandbox` SDK opens a database of its
-own through the same bundled SQLite, which the check does not cover; and the
-check is this advisory's precondition only, not a validation of the database.
-Hermetic, and only Unix is built and tested. Not done: a run against a real
-SQLite 3.54 or the advisory's published exploit.
+and the log's name may be a hard link to a database. A later check of a file on
+the same file system releases a descriptor once its file has no name left,
+which also releases any lock the process still held on that deleted file. The
+advisory is in `deny.toml`'s `ignore` with the reason. Still exposed: the
+check and the open are two steps, so whoever can change the files, or a
+directory above them, between the two is not stopped; the `microsandbox` SDK
+opens a database of its own through the same bundled SQLite, which the check
+does not cover; and the check is this advisory's precondition only, not a
+validation of the database. Hermetic, and only Unix is built and tested. Not
+done: a run against a real SQLite 3.54 or the advisory's published exploit.
 
 Beside an AIPlex backend, a plain backend is sent only what a route names for
 it (amendment 1.1 of the AIPlex integration contract; `docs/model-gateway.md`,

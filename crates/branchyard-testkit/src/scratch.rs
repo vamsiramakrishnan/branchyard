@@ -32,6 +32,26 @@ impl Scratch {
         }
     }
 
+    /// Like [`Scratch::new`], inside `parent` (a directory on a file system
+    /// other than the default temporary directory's, for instance).
+    pub fn new_in(parent: &Path, prefix: &str) -> Scratch {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("branchyard-{prefix}-"))
+            .tempdir_in(parent)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "create a scratch directory for {prefix} in {}: {e}",
+                    parent.display()
+                )
+            });
+        let path = std::fs::canonicalize(dir.path())
+            .unwrap_or_else(|e| panic!("canonicalize {}: {e}", dir.path().display()));
+        Scratch {
+            dir: Some(dir),
+            path,
+        }
+    }
+
     /// The directory, canonicalized.
     pub fn path(&self) -> &Path {
         &self.path
@@ -106,4 +126,27 @@ fn stop_processes_in(dir: &Path) {
             .stderr(Stdio::null())
             .status(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests: a panic is the failure report
+    use super::*;
+
+    #[test]
+    fn a_scratch_directory_is_made_inside_the_parent_and_removed_on_drop() {
+        let parent = Scratch::new("scratch-parent");
+        let child = Scratch::new_in(parent.path(), "child");
+        assert_eq!(child.path().parent(), Some(parent.path()));
+        assert!(child
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("branchyard-child-"));
+        let path = child.path().to_path_buf();
+        drop(child);
+        assert!(!path.exists());
+    }
 }
