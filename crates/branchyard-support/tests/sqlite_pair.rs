@@ -883,3 +883,69 @@ fn the_returned_name_in_a_linked_directory_has_no_link_in_it() {
     assert_eq!(name, real.canonicalize().unwrap().join("other.db"));
     assert_plain(&name);
 }
+
+/// A POSIX read lock on the whole of `file`, taken through this descriptor
+/// as SQLite takes its locks (`fcntl(F_SETLK)`, owned by the process), and
+/// seen in `/proc/locks` before the check runs.
+#[cfg(target_os = "linux")]
+fn lock_shared(file: &fs::File, path: &Path) {
+    rustix::fs::fcntl_lock(file, rustix::fs::FlockOperation::NonBlockingLockShared).unwrap();
+    let held = branchyard_testkit::posix_locks_on(path).unwrap();
+    assert_eq!(held, vec!["READ 0-EOF"], "the lock before the check");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_check_keeps_this_process_s_lock_on_the_database() {
+    use branchyard_testkit::posix_locks_on;
+    // Accepted: a log of 32 bytes or more with the same page size, so the
+    // check reads the database's header.
+    let (_dir, path) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    let file = fs::File::open(&path).unwrap();
+    lock_shared(&file, &path);
+    for _ in 0..3 {
+        accepted(&path);
+        assert_eq!(
+            posix_locks_on(&path).unwrap(),
+            vec!["READ 0-EOF"],
+            "the lock after an accepted check"
+        );
+    }
+    // Refused: another page size; the lock survives the refusal.
+    let (_other, refused) = pair(&database(4096, 4096), Some(&log(64, 8192)));
+    let held = fs::File::open(&refused).unwrap();
+    lock_shared(&held, &refused);
+    let message = refusal(&refused);
+    assert!(message.contains("8192"), "{message}");
+    assert_eq!(
+        posix_locks_on(&refused).unwrap(),
+        vec!["READ 0-EOF"],
+        "the lock after a refusal"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_check_holds_one_descriptor_per_database_until_its_name_is_gone() {
+    use branchyard_testkit::{descriptors_of, descriptors_on};
+    use std::os::unix::fs::MetadataExt as _;
+    let (dir, path) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    for _ in 0..5 {
+        accepted(&path);
+    }
+    assert_eq!(descriptors_on(&path).unwrap(), 1, "one descriptor, kept");
+    // A name for the same file that is a link leads to the same entry.
+    std::os::unix::fs::symlink("state.db", dir.join("alias.db")).unwrap();
+    accepted(&dir.join("alias.db"));
+    assert_eq!(descriptors_on(&path).unwrap(), 1, "a link adds none");
+    let meta = fs::metadata(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    // The next check of any database releases the one without a name.
+    let (_other, other) = pair(&database(4096, 4096), Some(&log(64, 4096)));
+    accepted(&other);
+    assert_eq!(
+        descriptors_of(meta.dev(), meta.ino()).unwrap(),
+        0,
+        "released once the file had no name"
+    );
+}

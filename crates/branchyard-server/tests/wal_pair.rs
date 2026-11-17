@@ -198,3 +198,30 @@ fn the_companion_store_opens_through_a_path_longer_than_sqlite_resolves() {
     assert!(dir.join("state.db").metadata().unwrap().len() > 0);
     drop(store);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_three_stores_on_one_file_keep_sqlite_s_lock() {
+    let dir = Scratch::new("wal-stores");
+    let path = dir.join("state.db");
+    let wal = dir.join("state.db-wal");
+    let held = || branchyard_testkit::posix_locks_on(&path).unwrap();
+    let store = SqliteStore::open(&path, None).unwrap();
+    assert!(!held().is_empty(), "SQLite's lock after the first open");
+    let triggers = SqliteTriggers::open(&path).unwrap();
+    assert!(
+        wal.metadata().unwrap().len() >= 32,
+        "a log at the second open"
+    );
+    assert!(!held().is_empty(), "SQLite's lock after the trigger store");
+    let companion = SqliteCompanion::open(&path).unwrap();
+    assert!(
+        wal.metadata().unwrap().len() >= 32,
+        "a log at the third open"
+    );
+    assert!(
+        !held().is_empty(),
+        "SQLite's lock after the companion store"
+    );
+    drop((store, triggers, companion));
+}

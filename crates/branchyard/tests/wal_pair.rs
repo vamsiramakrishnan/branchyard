@@ -292,3 +292,60 @@ fn doctor_reads_the_schema_through_a_path_longer_than_sqlite_resolves() {
     let schema = branchyard::doctor::store_schema(&root).unwrap();
     assert!(schema.is_some(), "the store was not found through {root:?}");
 }
+
+/// The POSIX locks this process holds on `db`, after asserting that a log of
+/// 32 bytes or more was beside it (so the open just made read the database's
+/// header in the check).
+#[cfg(target_os = "linux")]
+fn locks_after_a_checked_open(db: &Path) -> Vec<String> {
+    let wal = db.with_file_name(format!("{}-wal", db.file_name().unwrap().to_string_lossy()));
+    assert!(
+        wal.metadata().unwrap().len() >= 32,
+        "a log of 32 bytes or more at the second open"
+    );
+    branchyard_testkit::posix_locks_on(db).unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_open_of_the_store_keeps_sqlite_s_lock() {
+    let repo = repository();
+    let db = repo.join(".branchyard/state.db");
+    let yard = Yard::open(repo.path()).unwrap();
+    assert!(!branchyard_testkit::posix_locks_on(&db).unwrap().is_empty());
+    let second = Yard::open(repo.path()).unwrap();
+    let held = locks_after_a_checked_open(&db);
+    assert!(!held.is_empty(), "SQLite's lock after the second open");
+    drop((yard, second));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn glance_and_doctor_keep_the_store_s_lock() {
+    let repo = repository();
+    let db = repo.join(".branchyard/state.db");
+    let yard = Yard::open(repo.path()).unwrap();
+    assert!(branchyard::glance::read(repo.path(), None)
+        .unwrap()
+        .is_some());
+    let held = locks_after_a_checked_open(&db);
+    assert!(!held.is_empty(), "SQLite's lock after glance::read");
+    assert!(branchyard::doctor::store_schema(repo.path())
+        .unwrap()
+        .is_some());
+    let held = locks_after_a_checked_open(&db);
+    assert!(!held.is_empty(), "SQLite's lock after doctor::store_schema");
+    drop(yard);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_open_of_the_registry_keeps_sqlite_s_lock() {
+    let dir = Scratch::new("wal-pair");
+    let db = dir.join("services.db");
+    let first = LocalRegistry::open(&db).unwrap();
+    let second = LocalRegistry::open(&db).unwrap();
+    let held = locks_after_a_checked_open(&db);
+    assert!(!held.is_empty(), "SQLite's lock after the second open");
+    drop((first, second));
+}

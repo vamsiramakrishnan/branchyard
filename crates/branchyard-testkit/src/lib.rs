@@ -17,6 +17,8 @@
 //!   the tests run in, for every test that starts `by` or a server.
 //! - [`MockHttp`]: a mock HTTP server that fails the owning test on any
 //!   I/O error instead of swallowing it.
+//! - [`posix_locks_on`] and [`descriptors_on`] (Linux): the POSIX locks and
+//!   the descriptors this process holds on a file.
 //!
 //! It is a dev-dependency only; nothing in a release build links it. See
 //! "Writing tests" in CONTRIBUTING.md.
@@ -24,6 +26,8 @@
 
 mod agent;
 mod env;
+#[cfg(target_os = "linux")]
+mod locks;
 mod mock;
 mod repo;
 mod scratch;
@@ -35,6 +39,8 @@ pub use agent::{
 pub use env::hermetic;
 #[cfg(unix)]
 pub use env::system_tools;
+#[cfg(target_os = "linux")]
+pub use locks::{descriptors_of, descriptors_on, posix_locks_in, posix_locks_on};
 pub use mock::{loopback_listener, Banner, MockHttp, Request, Response};
 pub use repo::Repo;
 pub use scratch::{processes_in, Scratch};
