@@ -10,11 +10,25 @@ concurrency:
   cancel-in-progress: true
 jobs:
   office:
-    runs-on: ubuntu-latest
+    # The SDK supports Python 3.9 and later (sdk/python/pyproject.toml), and
+    # Python 3.9 was never built for the hosted Ubuntu 26.04 image: there
+    # actions/setup-python fails with "The version '3.9' ... was not found for
+    # Ubuntu 26.04". So the 3.9 leg runs on ubuntu-24.04, the newest image
+    # with a 3.9 build, and the 3.12 leg follows ubuntu-latest. When the SDK
+    # stops supporting 3.9, remove its entry and this note.
+    name: office (${{ matrix.python }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
+      # The legs run different interpreters on different images, so one
+      # failing says nothing about the other and does not cancel it.
+      fail-fast: false
       matrix:
-        python: ['3.9', '3.12']
+        include:
+          - python: '3.9'
+            runner: ubuntu-24.04
+          - python: '3.12'
+            runner: ubuntu-latest
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: sdk/python
