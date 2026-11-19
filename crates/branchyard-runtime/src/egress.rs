@@ -285,16 +285,7 @@ impl Interceptor {
         {
             return Ok(config.clone());
         }
-        let mut params = CertificateParams::new(vec![host.to_owned()])
-            .map_err(|e| format!("{host} cannot be a certificate's name: {e}"))?;
-        params.distinguished_name.push(DnType::CommonName, host);
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
-        let cert = params
-            .signed_by(&self.leaf_key, &self.authority.issuer)
-            .map_err(|e| format!("could not sign a certificate for {host}: {e}"))?;
+        let cert = self.leaf(host)?;
         let certified = CertifiedKey::new(vec![cert.der().clone()], self.leaf_signing.clone());
         let mut config = ServerConfig::builder_with_provider(self.provider.clone())
             .with_safe_default_protocol_versions()
@@ -307,6 +298,25 @@ impl Interceptor {
             .lock_recovering("egress certificates")
             .insert(host.to_owned(), config.clone());
         Ok(config)
+    }
+
+    /// The certificate presented for `host`, signed by the authority.
+    fn leaf(&self, host: &str) -> Result<rcgen::Certificate, String> {
+        let mut params = CertificateParams::new(vec![host.to_owned()])
+            .map_err(|e| format!("{host} cannot be a certificate's name: {e}"))?;
+        params.distinguished_name.push(DnType::CommonName, host);
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        // Strict verifiers (Python 3.13 and later by default) refuse a
+        // certificate that does not name its issuer's key. The identifier
+        // is derived from the authority's key as its own certificate's
+        // was, so an authority kept from before still matches.
+        params.use_authority_key_identifier_extension = true;
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
+        params
+            .signed_by(&self.leaf_key, &self.authority.issuer)
+            .map_err(|e| format!("could not sign a certificate for {host}: {e}"))
     }
 }
 
@@ -1477,6 +1487,79 @@ mod tests {
         assert!(forward_body(&mut bad, wire::Framing::Chunked, &mut Vec::new()).is_err());
         let mut truncated = BufReader::new(&b"hel"[..]);
         assert!(forward_body(&mut truncated, wire::Framing::Length(5), &mut Vec::new()).is_err());
+    }
+
+    /// What a verifier that checks strictly (OpenSSL's `X509_V_FLAG_X509_STRICT`,
+    /// the default of Python 3.13 and later) requires of `leaf` and of the
+    /// authority `ca` that issued it, read from the encoded certificates.
+    fn assert_strict(ca: &[u8], leaf: &[u8], host: &str) {
+        use x509_cert::der::Decode as _;
+        use x509_cert::ext::pkix::{
+            AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectAltName,
+            SubjectKeyIdentifier,
+        };
+        let ca = x509_cert::Certificate::from_der(ca)
+            .unwrap()
+            .tbs_certificate;
+        let leaf = x509_cert::Certificate::from_der(leaf)
+            .unwrap()
+            .tbs_certificate;
+
+        // The authority: a critical CA basic constraint, a key usage that
+        // signs certificates, and the identifier of its key.
+        assert_eq!(ca.version, x509_cert::Version::V3);
+        let (critical, constraints) = ca.get::<BasicConstraints>().unwrap().unwrap();
+        assert!(critical && constraints.ca, "{constraints:?}");
+        let (_, usage) = ca.get::<KeyUsage>().unwrap().unwrap();
+        assert!(usage.0.contains(KeyUsages::KeyCertSign), "{usage:?}");
+        let (critical, ca_key_id) = ca.get::<SubjectKeyIdentifier>().unwrap().unwrap();
+        assert!(!critical);
+        assert!(!ca_key_id.0.as_bytes().is_empty());
+
+        // The leaf: issued by that authority, naming the authority's key by
+        // the same identifier, and no authority itself.
+        assert_eq!(leaf.version, x509_cert::Version::V3);
+        assert_eq!(leaf.issuer, ca.subject);
+        let (critical, authority_key) = leaf
+            .get::<AuthorityKeyIdentifier>()
+            .unwrap()
+            .unwrap_or_else(|| panic!("the certificate for {host} names no authority key"));
+        assert!(!critical);
+        assert_eq!(authority_key.key_identifier, Some(ca_key_id.0), "{host}");
+        let (_, names) = leaf.get::<SubjectAltName>().unwrap().unwrap();
+        assert_eq!(names.0.len(), 1, "{host}");
+        if let Some((_, constraints)) = leaf.get::<BasicConstraints>().unwrap() {
+            assert!(!constraints.ca, "{host}");
+        }
+        let (_, usage) = leaf.get::<KeyUsage>().unwrap().unwrap();
+        assert!(!usage.0.contains(KeyUsages::KeyCertSign), "{host}");
+    }
+
+    /// Every kind of certificate the interceptor presents (for a name, an
+    /// IPv4 and an IPv6 address) chains to its authority by key identifier,
+    /// as strict verifiers require.
+    #[test]
+    fn minted_certificates_carry_what_strict_verifiers_check() {
+        let interceptor = Interceptor::new(Authority::generate("branch").unwrap(), None).unwrap();
+        let ca = CertificateDer::from_pem_slice(interceptor.authority_pem().as_bytes()).unwrap();
+        for host in ["api.example.com", "127.0.0.1", "::1"] {
+            let leaf = interceptor.leaf(host).unwrap();
+            assert_strict(&ca, leaf.der(), host);
+        }
+    }
+
+    /// An authority read back from the files a branch keeps, which may have
+    /// been written by an earlier release, is kept as written, and the
+    /// certificates it signs name the key identifier that file holds.
+    #[test]
+    fn a_kept_authority_signs_certificates_that_name_its_key() {
+        let written = Authority::generate("branch").unwrap();
+        let kept = Authority::from_pem("branch", written.cert_pem(), written.key_pem()).unwrap();
+        assert_eq!(kept.cert_pem(), written.cert_pem());
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let ca = CertificateDer::from_pem_slice(written.cert_pem().as_bytes()).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        assert_strict(&ca, leaf.der(), "api.example.com");
     }
 
     #[test]

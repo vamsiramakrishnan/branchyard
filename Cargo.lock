@@ -935,6 +935,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "webpki-roots",
+ "x509-cert",
 ]
 
 [[package]]

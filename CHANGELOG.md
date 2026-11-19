@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+Clients that verify certificates strictly, such as Python 3.13 and later
+(`ssl.create_default_context()` sets `VERIFY_X509_STRICT`), now accept the
+certificate the egress proxy presents for an inspected host
+(`docs/egress.md`, "Inspected hosts"). They refused it with `Missing Authority
+Key Identifier`: the certificates the branch's authority signs did not name its
+key. Each now carries an Authority Key Identifier equal to the authority's
+Subject Key Identifier. An authority already kept under
+`.branchyard/egress/<branch>/` is used as it is; the certificates it signs carry
+the extension too.
+
 A database whose write-ahead log has another page size is refused before SQLite
 opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
 uninitialized memory then; the bundled SQLite cannot be upgraded yet because
