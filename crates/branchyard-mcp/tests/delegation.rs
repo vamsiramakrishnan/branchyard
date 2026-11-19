@@ -363,8 +363,11 @@ fn the_server_refuses_a_forged_token_while_the_real_one_works() {
             .unwrap()
     });
     let token_file = f.root.join(".branchyard/delegation/root.json");
-    wait::until("the token file", || token_file.is_file());
-    let token: Value = serde_json::from_str(&fs::read_to_string(&token_file).unwrap()).unwrap();
+    // Wait for what the file holds: the writer creates it before it writes it.
+    let token: Value = wait::until("the token file to parse", || {
+        let text = fs::read_to_string(&token_file).map_err(|e| e.to_string())?;
+        serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())
+    });
     let token = token["token"].as_str().unwrap();
 
     let mut forged = Client::start(&f.root, "root", "0000forged");
