@@ -7,11 +7,11 @@ Clients that verify certificates strictly, such as Python 3.13 and later
 certificate the egress proxy presents for an inspected host (`docs/egress.md`,
 "Inspected hosts"). They refused it with `Missing Authority Key Identifier`:
 the certificates the branch's authority signs did not name its key. They now
-carry an Authority Key Identifier, the Subject Key Identifier read from the
-authority's certificate, whenever that certificate has one, as the certificate
-of every authority Branchyard makes does. An authority already kept under
-`.branchyard/egress/<branch>/` is read as before and used as it is; if its
-certificate has no Subject Key Identifier, the certificates it signs carry no
+carry an Authority Key Identifier: the Subject Key Identifier read from the
+authority's certificate, which every authority Branchyard makes has. An
+authority already kept under `.branchyard/egress/<branch>/` is read as before
+and used as it is; when no Subject Key Identifier can be read from the
+certificate there that holds its key, the certificates it signs carry no
 Authority Key Identifier, as before.
 
 A database whose write-ahead log has another page size is refused before SQLite
