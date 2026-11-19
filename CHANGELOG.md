@@ -4,13 +4,15 @@
 
 Clients that verify certificates strictly, such as Python 3.13 and later
 (`ssl.create_default_context()` sets `VERIFY_X509_STRICT`), now accept the
-certificate the egress proxy presents for an inspected host
-(`docs/egress.md`, "Inspected hosts"). They refused it with `Missing Authority
-Key Identifier`: the certificates the branch's authority signs did not name its
-key. Each now carries an Authority Key Identifier equal to the authority's
-Subject Key Identifier. An authority already kept under
-`.branchyard/egress/<branch>/` is used as it is; the certificates it signs carry
-the extension too.
+certificate the egress proxy presents for an inspected host (`docs/egress.md`,
+"Inspected hosts"). They refused it with `Missing Authority Key Identifier`:
+the certificates the branch's authority signs did not name its key. Each now
+carries an Authority Key Identifier equal to the Subject Key Identifier of the
+authority's certificate (every authority Branchyard makes has one). An
+authority already kept under `.branchyard/egress/<branch>/` is used as it is,
+and signs under the subject and the Subject Key Identifier of the certificate
+kept there; a kept certificate that cannot be read that way is replaced by a
+new authority.
 
 A database whose write-ahead log has another page size is refused before SQLite
 opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
