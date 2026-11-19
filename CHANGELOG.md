@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+A database whose write-ahead log has another page size is refused before SQLite
+opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
+uninitialized memory then; the bundled SQLite cannot be upgraded yet because
+`sqlx-sqlite`, through the optional `microsandbox` dependency, caps
+`libsqlite3-sys`). `branchyard_support::check_wal_pair` runs at every open of
+`.branchyard/state.db` (every `by` command, `by doctor`, the hooks' reader),
+`.branchyard/sync.db`, the service registry (and the file `BRANCHYARD_REGISTRY`
+names) and the server's `state.db` and `sync/*.db`. The check resolves the path
+itself, with the system (each directory with `canonicalize`, a link at the
+last name by reading it, at most 40), into a plain name (absolute, no `.` or
+`..`, no link), checks the log beside that name, and returns it; every open
+gives SQLite that name, because SQLite resolves a path differently (it drops
+`nope/..` from the text and opens `real.db`, where the system cannot get
+through the missing `nope`). Only SQLite, and a file operation beside the
+open, is given that name: a store keeps, returns and prints the
+path it was given, so a repository whose `.branchyard` or `state.db` is a link
+keeps its label and its team memory. A path whose name, as SQLite builds it
+element by element, passes its buffer of about 512 bytes while the resolved
+name is short (or that needs more than about 200 links in all for SQLite) now
+opens, where it failed before the check. A `-wal` of 32 bytes or more whose page size
+differs from the database's, or that sits beside a database shorter than 100
+bytes, is an error naming both files (where they are, and the path given when
+that differs); the remedy is to move both files away or restore a copy you
+trust, not to delete the log of a database that has content. A log beside a
+missing or empty database is refused too, saying that a log cannot be used
+without its database (move the log away to start a new store): it may hold
+committed changes. Also
+refused: a directory that cannot be resolved or is a file (with advice that
+follows the cause, naming the link and its target when the directory came from
+a link; a store that creates its directory makes it first, and fails there, as
+before, when it cannot), a path that begins with `file:` (SQLite reads it as a URI, not as a path, and
+Branchyard gives SQLite paths only; write `./file:x` or an absolute path), the
+exact name `:memory:` (SQLite opens an in-memory database for it, not a file;
+`BRANCHYARD_REGISTRY=:memory:` fails again, as it did before) and the empty
+path, a chain of more than 40 symbolic links or a
+loop (SQLite follows about 200), a log that is a symbolic link, and a log, or a
+database beside a log, that is not a regular file (a FIFO, a socket, a
+directory, a device). The type of a file is read without opening
+it, so a FIFO is not opened. A path a refusal shows has
+its control characters written as escapes. A file that cannot be read is
+reported with its path. A server refuses to start on such a data directory.
+Nothing else about the log or database is judged. On Unix the database and
+its log are each read through a read-only descriptor the process keeps (up to
+two per database; more than one on a file when its name was swapped during the
+check or two threads opened it at once), because closing any descriptor on a
+file releases every POSIX lock the process holds on it, SQLite's among them,
+and the log's name may be a hard link to a database. A later check of a file on
+the same device (`st_dev`) releases a descriptor once its file has no name
+left, which also releases any lock the process still held on that deleted file.
+The advisory is in `deny.toml`'s `ignore` with the reason. Still exposed: the
+check and the open are two steps, so whoever can change the files, or a
+directory above them, between the two is not stopped; the `microsandbox` SDK
+opens a database of its own through the same bundled SQLite, which the check
+does not cover; and the check is this advisory's precondition only, not a
+validation of the database. Hermetic, and only Unix is built and tested. Not
+done: a run against a real SQLite 3.54 or the advisory's published exploit.
+
 Beside an AIPlex backend, a plain backend is sent only what a route names for
 it (amendment 1.1 of the AIPlex integration contract; `docs/model-gateway.md`,
 "The route rule"). In a configuration with a backend that has

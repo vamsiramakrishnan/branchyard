@@ -825,8 +825,17 @@ impl Sqlite {
     /// Open or create `state.db` in `dir`, and import what earlier versions
     /// left there.
     pub fn open(dir: &Path) -> Result<Sqlite, Error> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::State(format!("create {}: {e}", dir.display())))?;
+        // Before SQLite is given the file: a log with another page size is
+        // refused (RUSTSEC-2026-0459). SQLite is given the name the check
+        // resolved; the store keeps, and names in messages, the path it was
+        // built from (its label comes from that path).
         let path = dir.join("state.db");
-        let conn = Connection::open(&path).map_err(|e| db(&path.display().to_string(), e))?;
+        let checked =
+            branchyard_support::check_wal_pair(&path).map_err(|e| Error::State(e.to_string()))?;
+        let conn =
+            Connection::open(checked.as_path()).map_err(|e| db(&path.display().to_string(), e))?;
         conn.busy_timeout(BUSY).map_err(|e| db("busy timeout", e))?;
         // Switching a new database to WAL can fail at once with SQLITE_BUSY
         // while another process switches it, without waiting in the busy
@@ -4612,6 +4621,65 @@ mod tests {
         fn drop(&mut self) {
             branchyard_support::cleanup_dir(&self.0);
         }
+    }
+
+    /// The label is the repository directory's name, taken from the path
+    /// the store was opened with, whatever a link in that path points to.
+    #[cfg(unix)]
+    #[test]
+    fn the_label_and_path_of_a_store_behind_a_link_are_the_given_ones() {
+        let scratch = branchyard_testkit::Scratch::new("sqlite-label");
+        let root = scratch.path().join("myrepo");
+        let shared = scratch.path().join("shared/stores");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        // `.branchyard` is a link to a directory elsewhere.
+        std::os::unix::fs::symlink(&shared, root.join(".branchyard")).unwrap();
+        let store = Sqlite::open(&root.join(".branchyard")).unwrap();
+        assert_eq!(store.label(), "myrepo");
+        assert_eq!(store.path(), root.join(".branchyard/state.db"));
+        assert!(shared.join("state.db").metadata().unwrap().len() > 0);
+        drop(store);
+        // `state.db` is a link to a file elsewhere.
+        let other = scratch.path().join("other");
+        let vault = scratch.path().join("vault/db");
+        fs::create_dir_all(other.join(".branchyard")).unwrap();
+        fs::create_dir_all(&vault).unwrap();
+        std::os::unix::fs::symlink(vault.join("state.db"), other.join(".branchyard/state.db"))
+            .unwrap();
+        let store = Sqlite::open(&other.join(".branchyard")).unwrap();
+        assert_eq!(store.label(), "other");
+        assert_eq!(store.path(), other.join(".branchyard/state.db"));
+        assert!(vault.join("state.db").metadata().unwrap().len() > 0);
+    }
+
+    /// A store directory reached by `<dir>/<250 a>/<250 b>/<250 c>/../../..`: the text is
+    /// longer than the 512 bytes in which SQLite builds a name, so SQLite's own
+    /// resolution of the path opens no file, while the name the check returns
+    /// is short.
+    #[cfg(unix)]
+    #[test]
+    fn a_store_opens_through_a_path_longer_than_sqlite_resolves() {
+        let scratch = branchyard_testkit::Scratch::new("sqlite-long");
+        let deep = scratch
+            .path()
+            .join("a".repeat(250))
+            .join("b".repeat(250))
+            .join("c".repeat(250));
+        fs::create_dir_all(&deep).unwrap();
+        let dir = deep.join("../../../store");
+        assert!(dir.as_os_str().len() > 600, "{dir:?}");
+        let store = Sqlite::open(&dir).unwrap();
+        assert!(
+            scratch
+                .path()
+                .join("store/state.db")
+                .metadata()
+                .unwrap()
+                .len()
+                > 0
+        );
+        drop(store);
     }
 
     #[test]

@@ -79,13 +79,18 @@ impl Outbox {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        // Before SQLite is given the file: a log with another page size is
+        // refused (RUSTSEC-2026-0459). SQLite and the permissions use the
+        // name the check resolved; the outbox keeps the path it was given.
+        let checked = branchyard_support::check_wal_pair(path)
+            .map_err(|e| crate::error::Error::local(e.to_string()))?;
+        let conn = Connection::open(checked.as_path())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             branchyard_support::best_effort(
                 "restrict the outbox file to its owner",
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)),
+                std::fs::set_permissions(checked.as_path(), std::fs::Permissions::from_mode(0o600)),
             );
         }
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
@@ -378,6 +383,75 @@ impl UploadJournal for OutboxJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_with_another_page_size_is_refused_before_sqlite_opens_the_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sync.db");
+        drop(Outbox::open(&path).unwrap());
+        let wal = dir.path().join("sync.db-wal");
+        let mut header = vec![0u8; 32];
+        header[8..12].copy_from_slice(&512u32.to_be_bytes());
+        std::fs::write(&wal, &header).unwrap();
+        let error = Outbox::open(&path).err().unwrap();
+        assert!(error.is(crate::error::Kind::Local), "{error:?}");
+        assert!(
+            error.message.contains(&wal.display().to_string()),
+            "{error:?}"
+        );
+        assert!(error.message.contains("512"), "{error:?}");
+        assert_eq!(std::fs::read(&wal).unwrap(), header);
+        assert!(!dir.path().join("sync.db-shm").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_outbox_opens_what_was_checked_and_refuses_the_dotdot_trick() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("data")).unwrap();
+        std::os::unix::fs::symlink("real/target.db", root.join("sync.db")).unwrap();
+        let outbox = Outbox::open(&root.join("data/../sync.db")).unwrap();
+        outbox.enqueue("r", "a", 10).unwrap();
+        // The files are where the target is; the outbox keeps the path it
+        // was given.
+        assert!(root.join("real/target.db").metadata().unwrap().len() > 0);
+        assert!(root.join("real/target.db-wal").exists());
+        assert_eq!(outbox.path(), root.join("data/../sync.db"));
+        drop(outbox);
+        // The link's text drops `nope/..`; the system cannot get through.
+        let wal = root.join("real/target.db-wal");
+        let mut header = vec![0u8; 32];
+        header[8..12].copy_from_slice(&512u32.to_be_bytes());
+        std::fs::write(&wal, &header).unwrap();
+        std::os::unix::fs::symlink("nope/../real/target.db", root.join("tricky.db")).unwrap();
+        let error = Outbox::open(&root.join("tricky.db")).err().unwrap();
+        assert!(error.message.contains("cannot be resolved"), "{error:?}");
+        assert_eq!(std::fs::read(&wal).unwrap(), header);
+    }
+
+    /// `<dir>/<250 a>/<250 b>/<250 c>/../../../sync.db`: the text is longer
+    /// than the 512 bytes in which SQLite builds a name, so SQLite's own
+    /// resolution of it opens no file, while the name the check returns is
+    /// short.
+    #[cfg(unix)]
+    #[test]
+    fn the_outbox_opens_through_a_path_longer_than_sqlite_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir
+            .path()
+            .join("a".repeat(250))
+            .join("b".repeat(250))
+            .join("c".repeat(250));
+        std::fs::create_dir_all(&deep).unwrap();
+        let path = deep.join("../../../sync.db");
+        assert!(path.as_os_str().len() > 600, "{path:?}");
+        let outbox = Outbox::open(&path).unwrap();
+        outbox.enqueue("r", "a", 10).unwrap();
+        assert_eq!(outbox.pending("r").unwrap().len(), 1);
+        assert!(dir.path().join("sync.db").metadata().unwrap().len() > 0);
+    }
 
     #[test]
     fn the_outbox_survives_reopening() {

@@ -1240,3 +1240,26 @@ fn transient_failures_are_retried_with_backoff() {
         .count();
     assert_eq!(manifest_puts, 3);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_second_open_of_the_outbox_keeps_sqlite_s_lock() {
+    let dir = branchyard_testkit::Scratch::new("outbox");
+    let path = dir.join("sync.db");
+    let first = Outbox::open(&path).unwrap();
+    assert!(!branchyard_testkit::posix_locks_on(&path)
+        .unwrap()
+        .is_empty());
+    let second = Outbox::open(&path).unwrap();
+    assert!(
+        dir.join("sync.db-wal").metadata().unwrap().len() >= 32,
+        "a log of 32 bytes or more at the second open"
+    );
+    assert!(
+        !branchyard_testkit::posix_locks_on(&path)
+            .unwrap()
+            .is_empty(),
+        "SQLite's lock after the second open"
+    );
+    drop((first, second));
+}
