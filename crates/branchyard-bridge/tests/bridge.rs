@@ -434,15 +434,18 @@ fn comm_of(pid: u32) -> Option<String> {
     )
 }
 
-/// The bytes `pid` has passed to `write` so far (`wchar` in `/proc/<pid>/io`).
-fn bytes_written_by(pid: u32) -> Option<u64> {
-    fs::read_to_string(format!("/proc/{pid}/io"))
-        .ok()?
+/// The bytes `pid` has passed to `write` so far (`wchar` in `/proc/<pid>/io`),
+/// or why they could not be read.
+fn bytes_written_by(pid: u32) -> Result<u64, String> {
+    let path = format!("/proc/{pid}/io");
+    fs::read_to_string(&path)
+        .map_err(|e| format!("{path}: {e}"))?
         .lines()
-        .find_map(|line| line.strip_prefix("wchar:"))?
+        .find_map(|line| line.strip_prefix("wchar:"))
+        .ok_or_else(|| format!("{path} has no wchar line"))?
         .trim()
         .parse()
-        .ok()
+        .map_err(|e| format!("{path}: wchar: {e}"))
 }
 
 fn zombies_of(parent: u32) -> Vec<u32> {
@@ -701,12 +704,27 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
             .into_iter()
             .find(|pid| comm_of(*pid).as_deref() == Some("head"))
     });
+    // A look that does not show that state says what it saw, so that a
+    // machine where the wait never comes true reports why.
     let mut last = None;
     wait::until("the pipes to fill and the writer to block", || {
-        let now = bytes_written_by(head)?;
-        let stalled = last == Some(now) && now > 0 && stat_of(head).is_some_and(|(_, s)| s == "S");
+        let now = bytes_written_by(head);
+        let state = stat_of(head).map(|(_, state)| state);
+        let stalled = matches!(&now, Ok(written) if *written > 0 && last == Some(Ok(*written)))
+            && state.as_deref() == Some("S");
+        let seen = format!(
+            "head {head} (comm {:?}, state {state:?}) wchar {now:?}, a look earlier {last:?}; \
+             this process's own wchar {:?}; kernel {:?}",
+            comm_of(head),
+            bytes_written_by(std::process::id()),
+            fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_owned()),
+        );
         last = Some(now);
-        stalled.then_some(())
+        if stalled {
+            Ok(())
+        } else {
+            Err(seen)
+        }
     });
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::kill(bridge.pid() as i32, libc::SIGTERM) }, 0);
