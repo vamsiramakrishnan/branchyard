@@ -17,13 +17,15 @@ branchyard-sandbox = { path = "../branchyard-sandbox" }
 branchyard-wire = { path = "../branchyard-wire" }
 # The egress proxy's TLS interception: a certificate authority per branch
 # (rcgen), termination toward the harness and re-encryption toward the
-# origin (rustls with the Mozilla roots). `x509-parser` is rcgen's reader of
-# an existing certificate: an authority read back from its files signs under
-# that certificate's subject and Subject Key Identifier.
-rcgen = { workspace = true, features = ["x509-parser"] }
+# origin (rustls with the Mozilla roots).
+rcgen = { workspace = true }
 rustls = { workspace = true }
 serde_json = { workspace = true }
 webpki-roots = { workspace = true }
+# Reads the Subject Key Identifier of the authority's certificate, which the
+# certificates it signs name, and, in tests, the extensions strict verifiers
+# check. Already in the tree (tokio-postgres-rustls).
+x509-cert = { version = "0.2.5", default-features = false }
 
 [target."cfg(unix)".dependencies]
 rustix = { workspace = true, features = ["thread", "net", "fs"] }
@@ -35,6 +37,3 @@ libc = { workspace = true }
 [dev-dependencies]
 branchyard-testkit = { path = "../branchyard-testkit" }
 tempfile = { workspace = true }
-# Reads the extensions of the certificates the egress interceptor mints,
-# which strict verifiers check. Already in the tree (tokio-postgres-rustls).
-x509-cert = { version = "0.2.5", default-features = false }
