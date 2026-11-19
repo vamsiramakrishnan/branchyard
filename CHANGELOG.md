@@ -10,9 +10,11 @@ the certificates the branch's authority signs did not name its key. They now
 carry an Authority Key Identifier: the Subject Key Identifier read from the
 authority's certificate, which every authority Branchyard makes has. An
 authority already kept under `.branchyard/egress/<branch>/` is read as before
-and used as it is; when no Subject Key Identifier can be read from the
-certificate there that holds its key, the certificates it signs carry no
-Authority Key Identifier, as before.
+and used as it is. When it is not certain which Subject Key Identifier its key
+has there (a certificate block that cannot be read, no certificate that holds
+the key, one that holds it without an identifier, or two that hold it with
+different ones), the certificates it signs carry no Authority Key Identifier,
+as before.
 
 A database whose write-ahead log has another page size is refused before SQLite
 opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
