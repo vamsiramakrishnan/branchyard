@@ -448,6 +448,22 @@ fn bytes_written_by(pid: u32) -> Result<u64, String> {
         .map_err(|e| format!("{path}: wchar: {e}"))
 }
 
+/// How many times `pid` has gone to sleep of its own accord, waiting for a
+/// pipe to take more for instance (`voluntary_ctxt_switches` in
+/// `/proc/<pid>/status`), or why that could not be read. A process asleep at
+/// both ends of an interval with the same count has slept through it.
+fn sleeps_of(pid: u32) -> Result<u64, String> {
+    let path = format!("/proc/{pid}/status");
+    fs::read_to_string(&path)
+        .map_err(|e| format!("{path}: {e}"))?
+        .lines()
+        .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+        .ok_or_else(|| format!("{path} has no voluntary_ctxt_switches line"))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("{path}: voluntary_ctxt_switches: {e}"))
+}
+
 fn zombies_of(parent: u32) -> Vec<u32> {
     children_of(parent)
         .into_iter()
@@ -694,29 +710,34 @@ fn sigterm_delivers_an_execs_last_output_and_status_before_the_bridge_exits() {
     // Stderr starts only now, so it never queues ahead of `ready`.
     let mut stdin = process.take_stdin().unwrap();
     stdin.write_all(b"go\n").unwrap();
-    // Nothing reads stderr yet: the client's pipe, both sockets and the
-    // bridge's pipe fill, and the bridge's stderr pump blocks holding the
-    // connection's writer. That is the state the test is about, so wait for
-    // it: `head` has been writing at full speed, and is full when it has
-    // written nothing between two looks and sleeps in the write.
+    // One byte of stderr shows that `head` is writing and that its output
+    // reaches this end. Nothing reads stderr after it: the client's pipe,
+    // both sockets and the bridge's pipe fill, and the bridge's stderr pump
+    // blocks holding the connection's writer. That is the state the test is
+    // about, so wait for it: `head` is full when it has slept through the
+    // time between two looks, asleep at both and woken by nothing between
+    // them. How many bytes it has written is not asked: a `head` that moves
+    // them with `splice` shows none in `wchar` (the hosted Ubuntu 26.04
+    // image's does), and one that writes them does.
     let head = wait::until("the writer to start", || {
         children_of(shell)
             .into_iter()
             .find(|pid| comm_of(*pid).as_deref() == Some("head"))
     });
+    stderr.read_exact(&mut [0u8; 1]).unwrap();
     // A look that does not show that state says what it saw, so that a
     // machine where the wait never comes true reports why.
     let mut last = None;
     wait::until("the pipes to fill and the writer to block", || {
-        let now = bytes_written_by(head);
+        let now = sleeps_of(head);
         let state = stat_of(head).map(|(_, state)| state);
-        let stalled = matches!(&now, Ok(written) if *written > 0 && last == Some(Ok(*written)))
+        let stalled = matches!(&now, Ok(sleeps) if last == Some(Ok(*sleeps)))
             && state.as_deref() == Some("S");
         let seen = format!(
-            "head {head} (comm {:?}, state {state:?}) wchar {now:?}, a look earlier {last:?}; \
-             this process's own wchar {:?}; kernel {:?}",
+            "head {head} (comm {:?}, state {state:?}) has slept {now:?} times, a look earlier \
+             {last:?}; its wchar {:?}; kernel {:?}",
             comm_of(head),
-            bytes_written_by(std::process::id()),
+            bytes_written_by(head),
             fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_owned()),
         );
         last = Some(now);
