@@ -18,7 +18,14 @@ jobs:
     # stops supporting 3.9, remove its entry and this note.
     name: office (${{ matrix.python }})
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    # A run takes under three minutes when the runner's Ubuntu mirror is
+    # fast. The limit is for when it is not: on 19 November 2026 the hosted
+    # runners that fetch packages from us-east-2.ec2.archive.ubuntu.com
+    # (either image; the others use azure.archive.ubuntu.com) spent 4 to 12
+    # minutes on the 116 to 124 MB of LibreOffice packages, at 0.2 to
+    # 0.6 MB/s, and one run was on course for about half an hour when a
+    # newer push cancelled it.
+    timeout-minutes: 45
     strategy:
       # The legs run different interpreters on different images, so one
       # failing says nothing about the other and does not cancel it.
