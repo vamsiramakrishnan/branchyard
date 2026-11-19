@@ -132,8 +132,8 @@ pub type Report = dyn Fn(&Decision) + Send + Sync;
 /// to trust and whose key stays with the engine. It signs under
 /// Branchyard's name for its owner, and the certificates it signs name its
 /// key by the Subject Key Identifier its certificate carries, or name no key
-/// when it was kept as anything but the one certificate of that key (see
-/// [`Authority::from_pem`]).
+/// when it was kept as anything but one certificate of that key with such
+/// an identifier (see [`Authority::from_pem`]).
 pub struct Authority {
     issuer: Issuer<'static, KeyPair>,
     /// The Subject Key Identifier of the certificate in `cert_pem`, which
@@ -185,15 +185,17 @@ impl Authority {
     /// fails before the first one. Nothing else is refused: a certificate
     /// that holds another key is not.
     ///
-    /// When the certificate's text is what [`Authority::generate`] writes,
-    /// one PEM block that is a certificate of the key with a Subject Key
-    /// Identifier, the certificates this authority signs carry that
-    /// identifier as their Authority Key Identifier. For any other text
-    /// (a second PEM block of any kind, a certificate of other key bytes,
+    /// When the certificate's text holds one PEM block, with any text
+    /// around it, and that block is a certificate of the key with a Subject
+    /// Key Identifier (what [`Authority::generate`] writes is such a text),
+    /// the certificates this authority signs carry that identifier as their
+    /// Authority Key Identifier. Otherwise (a second PEM block of any kind,
+    /// a block that is not a certificate, a certificate of other key bytes,
     /// no identifier that can be read) they carry none, as certificates did
     /// before they named a key: OpenSSL does not chain a certificate to one
     /// that carries another identifier than the one it names, and which
-    /// certificate of such a text a verifier chains to cannot be told here.
+    /// certificate of a text with several blocks a verifier chains to
+    /// cannot be told here.
     pub fn from_pem(owner: &str, cert_pem: &str, key_pem: &str) -> Result<Authority, String> {
         let key = KeyPair::from_pem(key_pem)
             .map_err(|e| format!("the authority's key is not a PEM private key: {e}"))?;
@@ -249,9 +251,9 @@ impl Authority {
 
 /// The Subject Key Identifier that the certificates the key `public_key`
 /// signs name (`public_key` is the key's bytes as a certificate carries
-/// them): that of the certificate in `cert_pem`, when the text is what
-/// [`Authority::generate`] writes, one PEM block that is a certificate of
-/// that key.
+/// them): that of the certificate in `cert_pem`, when the text holds one PEM
+/// block, with any text around it, and that block is a certificate of that
+/// key. What [`Authority::generate`] writes is such a text.
 ///
 /// OpenSSL does not chain a certificate to one that carries another
 /// identifier than the one it names. For a text that holds more than the one
@@ -379,8 +381,8 @@ impl Interceptor {
         // certificate that does not name its issuer's key. The identifier
         // is the Subject Key Identifier read from the authority's
         // certificate, which the issuer holds as a pre-specified identifier.
-        // An authority kept as anything but the one certificate of its key
-        // has none, and what it signs names no key, as before.
+        // An authority kept as anything but one certificate of its key with
+        // an identifier has none, and what it signs names no key, as before.
         params.use_authority_key_identifier_extension = self.authority.key_id.is_some();
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2124, 1, 1);
