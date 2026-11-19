@@ -442,10 +442,13 @@ fn dropping_an_exec_tears_down_its_remote_process_group() -> Result<(), Box<dyn 
     };
     let mut process = fixture.provider.exec("test", &command)?;
     let mut pid = String::new();
-    BufReader::new(process.take_stdout().ok_or("no stdout")?).read_line(&mut pid)?;
+    // Keep the reader: `tail -f` exits once nothing reads its stdout.
+    let mut stdout = BufReader::new(process.take_stdout().ok_or("no stdout")?);
+    stdout.read_line(&mut pid)?;
     let pid: u32 = pid.trim().parse()?;
-    // The shell prints the pid as it forks `tail`; reading the child's cwd
-    // from /proc can fail for a moment while it execs, so wait to see it.
+    // The shell prints the pid as it forks `tail`. Wait until the test has
+    // seen that process in the scratch directory, so that the later wait for
+    // it to be gone cannot pass for a process that was never seen there.
     wait::until(
         "the exec descendant to run in the scratch directory",
         || processes_in(fixture.scratch.path()).contains(&pid),
