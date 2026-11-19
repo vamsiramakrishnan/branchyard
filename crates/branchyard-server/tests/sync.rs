@@ -62,12 +62,27 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
     let done = run(&client, &opted_out("WRITE one.txt=1", "s1"));
     assert_eq!(done.state, OperationState::Succeeded, "{done:?}");
 
-    // Pushed after it ran, keyed by the repository.
+    // Pushed after it ran, keyed by the repository. The wait is on the
+    // finished turn, not on the task's presence: a replicator round inside
+    // the turn can already have pushed the task at the commit it was made
+    // from, and a laptop that pulled that state would commit beside the
+    // turn's commit instead of on top of it.
+    let yard = branchyard::Yard::open(&f.root).unwrap();
+    let git_branch = yard.branch("s1").unwrap().info().git_branch.clone();
+    let first = git(&f.root, &["rev-parse", &format!("refs/heads/{git_branch}")]);
     let elsewhere = remote(&bucket, "laptop");
-    wait::until("the task in the remote", || {
-        elsewhere
-            .tasks()
-            .is_ok_and(|t| t.iter().any(|t| t.task.ends_with(".s1")))
+    wait::until("the first turn in the remote", || {
+        elsewhere.tasks().is_ok_and(|tasks| {
+            tasks.iter().filter(|t| t.task.ends_with(".s1")).any(|t| {
+                elsewhere
+                    .manifest(&t.task)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(m, _)| {
+                        m.refs.get("refs/heads/main").map(String::as_str) == Some(first.trim())
+                    })
+            })
+        })
     });
     let task_id = elsewhere
         .tasks()
@@ -132,8 +147,6 @@ fn a_server_pulls_runs_under_the_lease_and_pushes() {
     elsewhere.release_lease(held).unwrap();
     let sent = send("WRITE two.txt=2");
     assert_eq!(sent.state, OperationState::Succeeded, "{sent:?}");
-    let yard = branchyard::Yard::open(&f.root).unwrap();
-    let git_branch = yard.branch("s1").unwrap().info().git_branch.clone();
     let tip = git(&f.root, &["rev-parse", &format!("refs/heads/{git_branch}")]);
     let ancestor = std::process::Command::new("git")
         .arg("-C")
