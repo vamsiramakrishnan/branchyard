@@ -59,8 +59,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
+    KeyIdMethod, KeyPair, KeyUsagePurpose, PublicKeyData as _,
 };
 use rustls::pki_types::pem::PemObject as _;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -129,9 +129,18 @@ pub type Report = dyn Fn(&Decision) + Send + Sync;
 
 /// A certificate authority that signs the certificates an [`Interceptor`]
 /// presents: one per branch, whose certificate the branch's harness is told
-/// to trust and whose key stays with the engine.
+/// to trust and whose key stays with the engine. It signs under
+/// Branchyard's name for its owner, and the certificates it signs name its
+/// key by the Subject Key Identifier its certificate carries, or name no key
+/// when it was kept as anything but one certificate of that key with such
+/// an identifier (see [`Authority::from_pem`]).
 pub struct Authority {
     issuer: Issuer<'static, KeyPair>,
+    /// The Subject Key Identifier of the certificate in `cert_pem`, which
+    /// the certificates this authority signs carry as their Authority Key
+    /// Identifier; `None` when `cert_pem` is not one PEM block that is a
+    /// certificate of this authority's key with an identifier.
+    key_id: Option<Vec<u8>>,
     cert_pem: String,
     key_pem: String,
 }
@@ -143,35 +152,63 @@ impl std::fmt::Debug for Authority {
 }
 
 impl Authority {
-    /// A new authority for `owner` (a branch's name), with a fresh key.
+    /// A new authority for `owner` (a branch's name), with a fresh key. Its
+    /// certificate carries a Subject Key Identifier, read back from the
+    /// certificate as written; it is an error if it cannot be.
     pub fn generate(owner: &str) -> Result<Authority, String> {
         let key = KeyPair::generate()
             .map_err(|e| format!("could not generate the authority's key: {e}"))?;
-        let params = Authority::params(owner)?;
+        let mut params = Authority::params(owner)?;
         let cert = params
             .self_signed(&key)
             .map_err(|e| format!("could not sign the authority's certificate: {e}"))?;
         let cert_pem = cert.pem();
+        let key_id = key_identifier_of(&cert_pem, key.der_bytes())
+            .ok_or("the authority's certificate has no readable Subject Key Identifier")?;
+        params.key_identifier_method = KeyIdMethod::PreSpecified(key_id.clone());
         let key_pem = key.serialize_pem();
         Ok(Authority {
             issuer: Issuer::new(params, key),
+            key_id: Some(key_id),
             cert_pem,
             key_pem,
         })
     }
 
     /// The authority [`Authority::generate`] made for `owner`, from the
-    /// certificate and key it wrote. The certificate is kept as written,
-    /// for clients' trust stores; what signs is the key, under the same
-    /// name, so the certificates signed chain to the one written.
+    /// certificate and key it was kept as. The certificate is kept as
+    /// written, for clients' trust stores; what signs is the key, under
+    /// Branchyard's name for `owner`, as [`Authority::generate`] gives it.
+    ///
+    /// It is an error when the key is not a PEM private key, and when the
+    /// PEM reader finds no certificate block in the certificate's text or
+    /// fails before the first one. Nothing else is refused: a certificate
+    /// that holds another key is not.
+    ///
+    /// When the certificate's text holds one PEM block, with any text
+    /// around it, and that block is a certificate of the key with a Subject
+    /// Key Identifier (what [`Authority::generate`] writes is such a text),
+    /// the certificates this authority signs carry that identifier as their
+    /// Authority Key Identifier. Otherwise (a second PEM block of any kind,
+    /// a block that is not a certificate, a certificate of other key bytes,
+    /// no identifier that can be read) they carry none, as certificates did
+    /// before they named a key: OpenSSL does not chain a certificate to one
+    /// that carries another identifier than the one it names, and which
+    /// certificate of a text with several blocks a verifier chains to
+    /// cannot be told here.
     pub fn from_pem(owner: &str, cert_pem: &str, key_pem: &str) -> Result<Authority, String> {
         let key = KeyPair::from_pem(key_pem)
             .map_err(|e| format!("the authority's key is not a PEM private key: {e}"))?;
-        if CertificateDer::from_pem_slice(cert_pem.as_bytes()).is_err() {
-            return Err("the authority's certificate is not a PEM certificate".into());
+        CertificateDer::from_pem_slice(cert_pem.as_bytes())
+            .map_err(|_| "the authority's certificate is not a PEM certificate".to_owned())?;
+        let key_id = key_identifier_of(cert_pem, key.der_bytes());
+        let mut params = Authority::params(owner)?;
+        if let Some(key_id) = &key_id {
+            params.key_identifier_method = KeyIdMethod::PreSpecified(key_id.clone());
         }
         Ok(Authority {
-            issuer: Issuer::new(Authority::params(owner)?, key),
+            issuer: Issuer::new(params, key),
+            key_id,
             cert_pem: cert_pem.to_owned(),
             key_pem: key_pem.to_owned(),
         })
@@ -210,6 +247,39 @@ impl Authority {
     pub fn key_pem(&self) -> &str {
         &self.key_pem
     }
+}
+
+/// The Subject Key Identifier that the certificates the key `public_key`
+/// signs name (`public_key` is the key's bytes as a certificate carries
+/// them): that of the certificate in `cert_pem`, when the text holds one PEM
+/// block, with any text around it, and that block is a certificate of that
+/// key. What [`Authority::generate`] writes is such a text.
+///
+/// OpenSSL does not chain a certificate to one that carries another
+/// identifier than the one it names. For a text that holds more than the one
+/// block, which certificate a verifier chains to cannot be told here:
+/// another reader may find a certificate in a block this one passes over
+/// (OpenSSL reads `TRUSTED CERTIFICATE` blocks too), or take a certificate
+/// that carries the key in another encoding for the key's own. So `None`
+/// when `-----BEGIN` does not occur exactly once in the text, and when the
+/// one block cannot be read as a certificate, holds other key bytes, or
+/// carries no identifier that can be read.
+fn key_identifier_of(cert_pem: &str, public_key: &[u8]) -> Option<Vec<u8>> {
+    use x509_cert::der::Decode as _;
+    if cert_pem.matches("-----BEGIN").count() != 1 {
+        return None;
+    }
+    let block = CertificateDer::from_pem_slice(cert_pem.as_bytes()).ok()?;
+    let cert = x509_cert::Certificate::from_der(&block)
+        .ok()?
+        .tbs_certificate;
+    if cert.subject_public_key_info.subject_public_key.raw_bytes() != public_key {
+        return None;
+    }
+    let (_, key_id) = cert
+        .get::<x509_cert::ext::pkix::SubjectKeyIdentifier>()
+        .ok()??;
+    Some(key_id.0.as_bytes().to_vec())
 }
 
 /// Looks inside the connections a verdict asks about: terminates the
@@ -285,16 +355,7 @@ impl Interceptor {
         {
             return Ok(config.clone());
         }
-        let mut params = CertificateParams::new(vec![host.to_owned()])
-            .map_err(|e| format!("{host} cannot be a certificate's name: {e}"))?;
-        params.distinguished_name.push(DnType::CommonName, host);
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
-        let cert = params
-            .signed_by(&self.leaf_key, &self.authority.issuer)
-            .map_err(|e| format!("could not sign a certificate for {host}: {e}"))?;
+        let cert = self.leaf(host)?;
         let certified = CertifiedKey::new(vec![cert.der().clone()], self.leaf_signing.clone());
         let mut config = ServerConfig::builder_with_provider(self.provider.clone())
             .with_safe_default_protocol_versions()
@@ -307,6 +368,27 @@ impl Interceptor {
             .lock_recovering("egress certificates")
             .insert(host.to_owned(), config.clone());
         Ok(config)
+    }
+
+    /// The certificate presented for `host`, signed by the authority.
+    fn leaf(&self, host: &str) -> Result<rcgen::Certificate, String> {
+        let mut params = CertificateParams::new(vec![host.to_owned()])
+            .map_err(|e| format!("{host} cannot be a certificate's name: {e}"))?;
+        params.distinguished_name.push(DnType::CommonName, host);
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        // Strict verifiers (Python 3.13 and later by default) refuse a
+        // certificate that does not name its issuer's key. The identifier
+        // is the Subject Key Identifier read from the authority's
+        // certificate, which the issuer holds as a pre-specified identifier.
+        // An authority kept as anything but one certificate of its key with
+        // an identifier has none, and what it signs names no key, as before.
+        params.use_authority_key_identifier_extension = self.authority.key_id.is_some();
+        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2124, 1, 1);
+        params
+            .signed_by(&self.leaf_key, &self.authority.issuer)
+            .map_err(|e| format!("could not sign a certificate for {host}: {e}"))
     }
 }
 
@@ -1477,6 +1559,286 @@ mod tests {
         assert!(forward_body(&mut bad, wire::Framing::Chunked, &mut Vec::new()).is_err());
         let mut truncated = BufReader::new(&b"hel"[..]);
         assert!(forward_body(&mut truncated, wire::Framing::Length(5), &mut Vec::new()).is_err());
+    }
+
+    /// What a verifier that checks strictly (OpenSSL's `X509_V_FLAG_X509_STRICT`,
+    /// the default of Python 3.13 and later) requires of `leaf` and of the
+    /// authority `ca` that issued it, read from the encoded certificates.
+    fn assert_strict(ca: &[u8], leaf: &[u8], host: &str) {
+        use x509_cert::der::Decode as _;
+        use x509_cert::ext::pkix::{
+            AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectAltName,
+            SubjectKeyIdentifier,
+        };
+        let ca = x509_cert::Certificate::from_der(ca)
+            .unwrap()
+            .tbs_certificate;
+        let leaf = x509_cert::Certificate::from_der(leaf)
+            .unwrap()
+            .tbs_certificate;
+
+        // The authority: a critical CA basic constraint, a key usage that
+        // signs certificates, and the identifier of its key.
+        assert_eq!(ca.version, x509_cert::Version::V3);
+        let (critical, constraints) = ca.get::<BasicConstraints>().unwrap().unwrap();
+        assert!(critical && constraints.ca, "{constraints:?}");
+        let (_, usage) = ca.get::<KeyUsage>().unwrap().unwrap();
+        assert!(usage.0.contains(KeyUsages::KeyCertSign), "{usage:?}");
+        let (critical, ca_key_id) = ca.get::<SubjectKeyIdentifier>().unwrap().unwrap();
+        assert!(!critical);
+        assert!(!ca_key_id.0.as_bytes().is_empty());
+
+        // The leaf: issued by that authority, naming the authority's key by
+        // the same identifier, and no authority itself.
+        assert_eq!(leaf.version, x509_cert::Version::V3);
+        assert_eq!(leaf.issuer, ca.subject);
+        let (critical, authority_key) = leaf
+            .get::<AuthorityKeyIdentifier>()
+            .unwrap()
+            .unwrap_or_else(|| panic!("the certificate for {host} names no authority key"));
+        assert!(!critical);
+        assert_eq!(authority_key.key_identifier, Some(ca_key_id.0), "{host}");
+        let (_, names) = leaf.get::<SubjectAltName>().unwrap().unwrap();
+        assert_eq!(names.0.len(), 1, "{host}");
+        if let Some((_, constraints)) = leaf.get::<BasicConstraints>().unwrap() {
+            assert!(!constraints.ca, "{host}");
+        }
+        let (_, usage) = leaf.get::<KeyUsage>().unwrap().unwrap();
+        assert!(!usage.0.contains(KeyUsages::KeyCertSign), "{host}");
+    }
+
+    /// Every kind of certificate the interceptor presents (for a name, an
+    /// IPv4 and an IPv6 address) chains to its authority by key identifier,
+    /// as strict verifiers require.
+    #[test]
+    fn minted_certificates_carry_what_strict_verifiers_check() {
+        let interceptor = Interceptor::new(Authority::generate("branch").unwrap(), None).unwrap();
+        let ca = CertificateDer::from_pem_slice(interceptor.authority_pem().as_bytes()).unwrap();
+        for host in ["api.example.com", "127.0.0.1", "::1"] {
+            let leaf = interceptor.leaf(host).unwrap();
+            assert_strict(&ca, leaf.der(), host);
+        }
+    }
+
+    /// The key identifier of the Authority Key Identifier `cert` carries,
+    /// `None` when it carries none.
+    fn authority_key_id(cert: &[u8]) -> Option<Vec<u8>> {
+        use x509_cert::der::Decode as _;
+        x509_cert::Certificate::from_der(cert)
+            .unwrap()
+            .tbs_certificate
+            .get::<x509_cert::ext::pkix::AuthorityKeyIdentifier>()
+            .unwrap()
+            .map(|(_, aki)| aki.key_identifier.unwrap().as_bytes().to_vec())
+    }
+
+    /// A key of the kind an authority's is, PEM, made here so that no key is
+    /// committed. [`Authority::from_pem`] does not check it against the
+    /// certificate, and nothing here verifies a signature.
+    fn some_key() -> String {
+        KeyPair::generate().unwrap().serialize_pem()
+    }
+
+    /// An authority [`Authority::generate`] wrote, read back from its files,
+    /// is kept as written, and the certificates it signs chain to it as
+    /// strict verifiers require.
+    #[test]
+    fn a_kept_authority_signs_certificates_that_name_its_key() {
+        let written = Authority::generate("branch").unwrap();
+        let kept = Authority::from_pem("branch", written.cert_pem(), written.key_pem()).unwrap();
+        assert_eq!(kept.cert_pem(), written.cert_pem());
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let ca = CertificateDer::from_pem_slice(written.cert_pem().as_bytes()).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        assert_strict(&ca, leaf.der(), "api.example.com");
+    }
+
+    /// A self-signed authority as `(certificate, key)` PEM, made with rcgen
+    /// as [`Authority::params`] describes it for `branch` but for the common
+    /// name and, when given, the Subject Key Identifier.
+    fn foreign_authority(common_name: &str, key_id: Option<Vec<u8>>) -> (String, String) {
+        let key = KeyPair::generate().unwrap();
+        (
+            certificate_of(&key, common_name, key_id),
+            key.serialize_pem(),
+        )
+    }
+
+    /// A self-signed authority's certificate for `key`, PEM, made with rcgen
+    /// as [`Authority::params`] describes it for `branch` but for the common
+    /// name and, when given, the Subject Key Identifier.
+    fn certificate_of(key: &KeyPair, common_name: &str, key_id: Option<Vec<u8>>) -> String {
+        let mut params = Authority::params("branch").unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params
+            .distinguished_name
+            .push(DnType::OrganizationName, "Branchyard");
+        if let Some(key_id) = key_id {
+            params.key_identifier_method = rcgen::KeyIdMethod::PreSpecified(key_id);
+        }
+        params.self_signed(key).unwrap().pem()
+    }
+
+    /// A kept certificate whose Subject Key Identifier is not the one the
+    /// library derives from the key: what the authority signs names that
+    /// identifier, not a recomputed one, and is issued under the kept
+    /// certificate's subject (Branchyard's own name for the owner).
+    #[test]
+    fn a_kept_authority_signs_under_the_key_identifier_of_its_certificate() {
+        let (cert_pem, key_pem) =
+            foreign_authority("Branchyard egress branch", Some((1u8..=20).collect()));
+        let kept = Authority::from_pem("branch", &cert_pem, &key_pem).unwrap();
+        assert_eq!(kept.cert_pem(), cert_pem);
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let ca = CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap();
+        for host in ["api.example.com", "127.0.0.1", "::1"] {
+            let leaf = interceptor.leaf(host).unwrap();
+            // Also compares the leaf's issuer with the kept subject.
+            assert_strict(&ca, leaf.der(), host);
+            assert_eq!(
+                authority_key_id(leaf.der()),
+                Some((1u8..=20).collect::<Vec<_>>()),
+                "{host}"
+            );
+        }
+    }
+
+    /// The Subject Key Identifier of the first certificate in `cert_pem`,
+    /// `None` when it carries none.
+    fn subject_key_id(cert_pem: &str) -> Option<Vec<u8>> {
+        use x509_cert::der::Decode as _;
+        let der = CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap();
+        x509_cert::Certificate::from_der(&der)
+            .unwrap()
+            .tbs_certificate
+            .get::<x509_cert::ext::pkix::SubjectKeyIdentifier>()
+            .unwrap()
+            .map(|(_, key_id)| key_id.0.as_bytes().to_vec())
+    }
+
+    /// A kept certificate that holds the authority's key and carries no
+    /// Subject Key Identifier (rcgen writes none in a certificate that is
+    /// not an authority's): the certificates its authority signs carry no
+    /// Authority Key Identifier, as none did before they named the
+    /// authority's key, rather than one no certificate holds.
+    #[test]
+    fn a_kept_certificate_without_a_key_identifier_signs_without_one() {
+        let mut params = Authority::params("branch").unwrap();
+        params.is_ca = IsCa::NoCa;
+        let key = KeyPair::generate().unwrap();
+        let cert_pem = params.self_signed(&key).unwrap().pem();
+        assert_eq!(subject_key_id(&cert_pem), None);
+        let kept = Authority::from_pem("branch", &cert_pem, &key.serialize_pem()).unwrap();
+        assert_eq!(kept.cert_pem(), cert_pem);
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        for host in ["api.example.com", "127.0.0.1", "::1"] {
+            let leaf = interceptor.leaf(host).unwrap();
+            assert_eq!(authority_key_id(leaf.der()), None, "{host}");
+        }
+    }
+
+    /// A kept certificate with text around its one PEM block, as tools that
+    /// print a certificate write it: what the authority signs still names
+    /// the certificate's key identifier.
+    #[test]
+    fn a_kept_certificate_with_text_around_it_names_its_key() {
+        let written = Authority::generate("branch").unwrap();
+        let text = format!(
+            "subject=CN = Branchyard egress branch, O = Branchyard\n{}\nkept by hand\n",
+            written.cert_pem()
+        );
+        let kept = Authority::from_pem("branch", &text, written.key_pem()).unwrap();
+        assert_eq!(kept.cert_pem(), text);
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let ca = CertificateDer::from_pem_slice(written.cert_pem().as_bytes()).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        assert_strict(&ca, leaf.der(), "api.example.com");
+    }
+
+    /// A kept file that holds anything beside the authority's certificate
+    /// that another reader could take for a PEM block: which certificate a
+    /// verifier chains to is then not known here, so what the authority
+    /// signs names no key, wherever the other block stands. The same key's
+    /// certificate a second time and a `-----BEGIN` inside a line count too.
+    #[test]
+    fn a_kept_file_with_a_second_block_signs_without_a_key_identifier() {
+        let key = KeyPair::generate().unwrap();
+        let own = certificate_of(&key, "Branchyard egress branch", None);
+        assert!(subject_key_id(&own).is_some());
+        let another_key = Authority::generate("other").unwrap();
+        let same_key = certificate_of(&key, "An earlier name", None);
+        let public_key = key.public_key_pem();
+        let trusted = own.replace(" CERTIFICATE-----", " TRUSTED CERTIFICATE-----");
+        assert_ne!(trusted, own);
+        let no_certificate = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let no_base64 = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+        let no_end = "-----BEGIN CERTIFICATE-----\nAAAA\n";
+        let in_a_line = "# from -----BEGIN CERTIFICATE----- to the end marker\n";
+        let mut texts = vec![format!("{own}{no_base64}")];
+        for second in [
+            another_key.cert_pem(),
+            &same_key,
+            &public_key,
+            &trusted,
+            no_certificate,
+            no_end,
+            in_a_line,
+        ] {
+            texts.push(format!("{own}{second}"));
+            texts.push(format!("{second}{own}"));
+        }
+        for text in texts {
+            let kept = Authority::from_pem("branch", &text, &key.serialize_pem()).unwrap();
+            let interceptor = Interceptor::new(kept, None).unwrap();
+            let leaf = interceptor.leaf("api.example.com").unwrap();
+            assert_eq!(authority_key_id(leaf.der()), None, "{text}");
+        }
+    }
+
+    /// A kept certificate that does not hold the authority's key (the files
+    /// of two authorities mixed up): what is signed names no key, since the
+    /// identifier there belongs to another key.
+    #[test]
+    fn a_kept_certificate_of_another_key_signs_without_a_key_identifier() {
+        let other = Authority::generate("branch").unwrap();
+        let written = Authority::generate("branch").unwrap();
+        let kept = Authority::from_pem("branch", other.cert_pem(), written.key_pem()).unwrap();
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        assert_eq!(authority_key_id(leaf.der()), None);
+    }
+
+    /// A kept file whose PEM block holds bytes that are not a certificate
+    /// is accepted, as it always was, and what its authority signs carries
+    /// no Authority Key Identifier, since there is none to read.
+    #[test]
+    fn a_kept_certificate_that_cannot_be_read_signs_without_a_key_identifier() {
+        let not_a_certificate = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        let kept = Authority::from_pem("branch", not_a_certificate, &some_key()).unwrap();
+        assert_eq!(kept.cert_pem(), not_a_certificate);
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        assert_eq!(authority_key_id(leaf.der()), None);
+    }
+
+    /// A kept certificate with another subject than Branchyard's is
+    /// accepted, and what its authority signs is issued under Branchyard's
+    /// name for the owner, as it always was.
+    #[test]
+    fn a_kept_certificate_with_another_subject_signs_under_the_owners_name() {
+        use x509_cert::der::Decode as _;
+        let (cert_pem, key_pem) = foreign_authority("Some Other Authority", None);
+        let kept = Authority::from_pem("branch", &cert_pem, &key_pem).unwrap();
+        let interceptor = Interceptor::new(kept, None).unwrap();
+        let leaf = interceptor.leaf("api.example.com").unwrap();
+        let ours = Authority::generate("branch").unwrap();
+        let ours = CertificateDer::from_pem_slice(ours.cert_pem().as_bytes()).unwrap();
+        let ours = x509_cert::Certificate::from_der(&ours).unwrap();
+        let leaf = x509_cert::Certificate::from_der(leaf.der()).unwrap();
+        assert_eq!(leaf.tbs_certificate.issuer, ours.tbs_certificate.subject);
     }
 
     #[test]

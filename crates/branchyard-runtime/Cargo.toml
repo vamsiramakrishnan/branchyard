@@ -22,6 +22,11 @@ rcgen = { workspace = true }
 rustls = { workspace = true }
 serde_json = { workspace = true }
 webpki-roots = { workspace = true }
+# Reads the Subject Key Identifier of the authority's certificate, which the
+# certificates it signs name, and, in tests, the extensions strict verifiers
+# check. Already in Cargo.lock, through tokio-postgres-rustls, which a
+# feature brings in; new to the default build.
+x509-cert = { version = "0.2.5", default-features = false }
 
 [target."cfg(unix)".dependencies]
 rustix = { workspace = true, features = ["thread", "net", "fs"] }

@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Clients that verify certificates strictly, such as Python 3.13 and later
+(`ssl.create_default_context()` sets `VERIFY_X509_STRICT`), now accept the
+certificate the egress proxy presents for an inspected host (`docs/egress.md`,
+"Inspected hosts"). They refused it with `Missing Authority Key Identifier`:
+the certificates the branch's authority signs did not name its key. They now
+carry an Authority Key Identifier: the Subject Key Identifier read from the
+authority's certificate, which every authority Branchyard makes has. An
+authority already kept under `.branchyard/egress/<branch>/` is read as before
+and used as it is. Unless its `ca.pem` holds exactly one PEM block and that
+block is a certificate of the authority's key with a Subject Key Identifier, as
+in the file Branchyard writes, the certificates it signs carry no Authority Key
+Identifier, as before.
+
 A database whose write-ahead log has another page size is refused before SQLite
 opens the pair (RUSTSEC-2026-0459: SQLite before 3.54.0 can return
 uninitialized memory then; the bundled SQLite cannot be upgraded yet because

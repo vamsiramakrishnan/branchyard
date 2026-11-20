@@ -677,9 +677,11 @@ fn tokens_are_issued_per_turn_and_forged_ones_are_refused() {
             .unwrap()
     });
     let token_file = f.root.join(".branchyard/delegation/root.json");
-    wait::until("the token file", || token_file.is_file());
-    let file: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&token_file).unwrap()).unwrap();
+    // Wait for what the file holds: the writer creates it before it writes it.
+    let file: serde_json::Value = wait::until("the token file to parse", || {
+        let text = fs::read_to_string(&token_file).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string())
+    });
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(&token_file).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
