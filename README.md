@@ -110,3 +110,7 @@ The same pages are a [searchable site](https://vamsiramakrishnan.github.io/branc
 ## License
 
 Branchyard's own code is [Apache-2.0](LICENSE). Bundled dependencies keep their own licenses. See [third-party notices](THIRD_PARTY.md).
+
+## Related projects
+
+- [straitjacket](https://github.com/vamsiramakrishnan/straitjacket). Capture and retrieve command evidence within a coding agent's session.
