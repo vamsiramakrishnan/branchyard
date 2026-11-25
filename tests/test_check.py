@@ -428,6 +428,9 @@ class Workflow(unittest.TestCase):
                 "if name == 'sudo':\n"
                 "    assert sys.argv[1] == 'rm', sys.argv\n"
                 "    os.execvp(sys.argv[1], sys.argv[1:])\n"
+                "elif name == 'df' and os.environ.get('FAKE_AVAIL'):\n"
+                "    print('Avail')\n"
+                "    print('  ' + os.environ['FAKE_AVAIL'])\n"
                 "elif name == 'rm':\n"
                 "    assert sys.argv[1:3] == ['-rf', '--'], sys.argv\n"
                 "    for path in sys.argv[3:]:\n"
@@ -442,8 +445,17 @@ class Workflow(unittest.TestCase):
                 executable.chmod(0o755)
             # No real command is on PATH; removals affect only the disposable fixture.
             env = {"PATH": str(binaries), "RUNNER_FIXTURE": str(fixture)}
-            for _ in range(2):
-                done = subprocess.run(["/bin/bash", "-eu", "-c", script], env=env, capture_output=True, text=True)
+            # With room to spare, nothing is deleted: the step costs nothing.
+            done = subprocess.run(
+                ["/bin/bash", "-eu", "-c", script], env={**env, "FAKE_AVAIL": "87G"}, capture_output=True, text=True
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            for path in (*unused, *retained):
+                self.assertEqual((fixture / path / "keep").read_text(), "payload", path)
+            # Short of space (or when df says nothing), it reclaims, and a second run is a no-op.
+            for avail in ("12G", None):
+                run_env = env if avail is None else {**env, "FAKE_AVAIL": avail}
+                done = subprocess.run(["/bin/bash", "-eu", "-c", script], env=run_env, capture_output=True, text=True)
                 self.assertEqual(done.returncode, 0, done.stderr)
             for path in unused:
                 self.assertFalse((fixture / path).exists(), path)
